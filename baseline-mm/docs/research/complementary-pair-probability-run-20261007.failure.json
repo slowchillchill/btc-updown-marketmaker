@@ -1,0 +1,54 @@
+{
+  "source_commit": "807ba5d76e091977ea77efccc6731372a1993eec",
+  "config_sha256": "c08cfc193dc378d5e4136c4f2191a8dcd66b63b66f53253095211e7d9fdac368",
+  "run_once": true,
+  "retried": false,
+  "study_started": false,
+  "material_complete": false,
+  "probability_results": 0,
+  "root_error": "MetadataBeforeIdentitySnapshot",
+  "trigger": {
+    "logical_path": "2026-09-12/typed_raw/utc_day=2026-09-12/source_kind=polymarket_market_metadata/polymarket_market_metadata_19-part-1.parquet",
+    "file_sha256": "8492f5739e3e0e07f0a8f6a0efb79f17ca3a7458e9e187f34d2f62080d492938",
+    "raw_row_number": 3,
+    "subset": "boundary-98-598.parquet",
+    "clock": 1789240506940,
+    "received": 1789240506938,
+    "admitted": 1789240506940,
+    "sequence": 4,
+    "condition_id": "0x7b443d179b4fe520ee251f5a7cc5aa9e52c009439a63d9e9a60fe69d06b19b7d",
+    "row_kind": "market_state_transition"
+  },
+  "diagnosis": {
+    "core_gate": "data-pipeline/core/src/public_observation_core.rs:822",
+    "identity_snapshot": "data-pipeline/core/src/reduction.rs:1333",
+    "initialization": "data-pipeline/training/src/historical_initialization.rs:176",
+    "public_reference_serde": "contracts/src/public_observation.rs:154",
+    "public_terminal_serde": "contracts/src/lib.rs:1097",
+    "consumer": "baseline-mm/research/probability/direct.py:122",
+    "unknown_condition": "63 records in generated metadata; no metadata_snapshot; no original seed for this condition",
+    "boundary": "研究修复只记录缺身份普通Metadata，合法AnchorRule/WS/Snapshot保留原Core路径；生产缺Snapshot拒绝未变",
+    "parse_bugs": "ReferenceFact adjacent tag reference_type/reference; Terminal internal status RESOLVED; existing Python external-tag checks cannot match"
+  },
+  "resource": {
+    "unit_wall_seconds": 570.148,
+    "prepare_wall_seconds": 548.78,
+    "unit_cpu_seconds": 1464.971671,
+    "unit_memory_peak_bytes": 20140470272,
+    "prepare_max_rss_kib": 19529672,
+    "unit_swap_bytes": 0,
+    "oom": false,
+    "signal": false,
+    "archive_unavailable": false
+  },
+  "repair": {
+    "probability_helper_sha256": "d77d6d2dbf5a252cd66ce171dc68a0c597733b0fc24014387b8188af773539ee",
+    "rust_example_tests": 2,
+    "python_tests": 12,
+    "real_rerun": false,
+    "formal_adoption": false,
+    "next_full_run_cost": "未知",
+    "failure_archive": "issue-185/probability-calibration-actual-failure-20261007",
+    "repair_archive": "issue-185/probability-calibration-repair-20261007"
+  }
+}

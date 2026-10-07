@@ -29,15 +29,17 @@ def prepare(config_path):
     try:
         ranges=direct.direct.range_index(db,config['files'],progress,config['native_unit_span'])
         units=list(direct.direct.query_units(ranges,config['native_unit_span']))
-        markets,anchors,rules,labels=direct.market_facts(db,config,boundary,work,units,progress)
-        rows=direct.target_rows(config,markets,anchors,rules,labels)
+        markets,anchors,rules,labels,census=direct.market_facts(db,config,boundary,work,units,progress)
+        rows=direct.target_rows(config,markets,anchors,rules,labels,census)
+        market_coverage=direct.census_coverage(config,census,markets,rows)
+        save(material/'market-coverage.json',market_coverage)
         pairs=direct.source_sampling(db,config,boundary,work,units,ranges,rows,progress)
         save(material/'samples.json',rows);save(material/'fit-pairs.json',pairs)
         from dataclasses import asdict
         save(material/'query-units.json',[asdict(u) for u in units])
-        save(material/'material.json',dict(format='direct-probability-samples-v1',
+        save(material/'material.json',dict(format='direct-probability-samples-v2',
             config_sha256=hashlib.sha256(config_path.read_bytes()).hexdigest(),start=config['start'],end=config['end'],
-            target_samples=len(rows),markets=len(markets),files=len(config['files']),
+            target_samples=len(rows),markets=len(markets),market_denominators={k:v for k,v in market_coverage.items() if k!='markets'},files=len(config['files']),
             physical_manifest_rows=sum(f['rows'] for f in config['files']),
             identity='causal-source-direct-query; not production strategy-call memory',
             implementation_commit=config['implementation_commit'],helper_sha256=config['probability_helper_sha256'],formal_adoption=False))
@@ -52,6 +54,8 @@ def coverage(rows):
     for r in rows:
         key=(r['day'],r['condition_id'],r['remaining_s'])
         counts[(*key,'targets')]+=1
+        counts[(*key,'raw_targets')]+=bool(r.get('raw_target'))
+        counts[(*key,'public_targets')]+=bool(r.get('public_target'))
         for field in ('identity_known','price','reference','integral','trade_price','depth_total','innovation','depth_pressure','trade_pressure'):
             counts[(*key,field+'_available')]+= r.get(field) is not None and r.get(field) is not False
         counts[(*key,'label_observed')]+= bool(r['labels'])
@@ -125,6 +129,7 @@ def study(config_path):
                 'USD/USDT创新未进行币种转换，终局标签仅为二元结果',
                 '开发窗不是独立留出，概率比较不证明账户盈利']))
         report.extend(['','缺失、固定十桶校准及日/市场分块离散见对应 validation.json。空桶为 null。所有目标与来源资格见 coverage.json。',
+            '原始目录/公共身份/采样分母与缺身份区间见 material/market-coverage.json；原始行缺口不等于样本缺口。生产完整回放的缺Snapshot拒绝仍保持。',
             '预测误差仅以二元标签的 Brier 检验。不能由公开二元结果伪造连续结算价格残差。',
             '本期末日标签按十八日右边界删失；开发窗属于开发评价。收益、费用和账户风险仍须公共回测。'])
         (out/'report.md').write_text('\n'.join(report)+'\n')
