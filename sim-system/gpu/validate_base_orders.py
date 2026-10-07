@@ -181,6 +181,9 @@ def main():
     assert delivered==[record['position'] for record in source['prior_records']]
     _,repeat=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
     assert not repeat.emitted.any().cpu().item()
+    from validate_base_noe_ledger import check as check_public_account
+    account_report=check_public_account(source,noe,batches,orders.read(slot),receipt,
+        Numbers.run_exact_batch(lambda:rational([original_kind['size_shares']])))
     # 已完成请求无pending：调度padding零terms/故障不得污染既存状态。
     padding = FrozenBaseTerms(tensor([-1]), integers([0]), integers([0]), rational(['0']),
                               tensor([-1]), tensor([-1]), tensor([1], torch.int32),tensor([-1]))
@@ -232,6 +235,7 @@ def main():
         'single_original_hidden_transition_queue_order_fill_calendar_common_commit_checked':True,
         'continuous_directory_bound_order_taker_maker_NOE_payload_and_positions_checked':True,
         'dynamic_NOE_records':len(by_row),
+        'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
         'elapsed_seconds_with_reference_reads': time.perf_counter()-started,
         'device_peak_allocated_bytes': torch.cuda.max_memory_allocated(),

@@ -92,6 +92,7 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     let mut ledger = ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
     ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
     for record in observation.take_closed_records() { ledger.apply_noe_memory_v2(&record).unwrap(); }
+    let opening_ledger = gpu_ledger_reservation_checkpoint(&ledger, "opening");
     let mut prior_batches = Vec::new();
     let initial = decoded_maker_initial_events();
     let condition = initial[0].market.condition_id.clone();
@@ -257,7 +258,8 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         },"proxy_latency_sha256":actor._latency_profile.file_sha256(),
         "cancel_arrived_at":cancel_receipt.platform_arrived_at_utc_ms,
         "cancel_records":cancel_records,"cancel_batches":cancel_batches,"cancel_closed_at":closed_at,
-        "prior_records":prior_records,"prior_batches":prior_batches,
+        "prior_records":prior_records,"prior_batches":prior_batches,"prior_closed_at":prefix_at,
+        "opening_ledger":opening_ledger,
         "cancel_ledger_before":cancel_ledger_before,"cancel_ledger_after":cancel_ledger_after,"cancel_ledger_attempts":cancel_ledger_attempts,
         "next_private":next_private,"next_batch":next_batch,"session_seed":state.session.as_ref().unwrap().session_seed.0});
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
