@@ -192,7 +192,7 @@ def main():
     targets,completions=Numbers.run_exact_batch(lambda:
         cancellation_rows_from_closed(projection.normalizer.bank,[batch],closed))
     assert targets.fault.cpu().tolist()==[0] and completions.fault.cpu().tolist()==[0]
-    assert not targets.emitted.any().cpu().item() and not completions.emitted.any().cpu().item()
+    assert not targets.received.any().cpu().item() and not completions.received.any().cpu().item()
     pending,repeated=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
     assert not repeated.emitted.any().cpu().item()
     # 同一固定图接后继真实Lifecycle；此前从未提前安装它。
