@@ -13,6 +13,7 @@ from reservation import ReservationBook,run_reserve_action,sequence_fault
 from memory import EconomicColumns
 from trade_success import TradeSuccess
 from position_cost import PositionCosts
+from order_funds import OrderFunds
 from rebate_contribution import RebateContributions
 from core import OUT_EVIDENCE,OUT_FACT,OUT_DUPLICATE,OUT_ALIAS,OUT_LOGICAL_CONFLICT,OUT_ECONOMIC_CONFLICT,OUT_PENDING
 
@@ -57,6 +58,7 @@ class AdmissionLifecycle:
     maker_cash: object  # 原Existing经济现金归Maker；结算新kind须按原归属另接。
     reservations: object
     orders: object
+    order_funds: object
     trades: object
     columns: object
     lifecycle: object
@@ -72,7 +74,7 @@ class AdmissionLifecycle:
     fault: torch.Tensor
 
     @classmethod
-    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None):
+    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None):
         roots,width=columns.row_refs.shape
         life=LifecycleColumns.from_projection(bank,columns)
         book=ReservationBook.empty(roots,capacity=max(1,width),device=columns.row_refs.device)
@@ -81,8 +83,10 @@ class AdmissionLifecycle:
         # 中途冷前缀不能将未提供的既有成本冒充已知零；新根显式传入empty。
         if position_costs is None:
             position_costs=PositionCosts.empty(roots,max(1,width),empty.device,known=False)
+        if order_funds is None:
+            order_funds=OrderFunds.empty(roots,max(1,width),max(1,width),width,empty.device,known=False)
         return cls(platform,success_pools,TradeSuccess.open(roots,max(1,width),empty.device),position_costs,
-            RebateContributions.empty(roots,max(1,width),empty.device),rebate_days,opening_cash,book,LifecycleDirectory.empty(roots,max(1,width),device=empty.device),
+            RebateContributions.empty(roots,max(1,width),empty.device),rebate_days,opening_cash,book,LifecycleDirectory.empty(roots,max(1,width),device=empty.device),order_funds,
             LifecycleDirectory.empty(roots,max(1,width),device=empty.device),columns,life,
             current_entry_sequence,current_local_prefix,empty,empty.clone(),torch.zeros_like(columns.enabled),
             ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=empty.device)),
@@ -109,6 +113,9 @@ class AdmissionLifecycle:
         if self.rebate_days is None:
             raise ValueError('尚未绑定原condition身份序的日目录')
         return replace(self,rebate_days=self.rebate_days.resized(capacity))
+
+    def resized_order_funds(self,capacity):
+        return replace(self,order_funds=self.order_funds.resized(capacity))
 
     def reserve_action(self,requests,conditions,principal,fee,enabled):
         funds=self.funds()
@@ -291,8 +298,12 @@ class AdmissionLifecycle:
                 take_ratio(self.lifecycle.rebate_paid,index),payment_event & (fault==0))
             fault=fault | days.fault
             use=use & (~payment_event | ready)
+        order_funds,funds_ready=self.order_funds.advance(self.lifecycle,self.columns,trade_at,local,
+            next_entry,self.applied_sequences,lifecycle_use & use,economic & result.applied & use)
+        fault=fault | order_funds.fault
+        use=use & funds_ready
         success=use&(fault==0)
-        valid=fault==0
+        valid=(fault==0)&funds_ready
         # 多成员向量容量不足时保留请求，整个证据不提交任何部分贡献。
         contribution_commit=valid & (~maker_event | success)
         contributions=replace(coordinate(contributions,self.rebate_contributions,contribution_commit),
@@ -317,6 +328,7 @@ class AdmissionLifecycle:
             maker_cash.numerator.select(success & economic,self.maker_cash.numerator),
             maker_cash.denominator.select(success & economic,self.maker_cash.denominator)),reservations=coordinate(book,self.reservations,valid),
             orders=coordinate(orders,self.orders,valid),trades=coordinate(trades,self.trades,valid),
+            order_funds=replace(coordinate(order_funds,self.order_funds,valid),capacity_required=order_funds.capacity_required),
             current_entry_sequence=next_entry.select(success,self.current_entry_sequence),applied=applied,
             applied_sequences=_take(next_entry,root.repeat_interleave(width)).select((same&success[:,None]).flatten(),self.applied_sequences),
             available_through=torch.where(success,torch.where(self.has_available,torch.maximum(self.available_through,available_at),available_at),self.available_through),

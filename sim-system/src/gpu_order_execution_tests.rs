@@ -1053,6 +1053,10 @@ fn gpu_ledger_reservation_checkpoint(ledger:&ledger::LedgerWriterV1,stage:&str) 
     let rebate_days=read.rebate_days().map(|day|serde_json::json!({"kind":day.kind,
         "attribution_day_start_utc_ms":day.attribution_day_start_utc_ms,
         "contributions":day.contributions,"amounts":day.amounts})).collect::<Vec<_>>();
+    let order_funds = ledger.funds_read_v1().orders().map(|order| serde_json::json!({
+        "identity":order.order_identity,"principal":order.principal_encumbrance_pusd,
+        "fee":order.immediate_fee_encumbrance_pusd,"last_ledger_entry_seq":order.last_ledger_entry_seq,
+    })).collect::<Vec<_>>();
     let order_lifecycle = ledger.funds_read_v1().orders().filter_map(|order| {
         let funds = ledger.funds_read_v1();
         let life = funds.order_lifecycle(order.order_identity)?;
@@ -1060,7 +1064,7 @@ fn gpu_ledger_reservation_checkpoint(ledger:&ledger::LedgerWriterV1,stage:&str) 
             "open":life.open, "last_ledger_entry_seq":life.last_ledger_entry_seq}))
     }).collect::<Vec<_>>();
     serde_json::json!({"stage":stage,"projection":ledger.projection_v2().unwrap(),
-        "cash":read.cash(),"request":request,"markets":read.market_totals().collect::<Vec<_>>(),"trades":trades,"rebate_days":rebate_days,"order_lifecycle":order_lifecycle})
+        "cash":read.cash(),"request":request,"markets":read.market_totals().collect::<Vec<_>>(),"trades":trades,"rebate_days":rebate_days,"order_lifecycle":order_lifecycle,"order_funds":order_funds})
 }
 
 #[test]

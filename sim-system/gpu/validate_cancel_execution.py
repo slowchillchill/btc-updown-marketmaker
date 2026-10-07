@@ -97,6 +97,7 @@ def validate_actual_cancel(source,delta):
     from admission import AdmissionLifecycle
     from closed import ClosedAdmission
     from success_pool import SuccessPools
+    from validate_order_funds import open_prefix,check as check_order_funds
     from queues import ExactRational
     before=source['cancel_ledger_before']
     original_projection=before['projection']
@@ -117,7 +118,8 @@ def validate_actual_cancel(source,delta):
         pools=SuccessPools.open(torch.tensor([0,0],device='cuda'),torch.tensor([0,0],device='cuda'),
             torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1)
         ledger=AdmissionLifecycle.open(balances,state.normalizer.bank,columns,
-            integers([original_projection['ledger_entry_seq']]),integers([original_projection['ledger_local_prefix']]),pools)
+            integers([original_projection['ledger_entry_seq']]),integers([original_projection['ledger_local_prefix']]),pools,
+            order_funds=open_prefix(1,columns.row_refs.size(1),columns.row_refs.size(1),columns.row_refs.size(1),before))
         ledger=replace(ledger,maker_cash=rational([str(Fraction(before['cash']['maker_available_pusd'])+
             Fraction(before['cash']['maker_reserved_pusd']))]))
         # 原目录当前只有这一真实已接纳订单；保存原公开open/经济接纳标志。
@@ -134,6 +136,7 @@ def validate_actual_cancel(source,delta):
         cache=Numbers.run_exact_batch(lambda:cache.accept(ledger.columns,first))
         ledger,cache=Numbers.run_exact_batch(lambda:cache.drain(ledger,torch.ones_like(cache.received),passes=1))
         expected=source['cancel_ledger_attempts'][prefix-1]['after']
+        assert check_order_funds(ledger,expected)
         original_order=expected['order_lifecycle'][0]
         assert ledger.orders.flags.cpu().tolist()[0][0]==original_order['open']
         assert ledger.orders.conditions.cpu().tolist()[0][0]==0 and original_order['condition']==before['order_lifecycle'][0]['condition']
@@ -168,4 +171,4 @@ def validate_actual_cancel(source,delta):
         'source_private_batch_and_actual_release_checked':True,'Ledger_four_original_positions_and_sequences_checked':True,
         'each_actual_receive_prefix_order_condition_open_and_last_sequence_checked':True,
         'Ledger_control_closes_without_cash_and_economic_releases_once':True,
-        'cold_original_cancel_prefix_initialized_once':True,'cancellation_method_mixed_transport_checked':True,'full_root':False}
+        'cold_original_cancel_prefix_initialized_once':True,'cancellation_method_mixed_transport_checked':True,'each_cancel_prefix_original_OrderFunds_checked':True,'full_root':False}
