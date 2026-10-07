@@ -66,7 +66,7 @@ class BaseSimRuntime:
                 torch.where(target,torch.arange(target.numel(),device=owner.device),-1),reduce='amax')
             source_fault=source_fault | torch.where(enabled,(counts != 1).to(torch.int32),0)
             choice=replace(choice,present=enabled & (source_fault == 0))
-            condition=condition_by_asset[row[0]].expand(self.orders.roots)
+            condition=condition_by_asset.index_select(0,row[0].reshape(1)).expand(self.orders.roots)
             candidate,effect=self.hidden_base(choice,rows,block._broadcast(row[3],self.orders.roots),
                 block._broadcast(row[4],self.orders.roots),block._broadcast(row[2],self.orders.roots),
                 condition,(row[9] != 0).expand(self.orders.roots),selected_paths,level_roots,
