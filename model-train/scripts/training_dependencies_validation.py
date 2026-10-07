@@ -35,7 +35,8 @@ def main():
     started=time.perf_counter()
     torch.manual_seed(181103)  # 工程组件接线，不增加正式候选/种子/账户根。
     device='cuda'
-    policy=Policy100ms(ModelShape100ms(layers=2,hidden=64)).to(device).eval()
+    # 原GRU无dropout；cuDNN仅在training前向时保留反向所需缓存。
+    policy=Policy100ms(ModelShape100ms(layers=2,hidden=64)).to(device).train()
     inputs=(torch.randn(5,2,626,device=device),torch.randn(5,2,433,device=device),
         torch.randn(5,2,6,3,9,device=device),torch.ones(5,2,6,3,device=device,dtype=torch.bool))
     h=torch.zeros(2,2,64,device=device,requires_grad=True)
