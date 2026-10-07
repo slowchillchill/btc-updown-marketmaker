@@ -67,7 +67,8 @@ def main():
     row_roots=tensor([0]*len(prices))
     hidden_state=Numbers.run_exact_batch(lambda:HiddenAssetState.empty(level_assets,rational(prices),
         tensor([0,0]),1,segment_capacity=2))
-    for asset,event in enumerate(source['initial']):
+    material=source.get('hidden_material')
+    for asset,event in enumerate(source['initial'] if material is None else []):
         book=event['payload']['event']
         quantities=['0']*len(prices)
         for name,side_rows in [('bids',[1,2] if asset==0 else [3]),('asks',[0] if asset==0 else [4])]:
@@ -90,11 +91,36 @@ def main():
     maker_rate = Numbers.run_exact_batch(lambda:rational([source['maker_rebate_rate']]))
     calendars = RebateCoordinator(MakerDays.empty(tensor([[0]]),tensor([[source['market_end']]]),
         tensor([[True]],torch.bool),fills=1,days=1),TakerDays.empty(1,'cuda',fills=1,days=1))
-    runtime=BaseSimRuntime(hidden_state,requests,orders,account,fills,calendars)
+    frontier=None
+    block=None
+    if material is not None:
+        from hidden_inputs import HiddenPmBlock
+        from hidden_frontier import HiddenBucketColumns,HiddenBucketFrontier
+        slots=[('1','ASK','0.2'),('1','BID','0.3'),('1','BID','0.4'),('2','BID','0.4'),('2','ASK','0.6')]
+        block=HiddenPmBlock(material['buckets'],material['assets'],slots,source_binding=material['source_binding'])
+        assert all(not value['references'] for value in block.buckets), '该有限源尚未接市场reference处理器'
+        assert len(block.buckets)==2, '初始双Book一桶，七条Maker消息同一完整桶'
+        hidden_state=Numbers.run_exact_batch(lambda:block.empty_state(segment_capacity=2))
+        frontier=Numbers.run_exact_batch(lambda:HiddenBucketFrontier.open(HiddenBucketColumns.from_block(block),1))
+    runtime=BaseSimRuntime(hidden_state,requests,orders,account,fills,calendars,frontier)
     hidden_source=ScheduledTime(tensor([source['maker_at']]),active,zero_fault)
     hidden_eof=tensor([False],torch.bool)
     horizon=tensor([source['market_end']])
     choose=lambda:runtime.choose(hidden_source,hidden_eof,horizon,active)
+    compact_index=0
+    if block is not None:
+        choice=choose()
+        assert choice.enabled(4).cpu().tolist()==[True] and choice.at.cpu().tolist()==[1100]
+        runtime=runtime.advance_role_time(choice,tensor([source['market_end']]*2)).begin_hidden_bucket(choice)
+        for compact_index in range(len(block.buckets[0]['steps'])):
+            runtime,effect=runtime.apply_hidden_step(choose(),compact_index,tensor([0,0]),
+                tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,source['fee_exponent'],rebate)
+            assert effect is None or not hasattr(effect,'fills') or not effect.fills
+        compact_index+=1
+        runtime,closed=runtime.finish_hidden_bucket()
+        assert closed.cpu().tolist()==[True] and runtime.hidden.initialized.cpu().tolist()==[True,True]
+        assert values(runtime.hidden_frontier.index_position)==[block.buckets[0]['bucket']['index_end']]
+        queue=runtime.hidden.queues
     choice=choose()
     assert choice.enabled(5).cpu().tolist()==[True] and torch.equal(choice.at,requests.next_pending().effective_at)
     # 源边界未知时不把公开grid当关闭证明；同ms完整hidden仍先于真实pending。
@@ -173,8 +199,39 @@ def main():
                 assert not any(frame.event.emitted.any().cpu().item() for frame in bad[-1].fills)
                 checked_bad_hidden_predecessor=True
             runtime=runtime.advance_role_time(choice,tensor([source['market_end']]*2))
-            runtime,hidden=runtime.hidden_base(choice,tensor([1 if bid else 0]),before,after,source_price,
-                tensor([0]),active,tensor([[0]*queue.capacity]),row_roots,fee_rate,source['fee_exponent'],rebate)
+            if block is None:
+                runtime,hidden=runtime.hidden_base(choice,tensor([1 if bid else 0]),before,after,source_price,
+                    tensor([0]),active,tensor([[0]*queue.capacity]),row_roots,fee_rate,source['fee_exponent'],rebate)
+            else:
+                if checkpoint['ordinal']==0:
+                    runtime=runtime.begin_hidden_bucket(choice)
+                # 类型/原顺序在冷源页解码；执行与游标推进仍由设备门决定。
+                while block.operations[compact_index]['tag']!='LevelChange':
+                    runtime,effect=runtime.apply_hidden_step(choose(),compact_index,tensor([0,0]),
+                        tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,source['fee_exponent'],rebate)
+                    compact_index+=1
+                operation=block.operations[compact_index]
+                transition=operation['fields']['transition']
+                assert transition['quantity_before_shares']==event['quantity_before_shares']
+                assert transition['quantity_after_shares']==event['quantity_after_shares']
+                assert transition['price_pusd_per_share']==event['price_pusd_per_share']
+                runtime,hidden=runtime.apply_hidden_step(choose(),compact_index,tensor([0,0]),
+                    tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,source['fee_exponent'],rebate)
+                compact_index+=1
+                assert values(runtime.hidden_frontier.index_position)==[block.buckets[0]['bucket']['index_end']]
+                if checkpoint['ordinal']!=len(source['events'])-1:
+                    unchanged,closed=runtime.finish_hidden_bucket()
+                    assert not closed.any().cpu().item()
+                else:
+                    for index in range(compact_index,len(block.operations)):
+                        assert block.operations[index]['tag']!='LevelChange'
+                        runtime,_=runtime.apply_hidden_step(choose(),index,tensor([0,0]),
+                            tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,source['fee_exponent'],rebate)
+                    runtime,closed=runtime.finish_hidden_bucket()
+                    assert closed.cpu().tolist()==[True]
+                    assert values(runtime.hidden_frontier.index_position)==[block.buckets[-1]['bucket']['index_end']]
+                    _,eof=runtime.hidden_frontier.scheduled()
+                    assert eof.cpu().tolist()==[True]
             hidden_state,orders,queue,account,fills,calendars=(runtime.hidden,runtime.orders,runtime.hidden.queues,
                 runtime.account,runtime.fills,runtime.calendars)
             if checkpoint['ordinal']==len(source['events'])-1:
@@ -341,6 +398,10 @@ def main():
         'controlled_same_time_hidden_before_pending_and_unknown_source_pause_checked':True,
         'single_SIM_runtime_owns_hidden_queue_account_requests_orders_and_obligations_checked':True,
         'pure_market_end_obligation_closes_matching_but_preserves_open_order_encumbrance_checked':True,
+        'verified_typedraw_initial_and_complete_seven_message_maker_bucket_checked':block is not None,
+        'complete_maker_bucket_frontier_keeps_original_index_until_all_steps_commit_checked':block is not None,
+        'compact_hidden_source_identities_are_new_DPT_identities_not_old_constructed_V3':block is not None,
+        'runtime_hidden_reference_handler_covered':False,
         'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
         'elapsed_seconds_with_reference_reads': time.perf_counter()-started,

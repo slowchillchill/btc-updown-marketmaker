@@ -241,7 +241,12 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     let confirmed_policy = TradeFinalityPolicyV2::decode_and_seal(&serde_json::to_vec(&serde_json::json!({
         "schema_version":"trade_finality_policy_v2", "normal_path":confirmed_path,"failure_overrides":[],
     })).unwrap()).expect("确认时应用经济的原密封路径");
-    let input = serde_json::json!({"checkpoints":checkpoints, "initial":initial, "events":events,
+    // 可选有限验证只从原源值重编码typedraw；新DPT身份不冒充旧V3构造身份。
+    let compact_source = std::env::var_os("B_GPU_COMPACT_BASE_SOURCE").map(|_| {
+        public_consumption_tests::gpu_compact_hidden_for_order_fixture(&initial, &events)
+    });
+    let input = serde_json::json!({"hidden_material":compact_source.as_ref().map(|(_, value)| value),
+        "checkpoints":checkpoints, "initial":initial, "events":events,
         "processing_at":processing_at, "maker_at":maker_at,
         "finality_path":actor._finality_policy.normal_path(),
         "confirmed_economic_path":confirmed_policy.normal_path(),

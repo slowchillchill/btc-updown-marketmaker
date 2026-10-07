@@ -300,6 +300,75 @@ mod gpu_hidden_tests {
     use super::*;
     include!("gpu_hidden_tests.rs");
 }
+
+// 有界GTC验证复用原typedraw→公共归约→独立hidden准备入口。
+// 新材料自行派生真实V3身份；旧ExecutionMarketEvent夹具身份不复制进材料。
+#[cfg(feature = "shared-execution")]
+pub(super) fn gpu_compact_hidden_for_order_fixture(
+    initial: &[ExecutionMarketEventV3], events: &[ExecutionMarketEventV3],
+) -> (tempfile::TempDir, serde_json::Value) {
+    use data_pipeline_training::{compact_public::PublicCompactWriterV1,
+        compact_hidden_material::{prepare_compact_hidden_material_v1,CompactHiddenMaterialReaderV1},
+        compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1,gpu_initial_sort::GpuInitialRunOrderV1};
+    let directory=tempfile::tempdir().unwrap();
+    let public_path=directory.path().join("public");
+    let hidden_path=directory.path().join("hidden");
+    let market=&initial[0].market;
+    let assets=initial.iter().map(|event|match &event.payload {
+        ExecutionMarketEventPayloadV3::InitialL2Snapshot(v)=>v.asset.clone(),
+        _=>panic!("原初始化必须是双资产完整快照"),
+    }).collect::<Vec<_>>();
+    let received=market.window.start_at_utc_ms-100;
+    let mut metadata=metadata_snapshot_row();
+    metadata.condition_id=market.condition_id.0.clone();metadata.clob_market_id=market.clob_market_id.0.clone();
+    metadata.asset_ids=serde_json::to_string(&assets.iter().map(|v|&v.token_id.0).collect::<Vec<_>>()).unwrap();
+    metadata.outcomes_raw=Some(serde_json::to_string(&assets.iter().map(|v|&v.outcome.label).collect::<Vec<_>>()).unwrap());
+    metadata.market_start_utc=market.window.start_at_utc_ms;metadata.market_end_utc=market.window.end_at_utc_ms;
+    metadata.timestamp_received=received;metadata.collector_admission_time_utc_ms=received+1;
+    metadata.fixed_identity_verified_at_utc=received-1;metadata.metadata_fetch_start_utc=Some(received-10);
+    metadata.source_evidence_received_at_utc=Some(received);metadata.row_evidence_validation_completed_at_utc=Some(received+1);
+    let mut inputs=vec![record(0,TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata))))];
+    for event in initial.iter().chain(events) {
+        let payload=match &event.payload {
+            ExecutionMarketEventPayloadV3::InitialL2Snapshot(v)=>PolymarketOrderbookEvent::Book {
+                asset_id:v.asset.token_id.0.clone(),last_trade_price:None,
+                bids:v.bids.iter().map(|v|PolymarketPriceLevel {price:v.price_pusd_per_share.0.clone(),size:v.quantity_shares.0.clone()}).collect(),
+                asks:v.asks.iter().map(|v|PolymarketPriceLevel {price:v.price_pusd_per_share.0.clone(),size:v.quantity_shares.0.clone()}).collect(),
+            },
+            ExecutionMarketEventPayloadV3::LevelExecutionTransition(v)=>PolymarketOrderbookEvent::PriceChange {
+                price_changes:vec![PolymarketPriceChangeEntry {asset_id:v.asset.token_id.0.clone(),
+                    price:v.price_pusd_per_share.0.clone(),size:Some(v.quantity_after_shares.0.clone()),
+                    side:if v.side==BookSide::Bid {PolymarketSide::Buy} else {PolymarketSide::Sell},best_bid:None,best_ask:None}],
+            },
+            _=>panic!("这个夹具只重编码原初始Book与原PriceChange的源值，不抄before"),
+        };
+        let source=event.time.source_event_at_utc_ms.expect("原PM须有真实源时刻");
+        let mut pm=row("epoch-1",inputs.len() as u64,source,event.time.received_at_utc_ms,payload);
+        pm.market=market.condition_id.0.clone();
+        inputs.push(record(inputs.len() as u64,TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(pm))));
+    }
+    inputs.push(end(inputs.len() as u64));
+    let mut public=core();
+    let mut writer=PublicCompactWriterV1::create(&public_path,public.header().clone()).unwrap();
+    for input in inputs {
+        let prepared=prepare_public_ingress_v1(&public,&input,&BTreeMap::new(),&[]).unwrap();
+        let applied=public.push_facts(&prepared).unwrap();
+        writer.push_prepared(&input,&prepared,&applied).unwrap();
+    }
+    writer.publish().unwrap();
+    let context=public.pm_context(&market.condition_id.0).unwrap();
+    let assets=context.assets.iter().map(|v|v.asset.clone()).collect::<Vec<_>>();
+    let mut sort=config().sort;sort.merge_workers=8;
+    let order=Arc::new(GpuInitialRunOrderV1::start(Path::new(&std::env::var("B_GPU_PYTHON").unwrap()),
+        Path::new(&std::env::var("B_GPU_SORT_WORKER").unwrap())).unwrap());
+    prepare_compact_hidden_material_v1(&public_path,&hidden_path,1<<20,&sort,order,"gpu-order-hidden".into(),None,|_,_,_,_| {}).unwrap();
+    let mut reader=CompactHiddenMaterialReaderV1::open(&hidden_path,&public_path,1,1<<20,1<<20,|_,_,_,_| {}).unwrap();
+    let mut buckets=Vec::new();
+    while let Some(bucket)=next_compact_hidden_gpu_bucket_v1(&mut reader).unwrap() {buckets.push(bucket);}
+    (directory,serde_json::json!({"buckets":buckets,"assets":assets,
+        "source_binding":{"binary":std::env::var("B_GPU_HIDDEN_CLI").unwrap(),"hidden":hidden_path,"public":public_path,
+            "rows":1,"bytes":1<<20,"max_batch_bytes":1<<20}}))
+}
 async fn public_execution(
     path: &Path,
     core: &PublicObservationCoreV1,
