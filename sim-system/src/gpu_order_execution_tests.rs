@@ -243,6 +243,8 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         "confirmed_economic_path":confirmed_policy.normal_path(),
         "fee_rate":rules.fee_schedule.rate.value().to_string(), "fee_exponent":rules.fee_schedule.exponent,
         "taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
+        "maker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_maker_rebate_rate.value().to_string(),
+        "market_end":initial[0].market.window.end_at_utc_ms,
         "post":post,"post_request_key":"gpu-legal-gtc-post","post_input_sequence":receipt.input_sequence(),
         "post_sent_at":1200,"post_terms":match &request {
             BusinessRequestV2::PostOrders(request) => serde_json::json!({

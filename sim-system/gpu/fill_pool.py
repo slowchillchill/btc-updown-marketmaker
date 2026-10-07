@@ -5,8 +5,9 @@
 """
 from dataclasses import dataclass, fields, replace
 import torch
-from queues import Numbers, ExactInt, _take, _repeat
+from queues import Numbers, ExactInt, ExactRational, _take, _repeat
 from fill_finality import FillRecord
+from fill_origins import FillOrigins
 
 
 _BANK = ('offsets','states','lengths','economic_ordinals')
@@ -58,6 +59,7 @@ class FillPoolTransition:
     fill_sequence: object  # 原SIM序号；不是物理槽位或private feedback seq。
     slot: torch.Tensor
     event: object
+    origin: object = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,7 @@ class FillPool:
     sequences: object
     next_sequence: object
     fault: torch.Tensor
+    origins: object = None  # 同一逐fill人口；旧纯最终性组件允许尚未绑定。
 
     @property
     def roots(self):
@@ -88,7 +91,8 @@ class FillPool:
         values['ordinal'] = torch.full((roots*capacity,),-1,device=template.ordinal.device,dtype=torch.int64)
         zero = template.base.constant(0)
         return cls(FillRecord(**values),torch.zeros((roots,capacity),dtype=torch.bool,device=template.ordinal.device),
-            _repeat(zero,capacity),zero.constant(1),zero.fault)
+            _repeat(zero,capacity),zero.constant(1),zero.fault,
+            FillOrigins.empty(zero, roots, capacity))
 
     def resized(self,capacity):
         if capacity <= self.capacity:
@@ -103,7 +107,37 @@ class FillPool:
         return replace(result,records=_put_record(result.records,_take_record(self.records,safe),target,enabled),
             occupied=torch.nn.functional.pad(self.occupied,(0,capacity-self.capacity)),
             sequences=_put_integer(result.sequences,self.sequences,target,enabled),
-            next_sequence=self.next_sequence,fault=self.fault)
+            next_sequence=self.next_sequence,fault=self.fault,
+            origins=result.origins.put(self.origins.take(safe),target,enabled))
+
+    def bind_origin(self, slots, order_sequences, order_slots, conditions, roles, price, enabled):
+        """仅绑定已安装fill的真实来源；原角色不得由即时费用或最终性状态推断。"""
+        columns = (slots, order_slots, conditions, roles)
+        if any(value.shape != (self.roots,) or value.dtype != torch.int64 or
+               value.device != self.occupied.device for value in columns):
+            raise TypeError('成交来源坐标须同设备int64[roots]')
+        if enabled.shape != (self.roots,) or enabled.dtype != torch.bool or enabled.device != self.occupied.device:
+            raise TypeError('成交来源人口须同设备bool[roots]')
+        index = torch.arange(self.roots, device=slots.device)*self.capacity+slots.clamp(0,self.capacity-1)
+        old = self.origins.take(index)
+        same_order = old.order_sequences.compare(order_sequences)
+        same_price = old.prices.compare(price)
+        upper = order_sequences.compare(order_sequences.constant((1 << 64)-1))
+        p_upper = price.compare(ExactRational(price.numerator.constant(1),price.numerator.constant(1)))
+        fault = order_sequences.fault | price.fault | upper.fault | p_upper.fault
+        fault = fault | ((slots < 0) | (slots >= self.capacity) | ~self.occupied.flatten()[index] |
+            (order_slots < 0) | (conditions < 0) | (roles < 0) | (roles > 1) |
+            (order_sequences.sign <= 0) | (upper.order > 0) |
+            (price.numerator.sign <= 0) | (p_upper.order >= 0)).to(torch.int32)
+        fault = fault | ((roles == 1) & (_take(self.records.fee,index).sign != 0)).to(torch.int32)
+        known = old.roles >= 0
+        mismatch = ((same_order.order != 0) | (same_price.order != 0) | (old.order_slots != order_slots) |
+            (old.conditions != conditions) | (old.roles != roles))
+        fault = fault | torch.where(known,same_order.fault | same_price.fault | mismatch.to(torch.int32),0)
+        fault = self.fault | fault*enabled.to(torch.int32)
+        use = enabled & (fault == 0)
+        origins = self.origins.put(FillOrigins(order_sequences,order_slots,conditions,roles,price),index,use)
+        return replace(self,origins=origins,fault=fault)
 
     def new_record(self,base,quote,fee,asset_indices,matched_at,active,selected_path):
         """复用原bank创建新成交；精确量与时刻仍经原记录边界校验。"""
@@ -158,8 +192,12 @@ class FillPool:
         exists = valid.any(1)
         return at,slot,exists
 
-    def advance_one(self,account,at,taker_rebate_rate):
+    def advance_one(self,account,at,taker_rebate_rate, *, enabled=None):
         scheduled,slot,exists = self.next_obligation()
+        if enabled is not None:
+            if enabled.shape != (self.roots,) or enabled.dtype != torch.bool or enabled.device != at.device:
+                raise TypeError('最终性消费人口须同设备bool[roots]')
+            exists = exists & enabled
         coordinates = torch.arange(self.roots,device=slot.device)*self.capacity+slot
         current = _take_record(self.records,coordinates)
         current = replace(current,active=current.active & exists,
@@ -167,7 +205,7 @@ class FillPool:
         current,account,transition = current.advance_one(account,at,taker_rebate_rate)
         records = _put_record(self.records,current,coordinates,transition.emitted)
         # 故障仍保留为根状态，不能把过期义务当成已完成或业务失败。
-        result = FillPoolTransition(_take(self.sequences,coordinates),slot,transition)
+        result = FillPoolTransition(_take(self.sequences,coordinates),slot,transition,self.origins.take(coordinates))
         return replace(self,records=records,fault=self.fault | transition.fault),account,result
 
     def coordinate_result(self,original,committed,fault):
@@ -178,7 +216,8 @@ class FillPool:
         return replace(self,records=_put_record(original.records,self.records,index,valid),
             sequences=self.sequences.select(valid,original.sequences),
             occupied=torch.where(committed[:,None],self.occupied,original.occupied),
-            next_sequence=self.next_sequence.select(committed,original.next_sequence),fault=fault)
+            next_sequence=self.next_sequence.select(committed,original.next_sequence),fault=fault,
+            origins=self.origins.coordinate(original.origins,committed))
 
     def enqueue_with_days(self,record,days):
         """实际fill登记只在成交池与日桶人口均可提交时生效。"""
@@ -242,6 +281,50 @@ class FillPool:
             failure_delta=account.coordinate_delta(event.failure_delta,committed,fault),
             rebate_delta=account.coordinate_delta(event.rebate_delta,committed,fault))
         return candidate,account,days,replace(transition,event=event)
+
+    def advance_mixed(self, account, maker, taker, at, maker_rate, taker_rate, *, enabled=None):
+        """同池先选唯一义务，再按真实role关闭对应前驱；不以费用猜角色。"""
+        from taker_days import coordinate_calendar
+        from asset_buy import take_ratio
+        _, slot, exists = self.next_obligation()
+        if enabled is not None:
+            exists = exists & enabled
+        index = torch.arange(self.roots, device=at.device)*self.capacity+slot
+        origin = self.origins.take(index)
+        invalid = exists & ((origin.roles < 0) | (origin.roles > 1))
+        original_account, original_maker, original_taker = account, maker, taker
+        candidate = replace(self, fault=self.fault | invalid.to(torch.int32))
+        candidate, account, transition = candidate.advance_one(account, at, taker_rate, enabled=exists)
+        event = transition.event
+        is_maker = origin.roles == 1
+        fee = _take(self.records.fee, index)
+        contribution = take_ratio(event.rebate_delta.movement.rebates,
+                                 torch.arange(self.roots, device=at.device)*4+1)
+        taker, taker_consumed = taker.complete(transition.fill_sequence, fee,
+            event.terminal & ~is_maker, event.state == 4, contribution)
+        maker, maker_consumed = maker.complete(transition.fill_sequence,
+            event.terminal & is_maker, event.state == 4, maker_rate)
+        fi, found, lookup_fault = maker._lookup(transition.fill_sequence)
+        root = torch.arange(self.roots, device=at.device)
+        market_slot = maker.fill_markets[root, fi]
+        maker, account, market = maker.finalize_market(account, market_slot,
+            event.terminal & is_maker & found)
+        fault = event.fault | maker.fault | taker.fault
+        fault = fault | torch.where(event.emitted & is_maker,
+                                   lookup_fault | (~found).to(torch.int32), 0)
+        closed = torch.where(is_maker, maker_consumed, taker_consumed)
+        committed = event.emitted & (~event.terminal | closed) & (fault == 0)
+        candidate = candidate.coordinate_result(self, committed, fault)
+        maker = coordinate_calendar(maker, original_maker, committed, fault)
+        taker = coordinate_calendar(taker, original_taker, committed, fault)
+        account = account.coordinate_result(original_account, fault)
+        event = replace(event, emitted=committed, terminal=event.terminal & committed, fault=fault,
+            economic_delta=account.coordinate_delta(event.economic_delta, committed, fault),
+            failure_delta=account.coordinate_delta(event.failure_delta, committed, fault),
+            rebate_delta=account.coordinate_delta(event.rebate_delta, committed, fault))
+        market = replace(market, emitted=market.emitted & committed, fault=fault,
+            account_delta=account.coordinate_delta(market.account_delta, committed, fault))
+        return candidate, account, maker, taker, replace(transition, event=event), market
 
 
 def run_fill_pool_batch(pool,compute):

@@ -830,3 +830,12 @@ FIFO段保存根内稳定slot；目录增长后由该slot无损取得原订单�
 三种物理池不足时扩容并从原状态重算，错误不当业务拒绝，先前成功前缀继续保留。
 原Post结果正文仍须由调用者按返回效果物化；这里的完成引用不代替完整原响应正文。
 完整FOK接纳、动态selector、全根时钟及全部订单退役/恢复继续接入，不以此GTC切片替代。
+
+成交池额外保存原订单u64、根内订单slot、真实角色、condition及原档位价格。
+GTC接纳按原ask与FIFO段的逐fill人口绑定来源并登记正费Taker日前驱；零费用Taker不登记返佣日。
+`maker_execution.py`将单条原level transition的正quote效果接到同一池、首最终性、账户和Maker前驱，
+物理扩容不消费fill序号。来源价取本条真实transition，不能从quote/base或公开末盘口反推。
+调用者仍须按原FIFO encounter顺序逐个安装，不能拼接不同transition后按订单合并。
+`FillPool.advance_mixed`先按原`(time,fill_sequence,path_ordinal)`选唯一义务，再由设备真实角色
+关闭对应返佣前驱；零费用不构成Maker证据。当前真实短链先完成Taker再生成Maker，
+尚未以该短链证明同时活跃的混合角色排序、完整hidden事务、动态selector或全根时钟。

@@ -16,6 +16,10 @@ from pending_base_execution import FrozenBaseTerms, run_pending_base_acceptance
 from base_execution import cancel_base_order
 from fill_finality import FillRecord
 from fill_pool import FillPool, run_fill_pool_batch
+from maker_execution import run_start_maker_fill
+from maker_days import MakerDays
+from taker_days import TakerDays
+from rebate_coordinator import RebateCoordinator
 from validate_base_execution import setup, integers, rational, values, units, assert_checkpoint
 
 
@@ -49,11 +53,16 @@ def main():
         tensor([False], torch.bool), source['finality_path'])
     fills = FillPool.empty(template, capacity=1)
     terms = FrozenBaseTerms(tensor([0]), integers([base]), integers([quote.numerator]),
-        rational([original_kind['limit_price_pusd_per_share']]), tensor([0]), tensor([1]), zero_fault)
+        rational([original_kind['limit_price_pusd_per_share']]), tensor([0]), tensor([1]), zero_fault,tensor([0]))
     fee_rate, rebate = Numbers.run_exact_batch(lambda: (rational([source['fee_rate']]), rational([source['taker_rebate_rate']])))
+    maker_rate = Numbers.run_exact_batch(lambda:rational([source['maker_rebate_rate']]))
+    calendars = RebateCoordinator(MakerDays.empty(tensor([[0]]),tensor([[source['market_end']]]),
+        tensor([[True]],torch.bool),fills=1,days=1),TakerDays.empty(1,'cuda',fills=1,days=1))
     requests, orders, queue, account, fills, accepted = run_pending_base_acceptance(requests, orders, queue,
         account, fills, terms, tensor([[0]]), fee_rate, source['fee_exponent'],
-        torch.zeros((1,queue.capacity), dtype=torch.int64, device='cuda'), rebate, tensor([0, 0]), tensor([0]))
+        torch.zeros((1,queue.capacity), dtype=torch.int64, device='cuda'), rebate, tensor([0, 0]), tensor([0]),
+        calendars=calendars)
+    calendars = accepted.calendars
     assert accepted.fault.cpu().tolist() == [0] and accepted.order.emitted.cpu().tolist() == [True]
     assert values(accepted.order.sequence) == [1] and accepted.response.emitted.cpu().tolist() == [True]
     assert not requests.next_pending().exists.cpu().item()
@@ -64,6 +73,9 @@ def main():
     assert_checkpoint(source['checkpoints'][0]['state'], read.quantity, account)
     # 原queue A段保存本根稳定slot。扩目录后不改变已有段中的slot或原完整u64身份。
     assert values(orders.read(slot).sequence) == [1]
+    assert fills.origins.roles[0,0].cpu().item() == 0
+    assert values(fills.origins.order_sequences) == [1]
+    assert values(fills.origins.prices.numerator) == [1] and values(fills.origins.prices.denominator) == [5]
     assert queue.order_ids[1][queue.kind[1] == 2].cpu().tolist() == [int(slot.cpu()[0])]
     maker_record = None
     observed_pending_zero_quote = False
@@ -71,7 +83,10 @@ def main():
         stage = checkpoint['stage']
         if stage in ('taker_finality', 'maker_finality'):
             at = tensor([checkpoint['at']])
-            fills, account, _ = Numbers.run_exact_batch(lambda: fills.advance_one(account, at, rebate))
+            fills, account, maker, taker, transition, _ = Numbers.run_exact_batch(lambda:
+                fills.advance_mixed(account,calendars.maker,calendars.taker,at,maker_rate,rebate))
+            calendars = RebateCoordinator(maker,taker)
+            assert transition.origin.roles.cpu().tolist() == [int(stage=='maker_finality')]
         elif stage == 'hidden_step':
             event = source['events'][checkpoint['ordinal']]['payload']['event']
             bid = event['side'] == 'BID'
@@ -84,14 +99,20 @@ def main():
             index = slot  # 单根；运行协调器保留root×slot无损映射。
             from queues import _take
             emitted = makers.emitted[:, slot[0]].reshape(1)
-            if emitted.cpu().item():
+            maker_emitted = emitted.cpu().item()
+            if maker_emitted:
                 assert maker_record is None
-                maker_record = fills.new_record(_take(makers.base, index), _take(makers.quote, index), integers([0]),
-                    read.assets, tensor([source['maker_at']]), emitted, tensor([0]))
-                fills, _ = run_fill_pool_batch(fills, lambda candidate: candidate.enqueue(maker_record))
-                fills, account, _ = Numbers.run_exact_batch(lambda: fills.advance_one(account, maker_record.matched_at, rebate))
             elif values(read.quantity.pending_maker_depletion_base_units)[0] > 0:
                 observed_pending_zero_quote = True
+            source_price = Numbers.run_exact_batch(lambda:rational([event['price_pusd_per_share']]))
+            fills, account, maker, maker_transition, _, _ = run_start_maker_fill(fills,account,calendars.maker,
+                read,_take(makers.base,index),_take(makers.quote,index),tensor([0]),source_price,
+                tensor([source['maker_at']]),tensor([0]),emitted,fee_rate,source['fee_exponent'],rebate)
+            calendars = replace(calendars,maker=maker)
+            if maker_emitted:
+                maker_record = maker_transition
+                assert values(maker_transition.fill_sequence) == [2]
+                assert maker_transition.origin.roles.cpu().tolist() == [1]
         elif stage == 'canceled':
             read = orders.read(slot)
             queue, quantity, account, _, _, _, delta = Numbers.run_exact_batch(lambda: cancel_base_order(queue,
@@ -102,13 +123,21 @@ def main():
         assert_checkpoint(checkpoint['state'], orders.read(slot).quantity, account)
     assert observed_pending_zero_quote and maker_record is not None
     assert values(fills.next_sequence) == [3] and values(orders.next_sequence) == [2]
+    assert fills.origins.roles.cpu().tolist() == [[0,1]]
+    assert values(fills.origins.order_sequences) == [1,1]
+    assert values(fills.origins.prices.numerator) == [1,3] and values(fills.origins.prices.denominator) == [5,10]
+    assert calendars.maker.market_pending.cpu().tolist() == [[0]]
+    assert calendars.maker.terminal_consumed.cpu().tolist() == [[True]]
+    assert not calendars.taker.pending.any().cpu().item()
     # 已完成请求无pending：调度padding零terms/故障不得污染既存状态。
     padding = FrozenBaseTerms(tensor([-1]), integers([0]), integers([0]), rational(['0']),
                               tensor([-1]), tensor([-1]), tensor([1], torch.int32))
     old_requests, old_orders, old_queue, old_account, old_fills = requests, orders, queue, account, fills
     requests, orders, queue, account, fills, idle = run_pending_base_acceptance(requests, orders, queue,
         account, fills, padding, tensor([[-1]]), fee_rate, source['fee_exponent'],
-        torch.zeros((1,queue.capacity), dtype=torch.int64, device='cuda'), rebate, tensor([0, 0]), tensor([-1]))
+        torch.zeros((1,queue.capacity), dtype=torch.int64, device='cuda'), rebate, tensor([0, 0]), tensor([-1]),
+        calendars=calendars)
+    calendars = idle.calendars
     assert idle.fault.cpu().tolist() == [0]
     assert not idle.acceptance.submission_delta.emitted.cpu().item() and not idle.response.emitted.cpu().item()
     for actual, previous in ((account.cash, old_account.cash), (account.next_sequence, old_account.next_sequence),
@@ -127,7 +156,7 @@ def main():
     next_terms = replace(terms, item_refs=tensor([1]))
     requests, orders, queue, account, fills, next_effect = run_pending_base_acceptance(requests, orders, queue,
         account, fills, next_terms, tensor([[0]]), fee_rate, source['fee_exponent'],
-        torch.zeros((1,8), dtype=torch.int64, device='cuda'), rebate, tensor([0, 0]), tensor([1]))
+        torch.zeros((1,8), dtype=torch.int64, device='cuda'), rebate, tensor([0, 0]), tensor([1]),calendars=calendars)
     assert next_effect.fault.cpu().tolist() == [0] and next_effect.order.emitted.cpu().tolist() == [True]
     assert orders.capacity == 2 and queue.capacity == 8
     assert values(orders.next_sequence) == [3] and values(fills.next_sequence) == [3]
@@ -146,6 +175,8 @@ def main():
         'order_u64_identity_and_queue_slot_survive_growth_checked': True,
         'completed_request_inactive_zero_terms_no_effect_or_fault_checked': True,
         'controlled_order_only_growth_keeps_eight_queue_segments_checked': True,
+        'actual_order_role_and_source_price_bound_to_each_fill_checked':True,
+        'same_fill_pool_finality_uses_actual_role_and_calendar_predecessors_checked':True,
         'original_SIM_checkpoints': len(source['checkpoints']),
         'elapsed_seconds_with_reference_reads': time.perf_counter()-started,
         'device_peak_allocated_bytes': torch.cuda.max_memory_allocated(),

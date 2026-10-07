@@ -46,7 +46,8 @@ def _coordinate_pool(candidate,original,fault):
     return replace(candidate,records=replace(candidate.records,**updates),
         occupied=torch.where((fault == 0)[:,None],candidate.occupied,original.occupied),
         sequences=candidate.sequences.select(enabled,original.sequences),
-        next_sequence=candidate.next_sequence.select(fault == 0,original.next_sequence),fault=fault)
+        next_sequence=candidate.next_sequence.select(fault == 0,original.next_sequence),fault=fault,
+        origins=candidate.origins.coordinate(original.origins,fault == 0))
 
 
 def accept_base_with_fills(prepared,queue,account,pool,matched_at,selected_paths,taker_rebate_rate,row_roots):
