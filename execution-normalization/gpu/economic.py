@@ -16,10 +16,12 @@ class EconomicEvidence:
     emitted: torch.Tensor
     fault: torch.Tensor
     sequence: object
+    payload_schema: int = 11
+    asset_indices: object | None = None
 
 
 def map_economic(delta,account_slots,condition_slots,token_slots,asset_indices,asset_roots,private_sequence,
-                 source_ordinal,effective_at,transition_tag,entity_sequence,path_ordinal):
+                 source_ordinal,effective_at,transition_tag,entity_sequence,path_ordinal,*,resolution_identity=None):
     """覆盖当前SIM接纳、逐fill应用/失败/返佣及单订单释放的原Existing转移。
 
     0=OrderAccepted，2=CallerCanceled，6=EconomicApplied，7=UnappliedFailure，
@@ -41,6 +43,11 @@ def map_economic(delta,account_slots,condition_slots,token_slots,asset_indices,a
     transition_known=torch.zeros(count,dtype=torch.bool,device=device)
     for tag in [0,2,6,7,8,9,10]:
         transition_known=transition_known | (transition_tag==tag)
+    if resolution_identity is not None:
+        if resolution_identity.shape!=(count,) or resolution_identity.dtype!=torch.int64 or resolution_identity.device!=device:
+            raise TypeError('判定释放须完整原Resolution身份目录')
+        transition_known |= transition_tag==5
+        fault |= ((transition_tag!=5)|(resolution_identity<0)).to(torch.int32)
     path_used=(transition_tag>=6)&(transition_tag<=8)
     fault=fault | ((account_slots<0)|(condition_slots<0)|(token_slots<0)|
         (source_ordinal<0)|(source_ordinal>0xffffffff)|~transition_known|
@@ -77,14 +84,17 @@ def map_economic(delta,account_slots,condition_slots,token_slots,asset_indices,a
     logical=encode_fields([account_slots,tag,delta.sequence])
     economic=encode_fields([account_slots,torch.ones_like(tag),delta.sequence])
     # V1/V2统一：原Existing转移及两项精确零liability均入同一schema。
-    semantic=encode_fields([account_slots,condition_slots,effective_at,transition_tag,entity_sequence,
+    payload=[account_slots,condition_slots,effective_at,transition_tag,entity_sequence,
         torch.where(path_used,path_ordinal,0),*balances,has_outcome,
-        torch.where(has_outcome,token_slots,0),outcome,zero,zero])
+        torch.where(has_outcome,token_slots,0),outcome,zero,zero]
+    if resolution_identity is not None:
+        payload.append(resolution_identity)
+    semantic=encode_fields(payload)
     words=private_sequence.words.to(torch.int64)&0xffffffff
     high=words[:,1] if words.size(1)>1 else torch.zeros(count,dtype=torch.int64,device=device)
     source=torch.stack([torch.full_like(high,2),words[:,0],high,source_ordinal],dim=1)
     return EconomicEvidence(logical,economic,semantic,source,balances,outcome,has_outcome,
-        delta.emitted & (fault==0),fault,delta.sequence)
+        delta.emitted & (fault==0),fault,delta.sequence,18 if resolution_identity is not None else 11,asset_indices)
 
 
 def map_rebate_economic(delta,account,asset_roots,private,ordinal,at,kind,day,paid):

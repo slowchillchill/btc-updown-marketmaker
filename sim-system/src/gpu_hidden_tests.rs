@@ -89,6 +89,18 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
 #[tokio::test(flavor="current_thread")]
 #[ignore="AutoDL真实紧凑TWAP/空Book/Terminal→一次原Resolved与后继Lifecycle"]
 async fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_effects() {
+    gpu_hidden_terminal_source(false).await;
+}
+
+#[cfg(feature="shared-execution")]
+#[tokio::test(flavor="current_thread")]
+#[ignore="AutoDL真实空Book→外层GTC挂单→Terminal市场关闭/释放→同NOE/Ledger"]
+async fn gpu_compact_hidden_terminal_closes_real_resting_gtc_and_releases_once() {
+    gpu_hidden_terminal_source(true).await;
+}
+
+#[cfg(feature="shared-execution")]
+async fn gpu_hidden_terminal_source(with_order: bool) {
     use data_pipeline_training::{compact_public::{PublicCompactWriterV1, CompactFactPayloadV1},
         compact_hidden_material::{prepare_compact_hidden_material_v1, CompactHiddenMaterialReaderV1},
         compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1, gpu_initial_sort::GpuInitialRunOrderV1};
@@ -203,6 +215,9 @@ async fn gpu_compact_hidden_reference_population_closes_without_fabricating_mark
     let mut qualified_sources=Vec::new();
     let mut batches=Vec::new();
     let mut lifecycle_count=0;
+    let mut post_reference=None;
+    let mut accepted_records=Vec::new();
+    let mut ledger_accepted=None;
     let mut reference_index = 0;
     let mut terminal_index = None;
     for bucket in &buckets {
@@ -216,17 +231,16 @@ async fn gpu_compact_hidden_reference_population_closes_without_fabricating_mark
                     let header = crate::market::MarketEventHeaderV1 {identity:&fact.event_id.0, market:&fact.market,
                         time:&fact.dependency_time, quality:&fact.quality};
                     let applied=original.apply_admitted_header(&header,&normalized,bucket.bucket.bucket_time_utc_ms,MARKET_END_AT).unwrap();
-                    let mut effects=state.session.as_mut().unwrap().execution_state.apply_market_event(CONDITION_ID,
-                        &normalized,bucket.bucket.bucket_time_utc_ms,MARKET_END_AT,
-                        execution.actor._rule_snapshot.snapshot(),execution.actor._finality_policy.as_ref()).unwrap();
-                    if let Some(qualified)=applied.qualified_resolution {
+                    if let Some(qualified)=applied.qualified_resolution.as_ref() {
                         qualified_sources.push(serde_json::json!({"reference_index":reference_index,
                             "event_id":qualified.resolution_event_id,"source_at":qualified.resolution_source_event_at_utc_ms,
                             "terminal":qualified.terminal,"parsed_payouts":qualified.parsed_payouts.map(|p|p.to_string())}));
-                        effects.merge(state.session.as_mut().unwrap().execution_state.apply_qualified_resolution(CONDITION_ID,
-                            &qualified,bucket.bucket.bucket_time_utc_ms,execution.actor._finality_policy.as_ref()).unwrap());
                     }
-                    let lifecycle=effects.into_lifecycle_feedback().unwrap();
+                    let (next,effects)=reduce_normalized_market_slice_v1(state,MarketEventPathV1::HiddenPlatform,
+                        bucket.bucket.bucket_time_utc_ms,&[header],&[normalized],execution.actor._rule_snapshot.snapshot(),
+                        execution.actor._finality_policy.as_ref()).unwrap_or_else(|_|panic!("真实canonical市场参考归约失败"));
+                    state=next;
+                    let lifecycle=effects.execution.into_lifecycle_feedback().unwrap();
                     if !lifecycle.is_empty() {
                         lifecycle_count+=lifecycle.len();
                         state=gpu_accept_projection_reference(&mut execution.actor,state,
@@ -248,18 +262,50 @@ async fn gpu_compact_hidden_reference_population_closes_without_fabricating_mark
                 let header = crate::market::MarketEventHeaderV1 {identity:&step.derived_id.0, market,
                     time:&step.dependency_time, quality:&step.quality};
                 original.apply_admitted_header(&header, &normalized, bucket.bucket.bucket_time_utc_ms, MARKET_END_AT).unwrap();
-                let effects=state.session.as_mut().unwrap().execution_state.apply_market_event(CONDITION_ID,&normalized,
-                    bucket.bucket.bucket_time_utc_ms,MARKET_END_AT,execution.actor._rule_snapshot.snapshot(),
-                    execution.actor._finality_policy.as_ref()).unwrap().into_lifecycle_feedback().unwrap();
+                let (next,effects)=reduce_normalized_market_slice_v1(state,MarketEventPathV1::HiddenPlatform,
+                    bucket.bucket.bucket_time_utc_ms,&[header],&[normalized],execution.actor._rule_snapshot.snapshot(),
+                    execution.actor._finality_policy.as_ref()).unwrap_or_else(|_|panic!("真实空Book隐藏归约失败"));
+                state=next;
+                let effects=effects.execution.into_lifecycle_feedback().unwrap();
                 assert!(effects.is_empty(),"原空Book不产生账户或成交反馈");
             }
+        }
+        if with_order && bucket.bucket.bucket_time_utc_ms==22000 {
+            let request=BusinessRequestV2::PostOrders(PostOrdersRequestV2 {
+                context:RequestContextV2 {global_request_id:"gpu-terminal-resting-post".into(),caller_correlation_id:None},
+                items:vec![PostOrderBatchItemV2 {batch_item_ordinal:0,item:post_item("gpu-terminal-resting-post:0",
+                    &ConditionId(CONDITION_ID.into()),&TokenId(UP_TOKEN_ID.into()),SimBuyOrderKindV1::GtcLimit {
+                        limit_price_pusd_per_share:"0.4".parse().unwrap(),size_shares:"5".parse().unwrap(),post_only:false})}],
+            });
+            let (next,receipt)=register_request_candidate(&execution.actor.opened,scenario.initial_market_directory(),state,
+                &request_cutoff(22100),&request,11,execution.actor._latency_profile.as_ref(),execution.actor._rule_snapshot.snapshot());
+            state=next;
+            let processing=receipt.platform_arrived_at_utc_ms();
+            assert!(processing<MARKET_END_AT,"原GTC到达须在市场end前，不缩改真实时延");
+            let (next,accepted)=advance_mutation_candidate_with_outputs(&execution.actor.opened,scenario.initial_market_directory(),
+                state,processing,execution.actor._rule_snapshot.snapshot(),execution.actor._finality_policy.as_ref());
+            state=next;
+            let accepted=accepted.expect("真实外层GTC在到达时处理");
+            let MutationActionBusinessEffectV3::Post(post)=&accepted.business else {panic!("原Post结果")};
+            assert!(matches!(&post.outcome,PostOrderItemOutcomeV2::Accepted(_)),"原合法空Book GTC必须接受: {:?}",post.outcome);
+            state=gpu_accept_projection_reference(&mut execution.actor,state,BusinessReducerOutputV2::MutationAction(Some(accepted)),&mut batches);
+            post_reference=Some(serde_json::json!({"request":request,"sent_at":22100,"input_sequence":receipt.input_sequence(),
+                "processing_at":processing,"accepted":state.session.as_ref().unwrap().execution_state.gpu_order_checkpoint_for_tests("sim-1")}));
+            execution.actor.projection_port.close_receive_prefix(29999);
+            execution.actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
+                crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:1,logical_time_utc_ms:29999}));
+            let first=observation.take_closed_records();
+            accepted_records=first.iter().map(|r|serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()})).collect();
+            assert_eq!(first.len(),3,"实际GTC接纳：Submission、OrderLifecycle和占款Economic");
+            for record in &first {ledger.apply_noe_memory_v2(record).unwrap();}
+            ledger_accepted=Some(gpu_ledger_reservation_checkpoint(&ledger,"after_real_GTC"));
         }
     }
     assert!(terminal_index.is_some());
     // 非WS元数据无source time，不进hidden；真实终态组先Terminal再Lifecycle。
     assert_eq!(controls.len(),1,"只有Terminal之后的真实Lifecycle");
     assert_eq!(qualified_sources.len(),2,"Terminal与后继Lifecycle均给同一原qualified源");
-    assert_eq!(lifecycle_count,1,"首次Resolved一次，后继qualified不重复，不自动兑付");
+    assert_eq!(lifecycle_count,if with_order {2} else {1},"每订单关闭加首次Resolved，后继qualified不重复，不自动兑付");
     assert_eq!(qualified_sources[0]["event_id"],qualified_sources[1]["event_id"]);
     assert!(canonical_market_facts_checked > 0);
     assert!(matches!(buckets[2].references[0].payload,
@@ -273,7 +319,11 @@ async fn gpu_compact_hidden_reference_population_closes_without_fabricating_mark
     let closed_records=observation.take_closed_records();
     let records=closed_records.iter().map(|r|serde_json::json!({"record":r.record(),
         "position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
-    for record in &closed_records {ledger.apply_noe_memory_v2(record).unwrap();}
+    let mut terminal_attempts=Vec::new();
+    for record in &closed_records {
+        ledger.apply_noe_memory_v2(record).unwrap();
+        terminal_attempts.push(serde_json::json!({"position":record.position(),"after":gpu_ledger_reservation_checkpoint(&ledger,"Terminal_prefix")}));
+    }
     let ledger_after=gpu_ledger_reservation_checkpoint(&ledger,"after_Resolved");
     let resolutions=ledger.economic_read().unwrap().resolutions().map(|r|serde_json::json!({
         "resolved":r.resolved,"request":r.request,"category":r.settlement_cost_attribution,
@@ -285,7 +335,7 @@ async fn gpu_compact_hidden_reference_population_closes_without_fabricating_mark
     for record in &closed_records {ledger.apply_noe_memory_v2(record).unwrap();}
     assert_eq!(ledger.projection_v2().unwrap(),before_repeat,
         "重读完整原position不产生Ledger条目");
-    assert_eq!(records.len(),1,"真实唯一Memory消费者只有一条Resolved，无经济delta");
+    assert_eq!(records.len(),if with_order {3} else {1},"Terminal订单关闭/经济释放/Resolved，零单仅一条Resolved");
     assert!(observation.take_closed_records().is_empty());
     let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,
         "original_controls":controls,"qualified_sources":qualified_sources,"resolved_records":records,
@@ -293,6 +343,7 @@ async fn gpu_compact_hidden_reference_population_closes_without_fabricating_mark
         "next_private":next_private,"next_batch":next_batch,"session_seed":session_seed,"resolved_close_at":close_at,
         "original_batches":batches,"terminal_reference_index":terminal_index.unwrap(),
         "canonical_market_facts_checked":canonical_market_facts_checked,
+        "accepted_records":accepted_records,"ledger_accepted":ledger_accepted,"terminal_attempts":terminal_attempts,"post_reference":post_reference,"original_order_after":if with_order {Some(state.session.as_ref().unwrap().execution_state.gpu_order_checkpoint_for_tests("sim-1"))} else {None},
         "source_binding":{"binary":std::env::var("B_GPU_HIDDEN_CLI").unwrap(),"hidden":hidden,"public":source,
             "rows":1,"bytes":1048576,"max_batch_bytes":1048576}});
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())

@@ -54,18 +54,23 @@ def public_rows_from_closed(bank,batches,closed,receive_rank):
     schemas=bank.payload_schemas[rows]
     layouts={3:['scalar']*4+['integer','scalar','integer','integer','scalar'],
         7:['scalar']*3+['integer','scalar','scalar'],
-        8:['scalar']*3+['integer','integer']+['scalar']*4+['rational']+['integer']*3+['scalar','integer','scalar','rational']}
+        8:['scalar']*3+['integer','integer']+['scalar']*4+['rational']+['integer']*3+['scalar','integer','scalar','rational'],
+        19:['scalar']*3+['integer','scalar','scalar','scalar']}
     decoded={}
     for schema,layout in layouts.items():
         enabled=active & (schemas==schema)
         decoded[schema],error=decode_fields(bank.semantic[rows],layout,enabled)
         fault=fault | Numbers.combine_fault_rows(torch.where(enabled,error,0).reshape(roots,width))
+    market_close=active & (schemas==19)
+    for index in range(6):
+        left,right=decoded[7][index],decoded[19][index]
+        decoded[7][index]=torch.where(market_close,right,left) if isinstance(left,torch.Tensor) else right.select(market_close,left)
     accepted=active & (schemas==3) & (decoded[3][1]==0)
-    formed=active & (schemas==7)
+    formed=active & ((schemas==7)|(schemas==19))
     # Accepted与真实CallerCanceled分开；其它未接Order事件仍显式报告缺口。
     order_life=formed
-    fault=fault | (order_life & (decoded[7][4]!=0)&(decoded[7][4]!=4)).reshape(roots,width).any(1).to(torch.int32)
-    closed_order=order_life&(decoded[7][4]==4)
+    fault=fault | (order_life & (decoded[7][4]!=0)&(decoded[7][4]!=4)&~(market_close&(decoded[7][4]==5))).reshape(roots,width).any(1).to(torch.int32)
+    closed_order=order_life&((decoded[7][4]==4)|(decoded[7][4]==5))
     formed=order_life&(decoded[7][4]==0)
     trades=active & (schemas==8)
     received=(accepted|order_life|trades).reshape(roots,width)

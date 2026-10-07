@@ -26,7 +26,7 @@ def entity_sequence(identity,kind):
     return int(value[kind]['source_'+kind.lower()+'_id'].removeprefix('sim-'))
 
 
-def expected_semantic(record):
+def expected_semantic(record, resolution_index=0, terminal_index=0):
     zero=torch.zeros(1,dtype=torch.int64,device='cuda')
     body=next(iter(record['record'].values()))
     if 'fact' in body:
@@ -36,7 +36,7 @@ def expected_semantic(record):
         if 'Existing' in transition:
             transition=transition['Existing']
         name,fields=(transition,{}) if isinstance(transition,str) else next(iter(transition.items()))
-        tag={'OrderAcceptedEncumbranceApplied':0,'CallerCancellationEncumbranceReleased':2,'FillFinalityEconomicApplied':6,'TakerRebateAccrualApplied':10,
+        tag={'OrderAcceptedEncumbranceApplied':0,'CallerCancellationEncumbranceReleased':2,'MarketResolutionEncumbranceReleased':5,'FillFinalityEconomicApplied':6,'TakerRebateAccrualApplied':10,
             'MakerRebateAccrualFinalized':9,
             'MakerRebateDayFinalized':11,'TakerRebateDayFinalized':12,'MakerRebatePaid':13,'TakerRebatePaid':14}[name]
         if tag==9:
@@ -44,7 +44,7 @@ def expected_semantic(record):
         elif tag>=11:
             sequence=fields['attribution_day_utc_ms']
         else:
-            identity=fields['order_identity' if tag in [0,2] else 'trade_identity']
+            identity=fields['order_identity' if tag in [0,2,5] else 'trade_identity']
             entity=json.loads(identity.split(':',1)[1])[-1]
             sequence=int(next(iter(next(iter(entity.values())).values())).removeprefix('sim-'))
         balance=value['balance_delta']
@@ -53,10 +53,13 @@ def expected_semantic(record):
         names=['cash_pusd_delta','available_pusd_delta','principal_encumbrance_pusd_delta','immediate_taker_fee_encumbrance_pusd_delta',
             'maker_rebate_receivable_pusd_delta','taker_rebate_receivable_pusd_delta','maker_rebate_locked_remainder_pusd_delta','taker_rebate_locked_remainder_pusd_delta']
         outcomes=balance['outcome_balance_deltas']
-        return encode_fields([zero,torch.full_like(zero,-1) if value['condition_id'] is None else zero,torch.tensor([value['economic_effective_at_utc_ms']],device='cuda'),
+        semantic=[zero,torch.full_like(zero,-1) if value['condition_id'] is None else zero,torch.tensor([value['economic_effective_at_utc_ms']],device='cuda'),
             torch.full_like(zero,tag),integers([sequence]),torch.full_like(zero,fields.get('path_ordinal',0)),
             *[rational([balance[name]]) for name in names],torch.tensor([bool(outcomes)],device='cuda'),zero,
-            rational([outcomes[0]['balance_shares_delta'] if outcomes else '0']),rational(['0']),rational(['0'])])
+            rational([outcomes[0]['balance_shares_delta'] if outcomes else '0']),rational(['0']),rational(['0'])]
+        if tag==5:
+            semantic.append(torch.full_like(zero,resolution_index))
+        return encode_fields(semantic)
     kind,value=next(iter(body['evidence'].items()))
     value=value['result']
     if kind=='TradeLifecycleV3':
@@ -73,6 +76,8 @@ def expected_semantic(record):
             torch.tensor([value['economic_application_account_transition_seq'] is not None],device='cuda'),
             integers([value['economic_application_account_transition_seq'] or 0]),torch.full_like(zero,maker_kind),rational([maker_value])])
     if kind=='OrderLifecycle':
+        if isinstance(value['event'],dict) and 'MarketResolvedCanceled' in value['event']:
+            return encode_fields([zero,zero,zero,integers([entity_sequence(value['order_identity'],'Order')]),torch.full_like(zero,5),zero,torch.full_like(zero,resolution_index)])
         if value['event']=='CallerCanceled':
             return encode_fields([zero,zero,zero,integers([entity_sequence(value['order_identity'],'Order')]),torch.full_like(zero,4),zero])
         return encode_fields([zero,zero,zero,integers([entity_sequence(value['order_identity'],'Order')]),zero,
@@ -92,6 +97,8 @@ def expected_semantic(record):
             integers([units(value['measurement']['Base']['open_base_quantity_shares'])]),
             torch.tensor([value['effective_processing_at_utc_ms']],device='cuda')])
     if kind=='SettlementLifecycleV2':
+        if 'Resolved' in value:
+            return encode_fields([zero,zero,torch.full_like(zero,resolution_index),torch.full_like(zero,terminal_index)])
         if 'MakerAccrualFinalized' in value:
             from fields import RecordList
             value=value['MakerAccrualFinalized']

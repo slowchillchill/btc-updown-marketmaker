@@ -134,6 +134,20 @@ class BaseSimRuntime:
         choice = replace(choice,present=permitted)
         candidate,effect = self.prepare_hidden_terminal(choice,indices,condition_by_market,market_end,source_assets)
         projected,batch = projection.resolved_position(sampler,effect,condition,block.terminal_columns)
+        return self._commit_hidden_terminal(candidate,effect,projected,batch,indices,permitted,rows)
+
+    def apply_hidden_terminal(self,choice,indices,condition_by_market,market_end,projection,sampler,asset_tokens,
+                              source_assets=None):
+        """真实Base订单市场关闭、释放和Resolved完整反馈共同成功后才消费引用。"""
+        block=self.hidden_frontier.columns.source
+        rows=block.reference_rows[indices.clamp(0,block.reference_rows.size(0)-1)]
+        axis=torch.arange(self.orders.roots,device=indices.device)
+        condition=condition_by_market[axis,rows[:,1].clamp(0,condition_by_market.size(1)-1)]
+        candidate,effect=self.prepare_hidden_terminal(choice,indices,condition_by_market,market_end,source_assets)
+        projected,batch=projection.market_resolution(sampler,effect,condition,block.terminal_columns,asset_tokens)
+        return self._commit_hidden_terminal(candidate,effect,projected,batch,indices,choice.enabled(4),rows)
+
+    def _commit_hidden_terminal(self,candidate,effect,projected,batch,indices,permitted,rows):
         fault = effect.fault | batch.fault
         from pending_base_execution import _coordinate_orders
         from base_acceptance import _coordinate_queue

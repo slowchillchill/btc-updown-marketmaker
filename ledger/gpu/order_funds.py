@@ -105,8 +105,8 @@ class OrderFunds:
         economic_tag = lifecycle.economic_tags[root, local]
         trade = evidence & (tag == 8)
         accepted = evidence & (tag == 3) & lifecycle.accepted[root, local]
-        observed = trade | accepted | (evidence & (tag == 7))
-        order_economic = economic & ((economic_tag == 0) | (economic_tag == 2))
+        observed = trade | accepted | (evidence & ((tag == 7) | (tag == 19)))
+        order_economic = economic & ((economic_tag == 0) | (economic_tag == 2) | (economic_tag == 5))
         fill_economic = economic & (economic_tag >= 6) & (economic_tag <= 8)
         trade_capacity = self.trade_bound.size(1)
         binding_position = root * trade_capacity + trade_slots

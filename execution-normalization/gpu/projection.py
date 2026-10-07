@@ -149,6 +149,49 @@ class Projection:
             effect.at,emission.emitted[:,0])]
         return working._finish(emitter,records,emission.root_fault | ordinals.fault)
 
+    def market_resolution(self,sampler,effect,condition,columns,asset_tokens):
+        """整市场原订单字符串序关闭反馈，最后首次Resolved；共同失败则整批不发。"""
+        from lifecycle import map_market_resolved_order,map_resolved_position
+        from economic import map_economic
+        from queues import _take
+        roots=self.account_slots.numel()
+        width=len(effect.orders.events)+1
+        if self.resolution_columns is not None and self.resolution_columns is not columns:
+            raise ValueError('判定关闭反馈须承接同一完整来源身份字典')
+        working=replace(self,resolution_columns=columns,condition_slots=condition)
+        lives=[event.effect.closed for event in effect.orders.events]
+        active=torch.stack([*lives,effect.resolved],1)
+        platforms=effect.at[:,None].expand(roots,width)
+        emitter,emission=working.emitter.emit(sampler,active,torch.zeros_like(active),platforms,platforms,
+            torch.zeros_like(platforms),effect.fault[:,None].expand_as(active))
+        categories=torch.tensor([1]*(width-1)+[3],device=effect.at.device).expand(roots,width)
+        counts=torch.stack([*(1+event.effect.delta.emitted.to(torch.int64) for event in effect.orders.events),
+            torch.ones_like(effect.at)],1)
+        ordinals=map_source_ordinals(emission.emitted,categories,counts,effect.fault[:,None].expand_as(active))
+        row=columns.fields[effect.reference.clamp(0,columns.fields.size(0)-1)]
+        records=[]
+        root=torch.arange(roots,device=effect.at.device)
+        for column,event in enumerate(effect.orders.events):
+            index=root*width+column
+            private=_take(emission.private_sequences,index)
+            batch=_take(emission.batch_sequences,index)
+            working=working.bind_base_order(event.order,asset_tokens,emission.emitted[:,column])
+            life=map_market_resolved_order(event.order.sequence,row[:,3],private,ordinals.first_ordinals[:,column],
+                working.account_slots,event.order.conditions,working.token_slots,emission.emitted[:,column])
+            economic=map_economic(event.effect.delta,working.account_slots,event.order.conditions,working.token_slots,
+                event.order.assets,working.asset_roots,private,ordinals.first_ordinals[:,column]+1,effect.at,
+                torch.full_like(effect.at,5),event.order.sequence,torch.zeros_like(effect.at),resolution_identity=row[:,3])
+            common=(private,batch,emission.received_at[:,column],categories[:,column],effect.at)
+            records.append((life,EVIDENCE,*common,emission.emitted[:,column]))
+            records.append((economic,ECONOMIC,*common,emission.emitted[:,column]&event.effect.delta.emitted))
+        private=_take(emission.private_sequences,root*width+width-1)
+        batch=_take(emission.batch_sequences,root*width+width-1)
+        resolved=map_resolved_position(working.account_slots,condition,row[:,3],row[:,2],private,
+            ordinals.first_ordinals[:,-1],emission.emitted[:,-1])
+        records.append((resolved,EVIDENCE,private,batch,emission.received_at[:,-1],categories[:,-1],
+            effect.at,emission.emitted[:,-1]))
+        return working._finish(emitter,records,emission.root_fault | ordinals.fault)
+
     def pending_base_acceptance(self,sampler,orders,pool,effects,asset_tokens):
         """已完成的单项Base接单来源；完整Pair响应仍须原请求封口协调。
 
@@ -191,7 +234,7 @@ class Projection:
         roots=self.account_slots.numel()
         size=roots
         zero=torch.zeros(roots,dtype=torch.int64,device=self.account_slots.device)
-        schema=11 if kind==ECONOMIC else getattr(mapped,'payload_schema',8)
+        schema=getattr(mapped,'payload_schema',11 if kind==ECONOMIC else 8)
         incoming=EvidenceBank(mapped.logical_keys,mapped.economic_keys if kind==ECONOMIC else zero[:,None],
             mapped.semantic,getattr(mapped,'cancellation_fields',None) if getattr(mapped,'cancellation_fields',None) is not None else zero[:,None],torch.full_like(zero,kind),mapped.source_order,zero,mapped.fault,
             torch.full_like(zero,schema),frozenset([schema]))
@@ -250,12 +293,15 @@ class Projection:
         economic_balances=[]
         economic_outcomes=[]
         economic_masks=[]
+        economic_assets=[]
         for mapped,kind,private_sequence,_,_,_,_,_ in records:
             zero=ExactRational.ratio(private_sequence.constant(0),private_sequence.constant(1))
             economic_sequences.append(mapped.sequence if kind==ECONOMIC else private_sequence.constant(0))
             economic_balances.append(mapped.balances if kind==ECONOMIC else (zero,)*8)
             economic_outcomes.append(mapped.outcome if kind==ECONOMIC else zero)
             economic_masks.append(torch.full_like(self.account_slots,kind==ECONOMIC,dtype=torch.bool))
+            asset=getattr(mapped,'asset_indices',None)
+            economic_assets.append(self.asset_indices if asset is None else asset)
         balance_fields=[cat_ratio([record[field] for record in economic_balances]) for field in range(8)]
         # 先[root,record]后字段8；规范row位置可直接gather共享精确列。
         balance_width=max(value.numerator.words.size(1) for value in balance_fields)
@@ -286,7 +332,7 @@ class Projection:
         return replace(working,emitter=coordinated,normalizer=candidate),ProjectionBatch(normalized,
             private_values,batch_values,ordinals,times,normalized.rows,normalized.emitted,fault,
             categories,platforms,requests,items,self.context_slots[:,None].expand_as(rows),self.run_slots[:,None].expand_as(rows),
-            economic_sequence,economic_balance,economic_outcome,self.asset_indices[:,None].expand_as(rows),economic_mask)
+            economic_sequence,economic_balance,economic_outcome,torch.stack(economic_assets,1).gather(1,order),economic_mask)
 
     def cancellation(self,sampler,targets,at,direct_received,method,completed):
         """已处理完整单资产请求的真实取消效果，保原双重顺序。

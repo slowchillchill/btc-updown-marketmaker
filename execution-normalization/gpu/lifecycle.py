@@ -73,6 +73,16 @@ def map_resolved_position(account,condition,resolution_identity,terminal_identit
     return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,17)
 
 
+def map_market_resolved_order(order_sequence,resolution,private,ordinal,account,condition,token,active):
+    """原MarketResolvedCanceled；关闭订单与释放金额为两个独立人口。"""
+    fault=input_fault([order_sequence,private],[account,condition,token,resolution],ordinal)
+    fault |= ((account<0)|(condition<0)|(token<0)|(resolution<0)).to(torch.int32)
+    logical=encode_fields([account,torch.full_like(account,7),order_sequence,private])
+    semantic=encode_fields([account,condition,token,order_sequence,torch.full_like(account,5),
+        torch.zeros_like(account),resolution])
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,19)
+
+
 def map_taker_contribution(record,frame,rebate_rate,private,ordinal,account,condition):
     """贡献不再改平台应收；实际应收变动仍是独立经济delta。"""
     from queues import ExactRational

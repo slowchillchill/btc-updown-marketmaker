@@ -105,7 +105,7 @@ class LifecycleColumns:
         active=torch.cat([batch.emitted for batch in columns.projection_batches],dim=1).flatten()
         outcomes=torch.cat([batch.normalized.outcomes for batch in columns.projection_batches],dim=1).flatten()
         material=active & ((outcomes==OUT_EVIDENCE)|(outcomes==OUT_FACT))
-        enabled={tag:material&(schemas==tag) for tag in [3,7,8,9,11,12,13,14,15,16,17]}
+        enabled={tag:material&(schemas==tag) for tag in [3,7,8,9,11,12,13,14,15,16,17,18,19]}
         layouts={
             3:['scalar']*4+['integer','scalar','integer','integer','scalar'],
             7:['scalar']*3+['integer','scalar','scalar'],
@@ -118,6 +118,8 @@ class LifecycleColumns:
             15:['scalar','integer','scalar'],
             16:['scalar']+['integer']*3,
             17:['scalar']*4,
+            18:['scalar']*4+['integer','scalar']+['rational']*8+['scalar','scalar']+['rational']*3+['scalar'],
+            19:['scalar']*3+['integer','scalar','scalar','scalar'],
         }
         decoded={}
         fault=torch.where(material,bank.fault[rows],0)
@@ -145,12 +147,24 @@ class LifecycleColumns:
             known=known | (schemas==tag)
         fault=fault | (material & ~known).to(torch.int32)
         zero=ExactInt.from_i64_tensor(torch.zeros_like(schemas))
+        # 两个判定专用schema保完整Resolution身份，原共同字段仍复用同一归约。
+        resolution_identities=torch.where(enabled[18],decoded[18][-1],decoded[17][2])
+        resolution_identities=torch.where(enabled[19],decoded[19][-1],resolution_identities)
+        def merge(left,right,mask):
+            if isinstance(left,torch.Tensor):return torch.where(mask,right,left)
+            if isinstance(left,ExactRational):
+                return ExactRational(right.numerator.select(mask,left.numerator),right.denominator.select(mask,left.denominator))
+            return right.select(mask,left)
+        decoded[11]=[merge(a,b,enabled[18]) for a,b in zip(decoded[11],decoded[18])]
+        decoded[7]=[merge(a,b,enabled[19]) for a,b in zip(decoded[7],decoded[19])]
+        enabled[11] |= enabled[18]
+        enabled[7] |= enabled[19]
         orders=decoded[3][4].select(enabled[3],zero)
         orders=decoded[7][3].select(enabled[7],orders)
         orders=decoded[8][4].select(enabled[8],orders)
         orders=decoded[15][1].select(enabled[15],orders)
         economic=enabled[11]
-        economic_order=economic & ((decoded[11][3]==0)|(decoded[11][3]==2))
+        economic_order=economic & ((decoded[11][3]==0)|(decoded[11][3]==2)|(decoded[11][3]==5))
         orders=decoded[11][4].select(economic_order,orders)
         fills=decoded[8][3].select(enabled[8],zero)
         fills=decoded[9][2].select(enabled[9],fills)
@@ -181,7 +195,7 @@ class LifecycleColumns:
             torch.where(payment,decoded[13][1],decoded[12][1]).reshape(roots,width),
             torch.where(payment,decoded[13][2],decoded[12][2]).reshape(roots,width),
             decoded[12][3],decoded[12][4],decoded[12][5],decoded[13][7],decoded[12][6],decoded[14][3],decoded[14][2].reshape(roots,width),
-            decoded[17][2].reshape(roots,width),decoded[17][3].reshape(roots,width),
+            resolution_identities.reshape(roots,width),decoded[17][3].reshape(roots,width),
             active.reshape(roots,width),
             torch.where(active,fault,0).reshape(roots,width))
 
