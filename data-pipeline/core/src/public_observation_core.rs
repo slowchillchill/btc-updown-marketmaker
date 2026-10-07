@@ -745,7 +745,7 @@ impl PublicObservationCoreV1 {
         &mut self,
         input: &PreparedIngressV1<'_>,
     ) -> Result<Vec<PublicReductionBatchV1>, DptCoreErrorV1> {
-        Ok(self.push_application(input, true)?.reductions)
+        Ok(self.push_application(input, PublicOutputModeV1::SourceProgress)?.reductions)
     }
     fn push_application<'a>(
         &mut self,
