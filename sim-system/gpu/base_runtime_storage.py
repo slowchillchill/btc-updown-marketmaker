@@ -267,7 +267,8 @@ class CapturedHiddenBuckets:
             for name in ('required_segments','required_records','required_maker_fills','required_maker_days'):
                 target=getattr(self,name)
                 target.copy_(torch.maximum(target,getattr(effect,name)))
-            population = torch.stack([frame.event.emitted for frame in effect.fills]).any()
+            population = (torch.stack([frame.event.emitted for frame in effect.fills]).any() if effect.fills
+                          else torch.zeros((),device=horizon.device,dtype=torch.bool))
             need = self.page.count+population.to(torch.int64)
             self.required_feedback.copy_(torch.maximum(self.required_feedback,need))
             fit = self.resources_fit & value.fits & (need <= self.page.capacity)

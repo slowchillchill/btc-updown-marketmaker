@@ -54,6 +54,12 @@ class DeviceConditionalLoop {
 };
 extern "C" void public_gpu_decimal(const uint8_t*, int64_t, const int64_t*,
     const bool*, uint32_t*, uint32_t*, int8_t*, int32_t*, int32_t*, int64_t, cudaStream_t);
+extern "C" void sim_gpu_snapshot_gather(const int64_t*, const int64_t*, const bool*,
+    const int64_t*, const int64_t*, const int64_t*, const int64_t*, const int64_t*,
+    const int64_t*, const uint32_t*, int64_t, const int8_t*, const uint32_t*, int64_t,
+    const int32_t*, const uint32_t*, int64_t, const int8_t*, const uint32_t*, int64_t,
+    const int32_t*, const bool*, int64_t*, int64_t*, int32_t*, uint32_t*,
+    int64_t, int64_t, int64_t, cudaStream_t);
 
 void words_check(const torch::Tensor& x) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kInt32 &&
@@ -70,6 +76,43 @@ void sign_check(const torch::Tensor& x, const torch::Tensor& words) {
 void capacity_check(int64_t rows, int64_t width) {
   TORCH_CHECK(width > 0 && (!rows || width <= INT64_MAX / rows / 4),
       "实际字节容量超出int64可分配范围");
+}
+std::vector<torch::Tensor> hidden_snapshot_gather(std::vector<torch::Tensor> x) {
+  TORCH_CHECK(x.size() == 18, "快照gather需完整源/运行列");
+  for (const auto& column : x)
+    TORCH_CHECK(column.is_cuda() && column.is_contiguous() && column.device() == x[0].device(),
+        "快照gather列须同设备且连续");
+  for (int i : {0,1,3,4,5,6,7,8}) TORCH_CHECK(x[i].scalar_type() == torch::kInt64, "快照坐标须int64");
+  TORCH_CHECK(x[2].scalar_type() == torch::kBool && x[17].scalar_type() == torch::kBool,
+      "快照人口/关闭掩码须bool");
+  words_check(x[9]); words_check(x[11]); words_check(x[13]); words_check(x[15]);
+  sign_check(x[10],x[9]); sign_check(x[14],x[13]);
+  TORCH_CHECK(x[12].scalar_type() == torch::kInt32 && x[16].scalar_type() == torch::kInt32,
+      "快照精确故障须int32");
+  int64_t roots=x[0].numel(), levels=x[5].numel();
+  TORCH_CHECK(x[0].dim()==1 && x[1].sizes()==x[0].sizes() && x[2].sizes()==x[0].sizes()
+      && x[3].sizes()==x[4].sizes() && x[17].sizes()==x[3].sizes()
+      && x[6].sizes()==x[5].sizes() && x[7].dim()==1 && x[7].numel()>0
+      && x[8].dim()==2 && x[8].size(1)==3 && x[9].size(0)==levels
+      && x[11].size(0)==levels && x[12].numel()==levels
+      && x[13].size(0)==x[15].size(0) && x[16].numel()==x[13].size(0), "快照源/运行布局不一致");
+  const c10::cuda::CUDAGuard guard(x[0].device());
+  int64_t cap=std::max(x[9].size(1)+x[15].size(1),x[13].size(1)+x[11].size(1));
+  capacity_check(roots,2*cap);
+  auto ids=torch::zeros({levels},x[0].options());
+  auto counts=torch::zeros_like(ids);
+  auto fault=torch::zeros({roots},x[12].options());
+  auto work=torch::empty({roots,2*cap},x[9].options());
+  sim_gpu_snapshot_gather(x[0].data_ptr<int64_t>(),x[1].data_ptr<int64_t>(),x[2].data_ptr<bool>(),
+      x[3].data_ptr<int64_t>(),x[4].data_ptr<int64_t>(),x[5].data_ptr<int64_t>(),x[6].data_ptr<int64_t>(),
+      x[7].data_ptr<int64_t>(),x[8].data_ptr<int64_t>(),(uint32_t*)x[9].data_ptr<int32_t>(),x[9].size(1),
+      x[10].data_ptr<int8_t>(),(uint32_t*)x[11].data_ptr<int32_t>(),x[11].size(1),x[12].data_ptr<int32_t>(),
+      (uint32_t*)x[13].data_ptr<int32_t>(),x[13].size(1),x[14].data_ptr<int8_t>(),
+      (uint32_t*)x[15].data_ptr<int32_t>(),x[15].size(1),x[16].data_ptr<int32_t>(),x[17].data_ptr<bool>(),
+      ids.data_ptr<int64_t>(),counts.data_ptr<int64_t>(),fault.data_ptr<int32_t>(),
+      (uint32_t*)work.data_ptr<int32_t>(),cap,roots,levels,c10::cuda::getCurrentCUDAStream().stream());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {ids,counts,fault};
 }
 std::vector<torch::Tensor> integer_op(int op, torch::Tensor a, torch::Tensor sa,
                                     torch::Tensor b, torch::Tensor sb) {
@@ -354,6 +397,7 @@ std::vector<torch::Tensor> ordered_attribution(torch::Tensor tn,torch::Tensor td
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("hidden_snapshot_gather", &hidden_snapshot_gather);
   pybind11::class_<DeviceConditionalLoop>(m, "DeviceConditionalLoop")
       .def(pybind11::init<uint64_t, uint64_t, torch::Tensor>())
       .def("replay", &DeviceConditionalLoop::replay);

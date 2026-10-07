@@ -305,7 +305,7 @@ mod gpu_hidden_tests {
 // 新材料自行派生真实V3身份；旧ExecutionMarketEvent夹具身份不复制进材料。
 #[cfg(feature = "shared-execution")]
 pub(super) fn gpu_compact_hidden_for_order_fixture(
-    initial: &[ExecutionMarketEventV3], events: &[ExecutionMarketEventV3],
+    initial: &[ExecutionMarketEventV3], events: &[ExecutionMarketEventV3], empty_initial: bool,
 ) -> (tempfile::TempDir, serde_json::Value) {
     use data_pipeline_training::{compact_public::PublicCompactWriterV1,
         compact_hidden_material::{prepare_compact_hidden_material_v1,CompactHiddenMaterialReaderV1},
@@ -332,8 +332,8 @@ pub(super) fn gpu_compact_hidden_for_order_fixture(
         let payload=match &event.payload {
             ExecutionMarketEventPayloadV3::InitialL2Snapshot(v)=>PolymarketOrderbookEvent::Book {
                 asset_id:v.asset.token_id.0.clone(),last_trade_price:None,
-                bids:v.bids.iter().map(|v|PolymarketPriceLevel {price:v.price_pusd_per_share.0.clone(),size:v.quantity_shares.0.clone()}).collect(),
-                asks:v.asks.iter().map(|v|PolymarketPriceLevel {price:v.price_pusd_per_share.0.clone(),size:v.quantity_shares.0.clone()}).collect(),
+                bids:if empty_initial {Vec::new()} else {v.bids.iter().map(|v|PolymarketPriceLevel {price:v.price_pusd_per_share.0.clone(),size:v.quantity_shares.0.clone()}).collect()},
+                asks:if empty_initial {Vec::new()} else {v.asks.iter().map(|v|PolymarketPriceLevel {price:v.price_pusd_per_share.0.clone(),size:v.quantity_shares.0.clone()}).collect()},
             },
             ExecutionMarketEventPayloadV3::LevelExecutionTransition(v)=>PolymarketOrderbookEvent::PriceChange {
                 price_changes:vec![PolymarketPriceChangeEntry {asset_id:v.asset.token_id.0.clone(),

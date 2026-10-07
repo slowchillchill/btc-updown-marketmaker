@@ -143,15 +143,16 @@ class HiddenPmBlock:
                                       dtype=torch.int64, device=device)
         self.snapshot_offsets = torch.tensor([entry['snapshot_start'] for entry in pending] +
                                             [len(snapshot_levels)], dtype=torch.int64, device=device)
+        # 补零哨兵在冷安装时建立一次；每步仅index_select，不复制整页源列。
+        self.event_lookup = torch.cat((self.event_indices, torch.zeros((1, 14), dtype=torch.int64, device=device)), 0)
+        self.tag_lookup = torch.cat((self.step_tags, torch.zeros(1, dtype=torch.int64, device=device)), 0)
 
     def selected_rows(self, indices):
         """设备游标选原源步；补零行只供无步根的掩码候选，不算来源人口。"""
         count = self.event_indices.size(0)
         safe = indices.clamp(0, count)
-        rows = torch.cat((self.event_indices, torch.zeros((1, 14), dtype=torch.int64,
-                         device=indices.device)), 0).index_select(0, safe)
-        tags = torch.cat((self.step_tags, torch.zeros(1, dtype=torch.int64,
-                         device=indices.device)), 0).index_select(0, safe)
+        rows = self.event_lookup.index_select(0, safe)
+        tags = self.tag_lookup.index_select(0, safe)
         return rows, tags, (indices >= 0) & (indices < count)
 
     def selected_lookup(self, state, rows, asset_roots, source_assets, level_sides):
@@ -164,36 +165,17 @@ class HiddenPmBlock:
         target = target & (level_sides == rows[owners, 1])
         return target & (relation.order == 0) & (fault == 0), fault
 
-    def snapshot_values(self, state, indices, rows, asset_roots, source_assets, level_sides):
-        """一次设备ragged关联完整快照；缺档/重复仍按原完整快照故障处理。"""
-        levels, population = state.level_assets.numel(), self.snapshot_levels.size(0)
-        roots = indices.numel()
-        owners = asset_roots[state.level_assets]
-        counts = torch.zeros(levels, dtype=torch.int64, device=indices.device)
-        missing = torch.zeros(roots, dtype=torch.int32, device=indices.device)
-        if not population:
-            return zeros(state.queues.price), counts, missing, torch.zeros_like(counts, dtype=torch.int32)
-        safe = indices.clamp(0, self.event_indices.size(0))
-        begin = self.snapshot_offsets.index_select(0, safe)
-        end = self.snapshot_offsets.index_select(0, (safe+1).clamp_max(self.event_indices.size(0)))
-        ordinal = torch.arange(population, device=indices.device)
-        in_snapshot = (ordinal[None, :] >= begin[:, None]) & (ordinal[None, :] < end[:, None])
-        runtime_prices = rational_take(state.queues.price,
-            torch.arange(levels, device=indices.device).repeat_interleave(population))
-        source_prices = self._values(self.snapshot_levels[:, 1].repeat(levels))
-        relation = runtime_prices.compare(source_prices)
-        errors = relation.fault.reshape(levels, population)
-        target = (relation.order.reshape(levels, population) == 0) & (errors == 0)
-        target = target & in_snapshot[owners]
-        target = target & (source_assets[state.level_assets] == rows[owners, 0])[:, None]
-        target = target & (level_sides[:, None] == self.snapshot_levels[None, :, 0])
-        counts = target.sum(1)
-        hits = torch.zeros((roots, population), dtype=torch.int64, device=indices.device).scatter_add(
-            0, owners[:, None].expand_as(target), target.to(torch.int64))
-        missing = (in_snapshot & (hits != 1)).any(1).to(torch.int32)
-        ids = torch.where(target, self.snapshot_levels[None, :, 2], 0).amax(1)
-        price_fault = Numbers.combine_fault_rows(torch.where(in_snapshot[owners], errors, 0))
-        return self._values(ids), counts, missing, price_fault
+    def snapshot_values(self, state, indices, rows, asset_roots, source_assets, level_sides, enabled):
+        """设备只扫描选中快照ragged范围；其它源类型不做精确快照匹配。"""
+        price = state.queues.price
+        dictionary = self.decimals
+        ids, counts, fault = Numbers.public_extension().hidden_snapshot_gather([
+            indices, rows[:, 0].contiguous(), enabled, source_assets, asset_roots,
+            state.level_assets, level_sides, self.snapshot_offsets, self.snapshot_levels,
+            price.numerator.words, price.numerator.sign, price.denominator.words, price.fault,
+            dictionary.numerator.words, dictionary.numerator.sign, dictionary.denominator.words,
+            self.decimal_fault, state.book_closed])
+        return self._values(ids), counts, fault
 
     def _values(self, ids):
         indices = ids if isinstance(ids, torch.Tensor) else torch.tensor(ids, dtype=torch.int64, device=self.level_assets.device)

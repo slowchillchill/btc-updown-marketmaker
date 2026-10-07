@@ -150,6 +150,23 @@ def main():
         assert initial_loop.iterations.cpu().tolist()==[len(block.buckets[0]['steps'])]
         compare(initial_storage.runtime,runtime,'device_selected_initial_complete_snapshots')
         progress('device_selected_initial_snapshots_checked',actual_steps=len(block.buckets[0]['steps']))
+        # 同一原双Book漏一个实际ASK绑定：新ragged图不得部分初始化失败根。
+        missing_block = HiddenPmBlock(material['buckets'],material['assets'],slots[:-1],
+                                      source_binding=material['source_binding'])
+        missing_start = replace(initial_runtime,
+            hidden=Numbers.run_exact_batch(lambda:missing_block.empty_state(segment_capacity=2)),
+            hidden_frontier=Numbers.run_exact_batch(lambda:HiddenBucketFrontier.open(
+                HiddenBucketColumns.from_block(missing_block),1)))
+        check_initial_gather(missing_start,source,tensor,fee_rate,rebate,'missing_snapshot',True)
+        # 实际typedraw双空Book材料、零运行档位；不是给非空源补padding造空。
+        empty_material = source['empty_hidden_material']
+        empty_block = HiddenPmBlock(empty_material['buckets'],empty_material['assets'],[],
+                                    source_binding=empty_material['source_binding'])
+        empty_start = replace(initial_runtime,
+            hidden=Numbers.run_exact_batch(lambda:empty_block.empty_state(segment_capacity=2)),
+            hidden_frontier=Numbers.run_exact_batch(lambda:HiddenBucketFrontier.open(
+                HiddenBucketColumns.from_block(empty_block),1)))
+        check_initial_gather(empty_start,source,tensor,fee_rate,rebate,'empty_snapshot',False)
         queue=runtime.hidden.queues
     choice=choose()
     assert choice.enabled(5).cpu().tolist()==[True] and torch.equal(choice.at,requests.next_pending().effective_at)
@@ -451,6 +468,9 @@ def main():
         'actual_Taker_MINED_CONFIRMED_two_native_iterations_keep_both_feedbacks_checked':finality_page is not None,
         'actual_finality_feedback_page_full_preserves_MINED_prefix_and_retries_checked':finality_page is not None,
         'actual_complete_Maker_bucket_native_source_cursor_and_feedback_page_checked':hidden_page is not None,
+        'actual_fixed_type_device_step_and_snapshot_gather_checked':material is not None,
+        'actual_fixed_type_missing_ASK_snapshot_preserves_root_and_cursor_checked':material is not None,
+        'actual_fixed_type_typedraw_both_empty_Books_zero_levels_checked':material is not None,
         'runtime_hidden_reference_handler_covered':False,
         'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
@@ -537,6 +557,38 @@ def check_captured_finalities(runtime,source,tensor,maker_rate,taker_rate,slot):
         compare(loop.page.read(index),frame,'immutable_feedback_'+str(index))
     progress('actual_Taker_finality_pages_checked',actual_iterations=2)
     return frozen,loop.page
+
+
+def check_initial_gather(original,source,tensor,fee_rate,rebate,label,expect_fault):
+    from base_runtime_storage import BaseRuntimeStorage,CapturedHiddenBuckets
+    block=original.hidden_frontier.columns.source
+    horizon=tensor([1100])
+    enabled=tensor([True],torch.bool)
+    ends=tensor([source['market_end']]*2)
+    reference=original
+    choice=reference.choose(None,None,horizon,enabled)
+    reference=reference.advance_role_time(choice,ends).begin_hidden_bucket(choice)
+    for index in range(len(block.buckets[0]['steps'])):
+        choice=reference.choose(None,None,horizon,enabled)
+        reference,_=reference.apply_hidden_step(choice,index,tensor([0,0]),
+            tensor([[0]*reference.hidden.queues.capacity]),fee_rate,source['fee_exponent'],rebate)
+    reference,closed=reference.finish_hidden_bucket()
+    assert reference.hidden.fault.any().cpu().item()==expect_fault
+    assert closed.cpu().tolist()==[not expect_fault]
+    storage=BaseRuntimeStorage(original,reference)
+    loop=CapturedHiddenBuckets(storage,horizon,enabled,tensor([0,0]),
+        tensor([[0]*original.hidden.queues.capacity]),fee_rate,source['fee_exponent'],rebate,ends,
+        word_capacity=4,feedback_capacity=1,stage_progress=lambda stage:progress(label+'_'+stage))
+    loop.replay()
+    torch.cuda.synchronize()
+    assert loop.resources_fit.cpu().item() and loop.page.count.cpu().item()==0
+    assert loop.closed.cpu().tolist()==[not expect_fault]
+    compare(storage.runtime,reference,label+'_selected_ragged_complete_state')
+    if not expect_fault:
+        assert storage.runtime.hidden.initialized.cpu().tolist()==[True,True]
+        assert storage.runtime.hidden.queues.rows==0
+        assert loop.iterations.cpu().tolist()==[len(block.buckets[0]['steps'])]
+    progress(label+'_ragged_checked')
 
 
 def check_captured_hidden_bucket(runtime,source,tensor,fee_rate,fee_exponent,rebate,slot):

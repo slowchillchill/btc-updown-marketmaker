@@ -243,9 +243,14 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     })).unwrap()).expect("确认时应用经济的原密封路径");
     // 可选有限验证只从原源值重编码typedraw；新DPT身份不冒充旧V3构造身份。
     let compact_source = std::env::var_os("B_GPU_COMPACT_BASE_SOURCE").map(|_| {
-        public_consumption_tests::gpu_compact_hidden_for_order_fixture(&initial, &events)
+        public_consumption_tests::gpu_compact_hidden_for_order_fixture(&initial, &events, false)
+    });
+    // 原typedraw入口接纳双资产空Book，不靠删GPU数量列伪造空盘。
+    let empty_compact_source = std::env::var_os("B_GPU_COMPACT_BASE_SOURCE").map(|_| {
+        public_consumption_tests::gpu_compact_hidden_for_order_fixture(&initial, &[], true)
     });
     let input = serde_json::json!({"hidden_material":compact_source.as_ref().map(|(_, value)| value),
+        "empty_hidden_material":empty_compact_source.as_ref().map(|(_,value)| value),
         "checkpoints":checkpoints, "initial":initial, "events":events,
         "processing_at":processing_at, "maker_at":maker_at,
         "finality_path":actor._finality_policy.normal_path(),

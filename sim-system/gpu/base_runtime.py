@@ -118,14 +118,16 @@ class BaseSimRuntime:
             block._values(rows[:, 3]), block._values(rows[:, 4]), block._values(rows[:, 2]),
             conditions, rows[:, 9] != 0, selected_paths, level_roots, fee_rate, fee_exponent, taker_rate)
         hidden = candidate.hidden
-        quantities, snapshot_counts, missing, snapshot_price_fault = block.snapshot_values(
-            hidden, indices, rows, owner, source_assets, level_sides)
         snapshot_enabled = assets & (permitted & (tags == 1))[owner]
         active_snapshot = snapshot_enabled & ~hidden.book_closed
+        snapshot_roots = torch.zeros(roots, dtype=torch.int32, device=owner.device).scatter_reduce(
+            0, owner, active_snapshot.to(torch.int32), reduce='amax') != 0
+        quantities, snapshot_counts, snapshot_fault = block.snapshot_values(
+            hidden, indices, rows, owner, source_assets, level_sides, snapshot_roots)
         tick = rational_take(block._values(rows[:, 5]), owner)
         hidden, snapshot_required = hidden.initial_snapshot(snapshot_enabled, quantities, tick, rows[owner, 10])
-        snapshot_fault = hidden._asset_fault((snapshot_counts > 1).to(torch.int32) | snapshot_price_fault)
-        hidden = replace(hidden, fault=hidden.fault | (snapshot_fault | missing[owner]) * active_snapshot.to(torch.int32))
+        snapshot_fault = snapshot_fault | grouped_fault(hidden._asset_fault((snapshot_counts > 1).to(torch.int32)), owner, roots)
+        hidden = replace(hidden, fault=hidden.fault | snapshot_fault[owner] * active_snapshot.to(torch.int32))
         tick_enabled = assets & (permitted & (tags == 3))[owner]
         hidden = hidden.tick_change(tick_enabled, rational_take(block._values(rows[:, 6]), owner),
                                     rows[owner, 8] != 0, rational_take(block._values(rows[:, 7]), owner))
