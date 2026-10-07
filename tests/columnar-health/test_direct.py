@@ -8,8 +8,7 @@ from pathlib import Path
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
-from test_health import START,CONDITION,material,change,candidate
-import test_health as previous_tests
+from test_health import START,CONDITION,material,change,candidate,load_fixture,trade_file
 from dpt_health import direct,projection
 from source_health import direct_study,intervals,statistics
 
@@ -80,7 +79,7 @@ class DirectProjectionTests(unittest.TestCase):
 
     def test_trade_time_native_duplicate_and_prefilter_epoch_order(self):
         with tempfile.TemporaryDirectory() as t:
-            root=Path(t);files=previous_tests.TradeClockTests().trade_file(root)
+            root=Path(t);files=trade_file(root)
             table=pq.read_table(files[0]['path']);template=table.to_pylist()[0]
             rows=[]
             for epoch,sequence,trade_id,received,event in [('A',1,1,100,10),('B',1,1,200,10),('B',2,2,400,20),('C',1,3,350,30)]:
@@ -121,8 +120,7 @@ class DirectStatisticsTests(unittest.TestCase):
                 root=Path(t);a=midnight-10;b=midnight+10
                 rows=[change(a,a,a)] if not new else [change(midnight-5,midnight-5,midnight-5),change(midnight,midnight-1,midnight-100)]
                 material(root,rows,a,b)
-                db=duckdb.connect();intervals.load_intervals(db,root,a,b,False,False)
-                expected=statistics.evaluate(db,candidate(),a,b,'expected',root)
+                db=duckdb.connect();load_fixture(db,root,a,b,False,False)
                 # Clip each algorithm unit while preserving actual causal facts.
                 db.execute('ALTER TABLE selected_intervals RENAME TO full_selected')
                 evaluator=direct_study.Evaluation(db,candidate(),a,b,'actual',root)
@@ -130,15 +128,17 @@ class DirectStatisticsTests(unittest.TestCase):
                     db.execute('CREATE TEMP TABLE selected_intervals AS SELECT * REPLACE(greatest(a,?) AS a,least(b,?) AS b) FROM full_selected WHERE a<? AND b>?',[lower,end,end,lower])
                     evaluator.consume('polymarket',lower,end);db.execute('DROP TABLE selected_intervals')
                 actual=evaluator.result()
-                self.assertEqual(actual['states'],[r for r in expected['states'] if r['source']=='polymarket'])
-                self.assertEqual(sorted(actual['daily_states'],key=lambda r:(r['asset'],r['day_start'],r['state'])),sorted([r for r in expected['daily_states'] if r['source']=='polymarket'],key=lambda r:(r['asset'],r['day_start'],r['state'])))
+                exceeded=next(r for r in actual['states'] if r['asset']=='1' and r['state']=='exceeded')
+                self.assertEqual((exceeded['episodes'],exceeded['duration_ms'],exceeded['transitions']),(1,10,1))
+                day=next(r for r in actual['daily_states'] if r['asset']=='1' and r['state']=='exceeded')
+                self.assertEqual((day['day_start'],day['transitions'],day['left_censored_fragments']),(midnight,1,0))
                 db.close()
 
     def test_real_selection_gap_retains_both_censoring_boundaries(self):
         with tempfile.TemporaryDirectory() as t:
             root=Path(t);rules=[dict(condition_id=CONDITION,visible_at=START,sequence=1,reference=8),dict(condition_id=CONDITION,visible_at=START+20,sequence=2,reference=0),dict(condition_id=CONDITION,visible_at=START+25,sequence=3,reference=8)]
             material(root,[change(START,START,START,source='chainlink_twap60')],rules=rules)
-            db=duckdb.connect();intervals.load_intervals(db,root,START,START+30,False,False)
+            db=duckdb.connect();load_fixture(db,root,START,START+30,False,False)
             db.execute('ALTER TABLE selected_intervals RENAME TO full_selected')
             e=direct_study.Evaluation(db,candidate(),START,START+30,'gap',root)
             for lower,end in [(START,START+20),(START+20,START+25),(START+25,START+30)]:
@@ -146,4 +146,90 @@ class DirectStatisticsTests(unittest.TestCase):
                 e.consume('chainlink_twap60',lower,end);db.execute('DROP TABLE selected_intervals')
             rows=e.result()['states'];exceeded=next(r for r in rows if r['state']=='exceeded')
             self.assertEqual((exceeded['episodes'],exceeded['duration_ms'],exceeded['left_censored_episodes'],exceeded['right_censored_episodes']),(2,15,1,2))
+            db.close()
+
+def source_rows(db,files,root,source):
+    runner=direct.SourceQuery(db,files,HELPER,root,source)
+    changes=[];arrivals=[]
+    for unit in direct.query_units(direct.range_index(db,files,lambda *a,**k:None)):
+        _,dirs=runner.load(unit)
+        changes+=db.execute('SELECT visible_at,received,event,sync_required FROM changes ORDER BY visible_at,asset').fetchall()
+        arrivals+=db.execute('SELECT visible_at,received,event FROM arrivals ORDER BY visible_at,asset').fetchall()
+        runner.keep_before(runner.frontier+1);runner.release(dirs)
+    return changes,arrivals
+
+
+class DirectValidityTests(unittest.TestCase):
+    def test_trade_conflict_and_backwards_id(self):
+        for backwards in (False,True):
+            with self.subTest(backwards=backwards),tempfile.TemporaryDirectory() as t:
+                root=Path(t);files=trade_file(root,START+2701,backwards);db=duckdb.connect()
+                with self.assertRaisesRegex(ValueError,'backwards' if backwards else 'conflicting'):
+                    source_rows(db,files,root,'binance_trade')
+                db.close()
+
+    def test_chainlink_anomalies_do_not_refresh_valid_times(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);path=root/'spot.parquet'
+            rows=[dict(timestamp_received=START+i,payload_timestamp=START-1,freshness_status=q,source_native_payload_json=json.dumps({'i':i}))
+                for i,q in enumerate(['fresh','invalid_type','invalid_topic','invalid_symbol','invalid_timestamp','stale'])]
+            rows[4]['timestamp_received']=START+10
+            schema=pa.schema([('timestamp_received',pa.timestamp('ms')),('payload_timestamp',pa.timestamp('ms')),('freshness_status',pa.string()),('source_native_payload_json',pa.string())])
+            pq.write_table(pa.Table.from_pylist(rows,schema=schema),path)
+            db=duckdb.connect();_,actual=source_rows(db,[descriptor(path,6,'polymarket_rtds_chainlink_btc_usd')],root,'chainlink_spot')
+            self.assertEqual(actual,[(START,START,START-1),(START+10,START+5,START-1)])
+            db.close()
+
+    def test_future_epoch_and_later_old_receive_keep_visible_prefix(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);_,table=pm_file(root,4);rows=table.to_pylist()
+            for i,row in enumerate(rows):
+                row['timestamp_received']=START+(100 if i<2 else 50)
+                row['collector_admission_time_utc_ms']=START+(100 if i<2 else 200)
+            later=dict(rows[0],timestamp_received=START+10,collector_admission_time_utc_ms=START+150,collector_admission_sequence=3)
+            for label,values in [('prefix',rows[:2]),('future',rows),('later',rows+[later])]:
+                work=root/label;work.mkdir();path=work/'pm.parquet'
+                pq.write_table(pa.Table.from_pylist(values,schema=table.schema),path,use_compliant_nested_type=False)
+                db=duckdb.connect();market_table(db)
+                changes,actual=source_rows(db,[descriptor(path,len(values))],work,'polymarket')
+                self.assertEqual([r for r in actual if r[0]==START+100],[(START+100,START+100,START)]*2)
+                if label!='prefix':
+                    self.assertEqual([r for r in actual if r[0]==START+200],[(START+200,START+50,START)]*2)
+                db.close()
+
+    def test_conflicting_pm_coordinate_uses_real_typed_normalization(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);fixture,table=pm_file(root);rows=table.to_pylist();rows[4]['timestamp']=START-1
+            path=root/'conflict.parquet';pq.write_table(pa.Table.from_pylist(rows,schema=table.schema),path,use_compliant_nested_type=False)
+            db=duckdb.connect();market_table(db)
+            with self.assertRaisesRegex(ValueError,'conflicting'):
+                source_rows(db,[descriptor(fixture,16),descriptor(path,16)],root,'polymarket')
+            db.close()
+
+    def test_truncated_parquet_representative(self):
+        with tempfile.TemporaryDirectory() as t:
+            path=Path(t)/'bad.parquet';path.write_bytes(b'PAR1truncated');db=duckdb.connect()
+            with self.assertRaises(duckdb.InvalidInputException):
+                direct.range_index(db,[descriptor(path,1)],lambda *a,**k:None)
+            db.close()
+    def test_captured_depth_gap_snapshot_recovery_and_old_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);db=duckdb.connect()
+            db.execute('CREATE TABLE raw_binance_depth_snapshot(timestamp_received TIMESTAMP_MS,last_update_id UBIGINT,snapshot_status VARCHAR,source_sequence_epoch_id VARCHAR,connection_generation UBIGINT,depth_ingress_sequence UBIGINT,collector_admission_sequence UBIGINT,collector_admission_time_utc_ms TIMESTAMP_MS,file_id BIGINT,row_id BIGINT)')
+            db.execute('CREATE TABLE raw_binance_depth_update(timestamp_received TIMESTAMP_MS,event_time TIMESTAMP_MS,first_update_id UBIGINT,final_update_id UBIGINT,snapshot_last_update_id UBIGINT,local_u_before UBIGINT,stitch_verdict VARCHAR,source_sequence_epoch_id VARCHAR,connection_generation UBIGINT,depth_ingress_sequence UBIGINT,collector_admission_sequence UBIGINT,collector_admission_time_utc_ms TIMESTAMP_MS,file_id BIGINT,row_id BIGINT)')
+            for seq,offset,last in [(2,1,10),(6,5,20)]:
+                db.execute("INSERT INTO raw_binance_depth_snapshot VALUES(epoch_ms(?),?,'complete','epoch',1,?,?,epoch_ms(?),0,?)",[START+offset,last,seq,seq,START+offset,seq])
+            for seq,offset,first,last,local,verdict in [(1,0,1,1,None,'not_applied_snapshot_unavailable'),(3,2,11,11,None,'applied'),(4,3,13,13,11,'not_applied_confirmed_hole'),(5,4,11,11,None,'not_applied_snapshot_unavailable'),(7,6,21,21,None,'applied')]:
+                db.execute("INSERT INTO raw_binance_depth_update VALUES(epoch_ms(?),epoch_ms(?),?,?,?, ?,?,'epoch',1,?,?,epoch_ms(?),1,?)",[START+offset,START,first,last,None if verdict=='not_applied_snapshot_unavailable' else (10 if seq<6 else 20),local,verdict,seq,seq,START+offset,seq])
+            files=[]
+            for kind in ('binance_depth_snapshot','binance_depth_update'):
+                path=root/(kind+'.parquet')
+                db.execute(f"COPY raw_{kind} TO {projection.literal(path)} (FORMAT PARQUET)")
+                count=db.execute(f'SELECT count(*) FROM raw_{kind}').fetchone()[0]
+                db.execute(f'DROP TABLE raw_{kind}')
+                files.append(descriptor(path,count,kind))
+            states,_=source_rows(db,files,root,'binance_depth')
+            self.assertEqual([r[3] for r in states],[True,False,False,True,True,False,False])
+            self.assertEqual(states[3][1:3],(START+2,START))
+            self.assertEqual(states[-1][1:3],(START+6,START))
             db.close()

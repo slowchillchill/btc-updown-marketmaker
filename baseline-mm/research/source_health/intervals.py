@@ -4,53 +4,6 @@ from dpt_health.projection import literal
 DAY = 86_400_000
 
 
-def load_intervals(db, material, start, end, trade_enabled, depth_enabled):
-    for table in ("changes", "markets", "rules", "arrivals"):
-        db.execute(f"CREATE VIEW {table} AS SELECT * FROM read_parquet({literal(material/(table+'.parquet'))})")
-    # PM durations are asset milliseconds. Common source durations are milliseconds
-    # counted once, independently of the number of simultaneously active markets.
-    db.execute(f"""CREATE TABLE scopes AS
-        SELECT 'polymarket' AS source,condition_id,unnest(assets) AS asset,
-               greatest(window_start,{start}) AS a,least(window_end,{end}) AS b FROM markets
-        WHERE window_start<{end} AND window_end>{start}
-        UNION ALL SELECT source,'','',{start},{end} FROM (VALUES
-            ('chainlink_spot'),('chainlink_twap60'),('binance_trade'),('binance_depth')) t(source)""")
-    db.execute("""CREATE TABLE points AS
-        SELECT s.source,s.condition_id,s.asset,greatest(c.visible_at,s.a-1) AS visible_at,c.visible_at AS original_at,
-               c.received,c.event,c.sync_required,c.available,c.sync_unknown,c.generation_unknown,s.b
-        FROM scopes s JOIN changes c USING(source,condition_id,asset) WHERE c.visible_at<s.b
-        UNION ALL SELECT source,condition_id,asset,a-1,-9223372036854775807,NULL,NULL,false,false,true,true,b FROM scopes""")
-    db.execute("""CREATE TABLE final_points AS SELECT * FROM points
-        QUALIFY row_number() OVER(PARTITION BY source,condition_id,asset,visible_at ORDER BY original_at DESC)=1""")
-    db.execute("""CREATE TABLE causal_intervals AS SELECT source,condition_id,asset,visible_at AS a,
-        coalesce(lead(visible_at) OVER w,b) AS b,received,event,sync_required,available,sync_unknown,generation_unknown,
-        original_at,
-        CASE WHEN sync_required THEN 'synchronization_required'
-             WHEN received IS NULL THEN 'unknown_business_progress'
-             WHEN NOT available THEN 'unavailable'
-             WHEN received>visible_at OR event>received THEN 'time_inconsistent'
-             WHEN event IS NULL THEN 'unknown_event_time' END AS exclusion
-        FROM final_points WINDOW w AS (PARTITION BY source,condition_id,asset ORDER BY visible_at)""")
-    # Keep an actual one-ms look-behind at each scope's clipped start. It is
-    # selected from facts already visible then, never from a new start-time fact.
-    db.execute("""CREATE TABLE boundary_facts AS SELECT i.* FROM causal_intervals i JOIN scopes s
-        USING(source,condition_id,asset) WHERE i.a=s.a-1""")
-    db.execute("""CREATE TABLE intervals AS SELECT i.* REPLACE(greatest(i.a,s.a) AS a)
-        FROM causal_intervals i JOIN scopes s USING(source,condition_id,asset) WHERE i.b>s.a""")
-    # TimeInconsistent receive can become legal after its future receive clock.
-    # Collector-admitted inputs normally satisfy received<=visible. Keep the
-    # boundary explicit for legally constructed compatibility materials.
-    if db.execute("SELECT count(*) FROM intervals WHERE received>a").fetchone()[0]:
-        raise ValueError("visibility precedes direct received time")
-    make_selection(db, start, end, trade_enabled, depth_enabled)
-    db.execute("""CREATE TABLE selected_intervals AS
-        SELECT * FROM intervals WHERE source='polymarket' AND b>a
-        UNION ALL SELECT i.source,i.condition_id,i.asset,greatest(i.a,s.a),least(i.b,s.b),
-            i.received,i.event,i.sync_required,i.available,i.sync_unknown,i.generation_unknown,i.original_at,i.exclusion
-        FROM intervals i JOIN selections s ON i.source=s.source AND i.a<s.b AND i.b>s.a
-        WHERE i.source!='polymarket'""")
-
-
 def make_selection(db, start, end, trade_enabled, depth_enabled):
     # Only the small market/rule boundary set is materialized here, not raw rows.
     # A valid spot remains eligible through silence and classified RTDS anomalies.

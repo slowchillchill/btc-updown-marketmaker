@@ -12,7 +12,7 @@
 
 初始化辅助入口读取原792行metadata文件并选择原3条前序。重复辅助入口只解析真实重复候选子集；拟合辅助入口只读取每日有权重的桶。当前沿用已归档工具，不为执行SQL重新构建Rust。
 
-原录制、完整归约和持久格式保持。旧 `research_source_health_two_layer prepare/study` 为历史入口。此前两次完整core准备未形成完整可消费材料，未执行study；无用途排序文件已清理，必要失败证据保持原身份。
+原录制、完整归约和持久格式保持。Rust `research_source_health_two_layer` 当前仅提供 `fit-columnar-histograms INPUT OUTPUT` 和 `classify-columnar-facts INPUT OUTPUT`。前者复用原桶上界分位、主体p90、每日下中位数及2/4/8倍候选；后者调用生产三态函数。旧 `configure / prepare / import-246 / analyze / study`、专属compact状态和Python全期投影/evaluator已删除。当前Python列式 `configure / prepare / study` 保持。此前两次完整core准备未形成完整可消费材料，未执行study；无用途排序文件已清理，必要失败证据保持原身份。
 
 随后工程头 `fd5581c8ec88a783d35a23e63f98177df5a5eb11` 的列式尝试仍累计全期raw表。该次运行被systemd-oomd终止，最后进程RSS约108.93GiB，study未启动。原80GiB配置不是RSS上界，旧APPROVED不覆盖当前修正。事故和新方向见[#185记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6015835991)。
 
@@ -97,6 +97,8 @@ SQL以自然文件为单元；原生范围重叠时合并必要文件。单次�
 代表测试覆盖原构造/解析入口、跨文件重复与冲突、资产和代际、缺口/快照恢复、持续旧事件、Chainlink异常保留、同毫秒样本和最终状态、真实断选、未知分母、首尾/午夜/删失、normal=max=0、未来折不泄漏和一个Parquet截断边界。原metadata初始化小文件的精确选择仍得到原3条前序；没有重扫十二分钟或十八日完整core。此前投影原型17项Python测试通过；固定workspace退出0，累计1379 passed/0 failed/23 ignored，具名UTC测试明确跳过。fmt和相关all-targets clippy退出0，既有警告保持。当前返工只改Python、测试与说明，Rust输入未变；上述Rust结果仍适用，不能证明当前SQL入口。17条真实构造原始记录验证prepare命令；另存的19条有限标量确认验证五折10份冻结/验证文件，不能称为18日历史运行。返工代表例验证：未来epoch旧received不改已可见前缀；B首条重复过滤后，A→B→C仍保持10@100、20@400、30@400；实际5ms断选的两段共15ms，右删失2、左截断1；重新选择时才可见新事实的左截断0。监督SIGTERM代表记录真实阶段−15并回收，无study。结果见[工程机器摘要](complementary-pair-columnar-health-engineering.json)和PR，不把旧通过记录替代新入口验证。
 
 用户已取消新增小样本试验。身份修复没有新增试验、RSS对照或构建。v6已实际执行并失败，随后v7在用户批准的保护下完整生成十八日材料和五折结果；不覆盖旧失败事实。既有23项小测试属于较早中间源码，后续metadata、文件范围、TWAP过滤顺序和内存连接修改未用新试验验证。旧工程机器摘要保持原版本，不能冒充当前入口结果。准确实现与实际查询结果仍须分别核对。
+
+本次源码收尾仅精简无消费者路径，并把代表断言迁移到当前direct查询。验证范围是定向Python测试、Rust辅助入口单元测试及原五折bins重拟合对照；不重扫原始Parquet、不重跑prepare/study、不做性能试验或全workspace/release构建。历史测试和实际研究继续绑定原源码，不重标为精简后版本。
 
 ## 历史紧凑工程证据
 
