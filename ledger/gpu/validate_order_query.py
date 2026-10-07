@@ -194,6 +194,7 @@ def validate(source,artifact):
             candidate,captured_consumed=captured.value
             assert torch.equal(captured_consumed,consumed)
             assert values(candidate.current_entry_sequence)==values(ledger.current_entry_sequence)
+            assert exact(candidate.platform.balances)==exact(ledger.platform.balances)
             assert exact(candidate.accepted_principal.amounts)==exact(ledger.accepted_principal.amounts)
             assert torch.equal(candidate.applied,ledger.applied)
             assert torch.equal(candidate.orders.accepted_principal_counted,ledger.orders.accepted_principal_counted)
@@ -217,15 +218,35 @@ def validate(source,artifact):
         assert values(ledger.current_local_prefix)==[expected['ledger_local_prefix']]
         assert values(ledger.platform.platform_source_prefix)==[expected['platform_source_prefix']]
         assert ledger.has_available.cpu().item() and ledger.available_through.cpu().tolist()==[expected['available_through_utc_ms']]
-        assert exact(ledger.platform.balances)==[Fraction(p[n]) for n in BALANCES]
+        # CPU project_balances合入待经济确认占款；platform.balances仅已应用经济。
+        # 同时核原8余额及派生8余额，不把Query确认变成经济余额写入。
+        expected_balances=[Fraction(p[n]) for n in BALANCES]
+        pending_principal=Fraction(p['platform_confirmation_pending_economic_principal_pusd'])
+        pending_fee=Fraction(p['platform_confirmation_pending_economic_immediate_fee_pusd'])
+        expected_raw=expected_balances.copy()
+        expected_raw[1]+=pending_principal+pending_fee
+        expected_raw[2]-=pending_principal;expected_raw[3]-=pending_fee
+        projected=exact(ledger.platform.balances)
+        assert projected==expected_raw,(ordinal,kind,'raw_economic_balances',projected,expected_raw)
         assert exact(ledger.accepted_principal.amounts)==[Fraction(p['cumulative_accepted_principal_pusd'])]
         principal=ledger.reservations.principal;fee=ledger.reservations.fee
         for status,prefix in ((0,'before_send'),(1,'after_send_unknown'),(2,'platform_confirmation_pending_economic')):
             source_projection=b if status<2 else p
             mask=(ledger.reservations.statuses==status).flatten().cpu().tolist()
-            assert sum((q for q,keep in zip(exact(principal),mask) if keep),Fraction(0))==Fraction(source_projection[prefix+'_principal_pusd'])
-            assert sum((q for q,keep in zip(exact(fee),mask) if keep),Fraction(0))==Fraction(source_projection[prefix+'_immediate_fee_pusd'])
+            principal_total=sum((q for q,keep in zip(exact(principal),mask) if keep),Fraction(0))
+            fee_total=sum((q for q,keep in zip(exact(fee),mask) if keep),Fraction(0))
+            assert principal_total==Fraction(source_projection[prefix+'_principal_pusd'])
+            assert fee_total==Fraction(source_projection[prefix+'_immediate_fee_pusd'])
             assert sum(mask)==source_projection[prefix+'_count']
+            if status==2:
+                projected[1]-=principal_total+fee_total
+                projected[2]+=principal_total;projected[3]+=fee_total
+        assert projected==expected_balances,(ordinal,kind,'public_projected_balances',projected,expected_balances)
+        funds=run(ledger.funds);local_pending=Fraction(b['principal_pusd'])+Fraction(b['immediate_fee_pusd'])
+        assert exact(funds.local_pending)==[local_pending]
+        assert exact(funds.platform_pending)==[pending_principal+pending_fee]
+        assert exact(funds.actual_available)==[expected_balances[1]-local_pending]
+        assert exact(funds.actual_reserved)==[expected_balances[2]+expected_balances[3]+local_pending]
         assert int((ledger.orders.occupied&ledger.orders.flags).sum().cpu())==p['open_order_count']
         if old is None and Fraction(p['cumulative_accepted_principal_pusd'])>0:
             old=LedgerDrainStorage(ledger,ClosedAdmission.empty(columns),word_capacity=16).snapshot().ledger
