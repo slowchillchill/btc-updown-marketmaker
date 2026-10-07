@@ -49,6 +49,7 @@ class ResolutionRead:
     winner_orphan_receivable: object
     known: torch.Tensor
     fault: torch.Tensor
+    settlement_state: torch.Tensor  # 原Native六态：Unresolved/NoPayout/Receivable/Pending/Redeemed/Failed。
 
 
 @dataclass(frozen=True)
@@ -224,9 +225,17 @@ class MarketResolutions:
         pair = take_ratio(pools.paired_quantity, self.assets[:, 0])-self.redeemed_pair
         orphan = self.orphan_value(pools,unredeemed=True)
         zero = ExactRational(pair.numerator.constant(0), pair.denominator.constant(1))
+        total_receivable=pair+orphan
+        receivable=total_receivable.numerator.sign>0
+        redeemed=(self.redeemed_pair.numerator.sign>0)|(
+            self.redeemed_orphan.numerator.sign.reshape(-1,2)>0).any(1)
+        request=self.requests
+        state=torch.where(~self.present,0,torch.where(~request.present,
+            torch.where(receivable,2,1),torch.where(request.outcomes==3,5,
+                torch.where((request.outcomes==2)&redeemed,4,3))))
         return ResolutionRead(self.present, self.identities, self.terminals, self.maker_category,
             select(pair, self.present, zero), select(orphan, self.present, zero), self.known,
-            self.fault | self.root_fault[self.roots] | pair.fault | orphan.fault)
+            self.fault | self.root_fault[self.roots] | pair.fault | orphan.fault | total_receivable.fault,state)
 
     def economic_predecessors(self, trades, days):
         """公开Ledger同condition成交与Maker结果门，不读取隐藏执行义务。"""

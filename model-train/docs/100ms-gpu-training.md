@@ -1026,6 +1026,27 @@ old人口不完整时保Unknown，不能把已有子集之和当完整old。
 独立缺身份重试核实际waiting，但CPU选定的提交块不能充当连续GPU宿主的热调度器。
 这是费用切片，不证明GPU已从开户连续推进所有非费用事件，不交付完整SIM费用场景调度、NAV或活动恢复。
 
+### 市场经济与六类结算状态输入
+
+公共Ledger按同一冻结scope精确归约保证价值、配对应收、赢家孤腿应收、确认盈亏、
+当前亏损、历史最大亏损与未判定孤腿本金；Native只作末端投影，写入284:293、299:308及332:356。
+确认盈亏继续消费共同事务维护的Cost扣减及最大亏损，不在冻结时补历史最大值。
+完整经济、成功及结算前缀分别沿实际冷初始化传入；缺Cost历史只使盈亏字段Unknown，
+不抹去已知应收。缺typed结算读面不能默认已知Unresolved，完整空scope仍Known零。
+
+六态沿原Rust Native槽序：Unresolved、ResolvedNoCurrentPayout、ReceivableNotRequested、
+RequestPending、Redeemed、RequestFailedNoEffect。公共Resolution、Request及实际已兑付量决定状态。
+FinalSuccess回执且已有正redeemed_pair或redeemed_orphan才为Redeemed，否则仍Pending。
+当前市场写356:364的六位及Known/适用位；old按实际scope精确计数后写364:382。
+完整结算历史里尚无经济事实的已选市场沿原CPU语义为Unresolved；未知历史不走该回退。
+old人口不完整时保留Unknown，没有current时为NA。
+只有Resolved无Request的应收分支额外依赖完整成功人口；其他独立状态不因这项历史缺失变Unknown。
+
+有限费用切片从真实before净paired/orphan与原成功池安装已兑付量，原Request也是before输入；
+after仅作独立CPU预期。原双腿兑付另验证实际Pending→Redeemed、应收正值→零、
+同设备图重放及旧冻结稳定。该批不提供账户WCM、Conservative NAV、Directional residual，
+也不证明完整连续宿主或活动根恢复。
+
 ### 累计接纳本金
 
 `ledger/gpu/accepted_principal.py` 保存每根、原 condition 的精确累计接纳本金，

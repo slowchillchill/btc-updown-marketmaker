@@ -157,6 +157,7 @@ def main():
     from public_ledger import PublicLedgerState
     from registry import PublicRegistryState,PublicRegistryEvents,FrozenIntentOrders
     from input_account import frozen_account_inputs
+    from validate_native_market_economics import check as check_economics
     from input_success import success_inputs,write_success_fields
     from success_read import net_success
     import math
@@ -175,7 +176,7 @@ def main():
         inputs=frozen_account_inputs(frozen,order_members,applicable,applicable,
             scope_conditions=scopes,scope_present=present,asset_outcomes=outcomes,
             success_prefix_known=enabled,settlement_prefix_known=enabled,
-            executed_prefix_known=~enabled,ledger_prefix_known=enabled)
+            executed_prefix_known=~enabled,ledger_prefix_known=enabled,economic_prefix_known=~enabled)
         return frozen,inputs
     before_frozen,before_native=Numbers.run_exact_batch(lambda:frozen_inputs(old,original_waiting))
     ledger,waiting=Numbers.run_exact_batch(lambda:waiting.drain(ledger,torch.ones_like(columns.enabled)))
@@ -206,6 +207,13 @@ def main():
     differences=[]
     for current,reference,native in [(old,before,before_native),(ledger,after,after_native)]:
         expected=reference['markets'][0]
+        check_economics(native,expected,profit_known=False)
+        # 实际FinalSuccess Request与已兑付量独立于成功池历史完整性。
+        incomplete=Numbers.run_exact_batch(lambda:frozen_account_inputs(
+            before_frozen if current is old else after_frozen,order_members,applicable,applicable,
+            scope_conditions=scopes,scope_present=present,economic_prefix_known=~enabled,
+            success_prefix_known=~enabled,settlement_prefix_known=enabled))
+        assert torch.equal(incomplete.slow[:,356:382],native.slow[:,356:382])
         read=Numbers.run_exact_batch(lambda:net_success(current.success_pools,current.resolutions,prefix_known=enabled))
         assert read.known.cpu().tolist()==[True,True] and read.fault.cpu().tolist()==[0]
         for field,key,first in [('quantity','success_shares',122),('cost','success_principal_cost_pusd',134),('orphan','orphan_shares',149)]:
@@ -241,29 +249,36 @@ def main():
         assert unknown.slow[0,start:end].cpu().tolist()==[0.,0.,1.]*((end-start)//3)
     _,old_again=Numbers.run_exact_batch(lambda:frozen_inputs(before_frozen.ledger,original_waiting))
     assert torch.equal(old_again.slow[:,122:164],before_native.slow[:,122:164])
+    assert torch.equal(old_again.slow[:,284:293],before_native.slow[:,284:293])
+    assert torch.equal(old_again.slow[:,332:382],before_native.slow[:,332:382])
     # 同一固定地址typed resolution图从真实未兑付切到实际兑付；不改历史成功池。
     from ledger_drain import _owned,_pairs,installed_word_capacity
     live=_owned(old.resolutions,ledger.resolutions)
     words=installed_word_capacity(ledger)
+    from input_economics import economic_inputs,write_economic_fields
     def encode_live():
-        return success_inputs(old.success_pools,scopes,present,applicable,outcomes,
-            prefix_known=enabled,resolutions=live,settlement_prefix_known=enabled)
+        return (success_inputs(old.success_pools,scopes,present,applicable,outcomes,
+            prefix_known=enabled,resolutions=live,settlement_prefix_known=enabled),
+            economic_inputs(replace(old,resolutions=live),scopes,present,applicable,
+                economic_prefix_known=~enabled,success_prefix_known=enabled,settlement_prefix_known=enabled))
     Numbers.device_exact_batch(encode_live,word_capacity=words,device='cuda')
     graph=torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         candidate=Numbers.device_exact_batch(encode_live,word_capacity=words,device='cuda')
     graph.replay()
     assert candidate.fits.cpu().item()
-    old_graph=write_success_fields(torch.zeros((1,433),device='cuda'),candidate.value)
+    old_graph=write_economic_fields(write_success_fields(torch.zeros((1,433),device='cuda'),candidate.value[0]),candidate.value[1])
     torch.testing.assert_close(old_graph[:,122:164],before_native.slow[:,122:164],rtol=1e-6,atol=1e-7)
+    check_economics(SimpleNamespace(slow=old_graph,provided=before_native.provided),before['markets'][0],profit_known=False)
     saved_graph=old_graph.clone()
     incoming_resolution=_owned(ledger.resolutions,live)
     with torch.no_grad():
         for target,incoming in _pairs(live,incoming_resolution):target.copy_(incoming)
     graph.replay()
-    assert candidate.fits.cpu().item() and candidate.value.fault.cpu().tolist()==[0]
-    new_graph=write_success_fields(torch.zeros((1,433),device='cuda'),candidate.value)
+    assert candidate.fits.cpu().item() and (candidate.value[0].fault|candidate.value[1].fault).cpu().tolist()==[0]
+    new_graph=write_economic_fields(write_success_fields(torch.zeros((1,433),device='cuda'),candidate.value[0]),candidate.value[1])
     torch.testing.assert_close(new_graph[:,122:164],after_native.slow[:,122:164],rtol=1e-6,atol=1e-7)
+    check_economics(SimpleNamespace(slow=new_graph,provided=after_native.provided),after['markets'][0],profit_known=False)
     assert torch.equal(old_graph,saved_graph)
     repeated,waiting=Numbers.run_exact_batch(lambda:waiting.drain(ledger,torch.ones_like(columns.enabled)))
     assert values(repeated.current_entry_sequence)==values(ledger.current_entry_sequence)

@@ -33,12 +33,14 @@ from market_economics import UnresolvedMarkets
 from resolution import ResolutionSources,MarketResolutions
 from settlement_accounting import SettlementCosts,ExternalCashIdentities
 from accepted_principal import AcceptedPrincipal
+from asset_buy import take_ratio
 from closed import ClosedAdmission
 from registry import PublicRegistryState,PublicRegistryEvents,FrozenIntentOrders
 from public_ledger import PublicLedgerState
 from ledger_drain import _owned
 from input_account import frozen_account_inputs
 from validate_append import _device_scan
+from validate_native_market_economics import check as check_economics
 
 spec=importlib.util.spec_from_file_location('settlement_cash_platform',ROOT/'ledger/gpu/platform.py')
 platform_module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=platform_module
@@ -214,6 +216,21 @@ def main(source):
                 resolved=replace(resolved,maker_category=tensor([r['attribution']=='Maker'],torch.bool),
                     directional_cash=rational([before['directional_cash']]))
                 m=next(m for m in before['markets'] if m['condition_id']==condition)
+                # 冷起点只取真实before净量与原成功池；after仍仅用于独立预期。
+                market_tokens=[asset['token_id'] for asset in m['assets']]
+                gross_pair=take_ratio(pools.paired_quantity,zero)
+                net_pair=rational([m['paired_shares']])
+                gross_orphan=take_ratio(pools.quantity,tensor([0,1]))
+                net_orphan=rational([m['orphan_shares'][market_tokens.index(token)] for token in tokens])
+                resolved=replace(resolved,redeemed_pair=gross_pair-net_pair,redeemed_orphan=gross_orphan-net_orphan)
+                if r['request'] is not None:
+                    request=r['request']
+                    assert request['settlement_request_id']==fact['settlement_request_id']
+                    outcomes=('Registered','Pending','FinalSuccess','FinalFailureNoEffect')
+                    observations=('Registered','SubmissionUnknown','ObservationTimeout','QueryUnknown','QueryAcceptedPending',
+                        'QueryFinalSuccess','QueryConfirmedNoTransaction','RetryAuthorized','RetryNotAuthorized','TerminalSuccess','TerminalFailureNoEffect')
+                    resolved,_=resolved.observe_request(zero,zero,zero,tensor([outcomes.index(request['outcome'])]),
+                        tensor([observations.index(request['observation'])]),yes)
                 markets=replace(markets,profit=rational([Fraction(m['confirmed_net_pnl_pusd']['numerator'])/
                     Fraction(m['confirmed_net_pnl_pusd']['denominator'])]),maximum_loss=rational([
                         Fraction(m['maximum_confirmed_net_loss_pusd']['numerator'])/Fraction(m['maximum_confirmed_net_loss_pusd']['denominator'])]))
@@ -306,8 +323,20 @@ def main(source):
         scopes=tensor([[[0],[-1]]]);present=scopes>=0;applicable=tensor([[True,True]],torch.bool)
         cutoff=max(visible,after['projection'].get('available_through_utc_ms') or visible)
         frozen=run(lambda:state.freeze_account(intents,tensor([cutoff])))
+        economic_args=dict(economic_prefix_known=yes,success_prefix_known=yes,settlement_prefix_known=yes) if kind=='Cost' else {}
         packed=run(lambda:frozen_account_inputs(frozen,tensor([[[],[]]],torch.bool),applicable,applicable,
-            scope_conditions=scopes,scope_present=present))
+            scope_conditions=scopes,scope_present=present,**economic_args))
+        if kind=='Cost':check_economics(packed,m)
+        if kind=='Cost' and block_index==0:
+            # 同一原已成熟市场的old消费布局；不声称重新选择了真实Root。
+            old_scopes=tensor([[[-1],[0]]]);old_present=old_scopes>=0
+            old_only=run(lambda:frozen_account_inputs(frozen,tensor([[[],[]]],torch.bool),applicable,
+                tensor([[False,True]],torch.bool),scope_conditions=old_scopes,scope_present=old_present,**economic_args))
+            assert old_only.slow[0,356:364].cpu().tolist()==[0.]*8
+            expected_counts=[triple for state in range(6) for triple in (
+                math.log1p(float(state==('Unresolved','ResolvedNoCurrentPayout','ReceivableNotRequested',
+                    'RequestPending','Redeemed','RequestFailedNoEffect').index(m['settlement_state']))),1.,1.)]
+            torch.testing.assert_close(old_only.slow[0,364:382].cpu(),torch.tensor(expected_counts),rtol=1e-6,atol=1e-7)
         unpaid=expected_rec-expected_paid
         triple=[math.copysign(math.log1p(abs(float(unpaid))),float(unpaid)),1.,1.]
         torch.testing.assert_close(packed.slow[0,296:299].cpu(),torch.tensor(triple),rtol=1e-6,atol=1e-7)
@@ -316,12 +345,28 @@ def main(source):
         # 缺Cost历史只令非空scope Unknown；空scope Known0，当前不存在仍NA。
         missing=replace(frozen,ledger=replace(ledger,settlement_costs=replace(ledger.settlement_costs,known=no)))
         unknown=run(lambda:frozen_account_inputs(missing,tensor([[[],[]]],torch.bool),applicable,applicable,
-            scope_conditions=scopes,scope_present=present))
+            scope_conditions=scopes,scope_present=present,**economic_args))
         assert unknown.slow[0,296:299].cpu().tolist()==[0.,0.,1.]
         assert unknown.slow[0,311:314].cpu().tolist()==[0.,1.,1.]
+        if kind=='Cost':
+            check_economics(unknown,m,profit_known=False)
+            if block_index==0 and resolutions[0]['request'] is None:
+                # 原late切片的Resolved无Request：应收分支缺成功历史必须Unknown。
+                incomplete_args=dict(economic_args,success_prefix_known=no)
+                incomplete=run(lambda:frozen_account_inputs(frozen,tensor([[[],[]]],torch.bool),applicable,applicable,
+                    scope_conditions=scopes,scope_present=present,**incomplete_args))
+                assert incomplete.slow[0,356:364].cpu().tolist()==[0.]*6+[0.,1.]
+                assert incomplete.slow[0,364:382].cpu().tolist()==[0.,1.,1.]*6
+            # 缺结算前缀时，不把缺目录当已知Unresolved；空old仍Known0。
+            absent_resolution=replace(frozen,ledger=replace(frozen.ledger,resolutions=None))
+            unavailable=run(lambda:frozen_account_inputs(absent_resolution,tensor([[[],[]]],torch.bool),applicable,applicable,
+                scope_conditions=scopes,scope_present=present,**economic_args))
+            assert unavailable.slow[0,284:293].cpu().tolist()==[0.,0.,1.]*3
+            assert unavailable.slow[0,356:364].cpu().tolist()==[0.]*6+[0.,1.]
         na=run(lambda:frozen_account_inputs(frozen,tensor([[[],[]]],torch.bool),applicable,
-            tensor([[False,True]],torch.bool),scope_conditions=scopes,scope_present=present))
+            tensor([[False,True]],torch.bool),scope_conditions=scopes,scope_present=present,**economic_args))
         assert na.slow[0,296:299].cpu().tolist()==[0.,0.,0.]
+        if kind=='Cost':assert na.slow[0,356:364].cpu().tolist()==[0.]*8
         if previous is not None:
             assert exact(previous[0].ledger.settlement_costs.recognized)==previous[1]
             assert exact(previous[0].ledger.maker_cash)==previous[2]
