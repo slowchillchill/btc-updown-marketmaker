@@ -412,6 +412,7 @@ def main():
         'actual_positive_maker_pool_shortage_keeps_owned_state_before_cold_growth_checked':checked_captured_maker,
         'controlled_global_resource_gate_blocks_successful_Maker_candidate_and_feedback_checked':checked_captured_maker,
         'actual_Maker_native_CUDA_WHILE_uses_device_cursor_and_skips_consumed_step_checked':checked_captured_maker,
+        'native_CUDA_WHILE_pool_shortage_and_initial_zero_iteration_checked':checked_captured_maker,
         'runtime_hidden_reference_handler_covered':False,
         'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
@@ -483,14 +484,12 @@ def check_captured_hidden_step(runtime,index,tensor,fee_rate,fee_exponent,rebate
     blocked=Numbers.device_exact_batch(lambda:compute(original_runtime),word_capacity=4,
         device=runtime.account.cash.words.device)
     blocked_storage=BaseRuntimeStorage(original_runtime,blocked.value[0])
-    blocked_graph=torch.cuda.CUDAGraph()
-    with torch.cuda.graph(blocked_graph):
-        blocked=Numbers.device_exact_batch(lambda:compute(blocked_storage.runtime),word_capacity=4,
-            device=runtime.account.cash.words.device)
-        blocked_fit,blocked_output=blocked_storage.commit_hidden_base(blocked)
-    blocked_graph.replay()
+    blocked_paths=torch.zeros((blocked_storage.runtime.orders.roots,blocked_storage.runtime.hidden.queues.capacity),dtype=torch.int64,device=horizon.device)
+    blocked_loop=CapturedHiddenBaseStep(blocked_storage,index,horizon,enabled,conditions,blocked_paths,
+        fee_rate,fee_exponent,rebate,word_capacity=4)
+    blocked_loop.replay()
     torch.cuda.synchronize()
-    assert not blocked_fit.cpu().item() and blocked.value[1].required_records.cpu().tolist()==[2]
+    assert not blocked_loop.resources_fit.cpu().item() and blocked_loop.output.required_records.cpu().tolist()==[2]
     compare(blocked_storage.runtime,original_runtime,"pool_shortage_keeps_input")
     # 受控全物理批门：本根的实际候选已成功，另处资源不足仍不允许它发布。
     suppressed_storage=BaseRuntimeStorage(runtime,expected)
@@ -527,6 +526,16 @@ def check_captured_hidden_step(runtime,index,tensor,fee_rate,fee_exponent,rebate
     compare(old,runtime,"old_snapshot")
     compare(frozen,expected,"frozen_after_commit")
     compare(frozen_effects,effect,"frozen_committed_effects")
+    # 构造时该真实步骤已经消费，首次launch即零迭代，不能读捕获池未写入输出。
+    idle_storage=BaseRuntimeStorage(frozen,frozen)
+    idle_loop=CapturedHiddenBaseStep(idle_storage,index,horizon,enabled,conditions,paths,
+        fee_rate,fee_exponent,rebate,word_capacity=4)
+    idle_loop.replay()
+    torch.cuda.synchronize()
+    compare(idle_storage.runtime,frozen,"first_launch_zero_iteration")
+    assert idle_loop.output.fault.cpu().tolist()==[0]
+    assert idle_loop.output.required_records.cpu().tolist()==[0]
+    assert not any(frame.event.emitted.cpu().item() for frame in idle_loop.output.fills)
     return frozen,frozen_effects
 
 

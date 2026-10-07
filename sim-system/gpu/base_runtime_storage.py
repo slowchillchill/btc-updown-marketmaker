@@ -6,7 +6,7 @@ BaseSimRuntime生成。本层只提交已经共同协调的候选，不选择阶
 """
 from dataclasses import fields, is_dataclass, replace
 import torch
-from queues import ExactInt, Numbers
+from queues import ExactInt, ExactRational, Numbers
 from fill_finality import FillRecord
 from hidden_base_execution import HiddenBaseEffects
 
@@ -53,6 +53,24 @@ def _tensor_pairs(target, candidate):
                 yield from _tensor_pairs(getattr(target, field.name), getattr(candidate, field.name))
     elif target != candidate:
         raise ValueError('候选不能更换活动SIM冷元数据')
+
+
+def _clear_output(value):
+    """设备零次迭代也输出已初始化的空反馈，而不是捕获池未写入的字节。"""
+    if isinstance(value, ExactRational):
+        _clear_output(value.numerator)
+        _clear_output(value.denominator)
+        value.denominator.words[:, 0].fill_(1)
+        value.denominator.sign.fill_(1)
+    elif isinstance(value, torch.Tensor):
+        value.zero_()
+    elif is_dataclass(value):
+        for field in fields(value):
+            if not _shared(value, field.name):
+                _clear_output(getattr(value, field.name))
+    elif isinstance(value, tuple):
+        for item in value:
+            _clear_output(item)
 
 
 class BaseRuntimeStorage:
@@ -139,12 +157,9 @@ class CapturedHiddenBaseStep:
             self.ready.copy_(ready() & self.resources_fit)
         self.entry = torch.cuda.CUDAGraph(keep_graph=True)
         with torch.cuda.graph(self.entry):
-            # 本次零次迭代时不可暴露上次graph输出；仅重置发射位，不重新领取反馈。
-            for frame in self.output.fills:
-                frame.event.emitted.zero_()
-                frame.event.terminal.zero_()
-                for name in ('economic_delta', 'failure_delta', 'rebate_delta'):
-                    getattr(frame.event, name).emitted.zero_()
+            # 零次迭代时不暴露旧输出或首次捕获的未初始化字段；不重新领取反馈。
+            _clear_output(self.output)
+            self.resources_fit.fill_(True)
             self.ready.copy_(ready())
         # 图句柄是冷资源元数据；所有业务条件仍在上述设备列中。
         self._loop = Numbers.public_extension().DeviceConditionalLoop(

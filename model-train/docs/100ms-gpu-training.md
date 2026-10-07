@@ -914,5 +914,11 @@ end清撮合段与订单释放仍分开。这个装配没有复制SIM业务或Le
 需求不足时保留全部活动字段。提交前保存本次反馈，防止原next_sequence被写入后污染尚待消费的序号。
 同一资源门同时限制fill事件、终态及三类经济delta的emitted，整批未提交时不发布成功根的候选反馈。
 观察和待消费输出分别取独立snapshot，后续原位提交不覆盖它们。
-当前真实正Maker步已接固定地址提交与已消费步骤重放；其它阶段、跨源步图分派、资源退出/重捕获、
-不可变反馈页追加及原生CUDA条件循环仍需沿同一持续宿主接通，不能由这个存储接口推断已完成。
+当前真实正Maker步已接固定地址提交与已消费步骤重放。`shared-run/gpu/conditional_graph.cu`提供
+锁定CUDA12.8的原生条件桥，入口和body末尾kernel直接设置设备条件，不用Torch/Inductor的主机分支。
+`CapturedHiddenBaseStep`保持图、输入和活动地址存活，从真实phase/游标决定是否进入该原LevelChange；
+成功消费或资源不足后在设备退出。同一步已消费时，下一launch零迭代，入口初始化空反馈及需求，
+避免旧emitted重发或首次图未运行时读未初始化输出。原生机制依据
+[CUDA12.8条件节点](https://docs.nvidia.com/cuda/archive/12.8.0/cuda-c-programming-guide/index.html#conditional-graph-nodes)。
+这个消费者当前只绑定单一原源步，实际运行限零/一次迭代，没有策略随机数；不能作为多步WHILE、
+其它阶段、跨源步图分派、完整资源退出/重捕获、不可变反馈页追加或整个持续宿主的交付证据。
