@@ -134,7 +134,8 @@ def validate_actual_cancel(source,delta):
     from public_ledger import PublicLedgerState
     from registry import PublicRegistryEvents
     # 同真实来源另算纯候选，作为统一生产入口的对照，不重复接纳手工分支。
-    coordinated=PublicLedgerState(pending_initial,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),cache,ledger)
+    request_state=PublicCancellationState.open(integers([0]),active[:,None])
+    coordinated=PublicLedgerState(pending_initial,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),cache,ledger,request_state)
     # 缺经济关联只暂停Ledger释放；公开Control已领取，Registry仍先关闭。
     # 原Registry已有故障不能继续提交该根Ledger。NOE实际领取引用仍在返回结果中。
     broken=replace(coordinated,registry=PublicRegistryState(replace(coordinated.registry.events,
@@ -151,6 +152,11 @@ def validate_actual_cancel(source,delta):
     assert (coordinated.waiting.received & ~coordinated.waiting.consumed).any().cpu().item()
     frozen_blocked=Numbers.run_exact_batch(lambda:coordinated.registry.freeze_orders(directory,closed_at))
     assert frozen_blocked.cancellable_known.cpu().tolist()==[[True]] and frozen_blocked.cancellable.cpu().tolist()==[[False]]
+    account_blocked=Numbers.run_exact_batch(lambda:coordinated.freeze_account(directory,closed_at))
+    assert account_blocked.fault.cpu().tolist()==[0]
+    assert values(account_blocked.pending_noe_count)==[int((coordinated.waiting.received & ~coordinated.waiting.consumed).sum().cpu())]
+    assert values(account_blocked.cancellations.pending_count)==[0]
+    assert values(account_blocked.cancellations.response_counts)==[1,0,0]
     coordinated,again=Numbers.run_exact_batch(lambda:coordinated.receive(state.normalizer.bank,gates,torch.ones_like(ledger.columns.enabled),passes=1))
     assert not again.closed.emitted.any().cpu().item()
     assert not (coordinated.waiting.received & ~coordinated.waiting.consumed).any().cpu().item()
@@ -158,6 +164,38 @@ def validate_actual_cancel(source,delta):
     assert check_order_funds(coordinated.ledger,source['cancel_ledger_after'])
     assert values(coordinated.ledger.current_entry_sequence)==[source['cancel_ledger_after']['projection']['ledger_entry_seq']]
     assert amounts(coordinated.ledger.platform.balances)==[Fraction(source['cancel_ledger_after']['projection']['platform_confirmed_projection'][name]) for name in names]
+    # 共享冻结包含首次领取后的公开请求完成；Ledger资金仍按实际经济提交改变。
+    account_after=Numbers.run_exact_batch(lambda:coordinated.freeze_account(directory,closed_at))
+    assert values(account_after.pending_noe_count)==[0]
+    assert values(account_blocked.pending_noe_count)!=[0], '旧冻结waiting人口不倒灌'
+    assert amounts(account_blocked.funds.actual_available)==[Fraction(before['cash']['actual_available_pusd'])]
+    assert amounts(account_after.funds.actual_available)==[Fraction(source['cancel_ledger_after']['cash']['actual_available_pusd'])]
+    sys.path[:0]=[str(root/'model-train/native-inputs/gpu'),str(root/'data-pipeline/gpu')]
+    from input_account import frozen_account_inputs
+    current_and_empty_old=torch.tensor([[[True],[False]]],device='cuda')
+    scope_known=torch.ones((1,2),dtype=torch.bool,device='cuda')
+    native=Numbers.run_exact_batch(lambda:frozen_account_inputs(account_after,current_and_empty_old,scope_known,scope_known))
+    assert native.fault.cpu().tolist()==[0]
+    def log(value):
+        import math
+        value=float(Fraction(value))
+        return math.copysign(math.log1p(abs(value)),value)
+    for index,name in [(110,'actual_available_pusd'),(113,'actual_reserved_pusd'),(116,'maker_available_pusd'),(119,'maker_reserved_pusd')]:
+        torch.testing.assert_close(native.slow[0,index:index+3].cpu(),
+            torch.tensor([log(source['cancel_ledger_after']['cash'][name]),1.,1.]),rtol=1e-6,atol=1e-7)
+    assert native.slow[0,412:415].cpu().tolist()==[0.,1.,1.]
+    assert native.slow[0,415:418].cpu().tolist()==[0.,1.,1.]
+    for offset,count in [(418,1),(421,0),(424,0)]:
+        torch.testing.assert_close(native.slow[0,offset:offset+3].cpu(),torch.tensor([log(count),1.,1.]))
+    expected_time=[log(Fraction(int(closed_at.cpu()[0])-direct['platform_responded_at_utc_ms'],1000)),
+        log(Fraction(int(closed_at.cpu()[0])-direct['response_received_at_utc_ms'],1000)),
+        log(Fraction(direct['response_received_at_utc_ms']-direct['platform_responded_at_utc_ms'],1000)),1.,1.,1.]
+    torch.testing.assert_close(native.slow[0,427:433].cpu(),torch.tensor(expected_time),rtol=1e-6,atol=1e-7)
+    assert native.provided[0,110:122].all().cpu().item() and native.provided[0,382:433].all().cpu().item()
+    assert not native.provided.all().cpu().item(), '未提供的经济/结算字段不可冒充完整slow433'
+    broken_account=replace(account_after,fault=torch.ones_like(account_after.fault))
+    broken_input=Numbers.run_exact_batch(lambda:frozen_account_inputs(broken_account,current_and_empty_old,scope_known,scope_known))
+    assert broken_input.fault.cpu().tolist()==[1], 'Native共同携带共享账户故障'
     # 较晚Ledger提交不能修改已冻结的公开读取。
     assert frozen_blocked.cancellable.cpu().tolist()==[[False]]
     # 设备实际take_closed输出定义次序；原CPU逐条after只用于比较，不提供应用控制。
@@ -199,6 +237,8 @@ def validate_actual_cancel(source,delta):
     return {'actual_GPU_cancel_effects_to_NOE_records':4,'Control_Canceled_before_CallerCanceled_closed':True,
         'Registry_fault_does_not_commit_Ledger_checked':True,'actual_shared_NOE_first_receive_Registry_then_Ledger_checked':True,'Ledger_waiting_does_not_delay_public_cancel_close_checked':True,'real_CallerCanceled_device_decoder_checked':True,'NOE_unset_gates_no_delivery':True,'first_delivery_not_repeated':True,
         'source_private_batch_and_actual_release_checked':True,'Ledger_four_original_positions_and_sequences_checked':True,
+        'same_cutoff_public_account_funds_waiting_and_cancel_request_freeze_checked':True,
+        'Native_actual_frozen_account_fields_and_fault_checked':True,
         'each_actual_receive_prefix_order_condition_open_and_last_sequence_checked':True,
         'Ledger_control_closes_without_cash_and_economic_releases_once':True,
         'cold_original_cancel_prefix_initialized_once':True,'cancellation_method_mixed_transport_checked':True,'each_cancel_prefix_original_OrderFunds_checked':True,'full_root':False}

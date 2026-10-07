@@ -381,6 +381,19 @@ class PublicCancellationState:
     registered: torch.Tensor  # [roots,requests]，发送登记的原receipt证明；完成不抹原身份。
     completions: CancellationCompletions
 
+    @classmethod
+    def open(cls, requests, registered):
+        """原请求身份目录和真实receipt登记；空完成不是从未发送的证明。"""
+        if registered.ndim != 2 or registered.dtype != torch.bool or requests.sign.numel() != registered.numel() or requests.words.device != registered.device:
+            raise TypeError('撤单请求目录须同设备精确身份和bool[roots,requests]登记人口')
+        roots = registered.size(0)
+        columns = torch.empty((roots, 0), dtype=torch.int64, device=registered.device)
+        zero = ExactInt.from_i64_tensor(columns.flatten())
+        completed = CancellationCompletions(columns.bool(), zero, zero, zero, zero,
+            columns, columns, columns, torch.zeros(roots, dtype=torch.int32, device=registered.device),
+            columns, columns, columns, zero, zero)
+        return cls(requests, registered, completed)
+
     def register(self, receipt_registered):
         from dataclasses import replace
         if receipt_registered.shape != self.registered.shape or receipt_registered.dtype != torch.bool or receipt_registered.device != self.registered.device:

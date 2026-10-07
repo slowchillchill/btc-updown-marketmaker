@@ -653,3 +653,10 @@ formed/latestDirect的T6，以及按公开condition作用域的最大/最小订�
 age只计action_snapshot未闭合订单；缺形成反馈保留Unknown，空集合为NotApplicable。
 原i64时点先转精确整数再作差，旧冻结结果不随后续反馈改写。当前接口尚未装成完整
 slow433/cancel184，也不负责选择current/old市场或推进根时钟。
+
+`shared-run/gpu/public_ledger.py::freeze_account` 在同一真实公開cutoff冻结Ledger、
+Registry、原订单来源、资金、已领取待消费NOE人口和已登记撤单请求完成读面。
+`native-inputs/gpu/input_account.py` 从该快照写资金110—121、订单382—411、
+待NOE412—414和完整全局请求415—432，并共同携带故障。输出的`provided`显式标明
+已写字段；未接入持仓、承诺、其它经济/结算/NAV字段前，不能把剩余零槽送作完整账户433。
+请求目录尚未绑定时保留None，不解释为已知空请求集合。旧冻结不随后续Ledger重试改写。
