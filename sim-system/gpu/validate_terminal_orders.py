@@ -423,9 +423,9 @@ def main():
                 public=Numbers.run_exact_batch(lambda:public.append_batch(projection.normalizer.bank,incoming))
                 visible=tensor([original_query['public_at']])
                 gates=gates.set_receive(visible,enabled).set_public(visible,enabled)
-                progress('actual_query_public_receive_begin',stage=original_query['stage'],physical_columns=public.waiting.received.size(1))
+                progress('actual_query_public_receive_begin',observation=original_query['stage'],physical_columns=public.waiting.received.size(1))
                 public,query_received=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,torch.ones_like(public.waiting.received)))
-                progress('actual_query_public_receive_end',stage=original_query['stage'])
+                progress('actual_query_public_receive_end',observation=original_query['stage'])
                 assert query_received.fault.cpu().tolist()==[0] and query_received.closed.emitted.sum().cpu().item()==len(original_query['records'])
                 expected=original_query['ledger']['projection']
                 assert values(public.ledger.current_entry_sequence)==[expected['ledger_entry_seq']]
