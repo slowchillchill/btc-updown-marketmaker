@@ -120,35 +120,6 @@ class Projection:
             condition_slots=order.conditions,token_slots=token,asset_indices=order.assets,
             order_sequence=order.sequence,request_slots=order.request_keys,item_ordinals=order.item_ordinals)
 
-    def resolved_position(self,sampler,effect,condition,columns):
-        """原首次Resolved生命周期；订单关闭反馈由其完整producer另行映射。
-
-        本方法仅映射这条非现金证据，不能据此忽略同次的MarketResolvedCanceled。
-        """
-        from lifecycle import map_resolved_position
-        from queues import _take
-        roots=self.account_slots.numel()
-        if condition.shape!=(roots,) or condition.dtype!=torch.int64 or condition.device!=self.account_slots.device:
-            raise TypeError('判定市场须为同设备完整int64目录')
-        if self.resolution_columns is not None and self.resolution_columns is not columns:
-            raise ValueError('连续Resolved记录须保留同一完整源身份字典绑定')
-        working=replace(self,resolution_columns=columns,condition_slots=condition)
-        active=effect.resolved[:,None]
-        platforms=effect.at[:,None]
-        emitter,emission=working.emitter.emit(sampler,active,torch.zeros_like(active),
-            platforms,platforms,torch.zeros_like(platforms),effect.fault[:,None])
-        categories=torch.full_like(platforms,3)
-        ordinals=map_source_ordinals(emission.emitted,categories,torch.ones_like(platforms),effect.fault[:,None])
-        positions=torch.arange(roots,device=condition.device)
-        private=_take(emission.private_sequences,positions)
-        batch=_take(emission.batch_sequences,positions)
-        row=columns.fields[effect.reference.clamp(0,columns.fields.size(0)-1)]
-        mapped=map_resolved_position(self.account_slots,condition,row[:,3],row[:,2],private,
-            ordinals.first_ordinals[:,0],emission.emitted[:,0])
-        records=[(mapped,EVIDENCE,private,batch,emission.received_at[:,0],categories[:,0],
-            effect.at,emission.emitted[:,0])]
-        return working._finish(emitter,records,emission.root_fault | ordinals.fault)
-
     def market_resolution(self,sampler,effect,condition,columns,asset_tokens):
         """整市场原订单字符串序关闭反馈，最后首次Resolved；共同失败则整批不发。"""
         from lifecycle import map_market_resolved_order,map_resolved_position

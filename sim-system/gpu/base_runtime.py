@@ -111,31 +111,6 @@ class BaseSimRuntime:
             market_controls=controls,source_resolutions=source,resolution_obligations=obligations)
         return candidate,effect
 
-    def apply_hidden_terminal_without_orders(self,choice,indices,condition_by_market,market_end,
-                                            projection,sampler,source_assets=None):
-        """首次无待关闭Base订单的真实Terminal→Resolved→引用完成共同候选。
-
-        有待关闭订单时保留等待，不能仅生成Resolved而省略订单生命周期。
-        返回的Projection批与SIM候选须共用同一精确资源提交门。本接口仍在
-        已有固定图外装配反馈，不声称已捕获完整Terminal/NOE循环。
-        """
-        block = self.hidden_frontier.columns.source
-        rows = block.reference_rows[indices.clamp(0,block.reference_rows.size(0)-1)]
-        roots = torch.arange(self.orders.roots,device=indices.device)
-        markets = condition_by_market.size(1)
-        if markets == 0:
-            raise ValueError('Terminal消费须有原市场目录')
-        condition = condition_by_market[roots,rows[:,1].clamp(0,markets-1)]
-        quantities = self.orders.quantities
-        active = (quantities.pending_maker_depletion_base_units.sign>0)|(quantities.open_base_units.sign>0)
-        unfinished = (self.orders.occupied & (self.orders.conditions==condition[:,None]) &
-            active.reshape_as(self.orders.occupied)).any(1)
-        permitted = choice.enabled(4) & ~unfinished
-        choice = replace(choice,present=permitted)
-        candidate,effect = self.prepare_hidden_terminal(choice,indices,condition_by_market,market_end,source_assets)
-        projected,batch = projection.resolved_position(sampler,effect,condition,block.terminal_columns)
-        return self._commit_hidden_terminal(candidate,effect,projected,batch,indices,permitted,rows)
-
     def apply_hidden_terminal(self,choice,indices,condition_by_market,market_end,projection,sampler,asset_tokens,
                               source_assets=None):
         """真实Base订单市场关闭、释放和Resolved完整反馈共同成功后才消费引用。"""

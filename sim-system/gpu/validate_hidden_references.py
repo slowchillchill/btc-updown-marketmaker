@@ -118,17 +118,20 @@ def main():
     exhausted=replace(projection,emitter=replace(projection.emitter,
         next_private_sequence=integers([(1<<64)-1])))
     failed,unchanged,failed_batch,failed_effect=Numbers.run_exact_batch(lambda:
-        storage.runtime.apply_hidden_terminal_without_orders(choice,storage.runtime.hidden_frontier.next_reference,
-            condition,end,exhausted,sampler))
+        storage.runtime.apply_hidden_terminal(choice,storage.runtime.hidden_frontier.next_reference,
+            condition,end,exhausted,sampler,tensor([0,1])))
     assert failed_effect.fault.cpu().tolist()==[1]
     assert not failed_effect.resolved.any().cpu().item() and not failed_batch.emitted.any().cpu().item()
     assert not failed.source_resolutions.present.any().cpu().item()
     assert failed.resolution_obligations.reference_indices.cpu().tolist()==[[-1]]
     assert failed.hidden_frontier.next_reference.cpu().tolist()==terminal_before.hidden_frontier.next_reference.cpu().tolist()
     assert values(unchanged.emitter.next_private_sequence)==[(1<<64)-1]
-    candidate,projected,batch,effect=Numbers.run_exact_batch(lambda:storage.runtime.apply_hidden_terminal_without_orders(
-        choice,storage.runtime.hidden_frontier.next_reference,condition,end,projection,sampler))
+    candidate,projected,batch,effect=Numbers.run_exact_batch(lambda:storage.runtime.apply_hidden_terminal(
+        choice,storage.runtime.hidden_frontier.next_reference,condition,end,projection,sampler,tensor([0,1])))
     assert effect.fault.cpu().tolist()==[0] and effect.resolved.cpu().tolist()==[True]
+    # 通用producer的空订单物理padding不属于原NOE人口。
+    from transport import select_batch_columns
+    batch=select_batch_columns(batch,tensor([[0]]))
     assert all(not event.effect.closed.any().cpu().item() for event in effect.orders.events)
     denied=storage.commit(candidate,tensor(False,torch.bool),TerminalFeedback(effect,batch))
     compare(storage.runtime,terminal_before,'Terminal_resource_exit_preserves_whole_prefix')

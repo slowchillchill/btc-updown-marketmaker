@@ -7,6 +7,7 @@ from fractions import Fraction
 from pathlib import Path
 import importlib.util
 import json
+import os
 import sys
 import time
 import torch
@@ -32,6 +33,8 @@ from latency import EmpiricalDelaySampler, byte_column
 
 def main():
     source=json.load(sys.stdin)
+    if os.environ.get("B_GPU_ORDER_ARTIFACT_DIR"):
+        (Path(os.environ["B_GPU_ORDER_ARTIFACT_DIR"])/"original-terminal-order-reference.json").write_text(json.dumps(source))
     started=time.perf_counter()
     root=Path(__file__).resolve().parents[2]
     tensor=lambda x,dtype=torch.int64:torch.tensor(x,dtype=dtype,device='cuda')
