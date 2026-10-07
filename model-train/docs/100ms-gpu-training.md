@@ -670,8 +670,18 @@ Ledger 待消费的单记录接口为 `ClosedAdmission.start_drain/drain_one`。
 每个候选沿原 `AdmissionLifecycle.apply_record` 返回共同 Ledger/waiting/cursor；
 Missing 保留原引用并继续本轮后面的记录，整轮无退出才关闭该根业务扫描。
 已应用重复与 NotApplicable 仍退出但不伪造经济应用。旧 `drain` 包装复用这条
-候选，仍发射固定 passes×width；原生条件循环、全部池/字资源共同门及首次
-Registry 接纳的固定容量候选尚待接入，不能据此声称当前物理 K²成本已消除。
+候选，仍发射固定 passes×width。`shared-run/gpu/ledger_drain.py` 现接固定
+Ledger/waiting/cursor存储与原生 `DeviceConditionalLoop`，一次迭代处理一个
+领取位置。资源fit同时含精确字宽、订单/成交、贡献/日/OrderFunds和市场绑定需求；
+不足保当前cursor和此前成功前缀，需求另存设备列，在冷资源退出后增长续跑。
+首次zero iteration定义资源输出；旧冻结借独立snapshot。业务无进展在整轮末
+由设备停止，不从CPU读取逐记录结果或固定最大轮数裁人口。
+
+`PublicLedgerState.receive_first`复用原唯一take_closed/Registry/关联/cancel/waiting
+接纳，`drain_captured`在同一来源上启动上述扫描并返回快照。当前Registry动态
+人口装箱、新页append和图安装仍图外冷边界，row匹配和历史保留尚未退役。
+原21条同来源分页入口正在核首次资源退出、无进展等待和新反馈恢复；实现不等于
+已验证的完整公共/100ms宿主，真实C/C−1前沿仍由后续协调器供给。
 
 `LifecycleDirectory.capacity_required` 另给订单/成交身份目录的物理需求，满池
 不作为非法业务 fault。Admission 在同一资源门回退该记录全部账户、预留、
@@ -680,7 +690,7 @@ Registry 接纳的固定容量候选尚待接入，不能据此声称当前物�
 订单/成交目录及关联缓存由同一原构造安装，容量不改变来源记录人口。
 原21条同订单三fill代表从容量1开户后执行原本地预留/发送；不是拆换部分目录。
 当前固定包装仍把未提交记录保存在
-waiting，原生图消费者还须将这些需求与数值字宽和其它经济目录需求一同提交。
+waiting；原生图消费者沿同一候选共同提交这些需求对应的资源门。
 
 
 

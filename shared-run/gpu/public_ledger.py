@@ -52,8 +52,12 @@ class PublicLedgerState:
             ledger=replace(ledger,fault=ledger.fault | batch.fault),
             waiting=self.waiting.append_columns(incoming))
 
-    def receive(self, bank, gates, association_available, *, passes=None):
-        """资源重试只重算整个纯候选；调用方成功后接纳返回状态和完整来源引用。"""
+    def receive_first(self, bank, gates):
+        """首次公开领取/Registry接纳候选；不在本事务里重新领取Ledger waiting。
+
+        当前动态人口装箱仍在冷边界。固定存储消费者先接纳本候选，再沿同一
+        waiting/首次visibility调用Ledger设备扫描；不是提前推进receive/public门。
+        """
         pending, closed = self.pending_noe.take_closed(gates)
         batches = self.ledger.columns.projection_batches
         # 物理领取rank按真实emitted人口递增；不是private/delivery业务序号。
@@ -73,10 +77,29 @@ class PublicLedgerState:
         waiting = self.waiting.accept(self.ledger.columns, closed)
         # 原Registry接纳失败时不得继续提交同根Ledger；其它独立根仍能推进。
         ledger_input=replace(self.ledger,fault=self.ledger.fault | registry.events.fault | targets.fault | cancellation_fault | submission_bindings.fault)
-        ledger, waiting = waiting.drain(ledger_input, association_available, passes=passes)
-        fault = closed.fault | registry.events.fault | targets.fault | cancellation_fault | waiting.fault | ledger.fault | submission_bindings.fault
-        return replace(self, pending_noe=pending, registry=registry, waiting=waiting, ledger=ledger, cancellations=cancellations, submission_bindings=submission_bindings), PublicDelivery(
+        fault = closed.fault | registry.events.fault | targets.fault | cancellation_fault | waiting.fault | ledger_input.fault | submission_bindings.fault
+        return replace(self, pending_noe=pending, registry=registry, waiting=waiting, ledger=ledger_input, cancellations=cancellations, submission_bindings=submission_bindings), PublicDelivery(
             closed, bindings, targets, completions, fault)
+
+    def receive(self, bank, gates, association_available, *, passes=None):
+        """兼容冷候选入口；首次接纳与Ledger扫描沿同一原公共路径。"""
+        state, delivery = self.receive_first(bank, gates)
+        ledger, waiting = state.waiting.drain(state.ledger, association_available, passes=passes)
+        fault = delivery.fault | waiting.fault | ledger.fault
+        return replace(state, ledger=ledger, waiting=waiting), replace(delivery, fault=fault)
+
+    def drain_captured(self, captured):
+        """首次接纳后，原生设备循环提交当前waiting；资源不足保成功前缀。
+
+        调用方在冷资源边界读取captured的字/目录需求，增长后保cursor续跑。
+        此函数不领取、不observe Registry、不提高双门；结果快照不借活动地址。
+        """
+        storage=captured.storage
+        if storage.source_ledger is not self.ledger or storage.source_waiting is not self.waiting:
+            raise ValueError('设备扫描须绑定当前原Ledger/waiting来源')
+        captured.replay()
+        committed=storage.snapshot()
+        return replace(self,ledger=committed.ledger,waiting=committed.waiting)
 
     def freeze_account(self, intents, cutoff, *, submitted_legs=None):
         """在真实公开推进/apply_closed之后一次冻结，不领取反馈或读取SIM。

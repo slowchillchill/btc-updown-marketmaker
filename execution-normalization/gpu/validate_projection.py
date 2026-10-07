@@ -325,6 +325,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     limited=Numbers.run_exact_batch(lambda:limited.submission_started(zero,zero,zero,zero,
         torch.tensor([True],device='cuda')))
     assert values(limited.current_entry_sequence)==values(append_start.current_entry_sequence)
+    limited_start=limited
     small_waiting=Numbers.run_exact_batch(lambda:ClosedAdmission.empty(columns).accept(columns,delivered))
     initial_rank=small_waiting.receive_rank.clone()
     initial_available=small_waiting.available_at.clone()
@@ -352,7 +353,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     # 只在来源接齐后关receive门，不把分页末尾当新的业务闭时点。
     from validate_append import check_incremental_receive
     incremental_checked=check_incremental_receive(state.normalizer.bank,batches,delivered,
-        append_start,admission,gates)
+        append_start,admission,gates,capacity_start=limited_start)
     assert values(admission.current_entry_sequence)==[source['ledger_projection']['ledger_entry_seq']]
     assert values(admission.current_local_prefix)==[source['ledger_projection']['ledger_local_prefix']]
     assert values(admission.platform.platform_source_prefix)==[7]

@@ -8,7 +8,76 @@ from transport import compact_committed_batches,select_batch_columns
 from validate_base_execution import values
 
 
-def check_incremental_receive(bank,batches,delivered,start,expected,gates):
+def _device_scan(state,association,label,*,zero_first=False):
+    """原PublicLedger首次领取后接生产原生扫描，host只处理容量退出。"""
+    import json,os,time
+    from ledger_drain import LedgerDrainStorage,CapturedLedgerDrain,installed_word_capacity
+    started=time.perf_counter()
+    def progress(stage):
+        row={'stage':'ledger_'+label+'_'+stage,'elapsed_seconds':time.perf_counter()-started}
+        print(json.dumps(row),file=sys.stderr,flush=True)
+        directory=os.environ.get('B_GPU_ORDER_ARTIFACT_DIR')
+        if directory:
+            with (Path(directory)/'ledger-progress.jsonl').open('a') as handle:
+                handle.write(json.dumps(row)+'\n')
+    words=installed_word_capacity(state.ledger)
+    cursor=None
+    retries=0
+    scans=[]
+    while True:  # 只读取物理资源fit；业务循环在DeviceConditionalLoop内部。
+        storage=LedgerDrainStorage(state.ledger,state.waiting,word_capacity=words,cursor=cursor)
+        enabled=torch.tensor(not zero_first,dtype=torch.bool,device=association.device)
+        captured=CapturedLedgerDrain(storage,association,word_capacity=words,enabled=enabled,progress=progress)
+        if zero_first:
+            before=storage.snapshot()
+            captured.replay()
+            assert captured.iterations.cpu().tolist()==[0] and captured.resources_fit.cpu().item()
+            assert captured.candidate.required_words.cpu().item()==0
+            assert captured.required['trades'].cpu().tolist()==[0]
+            assert torch.equal(storage.state.waiting.consumed,before.waiting.consumed)
+            assert values(storage.state.ledger.current_entry_sequence)==values(before.ledger.current_entry_sequence)
+            enabled.fill_(True)
+            zero_first=False
+        progress('launch')
+        old=storage.snapshot()
+        state=state.drain_captured(captured)
+        scans.append(captured.iterations.cpu().tolist())
+        # 旧冻结独立，不借活动张量；当前提交不能回写原state。
+        assert values(old.ledger.current_entry_sequence)==values(storage.source_ledger.current_entry_sequence)
+        if captured.resources_fit.cpu().item():
+            break
+        retries+=1
+        need={name:value.cpu().tolist() for name,value in captured.required.items()}
+        required_words=int(captured.candidate.required_words.cpu())
+        progress('resource_exit')
+        assert state.ledger.fault.cpu().tolist()==[0]
+        assert all(v<0 for v in need['conditions']), '目录绑定需求须在原来源冷安装边界处理'
+        ledger=state.ledger
+        orders=max(ledger.orders.occupied.size(1),max(need['orders']))
+        trades=max(ledger.trades.occupied.size(1),max(need['trades']))
+        # 来源物理列已安装，容量可按本页人口增长；不改变合法成交人口。
+        if trades>ledger.trades.occupied.size(1): trades=max(trades,ledger.columns.row_refs.size(1))
+        ledger=ledger.resized_lifecycle(orders=orders,trades=trades)
+        if max(need['contributions'])>ledger.rebate_contributions.occupied.size(1):
+            ledger=ledger.resized_contributions(max(need['contributions']))
+        if ledger.rebate_days is not None and max(need['days'])>ledger.rebate_days.occupied.size(1):
+            ledger=ledger.resized_rebate_days(max(need['days']))
+        if max(need['order_funds'])>ledger.order_funds.occupied.size(1):
+            ledger=ledger.resized_order_funds(max(need['order_funds']))
+        words=max(words,1<<(max(4,required_words)-1).bit_length())
+        state=replace(state,ledger=ledger)
+        cursor=storage.snapshot().cursor
+    # 同图无进展/已耗尽后再launch为0次，不重新领取、不刷新first visibility。
+    old_sequence=values(state.ledger.current_entry_sequence)
+    captured.replay()
+    assert captured.iterations.cpu().tolist()==[0] and captured.resources_fit.cpu().item()
+    assert values(storage.state.ledger.current_entry_sequence)==old_sequence
+    progress('complete')
+    return state,{'physical_records':state.waiting.received.size(1),'iterations_by_launch':scans,
+        'resource_retries':retries,'elapsed_seconds':time.perf_counter()-started}
+
+
+def check_incremental_receive(bank,batches,delivered,start,expected,gates,*,capacity_start=None):
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'shared-run/gpu'))
     from memory import EconomicColumns
     from admission_lifecycle import LifecycleColumns
@@ -32,18 +101,21 @@ def check_incremental_receive(bank,batches,delivered,start,expected,gates):
     assert (first.received_at<=first_gates.closed_receive_at[:,None]).all().cpu().item()
     first_columns=run(lambda:EconomicColumns.from_projection_batches([first]))
     # 开户/本地预留只初始化一次。旧身份目录可复用，后续仅追加记录列。
-    initial=replace(start,columns=first_columns,
+    root_start=start if capacity_start is None else capacity_start
+    initial=replace(root_start,columns=first_columns,
         lifecycle=run(lambda:LifecycleColumns.from_projection(bank,first_columns)),
         applied=torch.zeros_like(first_columns.enabled),
         applied_sequences=ExactInt.from_i64_tensor(torch.zeros(first_width,dtype=torch.int64,device=positions.device)),
         available_at=torch.zeros_like(first_columns.row_refs),
-        order_funds=replace(start.order_funds,unassigned_records=start.order_funds.unassigned_records[:,:first_width]))
+        order_funds=replace(start.order_funds,unassigned_records=root_start.order_funds.unassigned_records[:,:first_width]))
     pending=run(lambda:PendingRecords.from_columns(first.emitted,first.received_at,first.private_sequences,
         ExactInt.from_i64_tensor(bank.source_order[first.rows.flatten(),3]),first.rows,
         ExactInt.from_i64_tensor(torch.zeros(1,dtype=torch.int64,device=positions.device))))
     state=PublicLedgerState(pending,PublicRegistryState(PublicRegistryEvents.empty(1,positions.device)),
         ClosedAdmission.empty(first_columns),initial)
-    state,first_delivery=run(lambda:state.receive(bank,first_gates,torch.ones_like(first.emitted),passes=3))
+    state,first_delivery=run(lambda:state.receive_first(bank,first_gates))
+    state,first_scan=_device_scan(state,torch.ones_like(first.emitted),'first',zero_first=True)
+
     waiting=state.waiting.received & ~state.waiting.consumed
     assert waiting.any().cpu().item() and not state.ledger.fault.any().cpu().item(), (first_width,first_at.cpu().tolist())
     prefix=values(state.ledger.current_entry_sequence)
@@ -60,7 +132,9 @@ def check_incremental_receive(bank,batches,delivered,start,expected,gates):
     assert torch.equal(state.waiting.receive_rank[:,:first_width],first_rank)
     assert values(_take(state.waiting.delivered_sequences,torch.arange(first_width,device=positions.device)))==first_sequences
     assert torch.equal(state.waiting.received[:,:first_width]&~state.waiting.consumed[:,:first_width],waiting)
-    state,last_delivery=run(lambda:state.receive(bank,gates,torch.ones_like(state.ledger.columns.enabled),passes=3))
+    state,last_delivery=run(lambda:state.receive_first(bank,gates))
+    state,last_scan=_device_scan(state,torch.ones_like(state.ledger.columns.enabled),'appended')
+
     assert not (state.waiting.received & ~state.waiting.consumed).any().cpu().item()
     assert state.ledger.fault.cpu().tolist()==[0]
     for name in ['current_entry_sequence','current_local_prefix']:
@@ -97,7 +171,10 @@ def check_incremental_receive(bank,batches,delivered,start,expected,gates):
     assert damaged.ledger.columns.row_refs.size(1)==saved_width and damaged.ledger.fault.cpu().tolist()==[1]
     return {'first_page_records':first_width,'appended_records':21-first_width,
         'first_closed_receive_at':first_at.cpu().tolist(),'retained_waiting_records':int(waiting.sum().cpu()),
-        'same_received_time_fully_in_first_page':True}
+        'same_received_time_fully_in_first_page':True,
+        'native_single_record_loop':{'first':first_scan,'appended':last_scan},
+        'first_zero_iteration_and_resource_exit_prefix_retry_checked':True,
+        'native_no_progress_waiting_then_new_feedback_scan_checked':True}
 
 
 def check_incremental_rebate_batches(bank,batches,start,expected,gates):
