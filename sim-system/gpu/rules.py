@@ -16,6 +16,14 @@ class PublicRuleGpu:
             raw.extend(token.encode('ascii'));offsets.append(len(raw))
         self.values = decimal_columns(torch.tensor(list(raw),dtype=torch.uint8,device=device),
             torch.tensor(offsets,dtype=torch.int64,device=device),torch.ones(3,dtype=torch.bool,device=device)).rational()
+        # 来自同一封存快照的真实LIMIT费门槛；不以平台最低份数或FOK最低额代替。
+        minimum = context.get('immediate_limit_min_principal_pusd')
+        self.limit_minimum = None
+        if minimum is not None:
+            encoded = minimum.encode('ascii')
+            self.limit_minimum = decimal_columns(torch.tensor(list(encoded),dtype=torch.uint8,device=device),
+                torch.tensor([0,len(encoded)],dtype=torch.int64,device=device),
+                torch.ones(1,dtype=torch.bool,device=device)).rational()
         numbers = _numbers()
         self.delay_ms = numbers.ExactInt.from_values([context['taker_delay_ms']],device=device)
         self.exponent = numbers.ExactInt.from_values([context['fee_exponent']],device=device)
@@ -37,3 +45,5 @@ class PublicRuleGpu:
                 tail[slot]=float(context[name]);tail[slot+1]=1.0
             return tail,fault
         self.tail,self.fault = numbers.run_exact_batch(project)
+        if self.limit_minimum is not None:
+            self.fault = self.fault | self.limit_minimum.fault

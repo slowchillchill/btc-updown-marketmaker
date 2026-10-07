@@ -13,6 +13,10 @@ class RepairInputs:
     gap: torch.Tensor  # [roots,2sides,3]；old没有此字段。
     cap: torch.Tensor
     fault: torch.Tensor
+    cap_exact: object  # 同一次归约结果；Actor不从末端float投影反解。
+    cap_known: torch.Tensor
+    gap_exact: object
+    gap_known: torch.Tensor
 
 
 def repair_inputs(ledger,conditions,present,applicable,asset_outcomes,*,prefix_known,
@@ -84,7 +88,7 @@ def repair_inputs(ledger,conditions,present,applicable,asset_outcomes,*,prefix_k
         cap=select(difference,difference.numerator.sign>0,zero)
         cap_known=known&commitments.known[:,0]
         fault|=commitments.fault
-    return RepairInputs(gap,encode(cap,cap_known),fault)
+    return RepairInputs(gap,encode(cap,cap_known),fault,cap,cap_known,total,known)
 
 
 def write_repair_fields(slow,inputs):

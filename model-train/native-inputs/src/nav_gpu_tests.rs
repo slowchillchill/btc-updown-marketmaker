@@ -5,10 +5,10 @@ use data_pipeline_training::{public_recording::{PublicRecordingReaderV1,PublicSt
     compact_public::PublicCompactWriterV1};
 use data_pipeline_core::{public_input::prepare_public_ingress_v1,
     public_observation_core::PublicObservationCoreV1};
-type Materials=Arc<std::sync::Mutex<Vec<LedgerRecordMaterialV2>>>;
+pub(crate) type Materials=Arc<std::sync::Mutex<Vec<LedgerRecordMaterialV2>>>;
 
-pub(super) fn bind(execution:&mut PublicSimExecutionV1,ledger:&mut LedgerWriterV1,path:&Path)->Option<Materials> {
-    if std::env::var_os("B_GPU_NAV_VALIDATOR").is_none() {
+pub(crate) fn bind(execution:&mut PublicSimExecutionV1,ledger:&mut LedgerWriterV1,path:&Path)->Option<Materials> {
+    if std::env::var_os("B_GPU_NAV_VALIDATOR").is_none() && std::env::var_os("B_GPU_ACTOR_CANCEL_REFERENCE").is_none() {
         execution.bind_ledger_recording_v2(ledger,path).unwrap();return None;
     }
     let materials=Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -17,7 +17,7 @@ pub(super) fn bind(execution:&mut PublicSimExecutionV1,ledger:&mut LedgerWriterV
     Some(materials)
 }
 
-pub(super) fn checkpoint(shared:&SharedExecutionV2,before:&ActionBeforeReadV2,
+pub(crate) fn checkpoint(shared:&SharedExecutionV2,before:&ActionBeforeReadV2,
     group:Option<&NativeInputGroup>,materials:&Option<Materials>)->serde_json::Value {
     let read=shared.ledger().economic_read().unwrap();
     assert_eq!(read.base(),before.ledger(),"导出必须属于原ActionBefore同一次Ledger前缀");
@@ -50,9 +50,23 @@ pub(super) fn validate(name:&str,root:&Path,checkpoints:Vec<serde_json::Value>) 
     let artifact=PathBuf::from(std::env::var("B_GPU_NAV_ARTIFACT_ROOT").unwrap()).join(name);
     assert!(artifact.starts_with("/root/autodl-tmp"));
     fs::create_dir(&artifact).expect("保留原证据，不覆盖旧目录");
+    let compact=artifact.join("public-compact");
+    build_compact(root,&compact);
+    let source=serde_json::json!({"name":name,"compact":compact,"checkpoints":checkpoints});
+    let reference=artifact.join("original-account-reference.json");
+    fs::write(&reference,serde_json::to_vec_pretty(&source).unwrap()).unwrap();
+    let status=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+        .arg(validator).arg(&reference).arg(&artifact)
+        .stdout(fs::File::create(artifact.join("GPU.stdout")).unwrap())
+        .stderr(fs::File::create(artifact.join("GPU.stderr")).unwrap()).status().unwrap();
+    fs::write(artifact.join("GPU.exit"),status.code().unwrap_or(-1).to_string()).unwrap();
+    assert!(status.success(),"{}",fs::read_to_string(artifact.join("GPU.stderr")).unwrap());
+    eprintln!("gpu_nav_report={}",artifact.join("NAV-report.json").display());
+}
+
+pub(crate) fn build_compact(root:&Path,compact:&Path) {
     let mut reader=PublicRecordingReaderV1::recover(root,16,1<<20).unwrap();
     let mut core=PublicObservationCoreV1::new(reader.header.clone()).unwrap();
-    let compact=artifact.join("public-compact");
     let mut writer=PublicCompactWriterV1::create(&compact,reader.header.clone()).unwrap();
     while let Some(row)=reader.next_row().unwrap() {
         match row {
@@ -67,14 +81,4 @@ pub(super) fn validate(name:&str,root:&Path,checkpoints:Vec<serde_json::Value>) 
         }
     }
     writer.publish().unwrap();
-    let source=serde_json::json!({"name":name,"compact":compact,"checkpoints":checkpoints});
-    let reference=artifact.join("original-account-reference.json");
-    fs::write(&reference,serde_json::to_vec_pretty(&source).unwrap()).unwrap();
-    let status=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
-        .arg(validator).arg(&reference).arg(&artifact)
-        .stdout(fs::File::create(artifact.join("GPU.stdout")).unwrap())
-        .stderr(fs::File::create(artifact.join("GPU.stderr")).unwrap()).status().unwrap();
-    fs::write(artifact.join("GPU.exit"),status.code().unwrap_or(-1).to_string()).unwrap();
-    assert!(status.success(),"{}",fs::read_to_string(artifact.join("GPU.stderr")).unwrap());
-    eprintln!("gpu_nav_report={}",artifact.join("NAV-report.json").display());
 }

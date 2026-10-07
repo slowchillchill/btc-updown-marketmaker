@@ -49,7 +49,8 @@ class JointFreezeValidation:
         from commitments import SubmittedLegs
         from registry import FrozenIntentOrders
         from model_train.gpu_policy import Policy100ms,ModelShape100ms
-        self.source,self.artifact=source,artifact;self.started=time.perf_counter();self.rows=[];self.reports=[]
+        self.source,self.artifact=source,artifact;self.started=time.perf_counter();self.rows=[];self.reports=[];self.actor_reports=[]
+        self.actor_saved=None
         self.run=Numbers.run_exact_batch
         self.zero=torch.zeros(1,dtype=torch.int64,device='cuda');self.yes=torch.ones(1,dtype=torch.bool,device='cuda')
         compact=artifact/'public-compact'
@@ -117,12 +118,12 @@ class JointFreezeValidation:
             quote=valuation.freeze(market.prefixes,cutoff)
             native=account_inputs_at_prefix(account,self.market,self.zero,market.prefixes,self.start,
                 self.zero[:,None],self.yes[:,None],outcomes,row_role=market.role,valuation=quote,**history)
-            return market,native.inputs,account
+            return market,native.inputs,account,native
         # 正常路径固定资源；只在共同资源出口冷增长后重算同观察，不重吃来源。
         words=16
         while True:
             candidate=Numbers.device_exact_batch(encode,word_capacity=words,device='cuda')
-            market,native,account=candidate.value
+            market,native,account,_=candidate.value
             if bool((candidate.fits&market.resources_fit.all()).cpu()):break
             words=1<<(max(4,int(candidate.required_words.cpu()))-1).bit_length()
             self.encoder.grow_resources(market.required.max(0).values.cpu().tolist())
@@ -142,7 +143,9 @@ class JointFreezeValidation:
         for actual,expected in ((captured.value[0].fast,market.fast),(captured.value[1].slow,native.slow),
                 (captured.value[1].provided,native.provided)):
             assert torch.equal(actual,expected)
-        captured_market,captured_native,_=captured.value
+        captured_market,captured_native,captured_account,captured_scopes=captured.value
+        if os.environ.get('B_GPU_ACTOR_CONTEXT_VALIDATION')=='1':
+            self.check_actor_context(captured_account,captured_scopes,captured_market)
         publishing_keys=self.identities.clone()
         owned=FrozenPolicyInputs100ms.publish(captured_market,captured_native,publishing_keys,captured.fits)
         with torch.no_grad():
@@ -157,7 +160,7 @@ class JointFreezeValidation:
             # 覆盖实际publish源，而不是另一个eager/capture对象。快/慢来自下一真实
             # cutoff；本场景不变化的其它列以退役暂存覆写检验，不成为新业务输入。
             old_capture,old_keys=self.captured_old
-            old_market,old_native,_=old_capture.value
+            old_market,old_native,_,_=old_capture.value
             old_market.fast.copy_(captured_market.fast)
             old_native.slow.copy_(captured_native.slow)
             old_market.book_levels.zero_();old_market.book_mask.zero_()
@@ -172,6 +175,75 @@ class JointFreezeValidation:
             'public_prefix':int(market.prefixes.cpu()[0]),'pending_noe':pending,'unreceived_noe':unreceived,'role':1,
             'provided_fields':433,'elapsed_seconds':time.perf_counter()-self.started}
         self.reports.append(report);print(json.dumps({'stage':'joint_freeze_done',**report}),flush=True)
+
+    def check_actor_context(self,account,native,market):
+        from actor_context import publish_actor_context
+        from actor_support import DeviceNativeActor
+        from cancel_objects import OrderFormation,CancelObjectDirectory,freeze_cancel_objects
+        # 原单腿GTC receipt已实际公开；此两cutoff均已取消。原完整fixture无双腿请求。
+        source=account.order_sources.formed
+        formation=OrderFormation(account.orders.present,self.zero[:,None],self.zero[:,None],
+            self.intents.receipt_known,torch.full_like(self.zero[:,None],self.source['processing_at']),
+            integers([self.source['post_input_sequence']]),self.zero[:,None],source.present,
+            source.private_sequences,account.fault)
+        frame=self.market.frame(market.prefixes)
+        directory=CancelObjectDirectory(frame.admitted,self.market.times[:,0][None,:],
+            self.zero[:,None],self.yes[:,None],torch.empty((1,0),dtype=torch.bool,device='cuda'),
+            torch.empty((1,0,2),dtype=torch.int64,device='cuda'),torch.empty((1,0),dtype=torch.int64,device='cuda'))
+        objects=self.run(lambda:freeze_cancel_objects(account.orders,formation,directory))
+        # 原请求condition已准入；无人可撤仍保留合法的空成员Market对象。
+        selected=objects.present
+        assert selected.sum().cpu().item()==1
+        assert objects.kinds[selected].cpu().tolist()==[2]
+        assert objects.markets[selected].cpu().tolist()==[0]
+        assert not objects.members[selected].any().cpu().item()
+        assert self.pm.markets[0]['condition_id']==self.source['initial'][0]['market']['condition_id']
+        keys=self.identities.clone()
+        context=self.run(lambda:publish_actor_context(account,native,self.encoder,market,self.zero,self.zero,keys,objects))
+        assert context.fault.cpu().tolist()==[0]
+        from fractions import Fraction
+        actual,maker=account.funds.actual_available,account.funds.maker_available
+        exact=lambda value:[Fraction(n,d) for n,d in zip(values(value.numerator),values(value.denominator))]
+        assert values(context.cash_micro)==[max(0,int(min(exact(actual)[0],exact(maker)[0])*1000000))]
+        assert values(context.cap_centishares)==[max(0,int(value*100)) for value in exact(native.inputs.repair.cap_exact)]
+        assert values(context.tick_units)==[int(Fraction(event['payload']['event']['initial_tick_size_pusd_per_share'])*10000)
+            for event in self.source['initial']]
+        actor=DeviceNativeActor(context)
+        initial=actor.initial();support=self.run(lambda:actor.support(initial))
+        assert support.fault.cpu().tolist()==[0] and support.family[:,3:].cpu().tolist()==[[False,False,True]]
+        cancel_state=self.run(lambda:actor.choose(initial,torch.full_like(self.zero,5)))
+        cancel_support=self.run(lambda:actor.support(cancel_state))
+        assert torch.equal(cancel_support.cancel,objects.present)
+        from actor_context import _owned
+        if self.actor_saved is None:
+            self.actor_saved=(context,_owned(context.cash_micro),_owned(context.cap_centishares),
+                _owned(context.tick_units),context.cutoff.clone(),context.identities.clone(),
+                _owned(context.cancels),context.gap_positive.clone(),context.gap_known.clone(),
+                context.cap_known.clone(),keys,objects,account,native)
+        else:
+            old,cash,cap,ticks,at,identity,population,gap_positive,gap_known,cap_known,old_keys,old_objects,old_account,old_native=self.actor_saved
+            # 覆写实际发布源的退役暂存；这些值不再作为业务输入。
+            old_keys.fill_(-1);old_objects.present.fill_(False);old_objects.markets.fill_(-1)
+            old_objects.members.fill_(True);old_account.cutoff.fill_(-1)
+            old_native.inputs.repair.cap_exact.numerator.words.zero_()
+            old_native.inputs.repair.gap_exact.numerator.sign.fill_(1)
+            old_native.inputs.repair.gap_known.fill_(False);old_native.inputs.repair.cap_known.fill_(False)
+            for actual,expected in ((old.cash_micro,cash),(old.cap_centishares,cap),(old.tick_units,ticks)):
+                assert torch.equal(actual.words,expected.words) and torch.equal(actual.sign,expected.sign)
+                assert torch.equal(actual.fault,expected.fault)
+            assert torch.equal(old.cutoff,at) and torch.equal(old.identities,identity)
+            for name in ('present','kinds','members','formation_ranks','origin_pairs','markets','fault'):
+                assert torch.equal(getattr(old.cancels,name),getattr(population,name))
+            assert torch.equal(old.gap_positive,gap_positive) and torch.equal(old.gap_known,gap_known)
+            assert torch.equal(old.cap_known,cap_known)
+            again=self.run(lambda:DeviceNativeActor(old).support(DeviceNativeActor(old).initial()))
+            assert again.fault.cpu().tolist()==[0] and again.family[:,3:].cpu().tolist()==[[False,False,True]]
+            old_actor=DeviceNativeActor(old)
+            old_cancel=self.run(lambda:old_actor.choose(old_actor.initial(),torch.full_like(self.zero,5)))
+            assert torch.equal(self.run(lambda:old_actor.support(old_cancel)).cancel,population.present)
+        self.actor_reports.append({'actor_exact_context_cutoff':int(context.cutoff.cpu()[0]),
+            'cash_micro':values(context.cash_micro),'cap_centishares':values(context.cap_centishares),
+            'empty_member_market_object':True})
 
     def finish(self):
         assert len(self.rows)==2
@@ -200,5 +272,6 @@ class JointFreezeValidation:
             assert not wrong.ready.any().cpu().item() and torch.equal(wrong.hidden,self.initial_hidden)
         report={'status':'PASS','frames':self.reports,'GRU_layers':2,'model_hidden_start':1500,
             'complete_root_history_1000_1400':False,'continuous_host_PPO_restore':False}
+        if self.actor_reports: report['actor_exact_context']=self.actor_reports
         (self.artifact/'joint-freeze-report.json').write_text(json.dumps(report,indent=2)+'\n')
         return report

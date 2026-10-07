@@ -44,6 +44,28 @@ fn families() -> [Family; 6] {
         Family::CancelMarketOrders,
     ]
 }
+
+#[cfg(test)]
+pub(crate) fn gpu_intent_reference(intent:&ModelIntentV1)->serde_json::Value {
+    use contracts::{BuyLegIntentV1,BuyOrderIntentV1};
+    fn order(leg:&BuyLegIntentV1)->serde_json::Value {
+        let value=match &leg.order {
+            BuyOrderIntentV1::GtcLimit {size_shares,limit_price_pusd_per_share,post_only}=>serde_json::json!({
+                "GtcLimit":{"size_shares":size_shares.to_string(),"limit_price_pusd_per_share":limit_price_pusd_per_share.to_string(),"post_only":post_only}}),
+            BuyOrderIntentV1::FokMarket {spend_pusd,worst_price_pusd_per_share}=>serde_json::json!({
+                "FokMarket":{"spend_pusd":spend_pusd.to_string(),"worst_price_pusd_per_share":worst_price_pusd_per_share.to_string()}}),
+            _=>unreachable!("原NativeActor只形成GTC/FOK"),
+        };
+        serde_json::json!({"token_id":leg.token_id,"order":value})
+    }
+    match intent {
+        ModelIntentV1::SubmitSingleBuy {condition_id,order:leg}=>serde_json::json!({"SubmitSingleBuy":{"condition_id":condition_id,"order":order(leg)}}),
+        ModelIntentV1::SubmitPairedBuy {condition_id,orders}=>serde_json::json!({"SubmitPairedBuy":{"condition_id":condition_id,"orders":[order(&orders[0]),order(&orders[1])]}}),
+        ModelIntentV1::CancelOrder {platform_order_id}=>serde_json::json!({"CancelOrder":{"platform_order_id":platform_order_id}}),
+        ModelIntentV1::CancelOrders {platform_order_ids}=>serde_json::json!({"CancelOrders":{"platform_order_ids":platform_order_ids}}),
+        ModelIntentV1::CancelMarketOrders {condition_id}=>serde_json::json!({"CancelMarketOrders":{"condition_id":condition_id}}),
+    }
+}
 /// 只持有原组，金额和身份不传给 Python 重建；选择路径用于原条件概率重算。
 pub struct NativeActor {
     pub group: Arc<NativeInputGroup>,
@@ -122,6 +144,35 @@ impl NativeActor {
     }
     pub fn is_complete(&self) -> bool {
         self.done
+    }
+    #[cfg(test)]
+    pub(crate) fn gpu_context_reference(&self) -> serde_json::Value {
+        let repair = self.repair().unwrap();
+        let read = self.group.action_before.as_ref().unwrap();
+        let cash = &read.economics().cash;
+        let gaps: Vec<_> = (0..2).map(|side| {
+            read.economics().markets.iter()
+                .find(|market| market.condition_id == self.group.rows[self.row].hidden_state_key.condition_id)
+                .map(|market| {
+                    let at = market.assets.as_ref().unwrap().iter()
+                        .position(|asset| asset.outcome.index == side).unwrap();
+                    market.repair_gap_shares[at].clone()
+                }).unwrap_or_else(|| ExactDecimal("0".into()))
+        }).collect();
+        serde_json::json!({
+            "actual_available_pusd": cash.actual_available_pusd,
+            "maker_available_pusd": cash.maker_available_pusd,
+            "cash_micro": self.cash_micro().to_string(),
+            "ticks": [self.tick(0).unwrap(),self.tick(1).unwrap()],
+            "tokens": self.context().tokens,
+            "buy_enabled": self.buy_enabled(),
+            "single_side": repair.as_ref().map(|(side,_)| index(*side)),
+            "cap_centishares": repair.map(|(_,cap)|cap.to_string()),
+            "repair_gap_shares": gaps,
+            "rules": self.context().rules,
+            "immediate_limit_min_principal_pusd": self.context().rules.immediate_limit_min_principal_pusd,
+            "cancel_intents": self.group.cancel_intents.iter().map(gpu_intent_reference).collect::<Vec<_>>(),
+        })
     }
     pub fn prefix_features(&self) -> [f32; 36] {
         self.context().prefix_features(&self.state)

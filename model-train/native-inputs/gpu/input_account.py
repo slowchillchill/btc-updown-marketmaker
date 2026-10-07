@@ -16,6 +16,7 @@ class FrozenAccountInputs:
     order_fields: object
     cutoff: torch.Tensor
     fault: torch.Tensor
+    repair: object = None  # 当前精确cap及known，供同冻结Actor直接消费。
 
 
 def frozen_account_inputs(account, scope_members, scope_known, scope_applicable, *, scope_conditions=None, scope_present=None, asset_outcomes=None, executed_prefix_known=None, success_prefix_known=None, rebate_prefix_known=None,settlement_prefix_known=None,ledger_prefix_known=None,economic_liability_prefix_known=None,economic_prefix_known=None,row_role=None,valuation=None):
@@ -31,6 +32,7 @@ def frozen_account_inputs(account, scope_members, scope_known, scope_applicable,
     slow = write_order_scope_fields(slow, orders, scope_applicable)
     provided[:, 382:412] = True
     fault = account.fault | orders.fault
+    repair = None
     if economic_prefix_known is not None:
         from input_portfolio import portfolio_inputs,write_portfolio_fields
         absent=torch.zeros((roots,),dtype=torch.bool,device=device)
@@ -176,7 +178,7 @@ def frozen_account_inputs(account, scope_members, scope_known, scope_applicable,
         slow[:, 430:433] = present[:, None].expand(roots, 3).float()
         # 原Known(None)请求最新响应为NA六项，而订单模板无来源仍有适用位。
         provided[:, 415:433] = True
-    return FrozenAccountInputs(slow, provided, orders, account.cutoff.clone(), fault)
+    return FrozenAccountInputs(slow, provided, orders, account.cutoff.clone(), fault, repair)
 
 
 @dataclass(frozen=True)
@@ -238,4 +240,4 @@ def account_inputs_at_prefix(account, market, condition_slots, prefixes, root_st
             slow[:,first:last]=torch.where(unknown_old[:,None,None],
                 unknown_value[:,None,:],value).flatten(1)
     return NativeAccountAtPrefix(FrozenAccountInputs(slow,inputs.provided,inputs.order_fields,
-        inputs.cutoff,inputs.fault | scopes.fault),scopes)
+        inputs.cutoff,inputs.fault | scopes.fault,inputs.repair),scopes)

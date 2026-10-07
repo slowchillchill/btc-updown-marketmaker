@@ -1634,3 +1634,30 @@ trajectory/account/condition 身份坐标。无状态行保留 hidden，ContextO
 −29000；该期间没有额外行情。不复制旧 SIM canonical 身份，不构造 T−30 盘口或热身。
 两个观察点均是 DecisionRequired。模型从1500的显式数值 hidden 起点运行两步，传递全部
 GRU 层并核同设备捕获和旧输入稳定；1000–1400根记忆、完整根连续宿主仍由原任务继续交付。
+
+### 精确 Actor 上下文与设备支持接口
+
+`native-inputs/gpu/actor_context.py` 从同一账户／市场冻结接到原精确资金和规则。
+`input_repair` 保留同次归约的精确 gap、cap 及各自 known；Actor直接消费它，不从 slow 的浮点值
+反解资金或重算 gap 减承诺。上下文只拥有 cutoff、身份与资产坐标、精确现金／cap／tick
+和完整撤单对象读面；原不可变规则与身份字典共享，不保存活动 Ledger 引用。
+公共规则增加可缺省的 `immediate_limit_min_principal_pusd`，值来自原封存快照。
+旧上下文继续支持原观察能力；Actor需要补出这个真实字段，不能用 FOK 最低支出猜 LIMIT 费用门槛。
+
+`actor_support.py` 按原 NativeActor 推进六族、固定16段数量、逐腿 GTC／FOK 和999档
+全局价格坐标。数量现金上界保留原值，完成性沿原 SDK 编码域检查，不新增金额上限。
+费用继续调用 SIM 所属 `limit_buy_cost`。修复选择沿 Up／Down 顺序，只有正 gap 才读取该侧 cap，
+首个正百份 cap 即返回。公开 cap 的 Unknown 不变；零 gap 不消费未知承诺。
+所有选择只产生设备候选，不推进随机数、预留或请求。
+容量按原 `device_exact_batch` 回传；协调者只在共同 fits／fault 出口安装，容量不足保留原前缀。
+
+本切片的两类必要验证分别使用原 NativeActor 实际工程构造逐步支持，以及原同一 GTC
+账户1500／1600冻结到实际上下文消费者。原259／257完整撤单对象作为支持数学输入，
+不能代称非空订单成员的设备取消资格构建或184维编码已交付；联合冻结的该时刻无人可撤，
+仍保留该已准入请求市场的合法空成员 `CancelMarketOrders` 对象及对应支持。
+另一个未判定有限工程场景沿原SIM发送Resting和真实Matched GTC，使用实际Accepted／Trade
+反馈时钟选择100ms观察间隙。原NativeActor给出独立支持，设备冷切片只消费已公开Accepted，
+通过公共账户／市场冻结实际调用 `publish_actor_context`。它核零gap时未知cap不关闭合法族；
+该间隙须由服务器实际来源证明，不沿用旧场景的时刻，也不把切片签成完整首次领取流。
+完整模型路径采样／联合概率重算、设备前缀36／取消184、完整意图共同预留与提交，
+以及完整连续宿主、PPO和活动恢复仍须沿原步骤继续接线。

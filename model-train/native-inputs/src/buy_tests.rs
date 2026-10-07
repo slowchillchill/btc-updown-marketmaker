@@ -80,6 +80,13 @@ fn fixture_with_midpoints(
     minimum_shares: &str,
     midpoints: &[(i64, &str, &str)],
 ) -> Harness {
+    fixture_with_execution(cash,ticks,intermediate_at,followups,asks,minimum_shares,midpoints,None).0
+}
+
+fn fixture_with_execution(
+    cash:&str,ticks:[&str;2],intermediate_at:i64,followups:&[i64],asks:[&str;2],
+    minimum_shares:&str,midpoints:&[(i64,&str,&str)],configured:Option<(&[u8],String)>,
+) -> (Harness,Option<crate::public_input_tests::nav_gpu::Materials>,MemoryNoeObservationV4) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let mut core = core();
@@ -232,19 +239,24 @@ fn fixture_with_midpoints(
         writer.record(input, applied).unwrap();
     }
     writer.stabilize().unwrap();
-    let (mut execution, observation, rules) =
-        execution_with_minimum_v4(&temp.path().join("sim.jsonl"), &core, cash, minimum_shares);
+    let (mut execution, observation, rules) = match configured.as_ref() {
+        Some((policy,seed))=>execution_with_rules_v4(&temp.path().join("sim.jsonl"),&core,policy,None,seed.clone(),cash),
+        None=>execution_with_minimum_v4(&temp.path().join("sim.jsonl"),&core,cash,minimum_shares),
+    };
     let mut ledger =
         LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
-    execution
-        .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
-        .unwrap();
+    let materials=if configured.is_some() {
+        crate::public_input_tests::nav_gpu::bind(&mut execution,&mut ledger,&temp.path().join("ledger"))
+    } else {
+        execution.bind_ledger_recording_v2(&mut ledger,&temp.path().join("ledger")).unwrap();None
+    };
     let noe_context = observation
         .opening_record()
         .unwrap()
         .context()
         .context_reference
         .clone();
+    let retained_observation=observation.clone();
     let shared = SharedExecutionV2::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
@@ -255,14 +267,14 @@ fn fixture_with_midpoints(
         .account_instance_key;
     let native = NativeInputRoot::new("buy".into(), account, -10_000, rules.clone());
     let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, TradingTimes(times)).unwrap();
-    Harness {
+    (Harness {
         _temp: temp,
         shared,
         native,
         driver: FinitePublicConsumptionV1::new(execution, source, "buy".into()),
         groups: vec![],
         noe_context,
-    }
+    },materials,retained_observation)
 }
 
 #[cfg(feature = "python")]
@@ -273,6 +285,98 @@ fn ready(h: &mut Harness) -> NativeInputGroup {
         h.next().unwrap();
     }
     h.next().unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn accepted_only_zero_gap_keeps_original_actor_support() {
+    use crate::public_input_tests::{nav_gpu,account_registry_sources_for_tests};
+    let policy=br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10000},{"state":"CONFIRMED","offset_ms":20000}],"economic_application_ordinal":1},"failure_overrides":[]}"#;
+    let (mut h,materials,observation)=fixture_with_execution("2000",["0.01","0.01"],24_999,
+        &[55_000],["100","100"],"5",&[],Some((policy,
+        "00000000000000000000000000000000000000000000000000000000000023c8".into())));
+    let artifact=std::env::var_os("B_GPU_ACTOR_CANCEL_REFERENCE").map(|directory| {
+        let path=std::path::Path::new(&directory).join("accepted-only");std::fs::create_dir(&path).unwrap();
+        assert!(h._temp.path().starts_with("/root/autodl-tmp"));
+        h._temp.disable_cleanup(true);
+        std::fs::write(path.join("producer-path.txt"),h._temp.path().display().to_string()).unwrap();path
+    });
+    ready(&mut h);
+    let mut receipts=Vec::new();
+    for (request,token,price) in [("first-a",UP_TOKEN_ID,Decimal::new(1,2)),
+                                ("later-b",DOWN_TOKEN_ID,Decimal::new(6,1))] {
+        if request=="later-b" {
+            loop {
+                let group=h.next().unwrap();
+                if group.action_before.as_ref().unwrap().cutoff().decision_time().logical_time_utc_ms()==56_000 {break;}
+            }
+        }
+        let intent=Arc::new(ModelIntentV1::SubmitSingleBuy {
+            condition_id:ConditionId(CONDITION_ID.into()),order:BuyLegIntentV1 {
+                token_id:TokenId(token.into()),order:BuyOrderIntentV1::GtcLimit {
+                    size_shares:Decimal::from(5),limit_price_pusd_per_share:price,post_only:false,
+                },
+            },
+        });
+        let receipt=h.shared.execute(&mut h.driver.decision().unwrap(),context(request),Some(intent.clone()))
+            .await.unwrap().unwrap();
+        receipts.push(serde_json::json!({"request":request,"receipt":{
+            "input_sequence":receipt.input_sequence(),"platform_arrived_at_utc_ms":receipt.platform_arrived_at_utc_ms(),
+            "scheduled_action_count":receipt.scheduled_action_count()},"intent":crate::support::gpu_intent_reference(&intent)}));
+        if request=="later-b" {
+            // 只处理真实到达，随后从实际已物化NOE读取时钟；不提前领取或注回引用。
+            h.driver.observe_at(receipt.platform_arrived_at_utc_ms().checked_add(1).unwrap()).unwrap().unwrap();
+        }
+    }
+    h.driver.stabilize_recording().unwrap();
+    let result_references=observation.result_references();
+    let raw=result_references.iter().map(|reference| {
+        serde_json::to_value(::execution_normalization::read_noe_result_v4(reference).unwrap().record).unwrap()
+    }).collect::<Vec<_>>();
+    if let Some(path)=artifact.as_ref() {
+        std::fs::write(path.join("actual-published-noe.json"),serde_json::to_vec_pretty(&serde_json::json!({
+            "references":result_references,"records":raw,"receipts":receipts})).unwrap()).unwrap();
+    }
+    let accepted=raw.iter().find_map(|record| {
+        let body=record.get("Evidence")?;
+        let source=body["source_reference"]["record"].get("DirectResponse")?;
+        (source["association"]["SubmissionItem"]["global_request_id"]=="later-b"
+            && body["evidence"]["Control"]["result"].get("Submission").is_some())
+            .then(||source["response_received_at_utc_ms"].as_i64().unwrap())
+    }).expect("真实later-b Accepted已物化");
+    let first_trade=raw.iter().filter_map(|record| {
+        let body=record.get("Evidence")?;
+        body["evidence"].as_object()?.keys().any(|name|name.starts_with("TradeLifecycle"))
+            .then(||body["source_reference"]["record"]["TradeLifecycle"]["feedback_received_at_utc_ms"].as_i64().unwrap())
+    }).min().expect("真实Matched成交已有规范来源");
+    let cutoff=accepted.checked_add(100).unwrap().div_euclid(100).checked_mul(100).unwrap();
+    eprintln!("accepted_only actual_received={accepted} first_trade_received={first_trade} cutoff={cutoff}");
+    assert!(cutoff<=first_trade,"本次实际来源无Accepted-only的100ms间隙: Accepted={accepted}, Trade={first_trade}, cutoff={cutoff}");
+    h.driver.observe_at(cutoff).unwrap().unwrap();
+    h.shared.apply_closed().unwrap();
+    let decision=h.driver.decision().unwrap();
+    let at=decision.cutoff().clone();let frames=decision.frames();
+    h.shared.observe_group(&frames);
+    let before=h.shared.freeze_action_before(at,&frames).unwrap();
+    let group=Arc::new(h.native.encode(&frames,before).unwrap());
+    let read=group.action_before.as_ref().unwrap();
+    assert!(h.shared.registry().orders().all(|order|h.shared.registry().order_trades(order.order_identity).next().is_none()));
+    let matched=read.orders().find(|order|order.token_id==Some(&TokenId(DOWN_TOKEN_ID.into()))).unwrap();
+    assert!(matched.accepted.is_some());
+    assert_eq!(matched.matched_shares,ExecutionReadValueV1::Known(ExactDecimal("5".into())));
+    assert!(read.commitments().any(|value|value.remaining_target_shares==ExecutionReadValueV1::Unavailable));
+    assert!(read.economics().markets.iter().all(|market|market.repair_gap_shares.iter().all(|value|value.0=="0")));
+    let actor=NativeActor::new(group.clone(),0).unwrap();
+    let support=actor.support().unwrap();assert!(support[0]&&!support[1]&&support[2]);
+    if let Some(artifact)=artifact {
+        let compact=artifact.join("public-compact");nav_gpu::build_compact(&h._temp.path().join("dpt"),&compact);
+        let checkpoint=nav_gpu::checkpoint(&h.shared,read,Some(&group),&materials);
+        let report=serde_json::json!({"compact":compact,"checkpoint":checkpoint,
+            "public_order_sources":account_registry_sources_for_tests(h.shared.registry()),"receipts":receipts,
+            "accepted_received":accepted,"first_trade_received":first_trade,"cutoff":cutoff,
+            "actor_context":actor.gpu_context_reference(),"actor_paths":gpu_actor_paths(group.clone(),&[0,1,2,3,4,5])});
+        std::fs::write(artifact.join("reference.json"),serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    h.driver.stop_and_drain().unwrap();
 }
 
 #[cfg(feature = "python")]
@@ -1060,6 +1164,12 @@ fn cash_root_is_not_replaced_by_encoding_limit() {
             .unwrap()
     );
     assert_eq!(actor.state.interval.as_ref().unwrap().hi, original);
+    if let Some(directory)=std::env::var_os("B_GPU_ACTOR_CANCEL_REFERENCE") {
+        let report=serde_json::json!({"actor_context":actor.gpu_context_reference(),
+            "root_upper":original.to_string(),"quantity_support":actor.support().unwrap()});
+        std::fs::write(std::path::Path::new(&directory).join("encoding.json"),
+            serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1345,6 +1455,12 @@ async fn actual_single_repair_cap_counts_visible_success_and_nonterminal_commitm
                 BigUint::from(1000u32)
             );
             assert!(read.pending_noe_record_count() > 0);
+            if let Some(directory)=std::env::var_os("B_GPU_ACTOR_CANCEL_REFERENCE") {
+                let report=serde_json::json!({"cutoff":at,"actor_context":actor.gpu_context_reference(),
+                    "actor_paths":gpu_actor_paths(group.clone(),&[0,1,2,3,4,5])});
+                std::fs::write(std::path::Path::new(&directory).join("repair-before-economic.json"),
+                    serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+            }
             saw_economic_pending = true;
         }
         if !sent && market.success_shares[a].0.parse::<Decimal>().unwrap() == Decimal::from(10) {
@@ -1368,6 +1484,12 @@ async fn actual_single_repair_cap_counts_visible_success_and_nonterminal_commitm
                 );
                 if !saw_pending {
                     eprintln!("repair pending cutoff={at}");
+                    if let Some(directory)=std::env::var_os("B_GPU_ACTOR_CANCEL_REFERENCE") {
+                        let report=serde_json::json!({"cutoff":at,"actor_context":actor.gpu_context_reference(),
+                            "actor_paths":gpu_actor_paths(group.clone(),&[0,1,2,3,4,5])});
+                        std::fs::write(std::path::Path::new(&directory).join("repair-pending.json"),
+                            serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+                    }
                 }
                 saw_pending = true;
             } else if commitment == ExecutionReadValueV1::Known(ExactDecimal("0".into())) {
@@ -1815,6 +1937,8 @@ fn export_gpu_exact_buy_reference_v1() {
             "fee_1e5_units": cost.fee_1e5_units.to_string(),
         }));
     }
+    let context_reference = NativeActor::new(group.clone(),0).unwrap().gpu_context_reference();
+    let full_reference = gpu_actor_paths(group.clone(), &[2]);
     let mut actor = NativeActor::new(group, 0).unwrap();
     actor.choose(2).unwrap();
     while actor.state.stage == Stage::QuantityBranch {
@@ -1859,6 +1983,8 @@ fn export_gpu_exact_buy_reference_v1() {
     };
     let report = serde_json::json!({
         "schema": "gpu_exact_buy_reference_v1",
+        "actor_context": context_reference,
+        "actor_paths": full_reference,
         "fixture": {
             "source": "model-train/native-inputs/src/buy_tests.rs::fixture_config/ready",
             "reference_test": "ordinary_gtc_price_support_reserves_fee_and_keeps_mixed_fok_completion",
@@ -1908,6 +2034,30 @@ fn export_gpu_exact_buy_reference_v1() {
     });
     h.driver.stop_and_drain().unwrap();
     println!("BTC_GPU_EXACT_REFERENCE_V1={report}");
+}
+
+/// 原NativeActor每一步支持与坐标，供设备实现核对，不在Python重建合法域。
+pub(crate) fn gpu_actor_paths(group: Arc<NativeInputGroup>, families: &[usize]) -> serde_json::Value {
+    let family_support=NativeActor::new(group.clone(),0).unwrap().support().unwrap();
+    let mut traces=Vec::new();
+    for &family in families {
+        if !family_support[family] { continue; }
+        let mut actor=NativeActor::new(group.clone(),0).unwrap();
+        let mut steps=Vec::new();
+        let mut choice=family;
+        loop {
+            let mask=actor.support().unwrap();
+            steps.push(serde_json::json!({"stage":format!("{:?}",actor.state.stage),"mask":mask,"choice":choice}));
+            actor.choose(choice).unwrap();
+            if actor.is_complete() { break; }
+            choice=actor.support().unwrap().iter().position(|enabled|*enabled).unwrap();
+        }
+        traces.push(serde_json::json!({"family":family,"steps":steps,"path":actor.path,"intent":actor.intent().unwrap().as_ref().map(crate::support::gpu_intent_reference),
+            "quantity_centishares":actor.state.quantity_hundredths.as_ref().map(ToString::to_string),
+            "variants":actor.state.legs.iter().map(|leg|leg.variant.map(|v|format!("{v:?}"))).collect::<Vec<_>>(),
+            "price_indices":actor.state.legs.iter().map(|leg|leg.price_index.as_ref().map(ToString::to_string)).collect::<Vec<_>>() }));
+    }
+    serde_json::json!({"family_support":family_support,"traces":traces})
 }
 
 #[tokio::test(flavor = "current_thread")]

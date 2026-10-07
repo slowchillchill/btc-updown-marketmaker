@@ -264,6 +264,13 @@ async fn complete_pair_terminal_leg_and_257_global_selection() {
                 .unwrap(),
         );
         assert_native_cancel_families(g.clone());
+        if let Some(directory)=std::env::var_os("B_GPU_ACTOR_CANCEL_REFERENCE") {
+            let actor=NativeActor::new(g.clone(),0).unwrap();
+            let report=serde_json::json!({"cutoff":at,"actor_context":actor.gpu_context_reference(),
+                "actor_paths":buy_tests::gpu_actor_paths(g.clone(),&[0,1,2,3,4,5])});
+            std::fs::write(std::path::Path::new(&directory).join(format!("cancel-{at}.json")),
+                serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
         if at == 36_000 {
             assert_eq!(g.cancel.len(), 259);
             let ExecutionReadValueV1::Known(objects) =

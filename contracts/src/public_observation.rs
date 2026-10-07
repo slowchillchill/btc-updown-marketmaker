@@ -529,6 +529,9 @@ pub struct PublicTradingRuleContextV1 {
     /// 同一快照的真实平台最低份数；模型条件输入与执行规则，不是Actor最低数量掩码。
     pub limit_min_quantity_shares: ExactDecimal,
     pub market_buy_min_spend_pusd: ExactDecimal,
+    /// 封存快照的即时LIMIT费门槛；旧上下文缺此字段仍可消费原观察，不能猜Actor成本。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub immediate_limit_min_principal_pusd: Option<ExactDecimal>,
     pub taker_delay_enabled: bool,
     pub taker_delay_ms: u64,
     pub delay_requires_itode: bool,

@@ -163,6 +163,9 @@ impl SealedProcessRuleSnapshotV3 {
             market_buy_min_spend_pusd: contracts::ExactDecimal(
                 MARKET_BUY_MINIMUM_PRINCIPAL_PUSD.to_string(),
             ),
+            immediate_limit_min_principal_pusd: Some(decimal(
+                &documented.immediate_gtc_buy_minimum.value.minimum_principal_pusd,
+            )),
             taker_delay_enabled: synchronized.taker_order_delay_enabled,
             taker_delay_ms: documented.taker_delay.value.delay_ms,
             delay_requires_itode: documented.taker_delay.value.enabled_only_when_itode,

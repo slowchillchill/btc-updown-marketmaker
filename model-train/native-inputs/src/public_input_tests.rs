@@ -1149,7 +1149,7 @@ async fn old_pairing_is_market_local_before_sum() {
 }
 
 // 只读同次唯一消费后的公开来源；不读取派生matched/active/commitment初始化GPU。
-fn account_registry_sources_for_tests(registry:&SharedExecutionRegistryV2)->serde_json::Value {
+pub(crate) fn account_registry_sources_for_tests(registry:&SharedExecutionRegistryV2)->serde_json::Value {
     fn record(value:&::execution_normalization::NoeConsumedRecordRefV2)->serde_json::Value {
         serde_json::json!({"record":value.record(),"position":value.position(),"visibility":value.visibility()})
     }
@@ -1255,7 +1255,7 @@ fn native_execution(
 }
 
 #[path = "nav_gpu_tests.rs"]
-mod nav_gpu;
+pub(crate) mod nav_gpu;
 
 #[tokio::test(flavor = "current_thread")]
 async fn same_cutoff_orphan_marks_freeze_all_markets_and_encode_true_zero_unknown() {
