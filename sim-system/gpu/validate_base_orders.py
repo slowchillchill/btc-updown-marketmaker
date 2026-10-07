@@ -409,6 +409,7 @@ def main():
         'compact_hidden_source_identities_are_new_DPT_identities_not_old_constructed_V3':block is not None,
         'actual_positive_maker_joint_candidate_CUDA_graph_replay_to_same_NOE_checked':checked_captured_maker,
         'actual_positive_maker_fixed_address_commit_then_consumed_step_replay_checked':checked_captured_maker,
+        'actual_positive_maker_pool_shortage_keeps_owned_state_before_cold_growth_checked':checked_captured_maker,
         'runtime_hidden_reference_handler_covered':False,
         'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
@@ -432,6 +433,7 @@ def check_captured_hidden_step(runtime,index,tensor,fee_rate,fee_exponent,rebate
         choice=value.choose(None,None,horizon,enabled)
         paths=torch.zeros((value.orders.roots,value.hidden.queues.capacity),dtype=torch.int64,device=horizon.device)
         return value.apply_hidden_step(choice,index,conditions,paths,fee_rate,fee_exponent,rebate)
+    original_runtime=runtime
     expected,_=compute(runtime)
     runtime=replace(runtime,
         hidden=replace(runtime.hidden,queues=runtime.hidden.queues.resized(expected.hidden.queues.capacity)),
@@ -475,18 +477,25 @@ def check_captured_hidden_step(runtime,index,tensor,fee_rate,fee_exponent,rebate
     torch.cuda.synchronize()
     compare(actual,expected)
     from base_runtime_storage import BaseRuntimeStorage
+    # 同一真实正Maker在尚未扩fill池的原状态上仅生成容量请求；全字段不提交。
+    blocked=Numbers.device_exact_batch(lambda:compute(original_runtime),word_capacity=4,
+        device=runtime.account.cash.words.device)
+    blocked_storage=BaseRuntimeStorage(original_runtime,blocked.value[0])
+    blocked_graph=torch.cuda.CUDAGraph()
+    with torch.cuda.graph(blocked_graph):
+        blocked=Numbers.device_exact_batch(lambda:compute(blocked_storage.runtime),word_capacity=4,
+            device=runtime.account.cash.words.device)
+        blocked_fit,blocked_output=blocked_storage.commit_hidden_base(blocked)
+    blocked_graph.replay()
+    torch.cuda.synchronize()
+    assert not blocked_fit.cpu().item() and blocked.value[1].required_records.cpu().tolist()==[2]
+    compare(blocked_storage.runtime,original_runtime,"pool_shortage_keeps_input")
     storage=BaseRuntimeStorage(runtime,expected)
     old=storage.snapshot()
     def committed_step():
         candidate=Numbers.device_exact_batch(lambda:compute(storage.runtime),word_capacity=4,
             device=runtime.account.cash.words.device)
-        state,output=candidate.value
-        # 本次真正参与的所有物理池与字容量统一决定提交；不足不安装fault=2。
-        fit=candidate.fits & (output.required_segments <= storage.runtime.hidden.queues.capacity).all()
-        fit=fit & (output.required_records <= storage.runtime.fills.capacity).all()
-        fit=fit & (output.required_maker_fills <= storage.runtime.calendars.maker.fill_occupied.size(1)).all()
-        fit=fit & (output.required_maker_days <= storage.runtime.calendars.maker.occupied.size(1)).all()
-        output=storage.commit(state,fit,output)
+        fit,output=storage.commit_hidden_base(candidate)
         return candidate,fit,output
     committed_graph=torch.cuda.CUDAGraph()
     with torch.cuda.graph(committed_graph):

@@ -67,6 +67,15 @@ class BaseRuntimeStorage:
         """保留本次已提交SIM输出，后续图重放不能覆盖待消费反馈。"""
         return _owned(output, output)
 
+    def commit_hidden_base(self, candidate):
+        """一条原LevelChange的字/段/fill/Maker人口提交门。"""
+        state, output = candidate.value
+        fit = candidate.fits & (output.required_segments <= self.runtime.hidden.queues.capacity).all()
+        fit = fit & (output.required_records <= self.runtime.fills.capacity).all()
+        fit = fit & (output.required_maker_fills <= self.runtime.calendars.maker.fill_occupied.size(1)).all()
+        fit = fit & (output.required_maker_days <= self.runtime.calendars.maker.occupied.size(1)).all()
+        return fit, self.commit(state, fit, output)
+
     def commit(self, candidate, resources_fit, output=None):
         """资源不足保留全部活动字段；原各根fault/回退由业务协调器负责。
 
