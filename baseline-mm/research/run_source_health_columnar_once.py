@@ -33,6 +33,7 @@ def main(entry=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('config',type=Path);parser.add_argument('archive_root',type=Path)
     parser.add_argument('mount_point',type=Path);parser.add_argument('logs',type=Path)
+    parser.add_argument('--reuse-material',type=Path)
     args=parser.parse_args()
     if not archive_ready(args.archive_root,args.mount_point):
         raise RuntimeError('bound archive is unavailable or not on its expected writable mount')
@@ -43,6 +44,8 @@ def main(entry=None):
     entry=entry or Path(__file__).with_name('research_source_health_columnar.py')
     for stage in ('prepare','study'):
         command=['/usr/bin/time','-v','-o',str(args.logs/(stage+'.time')),sys.executable,'-u',str(entry),stage,str(args.config)]
+        if stage=='prepare' and args.reuse_material is not None:
+            command.extend(['--reuse-material',str(args.reuse_material)])
         (args.logs/(stage+'.command.json')).write_text(json.dumps(command,ensure_ascii=False,indent=2)+'\n')
         with (args.logs/(stage+'.stdout')).open('xb') as stdout,(args.logs/(stage+'.stderr')).open('xb') as stderr:
             process=subprocess.Popen(command,stdout=stdout,stderr=stderr,start_new_session=True)

@@ -7,12 +7,38 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[2]
 
 
 class SupervisionTests(unittest.TestCase):
+    def test_complete_material_reuse_is_forwarded_only_to_prepare(self):
+        sys.path.insert(0,str(ROOT/'baseline-mm/research'))
+        import run_source_health_columnar_once as supervisor
+        for reuse in (None,'completed-material'):
+            with self.subTest(reuse=reuse),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);run=root/'new-run';logs=root/'logs'
+                config=root/'config.json';config.write_text(json.dumps(dict(run_root=str(run))))
+                argv=['supervisor',str(config),str(root),'/',str(logs)]
+                if reuse is not None:argv.extend(['--reuse-material',str(root/reuse)])
+                def completed_stage(command,**kwargs):
+                    if command[7]=='prepare':
+                        (run/'material').mkdir(parents=True)
+                        (run/'material/material.json').write_text('{}')
+                    return SimpleNamespace(poll=lambda:0,wait=lambda:0)
+                # No real query or child job: exercise the supervisor's actual argv/exit files.
+                with patch.object(sys,'argv',argv),patch.object(supervisor.signal,'signal'),patch.object(supervisor,'archive_ready',return_value=True),patch.object(supervisor.subprocess,'Popen',side_effect=completed_stage):
+                    self.assertEqual(supervisor.main(),0)
+                prepare=json.loads((logs/'prepare.command.json').read_text())
+                study=json.loads((logs/'study.command.json').read_text())
+                self.assertNotIn('--reuse-material',study)
+                if reuse is None:self.assertNotIn('--reuse-material',prepare)
+                else:self.assertEqual(prepare[-2:],['--reuse-material',str(root/reuse)])
+                self.assertEqual(json.loads((logs/'study.exit.json').read_text())['returncode'],0)
+
     def test_sigterm_reaps_stage_and_records_actual_interruption(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)

@@ -264,8 +264,11 @@ class ProbabilityTests(unittest.TestCase):
             facts=[dict(timestamp_received=at,payload_timestamp=at,collector_admission_time_utc_ms=at,
                 freshness_status='fresh',window_s=w,source_sequence_epoch_id='twap-1',collector_admission_sequence=i+1,full_accuracy_value=str(p*10**18))
                 for i,(at,w,p) in enumerate([(1000,60,100),(6000,60,101),(7600,30,200),(25000,30,201)])]
-            pq.write_table(pa.Table.from_pylist(facts,schema=schema),path)
-            files=[dict(path=str(path),source_kind='polymarket_rtds_chainlink_twap',schema_version='polymarket_rtds_chainlink_twap_v1',bytes=path.stat().st_size,rows=4)]
+            files=[]
+            for i,subset in enumerate((facts[:2],facts[2:])):
+                path=root/f'twap-{i}.parquet'
+                pq.write_table(pa.Table.from_pylist(subset,schema=schema),path)
+                files.append(dict(path=str(path),source_kind='polymarket_rtds_chainlink_twap',schema_version='polymarket_rtds_chainlink_twap_v1',bytes=path.stat().st_size,rows=len(subset)))
             segments=[dict(at=5500,reference='chainlink_twap_sixty_seconds'),dict(at=7000,reference='chainlink_twap_thirty_seconds')]
             rows=[]
             for at in (5000,8000,20000):
@@ -277,7 +280,22 @@ class ProbabilityTests(unittest.TestCase):
             try:
                 ranges=direct.direct.range_index(db,files,lambda *a,**k:None)
                 cfg=dict(files=files,boundary_helper=str(HELPER),start=0,end=31001)
-                direct.source_sampling(db,cfg,boundary,root,list(direct.direct.query_units(ranges)),ranges,rows,lambda *a,**k:None)
+                units=list(direct.direct.query_units(ranges))
+                self.assertEqual(len(units),2)
+                release=direct.direct.SourceQuery.release;retained=[]
+                def release_and_check(query,directories):
+                    if query.source=='chainlink_twap60':
+                        before=db.execute('SELECT * FROM temporary_targets ORDER BY rule_visible').fetchall()
+                        self.assertFalse(db.execute("SELECT temporary FROM duckdb_tables() WHERE table_name='temporary_targets'").fetchone()[0])
+                        release(query,directories)
+                        self.assertEqual(db.execute('SELECT * FROM temporary_targets ORDER BY rule_visible').fetchall(),before)
+                        retained.append(before)
+                    else:release(query,directories)
+                with patch.object(direct,'group_rows',wraps=direct.group_rows) as grouping,patch.object(direct.direct.SourceQuery,'release',release_and_check):
+                    direct.source_sampling(db,cfg,boundary,root,units,ranges,rows,lambda *a,**k:None)
+                    self.assertEqual(grouping.call_count,2) # One fixed construction, one final innovation grouping.
+                self.assertEqual(retained,[[('condition',5500,0,0,7000,0,31000,20000,60),('condition',7000,0,7000,31000,0,31000,20000,30)]]*2)
+                self.assertEqual(db.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name='temporary_targets'").fetchone()[0],0)
                 self.assertEqual([r['reference'] for r in rows],[None,100,100])
                 self.assertIsNone(rows[1]['integral'])
                 self.assertEqual(rows[1]['price'],200)

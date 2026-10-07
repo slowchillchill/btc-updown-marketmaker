@@ -322,6 +322,28 @@ def source_sampling(db,config,boundary,work,units,ranges,rows,progress,stages=No
         runner=direct.SourceQuery(db,config['files'],Path(config['boundary_helper']),work,source,file_ranges=ranges,columns=PRICE_COLUMNS,twap_windows=(30,60))
         lower=config['start'];last_accepted=None
         if source=='chainlink_spot':db.execute('CREATE TABLE spot_support(received BIGINT,visible_at BIGINT,price DOUBLE)')
+        if source=='chainlink_twap60':
+            # 固定目标与单元无关；普通内存表跨 SourceQuery.release 保留。
+            target=[]
+            for condition_rows in group_rows(rows).values():
+                first=condition_rows[0];last_sample=condition_rows[-1]['at']
+                if first.get('market_known_at',first['start']) is None:continue
+                for j,rule in enumerate(first.get('rule_segments',[])):
+                    w={'chainlink_twap_thirty_seconds':30,'chainlink_twap_sixty_seconds':60}.get(rule['reference'])
+                    if w is None:continue
+                    following=first['rule_segments'][j+1]['at'] if j+1<len(first['rule_segments']) else first['end']
+                    # 首个可见规则沿公共 OpeningWindow；真实规则变化从变化可见时开始。
+                    lower_bound=first['start'] if j==0 else rule['at']
+                    target.append((first['condition_id'],rule['at'],first.get('market_known_at',first['start']),
+                        lower_bound,following,first['start'],first['end'],last_sample,w))
+            import pyarrow as pa
+            names=('condition_id','rule_visible','known_at','lower_bound','upper_bound','start','end_time','last_sample','window_s')
+            columns=list(zip(*target)) if target else [[] for _ in names]
+            table=pa.Table.from_arrays([pa.array(values,type=pa.string() if i==0 else pa.int64())
+                for i,values in enumerate(columns)],names=names)
+            db.register('twap_target_columns',table)
+            try:db.execute('CREATE TABLE temporary_targets AS SELECT * FROM twap_target_columns')
+            finally:db.unregister('twap_target_columns')
         carry=[];spot_level=[]
         for number,unit in enumerate(u for u in units if u.source==source):
             _,directories=runner.load(unit)
@@ -368,20 +390,6 @@ def source_sampling(db,config,boundary,work,units,ranges,rows,progress,stages=No
                 normalize(db,boundary,work,'effective_common',expression,source=='chainlink_twap60')
                 if source=='chainlink_twap60':
                     # 与公共选择器共用候选谓词；SQL 先聚合每市场/规则段的首个候选。
-                    db.execute('CREATE TEMP TABLE temporary_targets(condition_id VARCHAR,rule_visible BIGINT,known_at BIGINT,lower_bound BIGINT,upper_bound BIGINT,start BIGINT,end_time BIGINT,last_sample BIGINT,window_s BIGINT)')
-                    target=[]
-                    for condition_rows in group_rows(rows).values():
-                        first=condition_rows[0];last_sample=condition_rows[-1]['at']
-                        if first.get('market_known_at',first['start']) is None:continue
-                        for j,rule in enumerate(first.get('rule_segments',[])):
-                            w={'chainlink_twap_thirty_seconds':30,'chainlink_twap_sixty_seconds':60}.get(rule['reference'])
-                            if w is None:continue
-                            following=first['rule_segments'][j+1]['at'] if j+1<len(first['rule_segments']) else first['end']
-                            # 首个可见规则沿公共 OpeningWindow；真实规则变化从变化可见时开始。
-                            lower_bound=first['start'] if j==0 else rule['at']
-                            target.append((first['condition_id'],rule['at'],first.get('market_known_at',first['start']),
-                                lower_bound,following,first['start'],first['end'],last_sample,w))
-                    if target:db.executemany('INSERT INTO temporary_targets VALUES (?,?,?,?,?,?,?,?,?)',target)
                     found=db.execute('''SELECT t.condition_id,t.rule_visible,t.start,t.end_time,
                         greatest(e.clock,t.rule_visible,t.known_at) AS known_at,
                         epoch_ms(e.timestamp_received),epoch_ms(e.payload_timestamp),n.price,e.window_s
@@ -419,6 +427,7 @@ def source_sampling(db,config,boundary,work,units,ranges,rows,progress,stages=No
             sample_spot(db,rows,tail,spot_level)
             db.execute('DROP TABLE history');db.execute('DROP TABLE price_pairs');db.execute('DROP TABLE spot_support')
         else:apply_price_carry(rows,tail,carry,source)
+        if source=='chainlink_twap60':db.execute('DROP TABLE temporary_targets')
         db.execute('DROP TABLE carry');db.execute('DROP TABLE trade_carry')
         if stages:
             # 每个来源只保留它新增/更新的固定采样字段和必要充分统计。
