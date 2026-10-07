@@ -22,6 +22,7 @@ printf '\n' >> "$artifact_dir/commands.txt"
 command=("$repo_root/model-train/.venv/bin/python" model-train/scripts/gpu_public_state_validation.py
     --binary "$CARGO_TARGET_DIR/debug/dpt-public-compact" --material "$material"
     --device-page "$artifact_dir/public-page" --output "$artifact_dir/report.json")
+if [ -n "${3:-}" ]; then command+=(--legacy-device-page "$3"); fi
 printf '%q ' "${command[@]}" >> "$artifact_dir/commands.txt"
 printf '\n' >> "$artifact_dir/commands.txt"
 "${command[@]}" > "$artifact_dir/tests.log" 2>&1

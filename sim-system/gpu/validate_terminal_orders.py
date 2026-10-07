@@ -48,7 +48,7 @@ def main():
     token=item['item']['order']['token_id']
     price=kind['limit_price_pusd_per_share']
     # 运行价位来自原合法意图，源Book不需要有该档，也不虚构外部盘口。
-    block=HiddenPmBlock(source['buckets'],source['assets'],[(token,'BID',price)],source_binding=source['source_binding'])
+    block=HiddenPmBlock(source['assets'],[(token,'BID',price)],source_binding=source['source_binding'])
     asset=next(i for i,value in enumerate(block.assets) if value['token_id']==token)
     before=source['ledger_before']['projection']
     opening=before['platform_confirmed_projection']

@@ -22,16 +22,26 @@ from hidden_resolution import TerminalColumns
 
 
 class HiddenPmBlock:
-    def __init__(self, buckets, assets, slots, *, source_binding, device='cuda'):
-        # JSON是新的可达输入边界。绑定原材料reader再次恢复内容，不能只信自有hash或ID。
-        command = [source_binding['binary'], '--progress-interval-seconds', '0', '--verify-gpu-pm-buckets',
+    def __init__(self, assets, slots, *, source_binding, device='cuda'):
+        # 严格原reader一次输出完整桶及真实来源目录，直接装箱，不接受裸桶载荷。
+        command = [source_binding['binary'], '--progress-interval-seconds',
+                   str(source_binding.get('progress_interval_seconds', 10)), '--gpu-pm-source',
                    source_binding['hidden'], source_binding['public'], str(source_binding['rows']),
                    str(source_binding['bytes']), str(source_binding['max_batch_bytes'])]
-        verified = subprocess.run(command, input=json.dumps(buckets).encode(), stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, check=False)
-        if verified.returncode:
-            raise ValueError('hidden冷批次与实际原材料不一致: ' + verified.stderr.decode())
-        self.source_verification = json.loads(verified.stdout)
+        buckets = []
+        with subprocess.Popen(command, stdout=subprocess.PIPE) as reader:
+            last = None
+            for line in reader.stdout:
+                value = json.loads(line)
+                if 'source_scene' in value:
+                    last = value
+                else:
+                    buckets.append(value)
+            if reader.wait():
+                raise ValueError('hidden严格原材料读取失败')
+        if last is None:
+            raise ValueError('hidden严格原材料读取未完成')
+        self.source_verification = last
         # 原首次FixedIdentity的完整市场成员来自reader；不从当前PM步骤人口推断Active。
         scene = self.source_verification['source_scene']
         registry = {}

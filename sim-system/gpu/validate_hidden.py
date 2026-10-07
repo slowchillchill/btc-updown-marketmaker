@@ -21,7 +21,7 @@ def shares(value):
 def main():
     original = json.load(sys.stdin)
     started = time.perf_counter()
-    block = HiddenPmBlock(original['buckets'], original['assets'], original['slots'], source_binding=original['source_binding'])
+    block = HiddenPmBlock(original['assets'], original['slots'], source_binding=original['source_binding'])
     state = Numbers.run_exact_batch(lambda: block.empty_state(segment_capacity=1))
     from fractions import Fraction
     for index, expected in enumerate(original['expected']):
@@ -76,16 +76,8 @@ def main():
     assert all(not any(isinstance(value, torch.Tensor) for value in entry.values()) for entry in block.operations)
     assert block.event_indices.shape == (len(block.operations), 14)
     check_runtime_buckets(block, original)
-    import copy
-    damaged = copy.deepcopy(original['buckets'])
-    initial = next(step for bucket in damaged for _, step in bucket['steps'] if 'InitialSnapshot' in step['change'] and step['change']['InitialSnapshot']['bids'])
-    initial['change']['InitialSnapshot']['bids'][0]['quantity_shares'] = '999'
-    try:
-        HiddenPmBlock(damaged, original['assets'], original['slots'], source_binding=original['source_binding'])
-    except ValueError as error:
-        assert '不一致' in str(error)
-    else:
-        raise AssertionError('保留ID改变载荷不得进入设备状态')
+    # 调用方旧裸桶的修改不再进入生产入口；实际来源载荷校验由严格reader承担。
+    assert block.buckets == original['buckets']
     torch.cuda.synchronize()
     print(json.dumps({'checks': ['compact_independent_hidden_source', 'original_sim_exact_asset_predecessor',
         'uninitialized_distinct_from_initialized_empty', 'fine_source_quantity_preserved',
@@ -180,7 +172,7 @@ def check_runtime_buckets(block, original):
     snapshot=block.operations[snapshot_index]
     asset_token=block.assets[snapshot['asset']]['token_id']
     missing_slot=next(slot for slot in block.slots if slot[0]==asset_token and slot[1]=='ASK')
-    damaged=HiddenPmBlock(original['buckets'],original['assets'],[v for v in block.slots if v != missing_slot],
+    damaged=HiddenPmBlock(original['assets'],[v for v in block.slots if v != missing_slot],
                           source_binding=original['source_binding'])
     failed=Numbers.run_exact_batch(lambda:open_runtime(damaged))
     source,eof=failed.hidden_frontier.scheduled()

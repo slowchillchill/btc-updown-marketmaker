@@ -28,29 +28,28 @@ def main():
     source = json.load(sys.stdin)
     started = time.perf_counter()
     tensor = lambda x, dtype=torch.int64: torch.tensor(x, dtype=dtype, device='cuda')
-    block = HiddenPmBlock(source['buckets'], source['assets'], [], source_binding=source['source_binding'])
+    block = HiddenPmBlock(source['assets'], [], source_binding=source['source_binding'])
     page_mode=os.environ.get('B_GPU_HIDDEN_DEVICE_PAGES')=='1'
     prepared=None; page_report={}
     if page_mode:
         import subprocess
         import numpy as np
         import hidden_inputs
-        from hidden_device_page import build_hidden_device_columns,PreparedHiddenMaterial,_json_bytes
+        from hidden_device_page import build_hidden_device_columns,PreparedHiddenMaterial
         destination=Path(os.environ['B_GPU_ORDER_ARTIFACT_DIR'])/'hidden-device-columns'
         before_build=time.perf_counter()
-        binding=build_hidden_device_columns(block,destination,source['source_binding'],progress=progress)
+        build_hidden_device_columns(block,destination,source['source_binding'],progress=progress)
         build_seconds=time.perf_counter()-before_build
-        (destination.parent/'hidden-columns-binding.json').write_bytes(_json_bytes(binding.__dict__))
         original=block; timings=[]
-        saved=(subprocess.run,hidden_inputs.decimal_columns,Numbers.ExactRational.ratio,torch.argsort,torch.bincount)
-        def forbidden(*args,**kwargs): raise AssertionError('hidden页加载不得再解析事件/decimal/GCD/排序或调用verify CLI')
+        saved=(subprocess.Popen,hidden_inputs.decimal_columns,Numbers.ExactRational.ratio,torch.argsort,torch.bincount)
+        def forbidden(*args,**kwargs): raise AssertionError('hidden页加载不得再解析事件/decimal/GCD/排序或调用原读取CLI')
         try:
-            subprocess.run=hidden_inputs.decimal_columns=forbidden
+            subprocess.Popen=hidden_inputs.decimal_columns=forbidden
             Numbers.ExactRational.ratio=staticmethod(forbidden)
             torch.argsort=torch.bincount=forbidden
             for _ in range(2):
                 before_load=time.perf_counter()
-                prepared=PreparedHiddenMaterial(destination,source['source_binding'],binding=binding)
+                prepared=PreparedHiddenMaterial(destination,source['source_binding'])
                 first=HiddenPmBlock.from_prepared(prepared.page(0,2))
                 second=HiddenPmBlock.from_prepared(prepared.page(2,3))
                 assert prepared.banks['buckets'].decoded_records==0
@@ -58,7 +57,7 @@ def main():
                 assert first.decimals is second.decimals
                 timings.append(time.perf_counter()-before_load)
         finally:
-            subprocess.run,hidden_inputs.decimal_columns=saved[:2]
+            subprocess.Popen,hidden_inputs.decimal_columns=saved[:2]
             Numbers.ExactRational.ratio=staticmethod(saved[2])
             torch.argsort,torch.bincount=saved[3:]
         for name in ('event_indices','step_tags','snapshot_levels','snapshot_offsets','reference_rows'):
@@ -66,20 +65,26 @@ def main():
         compare(prepared.decimals,original.decimals,'loaded_exact_hidden_dictionary')
         assert prepared.banks['buckets']==source['buckets']
         assert prepared.banks['assets']==source['assets']
-        # 调用方已保存绑定不会跟随待加载页自述SHA变化。
-        manifest_path=destination/'manifest.json'; manifest_bytes=manifest_path.read_bytes()
-        changed=json.loads(manifest_bytes); changed['market_count']+=1
-        manifest_path.write_bytes(_json_bytes(changed))
-        try:
-            try: PreparedHiddenMaterial(destination,source['source_binding'],binding=binding)
-            except ValueError: pass
-            else: raise AssertionError('改自述manifest不能替换独立publisher绑定')
-        finally: manifest_path.write_bytes(manifest_bytes)
+        # 实际完整桶closure成员损坏；其余成员保持原只读输入。
+        import tempfile
+        import shutil
+        with tempfile.TemporaryDirectory(prefix='hidden-corrupt-',dir=destination.parent) as temporary:
+            broken=Path(temporary)
+            manifest=json.loads((destination/'manifest.json').read_bytes())
+            member=manifest['members']['closure']['file']
+            shutil.copyfile(destination/'manifest.json',broken/'manifest.json')
+            data=bytearray((destination/member).read_bytes()); data[0]^=1
+            (broken/member).write_bytes(data)
+            for entry in manifest['members'].values():
+                if entry['file']!=member: os.link(destination/entry['file'],broken/entry['file'])
+            try: PreparedHiddenMaterial(broken,source['source_binding'])
+            except ValueError as error: assert '摘要' in str(error)
+            else: raise AssertionError('完整桶成员损坏不得加载')
         block=first
         page_report={'hidden_columns_build_seconds':build_seconds,'hidden_columns_load_seconds':timings,
             'hidden_columns_bytes':sum(p.stat().st_size for p in destination.iterdir()),
             'hidden_second_load_no_event_JSON_decimal_GCD_sort_or_verify':True,
-            'hidden_caller_independent_binding_rejects_changed_manifest':True,
+            'hidden_corrupted_bucket_member_rejected':True,
             'hidden_full_original_bucket_and_exact_columns_checked':True,
             'hidden_real_complete_bucket_pages':[[0,2],[2,3]]}
     ends = tensor([source['market_end']]*len(block.assets))

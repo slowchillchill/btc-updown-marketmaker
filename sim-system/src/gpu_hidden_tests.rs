@@ -173,7 +173,8 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
     while let Some(bucket) = next_compact_hidden_gpu_bucket_v1(&mut reader).unwrap() {
         for ((position, reference), event_id) in bucket.bucket.reference_positions.iter()
             .zip(&bucket.references).zip(&bucket.reference_market_event_ids) {
-            let restored = reader.reference_market_fact(*position).unwrap();
+            let (restored_reference, restored) = reader.reference_fact_with_market(*position).unwrap();
+            assert_eq!(&restored_reference, reference);
             match &reference.payload {
                 CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact {..}) => {
                     let expected = &market_facts[&reference.position];

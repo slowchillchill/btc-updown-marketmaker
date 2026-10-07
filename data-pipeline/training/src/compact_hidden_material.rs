@@ -232,6 +232,10 @@ pub struct CompactHiddenMaterialReaderV1 {
     messages: BTreeMap<u64, (usize, u64, u64, bool)>,
     source: PublicCompactReaderV1,
     cached_message: Option<CompactHiddenMessageV1>,
+    /// 仅当前消息的已验收恢复结果；切换消息即替换，不缓存整段历史。
+    cached_steps: Vec<PmReductionStepV1<'static, SourceEvidenceRefV3>>,
+    #[cfg(test)]
+    message_loads: u64,
     index: RunCursor,
     next: Option<HiddenIndexEntryV1>,
     position: u64,
@@ -362,7 +366,8 @@ impl CompactHiddenMaterialReaderV1 {
             progress("hidden_receipt_sha256", "manifest.json", done, Some(total));
         })?;
         Ok(Self {manifest, material_manifest_sha256, source_scene, payload:File::open(root.join(MEMBERS[0]))?, offsets, messages,
-            source, cached_message:None, read_reports:0, expected_indexed_steps:0, expected_references, reference_facts:BTreeMap::new(), reference_locations:BTreeMap::new(), failed:false,
+            source, cached_message:None, cached_steps:Vec::new(),
+            #[cfg(test)] message_loads:0, read_reports:0, expected_indexed_steps:0, expected_references, reference_facts:BTreeMap::new(), reference_locations:BTreeMap::new(), failed:false,
             index:RunCursor::open(&root.join(MEMBERS[3]), rows, bytes)?, next:None, position:0,
             read_steps:0, read_references:0, last_key:None, max_packet_bytes})
     }
@@ -379,6 +384,7 @@ impl CompactHiddenMaterialReaderV1 {
         if self.cached_message.as_ref().is_some_and(|packet| packet.canonical_position==canonical_position) {
             return Ok(());
         }
+        #[cfg(test)] { self.message_loads += 1; }
         let &(index,first,count,validated) = self.messages.get(&canonical_position)
             .ok_or_else(|| io::Error::other("hidden步骤缺实际消息关联"))?;
         let start = self.offsets[index]; let length = self.offsets[index+1]-start;
@@ -399,6 +405,7 @@ impl CompactHiddenMaterialReaderV1 {
         if !matches!(original.payload, crate::compact_public::CompactFactPayloadV1::PmFromInput(ref header) if header==&packet.message) {
             return Err(io::Error::other("hidden消息不是来源实际规范PM事实").into());
         }
+        let mut restored_steps = Vec::with_capacity(packet.steps.len());
         for (offset,(reference,step)) in packet.steps.iter().enumerate() {
             if reference.canonical_record_position != canonical_position
                 || reference.derivation_position != first + offset as u64
@@ -419,7 +426,7 @@ impl CompactHiddenMaterialReaderV1 {
             if matches!(step.change, CompactPmChangeV1::Inline(PmStepChangeV1::InitialSnapshot {..})) {
                 return Err(io::Error::other("compact hidden快照必须引用原输入").into());
             }
-            self.restore_materialized_step(&packet.message, step.clone())?;
+            restored_steps.push(self.restore_materialized_step(&packet.message, step.clone())?);
         }
         for report in &packet.reports {
             if report.canonical_fact_id != packet.message.event_id {
@@ -439,6 +446,7 @@ impl CompactHiddenMaterialReaderV1 {
                 .ok_or_else(|| io::Error::other("hidden报告计数溢出"))?;
             self.messages.get_mut(&canonical_position).unwrap().3 = true;
         }
+        self.cached_steps = restored_steps;
         self.cached_message = Some(packet);
         Ok(())
     }
@@ -454,14 +462,14 @@ impl CompactHiddenMaterialReaderV1 {
         Ok(fact)
     }
 
-    /// 仅恢复已验证引用的原canonical MarketFact；组和来源顺序来自原材料。
-    pub fn reference_market_fact(&mut self, index_position: u64)
-        -> RecordingResult<Option<CanonicalMarketFactV1>> {
+    /// 一次读取已验证引用的完整事实及原canonical市场身份，保持原组和来源顺序。
+    pub fn reference_fact_with_market(&mut self, index_position: u64)
+        -> RecordingResult<(crate::compact_public::CompactFactV1, Option<CanonicalMarketFactV1>)> {
         if self.failed {return Err(io::Error::other("失败的hidden材料读取不能继续").into());}
         self.failed = true;
         let canonical = self.reference_locations.get(&index_position).copied()
             .ok_or_else(|| io::Error::other("参考不属于已验证的hidden索引位置"))?;
-        let fact = self.source.canonical_market_fact(canonical)?;
+        let fact = self.source.canonical_fact_with_market(canonical)?;
         self.failed = false;
         Ok(fact)
     }
@@ -486,12 +494,19 @@ impl CompactHiddenMaterialReaderV1 {
 
     fn restore_step_inner(&mut self, reference: &HiddenDerivedStepRefV1) -> RecordingResult<PmReductionStepV1<'static, SourceEvidenceRefV3>> {
         self.load_message(reference.canonical_record_position)?;
+        let index = self.cached_step_index(reference)?;
+        Ok(self.cached_steps[index].clone())
+    }
+
+    fn cached_step_index(&self, reference: &HiddenDerivedStepRefV1) -> RecordingResult<usize> {
         let packet = self.cached_message.as_ref().unwrap();
-        let (_, step) = packet.steps.iter().find(|(stored, _)| stored==reference)
-            .ok_or_else(|| io::Error::other("恢复步骤不是本材料实际引用"))?;
-        let step = step.clone();
-        let header = packet.message.clone();
-        self.restore_materialized_step(&header, step)
+        let first = self.messages[&reference.canonical_record_position].1;
+        let index = usize::try_from(reference.derivation_position.checked_sub(first)
+            .ok_or_else(|| io::Error::other("恢复步骤不是本材料实际引用"))?)?;
+        if packet.steps.get(index).map(|(stored,_)| stored) != Some(reference) {
+            return Err(io::Error::other("恢复步骤不是本材料实际引用").into());
+        }
+        Ok(index)
     }
 
     fn restore_materialized_step(&mut self, header: &CompactPmMessageHeaderV1,
@@ -579,10 +594,7 @@ impl CompactHiddenMaterialReaderV1 {
         match &entry {
             HiddenIndexEntryV1::Step(reference) => {
                 self.load_message(reference.canonical_record_position)?;
-                let packet = self.cached_message.as_ref().unwrap();
-                if !packet.steps.iter().any(|(stored,_)| stored==reference) {
-                    return Err(io::Error::other("hidden时间索引不指向实际步骤").into());
-                }
+                self.cached_step_index(reference)?;
                 self.read_steps += 1;
             }
             HiddenIndexEntryV1::Reference {canonical_position,derivation_position,source_at_utc_ms} => {
@@ -608,19 +620,38 @@ impl CompactHiddenMaterialReaderV1 {
     pub fn next_bucket(&mut self) -> RecordingResult<Option<ClosedCompactHiddenBucketV1>> {
         if self.failed { return Err(io::Error::other("失败的hidden材料读取不能继续").into()); }
         self.failed = true;
-        let result = self.next_bucket_inner();
+        let result = self.next_bucket_inner(None);
         if result.is_ok() { self.failed = false; }
         result
     }
 
-    fn next_bucket_inner(&mut self) -> RecordingResult<Option<ClosedCompactHiddenBucketV1>> {
+    /// 在严格遍历当前完整桶时交付已物化步骤；peek不覆盖已收集的结果。
+    /// 仅GPU冷构建需要此输出；原只读桶入口及恢复接口保持。
+    pub fn next_bucket_with_market_steps(&mut self) -> RecordingResult<Option<(ClosedCompactHiddenBucketV1,
+        Vec<(MarketIdentityV2, PmReductionStepV1<'static, SourceEvidenceRefV3>)>)>> {
+        if self.failed { return Err(io::Error::other("失败的hidden材料读取不能继续").into()); }
+        self.failed = true;
+        let mut steps = Vec::new();
+        let result = self.next_bucket_inner(Some(&mut steps));
+        if result.is_ok() { self.failed = false; }
+        Ok(result?.map(|bucket| (bucket, steps)))
+    }
+
+    fn next_bucket_inner(&mut self, mut materialized: Option<&mut Vec<(MarketIdentityV2,
+        PmReductionStepV1<'static, SourceEvidenceRefV3>)>>) -> RecordingResult<Option<ClosedCompactHiddenBucketV1>> {
         let first = match self.next.take() {Some(value)=>value, None=>match self.read_index()? {
             Some(value)=>value, None=>return Ok(None),
         }};
         let at = entry_key(&first)?.0; let start = self.position;
         let mut current = first; let mut steps = Vec::new(); let mut references = Vec::new();
         let closure = loop {
-            match current {HiddenIndexEntryV1::Step(step)=>steps.push(step),
+            match current {HiddenIndexEntryV1::Step(step)=>{
+                if let Some(output) = materialized.as_mut() {
+                    let restored = self.restore_step_inner(&step)?;
+                    output.push((self.cached_message.as_ref().unwrap().message.market.clone(), restored));
+                }
+                steps.push(step);
+            },
                 HiddenIndexEntryV1::Reference {..}=>references.push(self.position)};
             self.position += 1;
             match self.read_index()? {
@@ -688,6 +719,51 @@ mod tests {
             assert_eq!(adjacent[0].index_end,adjacent[1].index_start);
         }
         result
+    }
+
+    #[test]
+    #[ignore = "AutoDL同桶多消息及下一桶预读，直接交物化步骤不重复读取来源"]
+    fn gpu_bucket_source_materializes_same_time_messages_before_peek_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("public");
+        let target = temp.path().join("hidden");
+        let mut public = core();
+        let mut writer = PublicCompactWriterV1::create(&source_root,public.header().clone()).unwrap();
+        for input in [meta(0),pm(1,1,20050,book("10")),
+            pm(2,2,20050,PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("20"))]}),
+            pm(3,3,20200,PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("30"))]}),end(4)] {
+            let prepared = prepare_public_ingress_v1(&public,&input,&BTreeMap::new(),&[]).unwrap();
+            let applied = public.push_facts(&prepared).unwrap();
+            writer.push_prepared(&input,&prepared,&applied).unwrap();
+        }
+        writer.publish().unwrap();
+        let order = Arc::new(GpuInitialRunOrderV1::start(Path::new(&std::env::var("B_GPU_PYTHON").unwrap()),
+            Path::new(&std::env::var("B_GPU_SORT_WORKER").unwrap())).unwrap());
+        let mut sort = config().sort; sort.merge_workers = 8;
+        prepare_compact_hidden_material_v1(&source_root,&target,1<<20,&sort,order,
+            "same-time-gpu-consumer".into(),None,|_,_,_,_| {}).unwrap();
+        let mut reader = CompactHiddenMaterialReaderV1::open(&target,&source_root,1,1<<20,1<<20,|_,_,_,_| {}).unwrap();
+        let first = crate::compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1(&mut reader).unwrap().unwrap();
+        assert_eq!(first.bucket.bucket_time_utc_ms,20050);
+        assert_eq!(first.bucket.closure,ReplayIndexClosureV1::NextGlobalEventAt(20200));
+        assert_eq!(first.bucket.steps.iter().map(|step|step.canonical_record_position).collect::<BTreeSet<_>>().len(),2);
+        assert_eq!(reader.message_loads,3,"两条当前消息和下一桶预读消息各读取一次");
+        assert!(first.steps.iter().any(|(_,step)| matches!(&step.change,
+            PmStepChangeV1::InitialSnapshot {bids,..} if bids[0].quantity_shares.0=="10")));
+        let changes = |bucket: &crate::compact_hidden_gpu::CompactHiddenGpuBucketV1| bucket.steps.iter().filter_map(|(_,step)| {
+            match &step.change {
+                PmStepChangeV1::LevelChange {transition,..} if transition.side==BookSide::Bid =>
+                    Some((transition.quantity_before_shares.0.clone(),transition.quantity_after_shares.0.clone())),
+                _=>None,
+            }
+        }).collect::<Vec<_>>();
+        assert_eq!(changes(&first),vec![("10".into(),"20".into())]);
+        let second = crate::compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1(&mut reader).unwrap().unwrap();
+        assert_eq!(second.bucket.bucket_time_utc_ms,20200);
+        assert_eq!(changes(&second),vec![("20".into(),"30".into())]);
+        assert!(crate::compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1(&mut reader).unwrap().is_none());
+        assert_eq!(reader.message_loads,3,"消费两桶不得重读被peek覆盖的消息");
+        println!("same_time_messages=2 peek_messages=1 actual_message_loads={}",reader.message_loads);
     }
 
     #[test]

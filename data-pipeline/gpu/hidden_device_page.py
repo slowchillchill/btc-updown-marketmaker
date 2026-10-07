@@ -1,11 +1,9 @@
 """原已结束hidden材料一次构建typed列，按完整桶读取设备页。
 
-复用public的成员codec与独立publisher绑定。源身份bank保持不可变并按需
+复用public的成员codec及实际public／hidden来源关联。源身份bank保持不可变并按需
 解码；页末只代表需要换入下一范围，不签发EOF或公开可见前沿。
 """
-from dataclasses import dataclass
 from pathlib import Path
-import hashlib
 import json
 import numpy as np
 import torch
@@ -24,15 +22,8 @@ BANKS=('assets','slots','buckets','lifecycle_values','terminals','canonical_ids'
 EXACTS=('numerator','denominator','index_starts','index_ends')
 
 
-@dataclass(frozen=True)
-class HiddenPageBinding:
-    public_manifest_sha256: str
-    hidden_manifest_sha256: str
-    columns_manifest_sha256: str
-
-
 def build_hidden_device_columns(block,destination,source_binding,*,progress=None):
-    """输入必须来自HiddenPmBlock的原reader逐值验收；不从调用方裸列造凭据。"""
+    """输入由HiddenPmBlock从原严格reader直接装箱。"""
     hidden=Path(source_binding['hidden']); public=Path(source_binding['public'])
     verified=block.source_verification
     public_sha=_sha(public/'manifest.json'); hidden_sha=_sha(hidden/'manifest.json')
@@ -85,9 +76,7 @@ def build_hidden_device_columns(block,destination,source_binding,*,progress=None
         'hidden_manifest_sha256':hidden_sha,'source_prefix':json.loads((hidden/'manifest.json').read_bytes())['summary']['source_prefix'],
         'market_count':block.market_count,'buckets':len(block.buckets)}
     with (destination/'manifest.json').open('xb') as stream: stream.write(_json_bytes(manifest))
-    binding=HiddenPageBinding(public_sha,hidden_sha,_sha(destination/'manifest.json'))
     if progress: progress('hidden_columns_written',bytes=sum(p.stat().st_size for p in destination.iterdir()))
-    return binding
 
 
 class BankRange:
@@ -121,19 +110,17 @@ class PreparedOperations:
 
 class PreparedHiddenMaterial:
     """共享只读bank与成员映射；设备只上传所选完整桶页的步骤列。"""
-    def __init__(self,directory,source_binding,*,binding,device='cuda'):
-        self.directory=Path(directory); self.device=torch.device(device); self.binding=binding
+    def __init__(self,directory,source_binding,*,device='cuda'):
+        self.directory=Path(directory); self.device=torch.device(device)
         data=(self.directory/'manifest.json').read_bytes()
-        if not isinstance(binding,HiddenPageBinding) or hashlib.sha256(data).hexdigest()!=binding.columns_manifest_sha256:
-            raise ValueError('hidden列页与调用方独立publisher绑定不一致')
         manifest=json.loads(data)
-        if (manifest['version']!=VERSION or manifest['public_manifest_sha256']!=binding.public_manifest_sha256
-                or manifest['hidden_manifest_sha256']!=binding.hidden_manifest_sha256
-                or _sha(Path(source_binding['public'])/'manifest.json')!=binding.public_manifest_sha256
-                or _sha(Path(source_binding['hidden'])/'manifest.json')!=binding.hidden_manifest_sha256):
+        if (manifest['version']!=VERSION
+                or _sha(Path(source_binding['public'])/'manifest.json')!=manifest['public_manifest_sha256']
+                or _sha(Path(source_binding['hidden'])/'manifest.json')!=manifest['hidden_manifest_sha256']):
             raise ValueError('hidden列页原材料绑定错误')
         original=json.loads((Path(source_binding['hidden'])/'manifest.json').read_bytes())
-        if manifest['source_prefix']!=original['summary']['source_prefix']:
+        if (manifest['source_prefix']!=original['summary']['source_prefix']
+                or original['source_manifest_sha256']!=manifest['public_manifest_sha256']):
             raise ValueError('hidden列页完整来源前缀错误')
         expected=set(TABLES)|{name+'.'+field for name in EXACTS for field in ('words','sign','fault')}
         expected|={name+'.'+field for name in BANKS for field in ('utf8','offsets')}

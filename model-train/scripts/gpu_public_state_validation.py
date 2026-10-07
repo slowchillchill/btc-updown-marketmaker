@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--material',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--original-reference',type=Path)
+    parser.add_argument('--legacy-device-page',type=Path,help='现有v1页的消费列兼容核对')
     parser.add_argument('--device-page',type=Path,help='原reader一次构建并两次直接加载固定二进制列')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
@@ -62,10 +63,7 @@ def main():
         build_started=time.perf_counter()
         built=build_public_device_page(args.binary,args.material,args.device_page,progress=page_progress)
         build_seconds=time.perf_counter()-build_started
-        original_columns,binding=built[4:]
-        from dataclasses import asdict
-        args.output.parent.mkdir(parents=True,exist_ok=True)
-        (args.output.parent/'public-page-binding.json').write_text(json.dumps(asdict(binding),ensure_ascii=False,indent=2)+'\n')
+        original_columns=built[4]
         # 第二次及后续冷安装禁止GPU数字解析/GCD入口与前缀排序/counts。
         saved=(public_module.decimal_columns,torch.argsort,torch.bincount,public_module.PrefixColumn.__init__)
         saved_ratio=vars(_numbers().ExactRational)['ratio']
@@ -76,16 +74,15 @@ def main():
             _numbers().ExactRational.ratio=classmethod(forbidden)
             for attempt in range(2):
                 load_started=time.perf_counter()
-                page=PreparedPublicPage(args.device_page,args.material,binding=binding)
+                page=PreparedPublicPage(args.device_page,args.material)
                 installed=page.install()
-                assert page.columns['fact_records'].decoded_records==0
                 assert all(page.columns[name].decoded_records==0 for name in ('assets','markets','anchors','lifecycle_states'))
                 assert set(page.columns)==set(original_columns)
                 for name in TABLES: assert np.array_equal(page.columns[name],np.asarray(original_columns[name]).reshape(page.columns[name].shape))
                 for name in ('anchor_sets','terminal_payouts'):
                     assert len(page.columns[name])==len(original_columns[name])
                     for current,original in zip(page.columns[name],original_columns[name]): assert np.array_equal(current,np.asarray(original).reshape(current.shape))
-                for name in set(original_columns)-set(TABLES)-{'anchor_sets','terminal_payouts'}:
+                for name in set(original_columns)-set(TABLES)-set(PREFIXES)-{'anchor_sets','terminal_payouts'}:
                     assert page.columns[name]==original_columns[name]
                 for old,new in zip(built[:4],installed):
                     for name in PREFIXES:
@@ -112,17 +109,17 @@ def main():
             broken=Path(temporary)
             shutil.copyfile(args.device_page/'manifest.json',broken/'manifest.json')
             manifest=json.loads((args.device_page/'manifest.json').read_text())
-            identity_name=manifest['members']['fact_records.utf8']['file']
+            identity_name=manifest['members']['anchors.utf8']['file']
             identity=bytearray((args.device_page/identity_name).read_bytes()); identity[-1]^=1
             (broken/identity_name).write_bytes(identity)
             # 其余成员硬链接原只读页；仅独立复制的身份成员发生损坏。
             for entry in manifest['members'].values():
                 if entry['file']!=identity_name: os.link(args.device_page/entry['file'],broken/entry['file'])
-            try: PreparedPublicPage(broken,args.material,binding=binding)
+            try: PreparedPublicPage(broken,args.material)
             except ValueError as error:
                 assert '摘要' in str(error) and identity_name in str(error)
             else: raise AssertionError('损坏原身份成员必须拒绝')
-        # 同一冗余消费列边界：篡改预排值并更新其自身SHA仍不能替换已接纳页。
+        # 实际消费列越界：即使成员摘要随之更新，公共消费者仍拒绝非法值。
         with tempfile.TemporaryDirectory(prefix='page-rehashed-',dir=args.output.parent) as temporary:
             broken=Path(temporary)
             manifest=json.loads((args.device_page/'manifest.json').read_text())
@@ -133,20 +130,35 @@ def main():
             rows[1,3]=len(original_columns['decimals']); rows.flush(); del rows
             entry['sha256']=hashlib.sha256(target.read_bytes()).hexdigest()
             (broken/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,separators=(',',':')))
-            try: PreparedPublicPage(broken,args.material,binding=binding)
-            except ValueError as error: assert 'publisher绑定' in str(error)
-            else: raise AssertionError('重写成员自身摘要不得替换已接纳预排事实')
+            for other in manifest['members'].values():
+                if other['file']!=entry['file']: os.link(args.device_page/other['file'],broken/other['file'])
+            try: PreparedPublicPage(broken,args.material).install()
+            except ValueError as error: assert '精确值引用越界' in str(error)
+            else: raise AssertionError('非法精确值引用不得进入实际消费列')
+        if args.legacy_device_page is not None:
+            legacy=PreparedPublicPage(args.legacy_device_page,args.material)
+            legacy_states=legacy.install()
+            assert 'fact_records' not in legacy.columns
+            for name in TABLES:
+                assert np.array_equal(legacy.columns[name],prepared.columns[name]),name
+            for old,new in zip(legacy_states,installed):
+                for name in PREFIXES:
+                    if hasattr(old,name):
+                        assert torch.equal(getattr(old,name).padded,getattr(new,name).padded),name
+                        assert torch.equal(getattr(old,name).offsets,getattr(new,name).offsets),name
+            page_progress('legacy_public_v1_consumption_checked')
         wire=b''
         member_sizes=sorted(((p.name,p.stat().st_size) for p in args.device_page.iterdir()),key=lambda entry:entry[1],reverse=True)
         page_report={'build_seconds':build_seconds,'load_seconds':loads,
             'bytes':sum(p.stat().st_size for p in args.device_page.iterdir()),
             'largest_members':member_sizes[:8],
             'complete_original_columns_and_full_identity_equal':True,
-            'fact_json_decodes_during_two_loads':prepared.columns['fact_records'].decoded_records,
+            'duplicate_fact_bank_stored':False,
             'identity_json_decodes_during_two_loads':0,
             'two_loads_without_decimal_gcd_or_prefix_sort_checked':True,
             'corrupted_original_identity_member_rejected':True,
-            'rehashed_prepared_member_rejected_by_independent_publisher_binding':True,
+            'prepared_value_domain_rejected_by_consumer':True,
+            'legacy_v1_checked':args.legacy_device_page is not None,
             'whole_material_ended_page_only':True,'continuous_page_handoff_checked':False}
         del built
     parsed = time.perf_counter()
@@ -913,7 +925,6 @@ def main():
               'not_delivered':(['reference_preparation_for_this_material'] if not columns['reference_preparation_complete'] else [])+['hidden','sim_noe_ledger',
                                'whole_root_100ms_scheduler_cross_block','full_actor','ppo','active_root_restore']}
     if prepared is not None:
-        assert prepared.columns['fact_records'].decoded_records==0
         report['public_device_page']['cold_identity_records_decoded_by_existing_consumers']={
             name:prepared.columns[name].decoded_records for name in ('assets','markets','anchors','lifecycle_states')}
     args.output.parent.mkdir(parents=True,exist_ok=True)

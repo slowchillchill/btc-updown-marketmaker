@@ -116,15 +116,14 @@ def main():
         from hidden_inputs import HiddenPmBlock
         from hidden_frontier import HiddenBucketColumns,HiddenBucketFrontier
         slots=[('1','ASK','0.2'),('1','BID','0.3'),('1','BID','0.4'),('2','BID','0.4'),('2','ASK','0.6')]
-        block=HiddenPmBlock(material['buckets'],material['assets'],slots,source_binding=material['source_binding'])
+        block=HiddenPmBlock(material['assets'],slots,source_binding=material['source_binding'])
         assert all(not value['references'] for value in block.buckets), '该有限源尚未接市场reference处理器'
         assert len(block.buckets)==2, '初始双Book一桶，七条Maker消息同一完整桶'
         if os.environ.get('B_GPU_HIDDEN_ORDER_PAGES')=='1':
-            from hidden_device_page import build_hidden_device_columns,PreparedHiddenMaterial,_json_bytes
+            from hidden_device_page import build_hidden_device_columns,PreparedHiddenMaterial
             destination=Path(os.environ['B_GPU_ORDER_ARTIFACT_DIR'])/'hidden-order-columns'
-            binding=build_hidden_device_columns(block,destination,material['source_binding'],progress=progress)
-            (destination.parent/'hidden-order-binding.json').write_bytes(_json_bytes(binding.__dict__))
-            prepared_hidden=PreparedHiddenMaterial(destination,material['source_binding'],binding=binding)
+            build_hidden_device_columns(block,destination,material['source_binding'],progress=progress)
+            prepared_hidden=PreparedHiddenMaterial(destination,material['source_binding'])
             compare(prepared_hidden.decimals,block.decimals,'order_pages_shared_exact_source')
             assert prepared_hidden.banks['buckets']==material['buckets']
             block=HiddenPmBlock.from_prepared(prepared_hidden.page(0,1))
@@ -165,7 +164,7 @@ def main():
         compare(initial_storage.runtime,runtime,'device_selected_initial_complete_snapshots')
         progress('device_selected_initial_snapshots_checked',actual_steps=len(block.buckets[0]['steps']))
         # 同一原双Book漏一个实际ASK绑定：新ragged图不得部分初始化失败根。
-        missing_block = HiddenPmBlock(material['buckets'],material['assets'],slots[:-1],
+        missing_block = HiddenPmBlock(material['assets'],slots[:-1],
                                       source_binding=material['source_binding'])
         missing_start = replace(initial_runtime,
             hidden=Numbers.run_exact_batch(lambda:missing_block.empty_state(segment_capacity=2)),
@@ -174,7 +173,7 @@ def main():
         check_initial_gather(missing_start,source,tensor,fee_rate,rebate,'missing_snapshot',True)
         # 实际typedraw双空Book材料、零运行档位；不是给非空源补padding造空。
         empty_material = source['empty_hidden_material']
-        empty_block = HiddenPmBlock(empty_material['buckets'],empty_material['assets'],[],
+        empty_block = HiddenPmBlock(empty_material['assets'],[],
                                     source_binding=empty_material['source_binding'])
         empty_start = replace(initial_runtime,
             hidden=Numbers.run_exact_batch(lambda:empty_block.empty_state(segment_capacity=2)),

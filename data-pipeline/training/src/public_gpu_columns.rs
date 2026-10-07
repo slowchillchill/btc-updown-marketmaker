@@ -48,8 +48,6 @@ pub struct PublicPmDeviceColumnsV1 {
     pub fact_types: Vec<String>,
     /// [group,typeId,directSourceStart,directSourceEnd]，一行对应一个实际规范事实。
     pub facts: Vec<[i64;4]>,
-    /// 与facts同人口的原完整身份/来源/证明。PM与深度payload仍借原输入，不复制L2。
-    pub fact_records: Vec<crate::compact_public::CompactFactV1>,
     /// 与groups同序的原闭组身份；物理行不代完整group ID。
     pub group_ids: Vec<Sha256Hex>,
     pub group_members: Vec<Vec<u64>>,
@@ -308,7 +306,6 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
             builder.columns.group_members.push(group.member_input_positions.clone());
             builder.columns.groups.push([i64::try_from(group.group_position)?,i64::try_from(group.closed_at_input_position)?,group.visible_at_utc_ms]);
             for fact in &group.records {
-                builder.columns.fact_records.push(fact.clone());
                 let kind = match &fact.payload {
                     crate::compact_public::CompactFactPayloadV1::PmFromInput(m) => *pm_types
                         .get(&m.input_record.input_position).ok_or("规范PM事实缺原类型引用")?,

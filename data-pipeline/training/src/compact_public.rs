@@ -470,20 +470,21 @@ impl PublicCompactReaderV1 {
     }
 
     /// 由原完整组及事实恢复canonical市场身份；不归约业务或签发运行前沿。
-    pub(crate) fn canonical_market_fact(&mut self, position: u64)
-        -> RecordingResult<Option<CanonicalMarketFactV1>> {
+    pub(crate) fn canonical_fact_with_market(&mut self, position: u64)
+        -> RecordingResult<(CompactFactV1, Option<CanonicalMarketFactV1>)> {
         let cursor = self.columns.stream_position()?;
         let result = self.cold_canonical_fact(position);
         self.columns.seek(SeekFrom::Start(cursor))?;
         let (group_id, fact) = result?;
         let CompactFactPayloadV1::Inline(payload @ PublicBusinessPayloadV1::MarketFact {..}) = &fact.payload
-            else {return Ok(None);};
+            else {return Ok((fact, None));};
         let direct_ids = fact.direct_sources.iter().map(|source|source.source_message_id.clone()).collect::<Vec<_>>();
         let original = PublicBusinessFactV1 {position:fact.position, payload:payload.clone(),
-            source_refs:fact.source_refs, lineage:fact.lineage, direct_time:fact.direct_time,
-            dependency_time:fact.dependency_time, quality:fact.quality, direct_sources:fact.direct_sources};
-        Ok(Some(data_pipeline_core::public_reduction::materialize_market_fact_v1(
-            &group_id, &direct_ids, &original)?))
+            source_refs:fact.source_refs.clone(), lineage:fact.lineage.clone(), direct_time:fact.direct_time.clone(),
+            dependency_time:fact.dependency_time.clone(), quality:fact.quality.clone(), direct_sources:fact.direct_sources.clone()};
+        let market = data_pipeline_core::public_reduction::materialize_market_fact_v1(
+            &group_id, &direct_ids, &original)?;
+        Ok((fact, Some(market)))
     }
 
     /// 已验收前缀内的原输入引用；读取不会推进组/事实光标。

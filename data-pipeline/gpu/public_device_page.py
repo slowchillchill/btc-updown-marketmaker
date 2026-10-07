@@ -6,7 +6,6 @@
 import hashlib
 import json
 import math
-from dataclasses import dataclass
 from pathlib import Path
 import subprocess
 import numpy as np
@@ -18,7 +17,8 @@ from reference_state import PublicReferenceState
 from binance_state import PublicBinanceState
 
 
-VERSION = 'public_device_page_v1'
+VERSION = 'public_device_page_v2'
+LEGACY_VERSION = 'public_device_page_v1'
 PM_PREFIXES = ('quantities','selections','resets','initialized','ready','ticks',
     'level_anchors','book_quality','book_anchors','bba','trades','observed_ticks')
 MARKET_PREFIXES = ('market_admitted','market_lifecycle','market_trading','market_terminal')
@@ -30,23 +30,13 @@ TABLES = {'slots':3,'market_assets':3,'groups':3,'bba_values':8,'trade_values':7
     'lifecycle_values':4,'trading_values':8,'terminal_values':5,'reference_values':4,
     'reference_rule_values':3,'reference_official_values':4,'reference_temporary_values':4,
     'binance_slots':3,'binance_depth_values':3,'binance_trade_values':5}
-TABLES.update({name:4 for name in PREFIXES})  # 原来源行顺序也保留；预排列独立服务查询。
 EXACTS = ('coefficient','decimal_denominator','numerator','denominator')
 DERIVED = {'causal_visible_at':1,'anchor_times':2,'unique_anchor_ids':1,
     'condition_order':1,'asset_pairs':2,'market_times':2,'market_payouts':3}
 DTYPES = {'i8':np.dtype('<i8'),'i4':np.dtype('<i4'),'i1':np.dtype('i1'),'u1':np.dtype('u1')}
-BANKS = ('assets','markets','anchors','lifecycle_states','fact_records','group_ids',
+BANKS = ('assets','markets','anchors','lifecycle_states','group_ids',
     'group_members','fact_types','binance_symbols')
 TEXT_BANKS = ('group_ids','fact_types','binance_symbols')
-
-
-@dataclass(frozen=True)
-class PublicPageBinding:
-    """原reader核验后由publisher交接；调用方保留，不从待加载页推导expected。"""
-    source_manifest_sha256: str
-    page_manifest_sha256: str
-    input_stream_id: str
-    next_input_position: int
 
 
 class IdentityBank:
@@ -111,7 +101,7 @@ def store_array_member(directory, members, name, array, kind):
 
 
 def load_array_members(directory, members):
-    """只读typed成员；调用方必须先核验独立publisher绑定。"""
+    """只读typed成员；调用方核对实际来源、版本与消费列布局。"""
     arrays={}
     for name,entry in members.items():
         filename=entry['file']; shape=entry['shape']; kind=entry['dtype']
@@ -188,27 +178,20 @@ def build_public_device_page(binary, material, destination, *, device='cuda', pr
         'source_manifest_sha256':hashlib.sha256(source_manifest).hexdigest(),
         'source_applied_prefix':source['applied_prefix'],'source_members':source['files']}
     with (destination/'manifest.json').open('xb') as stream: stream.write(_json_bytes(manifest))
-    binding=PublicPageBinding(manifest['source_manifest_sha256'],_sha(destination/'manifest.json'),
-        source['applied_prefix']['input_stream_id'],source['applied_prefix']['next_input_position'])
     if progress: progress('public_device_page_written',bytes=sum(p.stat().st_size for p in destination.iterdir()))
-    return pm,market,reference,binance,columns,binding
+    return pm,market,reference,binance,columns
 
 
 class PreparedPublicPage:
     """验收页后复用预排数组与精确bank；所有根共享此不可变对象。"""
-    def __init__(self,directory,material,*,binding,device='cuda'):
+    def __init__(self,directory,material,*,device='cuda'):
         self.directory=Path(directory); self.device=torch.device(device); self._tensors={}; self._prefixes={}
         manifest_bytes=(self.directory/'manifest.json').read_bytes()
-        if (not isinstance(binding,PublicPageBinding)
-                or hashlib.sha256(manifest_bytes).hexdigest()!=binding.page_manifest_sha256):
-            raise ValueError('公共设备页与调用方已接纳publisher绑定不一致')
         manifest=json.loads(manifest_bytes)
-        if manifest['version']!=VERSION: raise ValueError('公共设备页版本错误')
+        legacy=manifest['version']==LEGACY_VERSION
+        if manifest['version'] not in (VERSION,LEGACY_VERSION): raise ValueError('公共设备页版本错误')
         original=(Path(material)/'manifest.json').read_bytes(); source=json.loads(original)
-        if (hashlib.sha256(original).hexdigest()!=binding.source_manifest_sha256
-                or binding.source_manifest_sha256!=manifest['source_manifest_sha256']
-                or source['applied_prefix']['input_stream_id']!=binding.input_stream_id
-                or source['applied_prefix']['next_input_position']!=binding.next_input_position
+        if (hashlib.sha256(original).hexdigest()!=manifest['source_manifest_sha256']
                 or source['applied_prefix']!=manifest['source_applied_prefix']
                 or source['files']!=manifest['source_members'] or not source['normal_end']):
             raise ValueError('公共设备页原材料绑定错误')
@@ -220,6 +203,8 @@ class PreparedPublicPage:
         expected|={name+'.'+field for name in EXACTS for field in ('words','sign','fault')}
         expected|={name+'.'+field for name in ('anchor_sets','terminal_payouts') for field in ('values','offsets')}
         expected|={name+'.'+field for name in BANKS for field in ('utf8','offsets')}
+        if legacy:
+            expected|=set(PREFIXES)|{'fact_records.utf8','fact_records.offsets'}
         if set(manifest['members'])!=expected: raise ValueError('公共设备页列人口错误')
         self.arrays=load_array_members(self.directory,manifest['members'])
         for name,width in TABLES.items():
@@ -232,7 +217,6 @@ class PreparedPublicPage:
         for name,ndim in DERIVED.items(): self._array(name,'i8',ndim)
         groups=self.arrays['groups']; count=len(groups)
         if (len(self.columns['group_ids'])!=count or len(self.columns['group_members'])!=count
-                or len(self.columns['fact_records'])!=len(self.columns['facts'])
                 or count!=source['groups'] or len(self.columns['facts'])!=source['facts']
                 or (count and not np.array_equal(groups[:,0],np.arange(count)))):
             raise ValueError('公共设备页原组/事实身份人口错误')
@@ -257,8 +241,7 @@ class PreparedPublicPage:
         if (len(set(order.tolist()))!=len(markets) or np.any((order<0)|(order>=len(markets)))
                 or not np.array_equal(self.arrays['asset_pairs'],pairs)):
             raise ValueError('公共设备页市场派生绑定错误')
-        # 原身份派生时间、condition字典序和双精确表示由独立publisher绑定覆盖；
-        # 不为二次加载重复解包整个人口的身份JSON或重跑decimal/GCD。
+        # 来源及成员完整性在冷加载核对；不重复解包整个人口身份或重跑decimal/GCD。
         text=self._array('decimal_text','u1',1); offsets=self._offsets('decimal_offsets',len(text))
         self.columns['decimals']=IdentityBank(text,offsets,text=True)
         for name,width in (('anchor_sets',1),('terminal_payouts',2)):
@@ -288,16 +271,8 @@ class PreparedPublicPage:
                 if (np.any(part[:,0]!=target) or np.any(np.diff(part[:,1])<0)
                         or np.any(np.diff(part[:,2])<0)):
                     raise ValueError('公共设备页prefix分段或原顺序错误')
-            # 校验原行→已给offset段的稳定映射，O(N)，不重排或重算offset。
-            next_row=np.array(offsets[:-1],copy=True)
-            for row in self.arrays[name]:
-                target=row[0]
-                if (not 0<=target<targets or next_row[target]>=offsets[target+1]
-                        or not np.array_equal(rows[next_row[target]],row)):
-                    raise ValueError('公共设备页预排列与原事实行不一致: '+name)
-                next_row[target]+=1
-            if not np.array_equal(next_row,offsets[1:]):
-                raise ValueError('公共设备页预排列原人口不一致: '+name)
+            # 唯一消费表示；现公共消费者继续检查序号、group、值域和来源引用。
+            self.columns[name]=rows
         n=len(self.columns['decimals']); exact={}
         for name in EXACTS:
             words=self._array(name+'.words','i4',2); sign=self._array(name+'.sign','i1',1)

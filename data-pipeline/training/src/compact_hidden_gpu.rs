@@ -20,14 +20,13 @@ pub struct CompactHiddenGpuBucketV1 {
 
 pub fn next_compact_hidden_gpu_bucket_v1(reader: &mut CompactHiddenMaterialReaderV1)
     -> RecordingResult<Option<CompactHiddenGpuBucketV1>> {
-    let Some(bucket) = reader.next_bucket()? else {return Ok(None);};
+    let Some((bucket, steps)) = reader.next_bucket_with_market_steps()? else {return Ok(None);};
     let mut references = Vec::with_capacity(bucket.reference_positions.len());
     let mut reference_market_event_ids = Vec::with_capacity(bucket.reference_positions.len());
     for position in &bucket.reference_positions {
-        references.push(reader.reference_fact(*position)?);
-        reference_market_event_ids.push(reader.reference_market_fact(*position)?.map(|fact|fact.event_id));
+        let (fact, market) = reader.reference_fact_with_market(*position)?;
+        references.push(fact);
+        reference_market_event_ids.push(market.map(|fact|fact.event_id));
     }
-    let mut steps = Vec::with_capacity(bucket.steps.len());
-    for reference in &bucket.steps {steps.push(reader.restore_step_with_market(reference)?);}
     Ok(Some(CompactHiddenGpuBucketV1 {version:"compact_hidden_gpu_bucket_v1",bucket,steps,references,reference_market_event_ids}))
 }

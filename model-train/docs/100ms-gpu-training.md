@@ -584,29 +584,34 @@ cargo run -p data-pipeline-training --bin dpt-public-compact --locked --offline 
 公共设备列的二次加载接口是 `data-pipeline/gpu/public_device_page.py`。
 `build_public_device_page` 只读已完成的原 compact，经原 reader 核验来源一次，
 调用现精确数字转换和 `PrefixColumn` 排序一次，再保存 little-endian 固定列、
-sentinel/offset、精确整数与有理数 bank。完整事实、组和来源身份保存在 UTF8
-bytes/offset bank，不合并不同来源或位置，不保存每事件全盘口；原 compact
+sentinel/offset、精确整数与有理数 bank。公共 v2 页只保存预排 prefix；加载时
+`columns[name]` 指向非 sentinel 行，现公共消费者继续检查序号、组、值域和来源
+引用。事实位置及来源坐标、组身份、anchor/anchor_sets保留，不再复制完整
+`fact_records` 正文。不合并不同来源或位置，不保存每事件全盘口；原 compact
 继续拥有原词法和输入旁证。页 manifest 绑定原 manifest 摘要、成员摘要及
 `AppliedIngressPrefixV1`。成员布局、offset、字典边界及原缺失/质量条件由加载接口
 和现公共消费者核验；不使用 pickle 或任意 Python class 恢复。
 
-publisher 在原 reader 核验及页写入完成后交付独立 `PublicPageBinding`，包含
-原 manifest SHA、设备页 manifest SHA 与完整输入前缀。加载必须传入调用方已经
-接纳的该绑定；不允许从待加载页自身推导 expected SHA。它同时覆盖预排/派生列
-和两种精确表示的来源一致性，重写成员自身摘要仍不能替换已接纳页。catalog/
-检查点后续须保存此绑定与共享页引用；当前尚未交付完整 catalog 或恢复。
+加载通过调用方选择的原 compact 路径核对实际来源 manifest、成员及完整输入前缀，
+再核对页成员长度、摘要、语义版本与实际消费列。公共 `public_device_page_v2`
+不再要求另带独立发布 binding 或页 manifest SHA 凭据。旧 v1 页仍可加载：其
+冗余 prefix/fact 成员保留原成员完整性检查，但只消费预排行，不把旧副本当成
+另一份事实。合格原 compact 与旧页无需全部重做；新 v2 页不能交给仅支持 v1
+的旧程序。页引用及活动根恢复尚待所属步骤交付。
 
 `PreparedPublicPage.install` 直接安装 `PublicPmState`、市场、参考和 Binance
 预排列及精确 bank，不再解包原事件 JSON、解析十进制、GCD 或重排前缀。
 数字和 ragged 列保留只读数组视图，首次上传使用 pinned staging，同页设备列共享。
-人口级事实 bank 在加载和模型消费中保持不解码。市场、资产和锚点的完整身份由
+市场、资产和锚点的完整身份由
 现 `SourceHistoryInputs` 等冷身份消费者按需解码并按页缓存；此冷绑定成本仍需计入。
 当前接口只发布一个已结束材料的完整组页，尚无连续 Builder flush、跨页前沿、
 hidden 流式发布或十五天工作集结论。加载页本身不签发实际交付/public prefix。
 
 现 `gpu_public_state_validation.py --device-page <新目录>` 沿原首分钟入口一次构建，
 两次加载时禁止精确解析、GCD 与前缀排序调用，逐值核对固定列和原身份 bank 字节，
-再运行原盘口、窗口和 100ms 输入检查。一个实际身份成员损坏必须拒绝。
+再运行原盘口、窗口和 100ms 输入检查。真实成员损坏与实际消费值域越界必须拒绝。
+`--legacy-device-page <现有v1目录>` 核对旧页与新页消费列、预排 prefix 及来源兼容。
+以下性能和通过结果仍属旧 v1 版本，不表示本次 v2 改动已经通过验证。
 `292428a` 在原首分钟材料上通过此入口，DPT 构建 0.24 秒，总检查
 52.868634 秒。一次构建 38.645137 秒，两次加载（含验收及逐值比较）分别
 5.114266／5.209205 秒，均无事实或身份 JSON 解码、数字解析、GCD 或前缀重排。
@@ -617,24 +622,32 @@ hidden 流式发布或十五天工作集结论。加载页本身不签发实际�
 原短链 Native 冻结参考均为 null；不能因继承的旧峰值标签声称运行了该参考。
 实际后续冷身份访问仅 lifecycle 5 条，其余身份及事实正文未解码。
 
-此页实际 216,978,511 字节，其中完整事实旁证 bank 134,238,831 字节、
+该历史 v1 页实际 216,978,511 字节，其中完整事实旁证 bank 134,238,831 字节、
 锚点 bank 45,267,163 字节，两者约 82.7%；大小主要来自未解包的完整身份/
-旁证，并非 GPU 数值本体。后续须沿无损共享字典、旁证引用、压缩或分页
-工作集处理此成本。首分钟分布不能代表全天，不线性外推十八天可存或吞吐。
+旁证，并非 GPU 数值本体。v2 删除重复事实正文，保留有消费用途的 anchor。
+本次大小及端到端成本须沿新入口实测。首分钟分布不能代表全天，不线性外推十八天可存或吞吐。
 本次 GPU 检查峰 99,640,832 字节包含验证和组件模型，不是完整根容量。
 `1df` 导入、`937` ragged bool、`72` ndarray 来源比较的实际失败原件保持，
 独审和准确执行组合见 #181 当前阶段证据。
 
 hidden 同 codec 的接口为 `data-pipeline/gpu/hidden_device_page.py`。一次构建
-复用原 `HiddenPmBlock` 对原 compact reader 的完整逐值验收，再保存步骤/tag、
-快照 ragged、参考分派、完整桶时间/offset/closure 与完整 u64 index 列。
+复用 `HiddenPmBlock` 从 `dpt-compact-hidden --gpu-pm-source` 严格入口的一次
+读取结果，直接装箱完整桶、原 canonical identity、source_scene及实际来源关联。
+调用方只提供原 public/hidden 来源路径及读取资源参数，不传裸 buckets 作为已验收
+输入，也不把桶回写 JSON 再执行 verify CLI。原读取器保持初始快照、epoch、
+位置、合法 closure、reference 与 Terminal身份检查；每个参考只读取一次事实并
+产生原市场身份。严格遍历当前桶时，在下一项预读前直接收集已物化步骤，
+闭桶后交付GPU入口；后续不再重读桶内消息。reader只保留当前消息恢复结果，
+GPU持有当前完整桶输出，切换后不缓存整段历史。
+随后保存步骤/tag、快照 ragged、参考分派、完整桶时间/offset/closure 与完整 u64 index 列。
 资产/价位目录、精确 bank、完整 Terminal/canonical ID 及原完整桶身份字节 bank
-共享；不持久化逐事件全盘口。调用方独立保存 `HiddenPageBinding`，加载先核
-两份原 manifest 与列 manifest 绑定，再验成员、布局、offset 和字典域。
+共享；不持久化逐事件全盘口。hidden列布局仍为 `hidden_device_columns_v1`，
+通过实际 public/hidden 来源路径核对两份原 manifest 关联，再验成员、布局、offset
+和字典域；删除额外独立发布 binding 参数及凭据文件，合格旧列材料可继续读取。
 
 `PreparedHiddenMaterial.page(begin,end)` 只接受原连续完整桶范围。页内只上传
 本范围的步骤、快照和参考；共享数值/目录/Terminal 对象复用。第二次加载不调用
-事件 JSON 解包、decimal/GCD/排序或从头到 EOF 的 verify CLI。原完整桶身份
+事件 JSON 解包、decimal/GCD/排序或从头到 EOF 的来源读取 CLI。原完整桶身份
 按需冷读，固定类型设备图直接读原 typed 列。运行参考游标保持页内坐标；
 Terminal 候选、执行义务、NOE 和 Ledger 使用同源稳定参考 ID。
 
