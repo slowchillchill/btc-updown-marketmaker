@@ -135,6 +135,16 @@ class AdmissionLifecycle:
             order_funds=self.order_funds.resized(self.order_funds.occupied.size(1)+extra).append_records(extra,trade_capacity),
             rebate_contributions=self.rebate_contributions.resized(self.rebate_contributions.occupied.size(1)+extra))
 
+    def resized_lifecycle(self, *, orders=None, trades=None):
+        """冷资源边界增长真实身份目录及逐槽关联；不重登旧身份/已应用位置。"""
+        order_capacity=self.orders.occupied.size(1) if orders is None else orders
+        trade_capacity=self.trades.occupied.size(1) if trades is None else trades
+        # 其余已安装缓存可比身份目录更宽；增长不能反向缩小它们。
+        return replace(self,orders=self.orders.resized(order_capacity),trades=self.trades.resized(trade_capacity),
+            trade_success=self.trade_success.resized(max(trade_capacity,self.trade_success.has_fact.size(1))),
+            position_costs=self.position_costs.resized(max(trade_capacity,self.position_costs.active.size(1))),
+            order_funds=self.order_funds.append_records(0,max(trade_capacity,self.order_funds.trade_bound.size(1))))
+
     def resized_contributions(self,capacity):
         """宿主只核人口容量请求后扩目录；原未消费NOE再试，不推进业务或随机数。"""
         return replace(self,rebate_contributions=self.rebate_contributions.resized(capacity))
@@ -284,6 +294,10 @@ class AdmissionLifecycle:
             torch.where(trade_event,pending,self.trades.flags[root,trade_at]),
             next_entry,trade_event|economic_trade)
         fault=fault | torch.where(trade_event|economic_trade,error,0)
+        lifecycle_ready=(orders.capacity_required<=orders.occupied.size(1)) & (trades.capacity_required<=trades.occupied.size(1))
+        use &= lifecycle_ready
+        trade_event &= lifecycle_ready
+        economic_trade &= lifecycle_ready
         # 真实份额/本金保持精确；D-0295只发生在成功池的派生成本分配端。
         base=_take(self.lifecycle.trade_base_units,index)
         quote=_take(self.lifecycle.trade_quote_units,index)
@@ -407,7 +421,7 @@ class AdmissionLifecycle:
                 markets.roots[None,:]==root[:,None],markets.fault[None,:],0))
             fault=fault | root_fault
         success=use&(fault==0)
-        valid=(fault==0)&funds_ready
+        valid=(fault==0)&funds_ready&lifecycle_ready
         # 多成员向量容量不足时保留请求，整个证据不提交任何部分贡献。
         contribution_commit=valid & (~maker_event | success)
         contributions=replace(coordinate(contributions,self.rebate_contributions,contribution_commit),
@@ -435,7 +449,8 @@ class AdmissionLifecycle:
             rebate_contributions=contributions,rebate_days=days,maker_cash=ExactRational(
             maker_cash.numerator.select(success & economic,self.maker_cash.numerator),
             maker_cash.denominator.select(success & economic,self.maker_cash.denominator)),reservations=coordinate(book,self.reservations,valid),
-            orders=coordinate(orders,self.orders,valid),trades=coordinate(trades,self.trades,valid),
+            orders=replace(coordinate(orders,self.orders,valid),capacity_required=orders.capacity_required),
+            trades=replace(coordinate(trades,self.trades,valid),capacity_required=trades.capacity_required),
             order_funds=replace(coordinate(order_funds,self.order_funds,valid),capacity_required=order_funds.capacity_required),
             current_entry_sequence=next_entry.select(success,self.current_entry_sequence),applied=applied,
             applied_sequences=_take(next_entry,root.repeat_interleave(width)).select((same&success[:,None]).flatten(),self.applied_sequences),

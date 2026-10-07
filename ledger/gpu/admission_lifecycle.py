@@ -228,13 +228,15 @@ class LifecycleDirectory:
     accepted_principal_counted: torch.Tensor
     flags: torch.Tensor  # 订单open或成交pending。
     last_sequences: object
+    capacity_required: torch.Tensor  # 物理目录需求；不足不等于非法业务身份。
 
     @classmethod
     def empty(cls,roots,capacity,*,device='cuda'):
         coordinates=torch.full((roots,capacity),-1,dtype=torch.int64,device=device)
         empty=torch.zeros_like(coordinates,dtype=torch.bool)
         zero=ExactInt.from_i64_tensor(torch.zeros(roots*capacity,dtype=torch.int64,device=device))
-        return cls(zero,empty,coordinates,coordinates.clone(),empty.clone(),empty.clone(),empty.clone(),zero)
+        return cls(zero,empty,coordinates,coordinates.clone(),empty.clone(),empty.clone(),empty.clone(),zero,
+            torch.full((roots,),capacity,dtype=torch.int64,device=device))
 
     def resized(self,capacity):
         roots,old=self.occupied.shape
@@ -260,15 +262,17 @@ class LifecycleDirectory:
     def set(self,key,condition,flag,ledger_sequence,enabled,*,request=None,economic=None,counted=None,terminal_sticky=False):
         roots,width=self.occupied.shape
         at,found,error=self.lookup(key)
-        fault=Numbers.combine_fault_rows(error) | (enabled & ~found & self.occupied.all(dim=1)).to(torch.int32)
+        required = torch.where(enabled & ~found & self.occupied.all(dim=1), width+1, width)
+        required = torch.maximum(required,self.capacity_required)
+        fault=Numbers.combine_fault_rows(error)
         expanded=_take(key,torch.arange(roots,device=at.device).repeat_interleave(width))
         sequence=_take(ledger_sequence,torch.arange(roots,device=at.device).repeat_interleave(width))
         old=self.flags.gather(1,at[:,None]).flatten()
         if terminal_sticky:
             flag=flag & (~found | old)
-        use=enabled&(fault==0)
+        use=enabled&(fault==0)&(required<=width)
         mask=torch.zeros_like(self.occupied).scatter(1,at[:,None],use[:,None])
-        return replace(self,keys=expanded.select(mask.flatten(),self.keys),occupied=self.occupied | mask,
+        return replace(self,capacity_required=required,keys=expanded.select(mask.flatten(),self.keys),occupied=self.occupied | mask,
             conditions=torch.where(mask,condition[:,None],self.conditions),flags=torch.where(mask,flag[:,None],self.flags),
             last_sequences=sequence.select(mask.flatten(),self.last_sequences),
             requests=self.requests if request is None else torch.where(mask,request[:,None],self.requests),

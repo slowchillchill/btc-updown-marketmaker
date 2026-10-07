@@ -314,6 +314,32 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         v for v,keep in zip(first_delivery,first_pending.flatten().cpu().tolist()) if keep]
     admission,cache=Numbers.run_exact_batch(lambda:cache.drain(admission,torch.ones_like(columns.enabled),passes=3))
     assert not (cache.received & ~cache.consumed).any().cpu().item() and admission.fault.cpu().tolist()==[0]
+    # 同一原21条NOE，订单物理目录仅一槽：满池不变成业务错误或提交半个记录。
+    from admission_lifecycle import LifecycleDirectory
+    limited=replace(append_start,orders=LifecycleDirectory.empty(1,1,device=columns.row_refs.device))
+    small_waiting=Numbers.run_exact_batch(lambda:ClosedAdmission.empty(columns).accept(columns,delivered))
+    initial_rank=small_waiting.receive_rank.clone()
+    initial_available=small_waiting.available_at.clone()
+    limited,small_waiting=Numbers.run_exact_batch(lambda:small_waiting.drain(limited,torch.ones_like(columns.enabled),passes=3))
+    assert limited.fault.cpu().tolist()==[0] and small_waiting.fault.cpu().tolist()==[0]
+    assert limited.orders.capacity_required.cpu().tolist()==[2]
+    assert limited.orders.occupied.sum().cpu().item()==1
+    assert (small_waiting.received & ~small_waiting.consumed).any().cpu().item()
+    assert values(limited.current_entry_sequence)[0]<values(admission.current_entry_sequence)[0]
+    expanded=limited.resized_lifecycle(orders=admission.orders.occupied.size(1))
+    assert values(expanded.orders.keys)[:1]==values(limited.orders.keys)
+    resumed,small_waiting=Numbers.run_exact_batch(lambda:small_waiting.drain(expanded,torch.ones_like(columns.enabled),passes=3))
+    assert resumed.fault.cpu().tolist()==[0] and not (small_waiting.received & ~small_waiting.consumed).any().cpu().item()
+    assert values(resumed.current_entry_sequence)==values(admission.current_entry_sequence)
+    assert values(resumed.platform.platform_source_prefix)==values(admission.platform.platform_source_prefix)
+    assert values(resumed.platform.balances.numerator)==values(admission.platform.balances.numerator)
+    assert values(resumed.platform.balances.denominator)==values(admission.platform.balances.denominator)
+    assert torch.equal(resumed.applied,admission.applied)
+    assert torch.equal(small_waiting.receive_rank,initial_rank) and torch.equal(small_waiting.available_at,initial_available)
+    assert torch.equal(resumed.orders.occupied,admission.orders.occupied)
+    assert values(resumed.orders.keys)==values(admission.orders.keys)
+    assert check_order_funds(resumed,source['reservation_checkpoints'][-1])
+    assert check_markets(resumed,source['reservation_checkpoints'][-1],source['initial'][0]['market']['condition_id'])
     # 同一真实设备NOE人口分成两页接入。第一页末是完整feedback边界；
     # 只在来源接齐后关receive门，不把分页末尾当新的业务闭时点。
     from validate_append import check_incremental_receive
@@ -540,7 +566,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
         'actual_reserved_market_population_persists_after_conversion_and_directory_retry':True,
-        'device_closed_cache_waiting_then_new_records_retry_checked':True,
+        'device_closed_cache_waiting_then_new_records_retry_checked':True,'actual_order_directory_capacity_exit_then_growth_preserves_waiting_prefix_checked':True,
         'incremental_feedback_append_preserves_account_waiting_and_delivery_checked':True,
         'incremental_feedback_pages':incremental_checked,
         'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_original_six_rebate_read_fields_checked':True,'actual_per_Ledger_record_unresolved_Pi_and_maximum_loss_checked':True,'actual_economic_before_Trade_OrderFunds_Unknown_and_binding_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'actual_trade_role_and_net_fee_executed_read_checked':True,'Native_actual_executed_quantity_principal_net_fee_176_to_211_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'full_clock_Ledger_reservation_delivered':False}
