@@ -111,7 +111,7 @@ def main(source):
         original_vector=run(lambda:RecordList((tensor([token_slots[m['token_id']] for m in members]),
             rational([m['balance_shares_delta'] for m in members])),tensor([[True]*len(members)],torch.bool)))
         balances=run(lambda:tuple(rational([existing[name+'_delta']]) for name in BALANCES))
-        liabilities=run(lambda:(rational([balance['settlement_fee_liability_pusd_delta']),rational([balance['actual_taker_fee_liability_pusd_delta']])))
+        liabilities=run(lambda:(rational([balance['settlement_fee_liability_pusd_delta']]),rational([balance['actual_taker_fee_liability_pusd_delta']])))
         if kind=='Cost':
             request=fact['settlement_request_id']
             assert request['policy_version']=='RESOLUTION_REDEEM_ONLY' and request['condition_id']==condition
