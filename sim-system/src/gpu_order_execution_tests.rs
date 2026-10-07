@@ -258,7 +258,6 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     assert_eq!(cancel_records.len(), 4, "CallerCanceled、真实释放、Target与Completed");
     assert!(observation.take_closed_records().is_empty());
     checkpoints.push(serde_json::json!({"stage":"canceled", "state":snapshot(&state)}));
-    let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
     let mut confirmed_path = serde_json::to_value(actor._finality_policy.normal_path()).unwrap();
     confirmed_path["economic_application_ordinal"] = serde_json::json!(2);
     let confirmed_policy = TradeFinalityPolicyV2::decode_and_seal(&serde_json::to_vec(&serde_json::json!({
@@ -276,6 +275,7 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     let order_queries=std::env::var_os("B_GPU_SIM_ORDER_QUERY").map(|_| {
         gpu_actual_order_query_reference(&mut actor,state,&observation,&mut ledger,closed_at,&condition)
     });
+    let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
     let input = serde_json::json!({"hidden_material":compact_source.as_ref().map(|(_, value)| value),
         "empty_hidden_material":empty_compact_source.as_ref().map(|(_,value)| value),
         "checkpoints":checkpoints, "initial":initial, "events":events,
