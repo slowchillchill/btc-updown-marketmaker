@@ -158,8 +158,8 @@ class HiddenPmBlock:
         """运行资产按根隔离，价格按精确值关联，不以共享字典编号判相等。"""
         owners = asset_roots[state.level_assets]
         price = self._values(rows[:, 2])
-        relation = state.queues.prices.compare(rational_take(price, owners))
-        fault = relation.fault | state.queues.prices.fault
+        relation = state.queues.price.compare(rational_take(price, owners))
+        fault = relation.fault | state.queues.price.fault
         target = (source_assets[state.level_assets] == rows[owners, 0])
         target = target & (level_sides == rows[owners, 1])
         return target & (relation.order == 0) & (fault == 0), fault
@@ -172,13 +172,13 @@ class HiddenPmBlock:
         counts = torch.zeros(levels, dtype=torch.int64, device=indices.device)
         missing = torch.zeros(roots, dtype=torch.int32, device=indices.device)
         if not population:
-            return zeros(state.queues.prices), counts, missing, torch.zeros_like(counts, dtype=torch.int32)
+            return zeros(state.queues.price), counts, missing, torch.zeros_like(counts, dtype=torch.int32)
         safe = indices.clamp(0, self.event_indices.size(0))
         begin = self.snapshot_offsets.index_select(0, safe)
         end = self.snapshot_offsets.index_select(0, (safe+1).clamp_max(self.event_indices.size(0)))
         ordinal = torch.arange(population, device=indices.device)
         in_snapshot = (ordinal[None, :] >= begin[:, None]) & (ordinal[None, :] < end[:, None])
-        runtime_prices = rational_take(state.queues.prices,
+        runtime_prices = rational_take(state.queues.price,
             torch.arange(levels, device=indices.device).repeat_interleave(population))
         source_prices = self._values(self.snapshot_levels[:, 1].repeat(levels))
         relation = runtime_prices.compare(source_prices)
