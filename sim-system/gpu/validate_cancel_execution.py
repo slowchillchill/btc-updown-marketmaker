@@ -15,7 +15,7 @@ from validate_base_execution import integers,rational,values
 
 def validate_actual_cancel(source,delta):
     root=Path(__file__).resolve().parents[2]
-    sys.path[:0]=[str(root/'execution-normalization/gpu'),str(root/'shared-run/gpu')]
+    sys.path[:0]=[str(root/'execution-normalization/gpu'),str(root/'shared-run/gpu'),str(root/'ledger/gpu')]
     from projection import Projection,CancelTargetFeedback
     from validate_projection import expected_semantic
     from fields import RecordList
