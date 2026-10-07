@@ -121,7 +121,7 @@ class TradeSuccess:
         member=member.any(2)&self.has_fact
         unknown=(member & ~self.details_known).any(1)
         # 原公开Market.executed数组[Maker,Taker]；真实Trade enum次序相反。
-        roles=torch.tensor([1,0],device=self.has_fact.device,dtype=torch.int64)
+        roles=1-torch.arange(2,device=self.has_fact.device,dtype=torch.int64)
         masks=member[:,None,:] & self.details_known[:,None,:] & (self.roles[:,None,:]==roles[None,:,None])
         positions=(torch.arange(roots,device=masks.device)[:,None,None]*width+
             torch.arange(width,device=masks.device)[None,None,:]).expand(roots,2,width).flatten()
