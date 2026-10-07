@@ -42,6 +42,11 @@ def validate_actual_cancel(source,delta):
     target=CancelTargetFeedback(integers([1]),integers([0]),refs,zero,active,delta,delta.fault)
     state,batch=Numbers.run_exact_batch(lambda:state.cancellation(sampler,(target,),at,received,torch.ones_like(zero),active))
     assert batch.fault.cpu().tolist()==[0]
+    from validate_transport import check_transport_layout
+    # 同一实际来源及无事实padding混合，method列不能因旧普通批None而被丢弃。
+    padding=replace(batch,emitted=torch.zeros_like(batch.emitted),cancellation_method=None,
+        normalized=replace(batch.normalized,emitted=torch.zeros_like(batch.emitted)))
+    assert Numbers.run_exact_batch(lambda:check_transport_layout([padding,batch]))
     metadata={ 'DirectResponse':0,'OrderLifecycle':1}
     for column,wanted in enumerate(batch.emitted.cpu().tolist()[0]):
         if not wanted:continue
@@ -163,4 +168,4 @@ def validate_actual_cancel(source,delta):
         'source_private_batch_and_actual_release_checked':True,'Ledger_four_original_positions_and_sequences_checked':True,
         'each_actual_receive_prefix_order_condition_open_and_last_sequence_checked':True,
         'Ledger_control_closes_without_cash_and_economic_releases_once':True,
-        'cold_original_cancel_prefix_initialized_once':True,'full_root':False}
+        'cold_original_cancel_prefix_initialized_once':True,'cancellation_method_mixed_transport_checked':True,'full_root':False}

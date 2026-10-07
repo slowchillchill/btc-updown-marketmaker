@@ -7,6 +7,8 @@ from transport import compact_committed_batches
 
 def check_transport_layout(batches):
     def duplicate(value):
+        if value is None:
+            return None
         if isinstance(value, torch.Tensor):
             return value.repeat((2,)+(1,)*(value.ndim-1))
         if is_dataclass(value):
@@ -48,6 +50,12 @@ def check_transport_layout(batches):
         if name == 'normalized':
             for member in ['rows', 'outcomes', 'primary_fact_rows', 'emitted']:
                 tensor([getattr(value, member) for value in expected], getattr(got, member))
+        elif name == 'cancellation_method':
+            if got is None:
+                assert all(value is None for value in expected)
+            else:
+                tensor([torch.full_like(batch.rows,-1) if value is None else value
+                    for batch,value in zip(doubled,expected)],got)
         elif name == 'fault':
             assert torch.equal(got, torch.zeros_like(got))  # 原源批本身已提交无错误。
         elif isinstance(got, torch.Tensor):

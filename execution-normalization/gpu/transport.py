@@ -72,6 +72,11 @@ def compact_committed_batches(batches):
     updates = {name: scalar([getattr(batch, name) for batch in batches]) for name in tensors}
     for name in ['private_sequences', 'batch_sequences', 'record_ordinals', 'economic_sequences']:
         updates[name] = integer([getattr(batch, name) for batch in batches])
+    # 旧普通批没有取消method列；混合批以非取消-1占位，保持原每记录坐标。
+    methods=[batch.cancellation_method for batch in batches]
+    updates['cancellation_method'] = None if all(value is None for value in methods) else scalar([
+        torch.full_like(batch.rows,-1) if value is None else value
+        for batch,value in zip(batches,methods)])
     updates['economic_balances'] = ratio([batch.economic_balances for batch in batches], 8)
     updates['economic_outcomes'] = ratio([batch.economic_outcomes for batch in batches])
     merged = replace(first, normalized=normalized, fault=fault([batch.fault for batch in batches]), **updates)
