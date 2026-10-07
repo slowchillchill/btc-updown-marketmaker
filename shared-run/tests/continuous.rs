@@ -3425,6 +3425,7 @@ fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&S
         serde_json::json!({"identity":order.order_identity,"origin":origin,"condition":order.condition_id,
             "accepted":order.accepted.map(record),"formed":order.formed.map(record),
             "latest_lifecycle":order.latest_lifecycle.map(record),
+            "latest_direct":order.latest_direct_feedback.map(record),
             "latest_cancel":order.latest_cancel_feedback.map(record),
             "trades":registry.order_trades(order.order_identity).map(record).collect::<Vec<_>>()})
     }).collect::<Vec<_>>();
