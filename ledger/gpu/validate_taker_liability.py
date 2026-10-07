@@ -6,6 +6,8 @@ import importlib.util
 import json
 import math
 import sys
+# 本脚本目录含Ledger platform.py；先移出隐式script搜索项，让torch加载标准库platform。
+sys.path=[entry for entry in sys.path if Path(entry).resolve()!=Path(__file__).resolve().parent]
 import torch
 
 ROOT=Path(__file__).resolve().parents[2]
