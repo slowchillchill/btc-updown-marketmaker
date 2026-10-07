@@ -28,6 +28,10 @@ run() {
     tail -n 4 "$artifact/$stage.log"
     return "$code"
 }
+run syntax "$repo_root/model-train/.venv/bin/python" -m py_compile \
+    model-train/native-inputs/gpu/actor_context.py model-train/native-inputs/gpu/actor_support.py \
+    model-train/native-inputs/gpu/input_account.py model-train/native-inputs/gpu/input_repair.py \
+    model-train/scripts/gpu_actor_support_validation.py sim-system/gpu/validate_joint_freeze.py
 run build-native cargo test --manifest-path model-train/native-inputs/Cargo.toml --lib --no-run --locked --offline -j24
 run build-public cargo build -p data-pipeline-training --bin dpt-public-compact --locked --offline -j24
 run buy-original cargo test --manifest-path model-train/native-inputs/Cargo.toml --lib --locked --offline -j24 \

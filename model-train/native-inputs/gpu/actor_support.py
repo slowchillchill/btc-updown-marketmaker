@@ -81,7 +81,7 @@ class DeviceNativeActor:
         up_found=up_used&c.cap_known[:,0]&(up.sign>0)
         down_used=~up_found&c.gap_positive[:,1]&c.gap_known[:,1]
         fault=(~c.gap_known[:,0]|(up_used&~c.cap_known[:,0])
-            |(~up_found&(~c.gap_known[:,1]|(down_used&~c.cap_known[:,1]))).to(torch.int32)
+            |(~up_found&(~c.gap_known[:,1]|(down_used&~c.cap_known[:,1])))).to(torch.int32)
         up=up.select(up_used&c.cap_known[:,0],up.constant(0))
         down=down.select(down_used&c.cap_known[:,1],down.constant(0))
         selected=up.select(up_found,down)
