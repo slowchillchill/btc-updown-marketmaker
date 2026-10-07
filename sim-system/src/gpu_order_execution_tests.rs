@@ -287,6 +287,9 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     let order_queries=std::env::var_os("B_GPU_SIM_ORDER_QUERY").map(|_| {
         gpu_actual_order_query_reference(&mut actor,state,&observation,&mut ledger,closed_at,&condition)
     });
+    let joint_public=std::env::var_os("B_GPU_JOINT_FREEZE").map(|_| {
+        public_consumption_tests::gpu_public_for_order_fixture(&initial,&events,false)
+    });
     let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
     let input = serde_json::json!({"hidden_material":compact_source.as_ref().map(|(_, value)| value),
         "empty_hidden_material":empty_compact_source.as_ref().map(|(_,value)| value),
@@ -313,7 +316,10 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         "opening_ledger":opening_ledger,
         "cancel_ledger_before":cancel_ledger_before,"cancel_ledger_after":cancel_ledger_after,"cancel_ledger_attempts":cancel_ledger_attempts,
         "next_private":next_private,"next_batch":next_batch,"session_seed":session_seed,
-        "order_queries":order_queries});
+        "order_queries":order_queries,
+        "joint_public":joint_public.as_ref().map(|_|serde_json::json!({
+            "compact":std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap()).join("public-compact"),"root_started_at":-29000,
+            "model_hidden_start":1500,"cutoffs":[1500,1600]}))});
     let mut command=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap());
     command.arg(std::env::var("B_GPU_ORDER_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped());
     if std::env::var_os("B_GPU_SIM_ORDER_QUERY").is_some() {
@@ -328,6 +334,9 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
             }
         }
         copy_source(_directory.path(),&artifact.join("original-producer"));
+        if let Some((directory,_))=&joint_public {
+            copy_source(&directory.path().join("public"),&artifact.join("public-compact"));
+        }
         command.stdout(std::fs::File::create(artifact.join("GPU.stdout")).unwrap());
         command.stderr(std::fs::File::create(artifact.join("GPU.stderr")).unwrap());
     } else {
@@ -1275,9 +1284,18 @@ fn gpu_actual_order_query_reference(actor:&mut SimRunActorV2,mut state:BusinessR
         let mut batches=Vec::new();
         state=gpu_accept_projection_reference(actor,next,BusinessReducerOutputV2::MutationAction(Some(effect)),&mut batches);
         cutoff=batches[0]["direct"][0]["metadata"]["response_received_at_utc_ms"].as_i64().unwrap();
+        let joint_before_receive=if index==2 && std::env::var_os("B_GPU_JOINT_FREEZE").is_some() {
+            assert!(receipt.platform_arrived_at_utc_ms<1500 && cutoff>1500 && cutoff<1600);
+            actor.projection_port.close_receive_prefix(1500);
+            actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
+                crate::public_consumption::ActorTimeRecordV1 {run_id:actor.opened.run_id.clone(),drive_position:4,
+                    logical_time_utc_ms:1500}));
+            assert!(observation.take_closed_records().is_empty(),"1506响应在1500尚未领取");
+            Some(gpu_ledger_reservation_checkpoint(ledger,"joint_1500_before_response"))
+        } else {None};
         actor.projection_port.close_receive_prefix(cutoff);
         actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
-            crate::public_consumption::ActorTimeRecordV1 {run_id:actor.opened.run_id.clone(),drive_position:2+index as u64,
+            crate::public_consumption::ActorTimeRecordV1 {run_id:actor.opened.run_id.clone(),drive_position:2+index as u64+u64::from(joint_before_receive.is_some()),
                 logical_time_utc_ms:cutoff}));
         let records=observation.take_closed_records();
         assert_eq!(records.len(),1,"Query无Economic，只产生一条实际Direct来源");
@@ -1288,7 +1306,8 @@ fn gpu_actual_order_query_reference(actor:&mut SimRunActorV2,mut state:BusinessR
         frames.push(serde_json::json!({"request":key,"event":event.0,"target":target,"input_sequence":receipt.input_sequence(),
             "sent_at":sent,"arrived_at":receipt.platform_arrived_at_utc_ms,"cutoff":cutoff,"retention":retention,
             "retention_input_sequence":retention_input_sequence,
-            "result":result,"batches":batches,"records":material,"before":before,"after_send":after_send,"after":after}));
+            "result":result,"batches":batches,"records":material,"before":before,"after_send":after_send,"after":after,
+            "joint_before_receive":joint_before_receive}));
     }
     serde_json::json!({"reservation":"gpu-query-reservation","principal":"0.25","reserved":reserved,"frames":frames})
 }
@@ -1336,6 +1355,10 @@ fn gpu_ledger_reservation_checkpoint(ledger:&ledger::LedgerWriterV1,stage:&str) 
     let rebate_days=read.rebate_days().map(|day|serde_json::json!({"kind":day.kind,
         "attribution_day_start_utc_ms":day.attribution_day_start_utc_ms,
         "contributions":day.contributions,"amounts":day.amounts})).collect::<Vec<_>>();
+    let resolutions=read.resolutions().map(|value|serde_json::json!({"resolved":value.resolved,
+        "request":value.request,"attribution":value.settlement_cost_attribution})).collect::<Vec<_>>();
+    let settlement_costs=read.settlement_costs().map(|value|serde_json::json!({"fact":value.fact,
+        "attribution":value.attribution})).collect::<Vec<_>>();
     let order_funds = ledger.funds_read_v1().orders().map(|order| serde_json::json!({
         "identity":order.order_identity,"principal":order.principal_encumbrance_pusd,
         "fee":order.immediate_fee_encumbrance_pusd,"last_ledger_entry_seq":order.last_ledger_entry_seq,
@@ -1347,7 +1370,8 @@ fn gpu_ledger_reservation_checkpoint(ledger:&ledger::LedgerWriterV1,stage:&str) 
             "open":life.open, "last_ledger_entry_seq":life.last_ledger_entry_seq}))
     }).collect::<Vec<_>>();
     serde_json::json!({"stage":stage,"projection":ledger.projection_v2().unwrap(),
-        "cash":read.cash(),"other_cash":read.residual_cash().other_cash_pusd,"request":request,"markets":read.market_totals().collect::<Vec<_>>(),"trades":trades,"rebate_days":rebate_days,"order_lifecycle":order_lifecycle,"order_funds":order_funds})
+        "cash":read.cash(),"other_cash":read.residual_cash().other_cash_pusd,"request":request,"markets":read.market_totals().collect::<Vec<_>>(),"trades":trades,"rebate_days":rebate_days,"order_lifecycle":order_lifecycle,"order_funds":order_funds,
+        "resolutions":resolutions,"settlement_costs":settlement_costs})
 }
 
 #[test]

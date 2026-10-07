@@ -51,6 +51,27 @@ class Policy100ms(nn.Module):
         z, next_hidden = self.state(fast, slow, book_levels, book_mask, hidden)
         return z, next_hidden, self.critic(z).squeeze(-1)
 
+    def frozen_state_and_value(self, frozen, hidden, identities, policy_version):
+        """实际自有冻结输入开始计算时绑定版本；不替代Actor合法域或轨迹屏障。
+
+        identities是这份hidden对应的完整根/账户/市场键，不能按行号混合市场。
+        未安装字段/资源退出不接纳hidden；ContextOnly仍推进全部GRU层。
+        """
+        from .frozen_inputs import FrozenPolicyEvaluation
+        rows=frozen.fast.shape[0]
+        if (identities.shape!=frozen.identities.shape or identities.dtype!=torch.int64
+                or identities.device!=frozen.fast.device or policy_version.shape!=(rows,)
+                or policy_version.dtype!=torch.int64 or policy_version.device!=frozen.fast.device):
+            raise TypeError('模型开始须同设备hidden身份及策略版本')
+        fault=frozen.fault|(~(identities==frozen.identities).all(1)).to(torch.int32)
+        fault|=(policy_version<0).to(torch.int32)
+        ready=frozen.resources_fit&frozen.provided.all(1)&(fault==0)
+        active=ready&(frozen.role>=0)
+        state,candidate,value=self.state_and_value(*frozen.model_inputs(),hidden)
+        return FrozenPolicyEvaluation(torch.where(active[:,None],state,0.0),
+            torch.where(active,value,0.0),torch.where(active[None,:,None],candidate,hidden),
+            policy_version.clone(),ready,fault)
+
     def unroll(self, inputs, hidden, advance_mask):
         """固定时间轴推进全部层；advance_mask只表示实际状态行，ContextOnly须为真。
 

@@ -104,6 +104,10 @@ def check(source,runtime,noe,sampler,asset_tokens,state,live_resources):
     check_account(payload['reserved'],'reserved')
     retries=0;reports=[];started=time.perf_counter();old=None;old_values=None
     artifact=Path(os.environ['B_GPU_ORDER_ARTIFACT_DIR'])
+    joint=None
+    if source.get('joint_public') is not None:
+        from validate_joint_freeze import JointFreezeValidation
+        joint=JointFreezeValidation(source,artifact)
     for index,frame in enumerate(frames):
         print(json.dumps({'stage':'order_query_start','index':index+1,'total':len(frames),
             'elapsed_seconds':time.perf_counter()-started}),flush=True)
@@ -192,6 +196,13 @@ def check(source,runtime,noe,sampler,asset_tokens,state,live_resources):
         assert torch.equal(torch.nn.functional.pad(actual,(0,width-actual.size(1))),
             torch.nn.functional.pad(semantic,(0,width-semantic.size(1))))
         state=run(lambda:state.append_batch(noe.normalizer.bank,batch))
+        if joint is not None and index==2:
+            intermediate=t([1500]);intermediate_gates=ReceiveGates.unset(1).set_receive(intermediate,yes).set_public(intermediate,yes)
+            state,held_delivery=run(lambda:state.receive(noe.normalizer.bank,intermediate_gates,
+                torch.ones_like(state.ledger.columns.enabled)))
+            assert not held_delivery.closed.emitted.any().cpu().item()
+            check_account(frame['joint_before_receive'],'joint_before_1506_response')
+            joint.freeze(state,t([1500]))
         cutoff=t([frame['cutoff']]);gates=ReceiveGates.unset(1).set_receive(cutoff,yes).set_public(cutoff,yes)
         state,delivery=run(lambda:state.receive(noe.normalizer.bank,gates,torch.ones_like(state.ledger.columns.enabled)))
         assert delivery.fault.cpu().tolist()==[0] and delivery.closed.emitted.cpu().sum().item()==1
@@ -202,6 +213,8 @@ def check(source,runtime,noe,sampler,asset_tokens,state,live_resources):
         assert available==[record['visibility']['Feedback']['available_at_utc_ms']]
         assert not (state.waiting.received&~state.waiting.consumed).any().cpu().item()
         check_account(frame['after'],'after_receive')
+        if joint is not None and index==2:
+            joint.freeze(state,t([1600]))
         intents=FrozenIntentOrders(yes[:,None],integers([1]),yes[:,None],rational(['5']),~yes[:,None],yes[:,None])
         frozen=run(lambda:state.freeze_account(intents,cutoff))
         assert frozen.orders.cancellable.cpu().tolist()==[[False]] and frozen.orders.matched_known.cpu().tolist()==[[True]]
@@ -225,5 +238,6 @@ def check(source,runtime,noe,sampler,asset_tokens,state,live_resources):
     report={'status':'PASS','frames':reports,'common_sender_capacity_retries':retries,
         'actual_live_query_resources':live_resources,
         'single_Base_Order_actual_SIM_NOE_PublicRegistry_Ledger':True,'Quote_Orders_continuous_host':False}
+    if joint is not None:report['joint_freeze']=joint.finish()
     (artifact/'query-report.json').write_text(json.dumps(report,indent=2)+'\n')
     return report

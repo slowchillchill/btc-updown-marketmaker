@@ -307,12 +307,34 @@ mod gpu_hidden_tests {
 pub(super) fn gpu_compact_hidden_for_order_fixture(
     initial: &[ExecutionMarketEventV3], events: &[ExecutionMarketEventV3], empty_initial: bool,
 ) -> (tempfile::TempDir, serde_json::Value) {
-    use data_pipeline_training::{compact_public::PublicCompactWriterV1,
-        compact_hidden_material::{prepare_compact_hidden_material_v1,CompactHiddenMaterialReaderV1},
+    use data_pipeline_training::{compact_hidden_material::{prepare_compact_hidden_material_v1,CompactHiddenMaterialReaderV1},
         compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1,gpu_initial_sort::GpuInitialRunOrderV1};
-    let directory=tempfile::tempdir().unwrap();
+    let (directory,public)=gpu_public_for_order_fixture(initial,events,empty_initial);
     let public_path=directory.path().join("public");
     let hidden_path=directory.path().join("hidden");
+    let market=&initial[0].market;
+    let context=public.pm_context(&market.condition_id.0).unwrap();
+    let assets=context.assets.iter().map(|v|v.asset.clone()).collect::<Vec<_>>();
+    let mut sort=config().sort;sort.merge_workers=8;
+    let order=Arc::new(GpuInitialRunOrderV1::start(Path::new(&std::env::var("B_GPU_PYTHON").unwrap()),
+        Path::new(&std::env::var("B_GPU_SORT_WORKER").unwrap())).unwrap());
+    prepare_compact_hidden_material_v1(&public_path,&hidden_path,1<<20,&sort,order,"gpu-order-hidden".into(),None,|_,_,_,_| {}).unwrap();
+    let mut reader=CompactHiddenMaterialReaderV1::open(&hidden_path,&public_path,1,1<<20,1<<20,|_,_,_,_| {}).unwrap();
+    let mut buckets=Vec::new();
+    while let Some(bucket)=next_compact_hidden_gpu_bucket_v1(&mut reader).unwrap() {buckets.push(bucket);}
+    (directory,serde_json::json!({"buckets":buckets,"assets":assets,
+        "source_binding":{"binary":std::env::var("B_GPU_HIDDEN_CLI").unwrap(),"hidden":hidden_path,"public":public_path,
+            "rows":1,"bytes":1<<20,"max_batch_bytes":1<<20}}))
+}
+
+// 复用同一typedraw/Core/writer冷构建；联合冻结不需要额外hidden准备。
+#[cfg(feature = "shared-execution")]
+pub(super) fn gpu_public_for_order_fixture(
+    initial: &[ExecutionMarketEventV3], events: &[ExecutionMarketEventV3], empty_initial: bool,
+) -> (tempfile::TempDir, PublicObservationCoreV1) {
+    use data_pipeline_training::compact_public::PublicCompactWriterV1;
+    let directory=tempfile::tempdir().unwrap();
+    let public_path=directory.path().join("public");
     let market=&initial[0].market;
     let assets=initial.iter().map(|event|match &event.payload {
         ExecutionMarketEventPayloadV3::InitialL2Snapshot(v)=>v.asset.clone(),
@@ -356,18 +378,7 @@ pub(super) fn gpu_compact_hidden_for_order_fixture(
         writer.push_prepared(&input,&prepared,&applied).unwrap();
     }
     writer.publish().unwrap();
-    let context=public.pm_context(&market.condition_id.0).unwrap();
-    let assets=context.assets.iter().map(|v|v.asset.clone()).collect::<Vec<_>>();
-    let mut sort=config().sort;sort.merge_workers=8;
-    let order=Arc::new(GpuInitialRunOrderV1::start(Path::new(&std::env::var("B_GPU_PYTHON").unwrap()),
-        Path::new(&std::env::var("B_GPU_SORT_WORKER").unwrap())).unwrap());
-    prepare_compact_hidden_material_v1(&public_path,&hidden_path,1<<20,&sort,order,"gpu-order-hidden".into(),None,|_,_,_,_| {}).unwrap();
-    let mut reader=CompactHiddenMaterialReaderV1::open(&hidden_path,&public_path,1,1<<20,1<<20,|_,_,_,_| {}).unwrap();
-    let mut buckets=Vec::new();
-    while let Some(bucket)=next_compact_hidden_gpu_bucket_v1(&mut reader).unwrap() {buckets.push(bucket);}
-    (directory,serde_json::json!({"buckets":buckets,"assets":assets,
-        "source_binding":{"binary":std::env::var("B_GPU_HIDDEN_CLI").unwrap(),"hidden":hidden_path,"public":public_path,
-            "rows":1,"bytes":1<<20,"max_batch_bytes":1<<20}}))
+    (directory,public)
 }
 async fn public_execution(
     path: &Path,

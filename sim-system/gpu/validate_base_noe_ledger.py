@@ -60,10 +60,19 @@ def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=Fa
         unresolved_markets=UnresolvedMarkets.open(pools,zero),
         market_balance_origin=market_origin(source['opening_ledger'],source['initial'][0]['market']['condition_id']),
         query_associations=query_associations))
+    if source.get('joint_public') is not None:
+        from validate_joint_freeze import install_opening
+        admission=run(lambda:install_opening(admission,source))
     pending=run(lambda:PendingRecords.from_columns(first.emitted,first.received_at,first.private_sequences,
         Numbers.ExactInt.from_i64_tensor(noe.normalizer.bank.source_order[first.rows.flatten(),3]),first.rows,integers([0])))
     state=PublicLedgerState(pending,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),
         ClosedAdmission.empty(columns),admission)
+    if source.get('joint_public') is not None:
+        from registry import PublicCancellationState
+        from commitments import SubmissionBindings
+        from dataclasses import replace
+        state=replace(state,cancellations=run(lambda:PublicCancellationState.open(integers([1]),~active[:,None])),
+            submission_bindings=SubmissionBindings.empty(1,'cuda',prefix_known=True))
     for batch in batches[1:]:
         state=run(lambda:state.append_batch(noe.normalizer.bank,batch))
     cutoff=tensor([source['prior_closed_at']])
@@ -122,6 +131,10 @@ def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=Fa
         row_reference[row]=reference
     assert len(row_reference)==4
     state=run(lambda:state.append_batch(noe.normalizer.bank,cancel_batch))
+    if source.get('joint_public') is not None:
+        from dataclasses import replace
+        assert source['cancel_arrived_at']<=source['cancel_closed_at']
+        state=replace(state,cancellations=state.cancellations.register(active[:,None]))
     at=tensor([source['cancel_closed_at']])
     gates=gates.set_receive(at,active).set_public(at,active)
     state,delivery=run(lambda:state.receive(noe.normalizer.bank,gates,
