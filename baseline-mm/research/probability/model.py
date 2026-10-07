@@ -77,6 +77,9 @@ def innovation_steps(rows):
     """每次采样先按旧基差计算，再刷新基差。"""
     basis = None
     for row in rows:
+        if row.get('identity_known') is False:
+            row['innovation'] = None
+            continue
         price, trade, received = row.get('spot_price',row.get('price')), row.get('trade_price'), row.get('spot_received',row.get('price_received'))
         if price is None or trade is None or received is None:
             row['innovation'] = None

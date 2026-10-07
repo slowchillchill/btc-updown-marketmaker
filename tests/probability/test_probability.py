@@ -216,6 +216,50 @@ class ProbabilityTests(unittest.TestCase):
                 self.assertEqual(quantity,dict(numerator='158456325028528675187087900670',denominator='1'))
             finally:boundary.close()
 
+    def test_actual_rust_census_public_serde_and_late_identity(self):
+        fixture=ROOT/'tests/probability/fixtures'
+        config=dict(start=3000,end=903001)
+        condition='0x'+'11'*32
+        before=direct.read_market_facts(fixture/'public-market-scenario.before-identity.jsonl')
+        markets,anchors,rules,labels,census=before
+        self.assertNotIn(condition,markets)
+        self.assertEqual(anchors[condition][0],dict(at=3301,value=100.0))
+        self.assertEqual(rules[condition][0],dict(at=3301,reference='chainlink_twap_sixty_seconds'))
+        self.assertEqual(labels[condition],[])
+        rows=direct.target_rows(config,*before)
+        targets=[r for r in rows if r['condition_id']==condition]
+        self.assertEqual(len(targets),8)
+        self.assertTrue(all(not r['identity_known'] and r['raw_target'] and not r['public_target'] for r in targets))
+        self.assertTrue(all(model.predict(r,model.Candidate(15,1,0),1)[1]=='missing_market_identity' for r in targets))
+        summary=direct.census_coverage(config,census,markets,rows)
+        raw=next(v for v in summary['markets'] if v['condition_id']==condition)
+        self.assertIsNone(raw['identity_at']);self.assertTrue(raw['identity_gap']['right_censored'])
+        self.assertEqual(raw['missing_identity_snapshot']['rows'],1)
+        self.assertEqual(summary['raw_locatable_targets'],16);self.assertEqual(summary['public_targets'],8)
+        self.assertGreater(targets[0]['raw_first_seen_at'],targets[0]['at'])
+        after=direct.read_market_facts(fixture/'public-market-scenario.jsonl')
+        markets,anchors,rules,labels,census=after
+        self.assertEqual(markets[condition]['known_at'],304001)
+        self.assertEqual(labels[condition][0]['at'],304001);self.assertEqual(labels[condition][0]['label'],1)
+        rows=direct.target_rows(config,*after)
+        self.assertTrue(all(not r['identity_known'] for r in rows if r['condition_id']==condition))
+        summary=direct.census_coverage(config,census,markets,rows)
+        raw=next(v for v in summary['markets'] if v['condition_id']==condition)
+        self.assertEqual(raw['raw_target_count'],8);self.assertEqual(raw['public_target_count'],8)
+        self.assertEqual(raw['census_identity_conflicts'][0]['raw']['market']['clob_market_id'],'999')
+        self.assertEqual(raw['census_identity_conflicts'][0]['public']['identity']['clob_market_id'],'123')
+        self.assertEqual(raw['raw_variants'][0]['market']['clob_market_id'],'999')
+        self.assertFalse(raw['identity_gap']['right_censored'])
+        # 有效市场窗口仍按公共身份；原始多窗口的目标数量必须保持未知。
+        ambiguous=copy.deepcopy(census);variant=copy.deepcopy(ambiguous[condition]['variants'][0])
+        variant['market']['window']['start_at_utc_ms']+=1000
+        ambiguous[condition]['variants'].append(variant)
+        rows=direct.target_rows(config,markets,anchors,rules,labels,ambiguous)
+        summary=direct.census_coverage(config,ambiguous,markets,rows)
+        self.assertEqual(summary['raw_target_count_unknown_markets'],1)
+        raw=next(v for v in summary['markets'] if v['condition_id']==condition)
+        self.assertIsNone(raw['raw_target_count']);self.assertEqual(raw['public_target_count'],8)
+
     def test_study_freezes_before_evaluation_and_writes_fixed_bins(self):
         from probability import cli
         import hashlib
