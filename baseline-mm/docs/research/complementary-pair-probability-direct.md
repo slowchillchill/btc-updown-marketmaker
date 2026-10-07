@@ -1,6 +1,6 @@
 # 直接概率与跨来源校准：方法及配置
 
-本实现承接 [#185 当前任务3分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。代码和合成边界验证已交付候选计算能力，一次真实十八日prepare已因缺身份前态失败，study未启动；[失败及最小修复报告](complementary-pair-probability-run-20261007.md)保留准确事实。正式参数仍未采用。本方法不完成经营参数、任务4连续账户、PAPER 或 LIVE 验收。
+本实现承接 [#185 当前任务3分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。代码和合成边界验证已交付候选计算能力。首次真实十八日prepare因缺身份前态失败；修复后的单次prepare又在TWAP跨单元价格保留SQL失败，study均未启动。[首次失败与身份修复](complementary-pair-probability-run-20261007.md)及[本次失败与SQL修复](complementary-pair-probability-run-20261007-repair1.md)分别保留运行身份和准确事实。正式参数仍未采用。本方法不完成经营参数、任务4连续账户、PAPER 或 LIVE 验收。
 
 ## 输入与准确查询
 
@@ -108,3 +108,7 @@ DuckDB语义依据：[ASOF连接](https://duckdb.org/docs/stable/sql/query_synta
 ## 本次失败修复验证
 
 真实执行、诊断、修复及新提案见[失败报告](complementary-pair-probability-run-20261007.md)。本轮Rust示例2项与Python12项通过，夹具由真实公共Rust输出生成并逐字核对。ReferenceFact、Terminal及市场QualityBoundary按实际serde读取。原始目录与合法身份分开；成功公共归并时才生效的pending终局不回填。未获身份的事后采样不更新创新记忆。新helper SHA-256为 `d77d6d2dbf5a252cd66ce171dc68a0c597733b0fc24014387b8188af773539ee`；原工程helper摘要和192项证据保持原身份，不重标为本次构建。
+
+## 跨单元价格保留的 SQL 修复
+
+修复后的单次真实prepare在 `price_samples` 的非空carry分支失败，见[本次失败报告](complementary-pair-probability-run-20261007-repair1.md)。动态INSERT列列表现在按SQL标识符双引号引用既有字段，内部双引号双写；值仍使用绑定参数，原跨单元状态和采样选择保持。一个代表性合成入口测试在原代码中复现TWAP与成交的同一解析错误，修复后验证旧事实延续、可见时间及同毫秒原生顺序，概率Python回归13项通过。Rust及两个helper未修改或重建；旧证据按适用范围复用。真实研究未完成，不自动再次运行，也没有正式参数采用。

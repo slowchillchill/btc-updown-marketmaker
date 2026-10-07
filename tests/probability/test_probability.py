@@ -171,6 +171,42 @@ class ProbabilityTests(unittest.TestCase):
                 self.assertIsNone(rows[1]['innovation'])
             finally:boundary.close();db.close()
 
+    def test_price_samples_cross_unit_carry_and_new_native_order(self):
+        # 同一跨单元入口覆盖TWAP与成交；旧事实可见，新单元不能回填过去。
+        for kind in ('twap','trade'):
+            with self.subTest(kind=kind):
+                db=duckdb.connect()
+                try:
+                    db.execute('CREATE TABLE targets AS SELECT * FROM (VALUES (0,1500),(1,2000),(2,2500)) t(id,"at")')
+                    db.execute('CREATE TABLE probability_targets AS SELECT id,60 AS rule_window_s FROM targets')
+                    db.execute("CREATE TABLE normalized AS SELECT * FROM (VALUES ('100',100.0),('101',101.0),('102',102.0)) n(raw,price)")
+                    # effective_common是接纳后的窄关系；只构造该入口所需合法字段。
+                    expression='price' if kind=='trade' else 'full_accuracy_value'
+                    extra='2.0 AS quantity,false AS buyer_is_maker' if kind=='trade' else '60 AS window_s'
+                    db.execute(f"CREATE TABLE effective_common AS SELECT 1000 AS clock,epoch_ms(1000::BIGINT) AS timestamp_received,900 AS event,'100' AS {expression},1 AS order_id,{extra}")
+                    carry=direct.price_samples(db,[],[],[],kind)
+                    self.assertEqual(carry[0]['at'],1000)
+                    self.assertEqual(carry[0]['order_id'],0)
+                    db.execute('DROP TABLE effective_common')
+                    extra='q AS quantity,m AS buyer_is_maker' if kind=='trade' else '60 AS window_s'
+                    db.execute(f"CREATE TABLE effective_common AS SELECT 2000 AS clock,epoch_ms(2000::BIGINT) AS timestamp_received,1900 AS event,p AS {expression},o AS order_id,{extra} FROM (VALUES ('101',1,3.0,false),('102',2,4.0,true)) v(p,o,q,m)")
+                    rows=[row(at) for at in (1500,2000,2500)]
+                    for r in rows:r['rule_window_s']=60
+                    carry=direct.price_samples(db,rows,[0,1,2],carry,kind)
+                    prefix='trade' if kind=='trade' else 'twap'
+                    self.assertEqual([r[prefix+'_price'] for r in rows],[100,102,102])
+                    self.assertEqual([r[prefix+'_received'] for r in rows],[1000,2000,2000])
+                    self.assertEqual([r[prefix+'_event_age_ms'] for r in rows],[600,100,600])
+                    self.assertEqual(carry[0]['price'],102)
+                    self.assertEqual(carry[0]['order_id'],0)
+                    if kind=='trade':
+                        self.assertEqual([r['trade_quantity'] for r in rows],[2,4,4])
+                        self.assertEqual([r['buyer_is_maker'] for r in rows],[False,True,True])
+                    # 无新消息的下一单元继续保留原事实，不以空关系清掉carry。
+                    db.execute('DELETE FROM effective_common')
+                    self.assertEqual(direct.price_samples(db,[],[],carry,kind),carry)
+                finally:db.close()
+
     def test_depth_sql_typed_application_overwrite_zero_and_gap(self):
         with tempfile.TemporaryDirectory() as t:
             root=Path(t);base=dict(symbol='BTCUSDT',source_sequence_epoch_id='depth-1',connection_generation=1,
