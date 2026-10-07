@@ -125,7 +125,9 @@ def main():
             build_hidden_device_columns(block,destination,material['source_binding'],progress=progress)
             prepared_hidden=PreparedHiddenMaterial(destination,material['source_binding'])
             compare(prepared_hidden.decimals,block.decimals,'order_pages_shared_exact_source')
-            assert prepared_hidden.banks['buckets']==material['buckets']
+            # CLI结构字段与独立Rust Value键序不同；仍比较每个完整桶及原数组顺序。
+            actual_buckets=[prepared_hidden.banks['buckets'][index] for index in range(len(prepared_hidden.banks['buckets']))]
+            assert actual_buckets==material['buckets'], '原完整桶身份、引用、步骤及闭桶字段'
             block=HiddenPmBlock.from_prepared(prepared_hidden.page(0,1))
             hidden_page_report={'nonempty_hidden_pages':[[0,1],[1,2]],
                 'nonempty_hidden_columns_bytes':sum(p.stat().st_size for p in destination.iterdir()),

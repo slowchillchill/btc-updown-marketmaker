@@ -63,7 +63,9 @@ def main():
         for name in ('event_indices','step_tags','snapshot_levels','snapshot_offsets','reference_rows'):
             assert np.array_equal(prepared.arrays[name],getattr(original,name).cpu().numpy()),name
         compare(prepared.decimals,original.decimals,'loaded_exact_hidden_dictionary')
-        assert prepared.banks['buckets']==source['buckets']
+        # CLI直接Serialize结构字段；独立Rust预期经Value按键排序。核完整对象，不要求JSON键序。
+        actual_buckets=[prepared.banks['buckets'][index] for index in range(len(prepared.banks['buckets']))]
+        assert actual_buckets==source['buckets'], '原完整桶身份、引用、步骤及闭桶字段'
         assert prepared.banks['assets']==source['assets']
         # 实际完整桶closure成员损坏；其余成员保持原只读输入。
         import tempfile
