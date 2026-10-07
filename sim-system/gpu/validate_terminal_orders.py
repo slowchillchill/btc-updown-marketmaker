@@ -312,26 +312,28 @@ def main():
         coordinator,actions=Numbers.run_exact_batch(lambda:coordinator.advance(frozen,enabled))
         assert actions.request.cpu().tolist()==[True] and actions.query.cpu().tolist()==[False]
         assert not frozen.commitments.present.any().cpu().item()
-        from settlement_registration import SettlementRegistrations
         reference=source['settlement_reference']
         assert reference['scenario']=={'steps':[{'offset_ms':1,'event':{'SubmissionReceipt':'Registered'}}],'costs':[]}
-        backend=SettlementRegistrations.empty(tensor([[0]]),tensor([[1]]))
+        runtime=runtime.install_settlement_registration(tensor([[0]]),tensor([[1]]))
         identity_bytes,identity_offsets=byte_column([value.encode('utf-8') for value in block.terminal_columns.canonical_ids])
-        backend=Numbers.run_exact_batch(lambda:backend.register(actions,sampler,identity_bytes,identity_offsets,
-            runtime.resolution_obligations,runtime.calendars.maker,block.terminal_columns))
+        runtime=Numbers.run_exact_batch(lambda:runtime.register_resolution_request(actions,sampler,identity_bytes,identity_offsets))
+        backend=runtime.settlement_registrations
         assert backend.fault.cpu().tolist()==[0] and values(backend.sends)==[1]
         first_backend=backend
-        repeated=Numbers.run_exact_batch(lambda:backend.register(actions,sampler,identity_bytes,identity_offsets,
-            runtime.resolution_obligations,runtime.calendars.maker,block.terminal_columns))
-        compare(repeated,first_backend,'same_request_preserves_first_registration_and_scenario')
+        repeated=Numbers.run_exact_batch(lambda:runtime.register_resolution_request(actions,sampler,identity_bytes,identity_offsets))
+        compare(repeated.settlement_registrations,first_backend,'same_request_preserves_first_registration_and_scenario')
         clock=backend.next_clock()
         assert clock.at.cpu().tolist()==[reference['at']] and clock.present.cpu().tolist()==[True]
         horizon.copy_(clock.at)
-        choice=runtime.choose(None,None,horizon,enabled,settlement=clock)
+        choice=runtime.choose(None,None,horizon,enabled)
         assert choice.enabled(0).cpu().tolist()==[True]
-        backend,feedback=backend.advance_registered(choice.at,choice.enabled(0))
-        projection,batch=Numbers.run_exact_batch(lambda:projection.settlement_request(sampler,feedback.conditions[:,0],
-            feedback.resolutions[:,0],zero,zero,zero,feedback.at[:,0],feedback.emitted[:,0],feedback.fault))
+        broken=replace(projection,emitter=replace(projection.emitter,next_private_sequence=integers([(1<<64)-1])))
+        denied,_,denied_batch=Numbers.run_exact_batch(lambda:runtime.settlement_registered(choice,broken,sampler,tensor([[0]])))
+        assert not denied_batch.emitted.any().cpu().item() and denied_batch.fault.cpu().tolist()==[1]
+        compare(denied.settlement_registrations,replace(first_backend,fault=denied_batch.fault),
+            'Registered_feedback_fault_keeps_scenario_and_first_request')
+        runtime,projection,batch=Numbers.run_exact_batch(lambda:runtime.settlement_registered(choice,projection,sampler,tensor([[0]])))
+        backend=runtime.settlement_registrations
         assert batch.emitted.cpu().tolist()==[[True]]
         row=batch.rows.flatten()
         fields,error=Numbers.run_exact_batch(lambda:decode_fields(projection.normalizer.bank.semantic[row],['scalar']*8,enabled))
@@ -373,6 +375,7 @@ def main():
         'actual_Maker_pending_Terminal_then_MINED_CONFIRMED_and_market_result_checked':with_pending,
         'public_Ledger_economic_predecessors_and_Maker_gate_checked':with_pending,
         'first_public_Request_backend_Registered_same_NOE_Ledger_checked':with_pending,
+        'Registered_feedback_fault_keeps_same_runtime_scenario_prefix_checked':with_pending,
         'growth_new_slot_does_not_alias_old_pending_identity_checked':with_pending,'full_root_and_requested_settlement':False,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 

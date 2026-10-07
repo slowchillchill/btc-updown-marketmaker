@@ -25,6 +25,36 @@ class BaseSimRuntime:
     market_controls: object = None  # MarketFact映射/交易/质量；不冒充Terminal经济状态。
     source_resolutions: object = None
     resolution_obligations: object = None
+    settlement_registrations: object = None  # 仅显式单Registered工程scenario；不代表完整结算后端。
+
+    def install_settlement_registration(self,conditions,receipt_offsets):
+        from settlement_registration import SettlementRegistrations
+        if self.settlement_registrations is not None:
+            return self
+        return replace(self,settlement_registrations=SettlementRegistrations.empty(conditions,receipt_offsets))
+
+    def register_resolution_request(self,actions,sampler,identity_bytes,identity_offsets):
+        if self.settlement_registrations is None or self.resolution_obligations is None:
+            raise ValueError('请求首登记需实际已安装scenario和判定义务')
+        registered=self.settlement_registrations.register(actions,sampler,identity_bytes,identity_offsets,
+            self.resolution_obligations,self.calendars.maker,self.hidden_frontier.columns.source.terminal_columns)
+        return replace(self,settlement_registrations=registered)
+
+    def settlement_registered(self,choice,projection,sampler,policy):
+        """真实阶段0回执与NOE共同候选；映射故障不能先消费scenario步骤。"""
+        self._source(choice)
+        original=self.settlement_registrations
+        if original is None:
+            raise ValueError('Registered消费需已安装实际scenario')
+        backend,feedback=original.advance_registered(choice.at,choice.enabled(0))
+        zeros=torch.zeros_like(feedback.conditions)
+        projected,batch=projection.settlement_requests(sampler,feedback.conditions,feedback.resolutions,
+            policy,zeros,zeros,feedback.at,feedback.emitted,feedback.fault | choice.fault)
+        fault=backend.fault | batch.fault | choice.fault
+        backend=replace(backend.coordinated(original,fault==0),fault=fault)
+        batch=replace(batch,emitted=batch.emitted & (fault==0)[:,None],
+            economic_enabled=batch.economic_enabled & (fault==0)[:,None],fault=fault)
+        return replace(self,settlement_registrations=backend),projected,batch
 
     def install_hidden_resolutions(self):
         """冷安装判定存储；不把未来Terminal、订单或成交当已应用事实。"""
@@ -163,6 +193,8 @@ class BaseSimRuntime:
         if self.hidden_frontier is not None:
             hidden_source,hidden_eof=self.hidden_frontier.scheduled()
         source=replace(hidden_source,fault=hidden_source.fault | fault)
+        if settlement is None and self.settlement_registrations is not None:
+            settlement=self.settlement_registrations.next_clock()
         choice=next_sim_drive(self.requests,self.fills,self.calendars,source,hidden_eof,
             advance_until,enabled,settlement=settlement,gtd=gtd)
         return replace(choice,hidden_frontier=self.hidden_frontier)

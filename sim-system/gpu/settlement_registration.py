@@ -78,6 +78,12 @@ class SettlementRegistrations:
         at=masked.min(1).values
         return ScheduledTime(at,pending.any(1)&(fault==0),fault)
 
+    def coordinated(self,original,valid_roots):
+        use=valid_roots[:,None]
+        return replace(self,**{name:torch.where(use,getattr(self,name),getattr(original,name))
+            for name in ('present','resolutions','first_arrival','received')},
+            sends=self.sends.select(use.expand_as(self.present).flatten(),original.sends))
+
     def advance_registered(self,at,enabled):
         scheduled=self.next_clock()
         pending=self.present & ~self.received

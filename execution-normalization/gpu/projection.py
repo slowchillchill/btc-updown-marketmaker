@@ -163,19 +163,25 @@ class Projection:
             effect.at,emission.emitted[:,-1]))
         return working._finish(emitter,records,emission.root_fault | ordinals.fault)
 
-    def settlement_request(self,sampler,condition,resolution,policy,outcome,observation,at,active,fault):
-        """真实SIM请求观察→原独立Settlement反馈；无账户delta，不伪造经济序号。"""
+    def settlement_requests(self,sampler,condition,resolution,policy,outcome,observation,at,active,fault):
+        """同次原有序SIM请求观察→独立Settlement反馈；无账户delta。"""
         from lifecycle import map_settlement_request
-        emitter,emission=self.emitter.emit(sampler,active[:,None],torch.zeros_like(active[:,None]),
-            at[:,None],at[:,None],torch.zeros_like(at[:,None]),fault[:,None])
+        emitter,emission=self.emitter.emit(sampler,active,torch.zeros_like(active),
+            at,at,torch.zeros_like(at),fault[:,None].expand_as(active))
         from queues import _take
-        root=torch.arange(active.numel(),device=at.device)
-        private=_take(emission.private_sequences,root)
-        batch=_take(emission.batch_sequences,root)
-        record=map_settlement_request(self.account_slots,condition,resolution,policy,outcome,observation,
-            private,torch.zeros_like(at),emission.emitted[:,0])
-        return self._finish(emitter,[(record,EVIDENCE,private,batch,emission.received_at[:,0],
-            torch.full_like(at,3),at,emission.emitted[:,0])],emission.root_fault)
+        roots,width=active.shape
+        root=torch.arange(roots,device=at.device)
+        categories=torch.full_like(at,3)
+        ordinals=map_source_ordinals(emission.emitted,categories,torch.ones_like(at),fault[:,None].expand_as(active))
+        records=[]
+        for column in range(width):
+            private=_take(emission.private_sequences,root*width+column)
+            batch=_take(emission.batch_sequences,root*width+column)
+            record=map_settlement_request(self.account_slots,condition[:,column],resolution[:,column],policy[:,column],
+                outcome[:,column],observation[:,column],private,ordinals.first_ordinals[:,column],emission.emitted[:,column])
+            records.append((record,EVIDENCE,private,batch,emission.received_at[:,column],
+                categories[:,column],at[:,column],emission.emitted[:,column]))
+        return self._finish(emitter,records,emission.root_fault | ordinals.fault)
 
     def pending_base_acceptance(self,sampler,orders,pool,effects,asset_tokens):
         """已完成的单项Base接单来源；完整Pair响应仍须原请求封口协调。
