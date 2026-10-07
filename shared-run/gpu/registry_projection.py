@@ -1,15 +1,15 @@
 """实际设备NOE领取列到共享Registry公开字段的批量接缝。
 
-解码原现行Base Submission、Accepted OrderLifecycle、TradeLifecycleV3 schema。
+解码原现行Base Submission、Accepted OrderLifecycle、TradeLifecycleV3和普通Query schema。
 输入是NOE双门已领取引用；不读取Ledger应用结果，不经CPU逐条业务回调。
-更宽查询/取消/登记schema由各自来源接入，不把未知类型解释为已支持。
+Orders分页查询/其它取消或登记schema由各自来源接入，不把未知类型解释为已支持。
 """
 from dataclasses import dataclass
 import torch
 from queues import ExactInt,ExactRational,Numbers,_take
 from fields import decode_fields
 from core import OUT_EVIDENCE
-from registry import PublicRegistryEvents,BASE_ACCEPTED,ORDER_LIFECYCLE,TRADE
+from registry import PublicRegistryEvents,BASE_ACCEPTED,ORDER_LIFECYCLE,TRADE,ORDER_QUERY
 
 
 def concatenate_integer(values,roots):
@@ -69,7 +69,8 @@ def public_rows_from_closed(bank,batches,closed,receive_rank,*,source_rows=None)
     layouts={3:['scalar']*4+['integer','scalar','integer','integer','scalar'],
         7:['scalar']*3+['integer','scalar','scalar'],
         8:['scalar']*3+['integer','integer']+['scalar']*4+['rational']+['integer']*3+['scalar','integer','scalar','rational'],
-        19:['scalar']*3+['integer','scalar','scalar','scalar']}
+        19:['scalar']*3+['integer','scalar','scalar','scalar'],
+        25:['scalar']*4+['integer']+['scalar']*3+['rational']*2+['scalar']*2+['integer']*2}
     decoded={}
     for schema,layout in layouts.items():
         enabled=active & (schemas==schema)
@@ -87,13 +88,15 @@ def public_rows_from_closed(bank,batches,closed,receive_rank,*,source_rows=None)
     closed_order=order_life&((decoded[7][4]==4)|(decoded[7][4]==5))
     formed=order_life&(decoded[7][4]==0)
     trades=active & (schemas==8)
-    received=(accepted|order_life|trades).reshape(roots,width)
+    queries=active & (schemas==25) & (decoded[25][1]==0)
+    received=(accepted|order_life|trades|queries).reshape(roots,width)
     zero=ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=device))
     order=decoded[3][4].select(accepted,zero)
     order=decoded[7][3].select(order_life,order)
     order=decoded[8][4].select(trades,order)
+    order=decoded[25][4].select(queries,order)
     fill=decoded[8][3].select(trades,zero)
-    kinds=torch.where(trades,TRADE,torch.where(order_life,ORDER_LIFECYCLE,BASE_ACCEPTED)).reshape(roots,width)
+    kinds=torch.where(queries,ORDER_QUERY,torch.where(trades,TRADE,torch.where(order_life,ORDER_LIFECYCLE,BASE_ACCEPTED))).reshape(roots,width)
     units=lambda value:ExactRational.ratio(value,value.constant(1_000_000))
     private=concatenate_integer([batch.private_sequences for batch in batches],roots)
     ordinals=concatenate_integer([batch.record_ordinals for batch in batches],roots)
@@ -109,7 +112,9 @@ def public_rows_from_closed(bank,batches,closed,receive_rank,*,source_rows=None)
         (formed & (decoded[7][5]==1)).reshape(roots,width),formed.reshape(roots,width),
         torch.zeros_like(received),closed_order.reshape(roots,width),
         torch.cat([batch.platform_at for batch in batches],1).gather(1,at),
-        torch.cat([batch.received_at for batch in batches],1).gather(1,at),fault)
+        torch.cat([batch.received_at for batch in batches],1).gather(1,at),fault,
+        torch.where(queries,decoded[25][5],-1).reshape(roots,width),
+        torch.where(queries,decoded[25][7],-1).reshape(roots,width))
 
     submission=active & (schemas==3)
     fault=fault | (submission & ((decoded[3][1]<0)|(decoded[3][1]>2))).reshape(roots,width).any(1).to(torch.int32)

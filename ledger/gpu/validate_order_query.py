@@ -208,7 +208,7 @@ def validate(source,artifact):
                 _,query_bound=run(lambda:original.query_associations.lookup(original.lifecycle.request_slots[:,index]))
                 definitive=query_bound.cpu().item() and original.lifecycle.query_outcomes[0,index].cpu().item()==0 and (
                     original.lifecycle.query_states[0,index].cpu().item() in (0,1))
-                if definitive and original.order_funds.occupied.all().cpu().item() and not fund_member.cpu().item():
+                if consumed.cpu().item() and definitive and original.order_funds.occupied.all().cpu().item() and not fund_member.cpu().item():
                     full_funds_queries+=1
             # 同一原position已消费时apply_record不再签发新消费/条目。
             assert consumed.cpu().item()==(not original.applied[0,index].cpu().item())

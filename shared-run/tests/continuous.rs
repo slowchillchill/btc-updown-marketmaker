@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/query_registry_gpu.rs"]
+mod query_registry_gpu;
 use common::*;
 use contracts::*;
 use ledger::*;
@@ -3084,6 +3086,7 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
     let mut terminal = None;
     let mut initial_funds = None;
     let mut checked = 0;
+    let mut gpu_frames=Vec::new();
     while driver.next_group().unwrap().is_some() {
         let Some(view) = shared.action_before(&mut driver).unwrap() else {
             continue;
@@ -3099,6 +3102,7 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
             );
         }
         if at == 299_970 {
+            query_registry_gpu::frame(&mut gpu_frames,"before_query",at,shared.registry());
             let Known(objects) = view.cancel_objects() else {
                 panic!("完整成员")
             };
@@ -3220,6 +3224,8 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
                 "查询不释放真实资金占用"
             );
             checked += 1;
+            query_registry_gpu::frame(&mut gpu_frames,
+                if at==300_007 {"terminal_before_lifecycle"} else {"late_open_after_terminal"},at,shared.registry());
         }
     }
     assert_eq!(checked, 2);
@@ -3228,8 +3234,10 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
     let mut late =
         SharedExecutionRegistryV1::new(Arc::new(terminal.as_ref().unwrap().context().clone()));
     late.observe(&terminal.unwrap());
+    query_registry_gpu::frame(&mut gpu_frames,"reordered_terminal_only",300_008,&late);
     let order = shared.registry().order(&id).unwrap();
     late.observe(order.accepted.unwrap());
+    query_registry_gpu::frame(&mut gpu_frames,"reordered_late_measurement",300_008,&late);
     let trades: Vec<_> = shared.registry().order_trades(&id).cloned().collect();
     assert!(!trades.is_empty());
     for _ in 0..2 {
@@ -3243,6 +3251,8 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
         order.matched_shares
     );
     assert_eq!(late.order_trades(&id).count(), trades.len());
+    query_registry_gpu::frame(&mut gpu_frames,"reordered_late_trades",300_008,&late);
+    query_registry_gpu::finish(gpu_frames);
 }
 
 #[tokio::test(flavor = "current_thread")]

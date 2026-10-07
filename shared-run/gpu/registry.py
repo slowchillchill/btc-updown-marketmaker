@@ -10,8 +10,8 @@ from asset_buy import take_ratio
 from success_pool import select
 from trade_success import sum_rows
 
-# 所属字段布局：Base接受、Quote接受、明确关闭、Trade、撤单目标响应。
-BASE_ACCEPTED, QUOTE_ACCEPTED, ORDER_LIFECYCLE, TRADE, CANCEL_TARGET = range(5)
+# 所属字段布局：Base接受、Quote接受、明确关闭、Trade、撤单目标响应、普通Query。
+BASE_ACCEPTED, QUOTE_ACCEPTED, ORDER_LIFECYCLE, TRADE, CANCEL_TARGET, ORDER_QUERY = range(6)
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,17 @@ class PublicRegistryEvents:
     platform_at: torch.Tensor  # 原source reference的平台事件/回应时刻。
     received_at: torch.Tensor  # 原source reference的实际反馈收到时刻。
     fault: torch.Tensor
+    query_states: torch.Tensor | None = None
+    query_quantity_kinds: torch.Tensor | None = None
+
+    def __post_init__(self):
+        # 原非Query构造者不新增业务成员；新增列只在ORDER_QUERY人口内有意义。
+        for name in ('query_states','query_quantity_kinds'):
+            value=getattr(self,name)
+            if value is None:
+                object.__setattr__(self,name,torch.full_like(self.kinds,-1))
+            elif value.shape!=self.received.shape or value.dtype!=torch.int64 or value.device!=self.received.device:
+                raise TypeError('Query公开字段须同设备int64[roots,events]')
 
 
     @classmethod
@@ -108,6 +119,19 @@ def choose_latest(member, priority):
     return priority.gather(1,first), member.any(2)
 
 
+def query_selection(events,member):
+    """首次领取按原delivery单调递增；首次终态锁定known_query，direct继续更新。
+
+    Query数量只提供Base/Quote适用性，不能替代Submission measurement。
+    """
+    priority=delivery_priority(events.delivery_sequences,events.record_ordinals,events.receive_rank)
+    queries=member & (events.kinds==ORDER_QUERY)[:,None,:]
+    latest,known=choose_latest(queries,priority)
+    terminal=queries & ((events.query_states>=1)&(events.query_states<=5))[:,None,:]
+    first_terminal,closed=choose_latest(terminal,priority.flip(1))
+    return torch.where(closed,first_terminal,latest),known,closed
+
+
 def frozen_order_read(events, intents):
     """原GTC/Quote公开计量、最终性覆盖和未闭合人口；不生成提交或现金变化。"""
     roots, width = events.received.shape
@@ -132,10 +156,16 @@ def frozen_order_read(events, intents):
     initial = take_ratio(events.matched,coordinates)
     initial_open = take_ratio(events.open_quantity,coordinates)
     quote = accepted & (events.kinds.gather(1,at)==QUOTE_ACCEPTED)
+    query_at,query_known,query_closed=query_selection(events,member)
+    query_kind=events.query_quantity_kinds.gather(1,query_at)
+    query_applicable=query_known & (query_kind!=2)
+    base_applicable=torch.where(accepted,~quote,
+        torch.where(query_applicable,query_kind==0,~intents.quoted))
+    applicability_known=accepted|query_applicable|intents.origin_known
     life_at, life_known = choose_latest(member & (events.kinds==ORDER_LIFECYCLE)[:,None,:], priority)
     formed_at, formed_known = choose_latest(member & ((events.kinds==ORDER_LIFECYCLE)&events.formation)[:,None,:], priority)
     formed_matched = formed_known & events.accepted_matched.gather(1,formed_at)
-    closed = (life_known & events.lifecycle_closed.gather(1,life_at)) | (
+    closed = query_closed | (life_known & events.lifecycle_closed.gather(1,life_at)) | (
         member & ((events.kinds==CANCEL_TARGET)&events.canceled)[:,None,:]).any(2)
     # Trade按完整身份的最高private保留一份；排序相邻键去重，不建历史平方矩阵。
     candidate = events.received & (events.kinds==TRADE)
@@ -157,7 +187,7 @@ def frozen_order_read(events, intents):
     active = initial_open-maker
     empty = ExactRational(active.numerator.constant(0),active.denominator.constant(1))
     active = select(active,~closed.flatten(),empty)
-    active_known = (accepted & (active.numerator.sign>=0).reshape(roots,count)) | (closed & intents.origin_known & ~intents.quoted)
+    active_known = base_applicable & applicability_known & ((accepted & (active.numerator.sign>=0).reshape(roots,count)) | closed)
     cancellable_known = closed|quote|formed_matched|active_known
     cancellable = active_known & (active.numerator.sign>0).reshape(roots,count) & ~closed & ~quote & ~formed_matched
     coverage = taker.compare(initial)
@@ -180,15 +210,17 @@ def frozen_order_read(events, intents):
         limit=sequence.compare(sequence.constant((1<<64)-1))
         invalid=sequence.fault | limit.fault | ((sequence.sign<0)|(limit.order>0)).to(torch.int32)
         fault=fault | Numbers.combine_fault_rows(torch.where(events.received,invalid.reshape(roots,width),0))
-    invalid=(events.kinds<BASE_ACCEPTED)|(events.kinds>CANCEL_TARGET)
+    invalid=(events.kinds<BASE_ACCEPTED)|(events.kinds>ORDER_QUERY)
     invalid=invalid | ((events.kinds==TRADE)&((events.roles<0)|(events.roles>1)|(events.dispositions<0)|(events.dispositions>4)))
+    invalid=invalid | ((events.kinds==ORDER_QUERY)&((events.query_states<0)|(events.query_states>8)|
+        (events.query_quantity_kinds<0)|(events.query_quantity_kinds>2)))
     fault=fault | Numbers.combine_fault_rows(torch.where(events.received,invalid.to(torch.int32),0))
     fault = fault | Numbers.combine_fault_rows(torch.where(member,comparison_fault,0).reshape(roots,-1))
     for value in [matched,active,commitment]:
         fault = fault | Numbers.combine_fault_rows(torch.where(intents.present,value.fault.reshape(roots,count),0))
     fault = fault | Numbers.combine_fault_rows(torch.where(accepted,coverage.fault.reshape(roots,count),0))
     return PublicOrdersRead(intents.present,matched,accepted,active,active_known,
-        ~(quote | (intents.origin_known & intents.quoted)),accepted|intents.origin_known,
+        base_applicable,applicability_known,
         commitment_present,cancellable,cancellable_known,
         commitment,commitment_known,unfinished,fault)
 
@@ -229,16 +261,21 @@ def compact_order_events(events):
     trade=events.kinds==TRADE
     key=events.trades.select(trade.flatten(),key)
     category=torch.where(events.kinds<=QUOTE_ACCEPTED,0,events.kinds-1)
-    ordinary=events.received & ((events.kinds!=CANCEL_TARGET)|events.canceled)
+    ordinary=events.received & (events.kinds!=ORDER_QUERY) & ((events.kinds!=CANCEL_TARGET)|events.canceled)
     keep=first_identity_population(key,category,ordinary,priority)
     keep=keep | first_identity_population(key,category,events.received & (events.kinds==ORDER_LIFECYCLE) & events.formation,priority)
     # 最新Direct按原领取delivery/record ordinal选择，三类取消结果均保留。
-    direct=(events.kinds<=QUOTE_ACCEPTED)|(events.kinds==CANCEL_TARGET)
+    direct=(events.kinds<=QUOTE_ACCEPTED)|(events.kinds==CANCEL_TARGET)|(events.kinds==ORDER_QUERY)
     direct_priority=delivery_priority(events.delivery_sequences,events.record_ordinals,events.receive_rank)
     keep=keep | first_identity_population(events.orders,torch.zeros_like(events.kinds),events.received & direct,direct_priority)
     # latest_cancel是独立来源；较新的非撤单Direct不能抹掉此前NoEffect/Unknown响应。
     keep=keep | first_identity_population(events.orders,torch.zeros_like(events.kinds),
         events.received & (events.kinds==CANCEL_TARGET),direct_priority)
+    # known_query与latest_direct各有真实消费者；首次终态后晚Open不能抹前者。
+    queries=events.received & (events.kinds==ORDER_QUERY)
+    terminal=queries & (events.query_states>=1) & (events.query_states<=5)
+    keep=keep | first_identity_population(events.orders,torch.zeros_like(events.kinds),queries,direct_priority)
+    keep=keep | first_identity_population(events.orders,torch.zeros_like(events.kinds),terminal,direct_priority.flip(1))
     # root fault保存全部输入的故障，不因来源替换或压紧洗掉失败。
     fault=events.fault.clone()
     for value in [events.orders,events.trades,events.private_sequences,events.delivery_sequences,events.record_ordinals,events.batch_sequences]:
@@ -247,8 +284,10 @@ def compact_order_events(events):
         fault=fault | Numbers.combine_fault_rows(torch.where(events.received,invalid.reshape(roots,width),0))
     for value in [events.matched,events.open_quantity,events.trade_quantity]:
         fault=fault | Numbers.combine_fault_rows(torch.where(events.received,value.fault.reshape(roots,width),0))
-    kind_fault=(events.kinds<BASE_ACCEPTED)|(events.kinds>CANCEL_TARGET)
+    kind_fault=(events.kinds<BASE_ACCEPTED)|(events.kinds>ORDER_QUERY)
     kind_fault=kind_fault | ((events.kinds==TRADE)&((events.roles<0)|(events.roles>1)|(events.dispositions<0)|(events.dispositions>4)))
+    kind_fault=kind_fault | ((events.kinds==ORDER_QUERY)&((events.query_states<0)|(events.query_states>8)|
+        (events.query_quantity_kinds<0)|(events.query_quantity_kinds>2)))
     fault=fault | Numbers.combine_fault_rows(torch.where(events.received,kind_fault.to(torch.int32),0))
     # 唯一CPU读数是该物理块的最大保留人口，用于分配；不读业务条件逐项推进。
     capacity=max(1,int(keep.to(torch.int64).sum(1).max().cpu()))
@@ -520,6 +559,7 @@ class FrozenOrderSources:
     latest_direct: OrderFeedbackSource
     fault: torch.Tensor
     latest_cancel: OrderFeedbackSource | None = None
+    known_query: OrderFeedbackSource | None = None
 
 
 def delivery_priority(delivery, ordinal, receive_rank):
@@ -543,7 +583,7 @@ def frozen_order_sources(events,intents):
         columns=torch.zeros((roots,count),dtype=torch.int64,device=device)
         zero=ExactInt.from_i64_tensor(columns.flatten())
         source=OrderFeedbackSource(blank,torch.full_like(columns,-1),columns,columns,columns,columns,columns,zero,zero,zero,zero)
-        return FrozenOrderSources(source,source,events.fault,source)
+        return FrozenOrderSources(source,source,events.fault,source,source)
     same,error=identity_matches(intents.identities,events.orders,roots,count,width)
     member=same&events.received[:,None,:]&intents.present[:,:,None]
     fault=events.fault|Numbers.combine_fault_rows(torch.where(member,error,0).reshape(roots,-1))
@@ -558,8 +598,17 @@ def frozen_order_sources(events,intents):
             _take(events.record_ordinals,coordinates),_take(events.private_sequences,coordinates),
             _take(events.delivery_sequences,coordinates))
     formed=select_source((events.kinds==ORDER_LIFECYCLE)&events.formation,source_priority(events.private_sequences,events.receive_rank))
-    direct=select_source((events.kinds<=QUOTE_ACCEPTED)|(events.kinds==CANCEL_TARGET),
+    direct=select_source((events.kinds<=QUOTE_ACCEPTED)|(events.kinds==CANCEL_TARGET)|(events.kinds==ORDER_QUERY),
         delivery_priority(events.delivery_sequences,events.record_ordinals,events.receive_rank))
     cancellation=select_source(events.kinds==CANCEL_TARGET,
         delivery_priority(events.delivery_sequences,events.record_ordinals,events.receive_rank))
-    return FrozenOrderSources(formed,direct,fault,cancellation)
+    # 以完整来源选择相同known_query；原canonical condition/token仍在共享NOE bank。
+    query_at,query_known,_=query_selection(events,member)
+    # 与其他公开来源相同的原引用绑定，不创建第二份查询正文。
+    coordinates=(torch.arange(roots,device=device)[:,None]*width+query_at).flatten()
+    def query_column(value):return value.gather(1,query_at)
+    query=OrderFeedbackSource(query_known,torch.where(query_known,query_column(events.record_refs),-1),
+        query_column(events.platform_at),query_column(events.received_at),query_column(events.available_at),
+        query_column(events.context_slots),query_column(events.run_slots),_take(events.batch_sequences,coordinates),
+        _take(events.record_ordinals,coordinates),_take(events.private_sequences,coordinates),_take(events.delivery_sequences,coordinates))
+    return FrozenOrderSources(formed,direct,fault,cancellation,query)

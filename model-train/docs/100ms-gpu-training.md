@@ -1510,7 +1510,32 @@ Submission 的已收到 Accepted 也须有原 SubmissionItem 关联才应用 Led
 均保持关闭；真实经济建立的单槽资金目录满后，另一实际预留的 Query 确认仍不改变资金目录。
 进度按实际步骤数输出，可由 `B_GPU_QUERY_PROGRESS_EVERY` 调节，0 关闭。
 后置验证入口是 `model-train/scripts/run_order_query_validation.sh`，完整成功池路径复用
-原 `trade-records` 定向回归。提交前尚未运行本批验证。
-Registry 的 V2 Found 快照、实际 SIM Query 生产者和发送端登记接线仍开放；Found 快照
+原 `trade-records` 定向回归。`cf03345` 两个原 Ledger 场景均在 AutoDL 通过，
+`c510f64` 完整成功池非空 trade 回归适用；原导出和验证读面失败保留于 #181 实施记录。
+Registry 的 V2 Found 消费者沿下一组件接线；实际 SIM Query 生产者和发送端登记仍开放。Found 快照
 不能替代原 Submission 数量测量。此处不增加自动查询或重试政策，也不声称完整 Query 宿主、
 连续训练、PPO 或活动账户恢复已经交付。
+
+### 普通 Query 的 Registry 公开读取
+
+`shared-run/gpu/registry_projection.py` 在原首次领取接缝解码 `schema25`。
+只有 Found 为原订单身份新增公开来源；NotFound/OutOfRetention 不生成订单快照。
+Query 的 Base/Quote 数量种类补适用性，数量值不作为 Submission 的计量基准。
+无 Submission measurement 时 matched 保持 Unavailable；Base 终态 active 为 Known0，
+Quote active 为 NotApplicable。已有 measurement 继续使用原 matched 加后续 Maker、
+open 减后续 Maker 的公式，Query 只提供终态覆盖，不改变账本资金。
+
+首次终态 Query 固定 `known_query`，晚到 Open 仍可更新 `latest_direct`。
+来源选择保原完整 delivery/record ordinal；压紧分别保留查询快照和最新直接响应，
+两者相同位置时不另存正文。Query 状态和数量种类是必要读取列；市场/资产及完整来源
+仍沿共享 bank 与 `known_query` 的原 position 访问，不复制完整快照。
+字段追加兼容原非 Query 构造者，其新列是明确无 Query 的占位，不能当已知来源。
+冻结读取只使用截至已公开人口，身份目录预分配不提前暴露订单。
+
+验证复用 `real_terminal_query_then_late_open_precede_lifecycle` 的原合法 SIM 构造：
+终态响应先公开，晚 Open 后公开且终态生命周期尚未到；另复用该原测试的空 Registry
+先 observe 终态，再收到原 measurement/trades 的附加重排反例，不增加第二账户回放。
+`run_query_registry_validation.sh` 导出完整原引用和独立 CPU Registry 读面，核数量、
+适用性、cancellable、原引用及同设备冻结捕获/旧冻结。Query 冷切片承接真实交付起点并
+核实际双时间门，非 Query 来源复用原冷引用适配；这不是完整首次领取流或 GPU SIM 生产者。
+完整取消对象人口、Quote Query 的 SIM 后端和发送/关联共同提交仍开放，本候选尚未后置运行。
