@@ -31,6 +31,7 @@ run_test() {
 }
 case "$case_name" in
     pair-redemption)
+        export B_GPU_PAIR_REDEMPTION_VALIDATOR="$repo_root/sim-system/gpu/validate_pair_redemption.py"
         command=(cargo test -p shared-run --test economic_settlement --locked --offline
             gpu_actual_pair_and_winner_orphan_redemption_preserves_one_economic_fact -- --ignored --nocapture)
         printf '%q ' "${command[@]}" >> "$artifact_dir/commands.txt"
