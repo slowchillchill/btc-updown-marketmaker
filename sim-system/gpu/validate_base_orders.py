@@ -103,11 +103,25 @@ def main():
         assert_checkpoint(checkpoint['state'], orders.read(slot).quantity, account)
     assert observed_pending_zero_quote and maker_record is not None
     assert values(fills.next_sequence) == [3] and values(orders.next_sequence) == [2]
+    # 已完成请求无pending：调度padding零terms/故障不得污染既存状态。
+    padding = FrozenBaseTerms(tensor([-1]), integers([0]), integers([0]), rational(['0']),
+                              tensor([-1]), tensor([-1]), tensor([1], torch.int32))
+    old_requests, old_orders, old_queue, old_account, old_fills = requests, orders, queue, account, fills
+    requests, orders, queue, account, fills, idle = run_pending_base_acceptance(requests, orders, queue,
+        account, fills, padding, tensor([[-1]]), fee_rate, source['fee_exponent'],
+        torch.zeros((1,queue.capacity), dtype=torch.int64, device='cuda'), rebate, tensor([0, 0]), tensor([-1]))
+    assert idle.fault.cpu().tolist() == [0]
+    assert not idle.acceptance.submission_delta.emitted.cpu().item() and not idle.response.emitted.cpu().item()
+    for actual, previous in ((account.cash, old_account.cash), (account.next_sequence, old_account.next_sequence),
+                             (orders.next_sequence, old_orders.next_sequence), (fills.next_sequence, old_fills.next_sequence)):
+        assert values(actual) == values(previous)
+    assert torch.equal(requests.done, old_requests.done) and torch.equal(queue.kind, old_queue.kind)
     torch.cuda.synchronize()
     print(json.dumps({'device_request_registration_to_real_GTC_acceptance_checked': True,
         'directory_routes_actual_hidden_maker_depletion_and_cancel_checked': True,
         'zero_quote_pending_keeps_original_fill_population_checked': True,
         'order_u64_identity_and_queue_slot_survive_growth_checked': True,
+        'completed_request_inactive_zero_terms_no_effect_or_fault_checked': True,
         'original_SIM_checkpoints': len(source['checkpoints']),
         'elapsed_seconds_with_reference_reads': time.perf_counter()-started,
         'device_peak_allocated_bytes': torch.cuda.max_memory_allocated(),

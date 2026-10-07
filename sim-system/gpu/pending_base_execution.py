@@ -63,12 +63,13 @@ def accept_pending_base(requests, pending, orders, queue, account, fills, terms,
     if pending.source is not requests:
         raise ValueError('接单须使用选择pending时同一请求状态')
     active = pending.exists
-    source_fault = requests.fault | orders.fault | terms.fault
+    source_fault = requests.fault | orders.fault | terms.fault*active.to(torch.int32)
     source_fault = source_fault | (active & (terms.item_refs != pending.item_ref)).to(torch.int32)
     prepared = prepare_base_order(queue, account, ask_rows, terms.accepted_base, terms.accepted_quote,
         terms.limit_price, fee_rate, fee_exponent, terms.assets, active & (source_fault == 0))
     # 不存在pending的padding terms不是新的业务错误；实际人口仍保存全部原故障。
-    prepared = replace(prepared, fault=source_fault | prepared.fault*active.to(torch.int32))
+    prepared = replace(prepared, fault=source_fault | prepared.fault*active.to(torch.int32),
+        quantity=replace(prepared.quantity, fault=prepared.quantity.fault*active.to(torch.int32)))
     original_queue, original_account, original_fills, original_orders = queue, account, fills, orders
     queue, account, fills, accepted = accept_base_with_fills(prepared, queue, account, fills,
         pending.effective_at, selected_paths, taker_rebate_rate, row_roots)
