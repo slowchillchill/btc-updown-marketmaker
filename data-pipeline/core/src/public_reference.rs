@@ -659,6 +659,30 @@ pub enum TemporaryReferenceSelectionResultV1 {
     Prepared(PreparedReferenceSelectionV1),
 }
 
+/// 与直接窄列统计共用的临时 TWAP 候选谓词。
+/// 适用时段、因果排序及首条选择仍由调用者/选择器负责。
+#[allow(clippy::too_many_arguments)]
+pub fn temporary_twap_candidate_matches_v1(
+    reference: BtcSettlementReferenceV1,
+    market_start: i64,
+    market_end: i64,
+    window_s: u64,
+    payload_timestamp: i64,
+    received: i64,
+    quality: MarketDataQuality,
+) -> bool {
+    let expected = match reference {
+        BtcSettlementReferenceV1::ChainlinkSpot => return false,
+        BtcSettlementReferenceV1::ChainlinkTwapThirtySeconds => 30,
+        BtcSettlementReferenceV1::ChainlinkTwapSixtySeconds => 60,
+    };
+    window_s == expected
+        && matches!(quality, MarketDataQuality::Fresh | MarketDataQuality::Stale)
+        && payload_timestamp >= market_start
+        && payload_timestamp < market_end
+        && received >= market_start
+}
+
 /// 临时参考适用性和首条判断的唯一纯函数；准备阶段调用，热核心仅提交返回值。
 pub fn select_temporary_reference_v1(
     state: TemporaryReferenceStateV1<'_>,
@@ -677,9 +701,11 @@ pub fn select_temporary_reference_v1(
     if state.official.is_some() || state.temporary.is_some() {
         return empty();
     }
-    let window_s = match state.reference {
-        Some(BtcSettlementReferenceV1::ChainlinkTwapThirtySeconds) => 30,
-        Some(BtcSettlementReferenceV1::ChainlinkTwapSixtySeconds) => 60,
+    let reference = match state.reference {
+        Some(
+            reference @ (BtcSettlementReferenceV1::ChainlinkTwapThirtySeconds
+            | BtcSettlementReferenceV1::ChainlinkTwapSixtySeconds),
+        ) => reference,
         _ => return empty(),
     };
     if matches!(
@@ -703,22 +729,18 @@ pub fn select_temporary_reference_v1(
         }
         if candidate.record_ref.input_position < cursor.next_input_position
             || candidate.record_ref.input_position > dependency_input_position
-            || value.window_s != window_s
-            || !matches!(
-                candidate.canonical_fact.quality.availability,
-                MarketDataQuality::Fresh | MarketDataQuality::Stale
-            )
         {
             continue;
         }
-        let start = state.market.window.start_at_utc_ms;
-        // 按实际观测时刻归属半开市场窗口，再沿原接收/记录顺序取首条。
-        if value.payload_timestamp_utc_ms < start
-            || value.payload_timestamp_utc_ms >= state.market.window.end_at_utc_ms
-        {
-            continue;
-        }
-        if candidate.anchor.received_at_utc_ms < start {
+        if !temporary_twap_candidate_matches_v1(
+            reference,
+            state.market.window.start_at_utc_ms,
+            state.market.window.end_at_utc_ms,
+            value.window_s,
+            value.payload_timestamp_utc_ms,
+            candidate.anchor.received_at_utc_ms,
+            candidate.canonical_fact.quality.availability,
+        ) {
             continue;
         }
         return TemporaryReferenceSelectionResultV1::Prepared(PreparedReferenceSelectionV1 {

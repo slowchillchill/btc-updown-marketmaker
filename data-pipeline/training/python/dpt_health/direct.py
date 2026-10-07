@@ -127,7 +127,7 @@ def query_units(ranges, sequence_span=1_048_576):
                 yield QueryUnit(source,'',epoch,generation,lo,hi+1,tuple(sorted(file_ids)),rows)
 
 
-def unit_query(unit, files):
+def unit_query(unit, files, columns=None):
     """An explicit native predicate allows Parquet row-group statistics pruning.
 
     Pruning is an engine capability, not a claimed measured property. Worst-case
@@ -143,7 +143,7 @@ def unit_query(unit, files):
             predicates.append(f'{epoch}={literal(unit.epoch)}')
         if unit.source == 'polymarket' and unit.condition_id:
             predicates.append(f'{condition}={literal(unit.condition_id)}')
-        queries.append(f"SELECT {COLUMNS[kind]},{file_id}::BIGINT AS file_id,"
+        queries.append(f"SELECT {(columns or COLUMNS)[kind]},{file_id}::BIGINT AS file_id,"
                        f"file_row_number AS row_id,{literal(kind)} AS source_kind "
                        f"FROM read_parquet({literal(file['path'])},file_row_number=true) "
                        f"WHERE {' AND '.join(predicates)}")
@@ -159,9 +159,11 @@ class SourceQuery:
     is clocks/sync/epoch plus one current trade identity coordinate. Admission
     duplicates are complete within native units; there is no truncated seen set.
     """
-    def __init__(self, db, files, helper, work, source, frontier=0, file_ranges=()):
+    def __init__(self, db, files, helper, work, source, frontier=0, file_ranges=(), columns=None, twap_windows=(60,)):
         self.db, self.files, self.helper, self.work = db, files, helper, work
         self.source, self.frontier, self.ordinal = source, frontier, 0
+        self.columns = columns
+        self.twap_windows = tuple(twap_windows)
         self.receive_ranges = {}
         for r in file_ranges:
             if r.source == source:
@@ -178,7 +180,7 @@ class SourceQuery:
         self.ordinal += 1
         db.execute('CREATE TEMP TABLE prior_trade_carry AS SELECT * FROM trade_carry')
         before = self.frontier
-        queries = unit_query(unit, self.files)
+        queries = unit_query(unit, self.files, self.columns)
         db.execute('CREATE TEMP TABLE unit_raw AS ' + ' UNION ALL BY NAME '.join(queries))
         kinds = [r[0] for r in db.execute('SELECT DISTINCT source_kind FROM unit_raw').fetchall()]
         spot = unit.source == 'chainlink_spot'
@@ -269,7 +271,7 @@ class SourceQuery:
                         table = 'effective_spot'
                     # Both TWAP windows share the capture-native counter. Form
                     # its causal frontier before selecting valid TWAP60 facts.
-                    selected_window = ' AND window_s=60' if kind == 'polymarket_rtds_chainlink_twap' else ''
+                    selected_window = ' AND window_s IN ('+','.join(str(int(w)) for w in self.twap_windows)+')' if kind == 'polymarket_rtds_chainlink_twap' else ''
                     pieces.append(f"SELECT epoch_ms(payload_timestamp) AS event,true AS valid,false AS snapshot,false AS forced_sync,true AS available,* FROM {table} WHERE freshness_status IN ('fresh','stale'){selected_window}")
             db.execute('CREATE TEMP VIEW effective_common AS '+ ' UNION ALL BY NAME '.join(pieces))
             db.execute(f"""CREATE TEMP TABLE unit_events AS SELECT {literal(unit.source)} AS source,'' AS condition_id,'' AS asset,
