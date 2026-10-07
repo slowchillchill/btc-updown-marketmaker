@@ -22,6 +22,18 @@ PRICE_COLUMNS = dict(projection.COLUMNS,
     polymarket_rtds_chainlink_twap=projection.COLUMNS['polymarket_rtds_chainlink_twap']+',full_accuracy_value',
     binance_aggtrade=projection.COLUMNS['binance_aggtrade']+',price,quantity,buyer_is_maker', **DEPTH_COLUMNS)
 
+METADATA_CLOCK_COLUMNS=('schema_version','metadata_row_kind','timestamp_received','collector_host_id',
+    'collector_admission_sequence','collector_admission_time_utc_ms','slug','condition_id','clob_market_id',
+    'source_evidence_origin','source_evidence_received_at_utc','ws_platform_timestamp_utc',
+    'ws_claimant_source_sequence_epoch_id','ws_claimant_collector_admission_sequence','source_evidence_raw_sha256')
+ANCHOR_CLOCK_COLUMNS=('metadata_origin','http_request_url','http_body_sha256','anchor_query_ordinal',
+    'anchor_query_source_epoch_id','anchor_source_computed_at_utc')
+METADATA_CLOCK_TIMES={'timestamp_received','collector_admission_time_utc_ms','source_evidence_received_at_utc',
+    'ws_platform_timestamp_utc','anchor_source_computed_at_utc'}
+
+METADATA_SEMANTIC_COLUMNS=('active', 'metadata_row_kind', 'timestamp_received', 'metadata_origin', 'slug', 'condition_id', 'clob_market_id', 'asset_ids', 'market_start_utc', 'market_end_utc', 'market_lifecycle_state', 'market_runtime_role', 'source_evidence_origin', 'source_evidence_event_type', 'source_evidence_channel', 'source_evidence_received_at_utc', 'source_evidence_payload_json', 'market_lifecycle_transition', 'market_runtime_role_transition', 'closed', 'closed_time_utc', 'closed_time_check_failure_reason', 'uma_resolution_status', 'outcomes_raw', 'outcome_prices_raw', 'accepting_orders', 'ws_platform_timestamp_raw', 'ws_platform_timestamp_utc', 'winning_asset_id', 'winning_outcome', 'resolution_evidence_source', 'terminal_claim_owner', 'resolution_poll_result', 'resolution_integrity_error_class', 'resolution_followup_status', 'ws_claimant_source_sequence_epoch_id', 'ws_claimant_collector_admission_sequence', 'schema_version', 'collector_host_id', 'collector_admission_sequence', 'collector_admission_time_utc_ms', 'source_evidence_raw_sha256', 'http_request_url', 'http_body_sha256', 'anchor_query_ordinal', 'anchor_query_source_epoch_id', 'anchor_source_computed_at_utc', 'anchor_query_result', 'price_to_beat_decimal', 'price_to_beat_source_field', 'twap_enabled', 'twap_lookback_seconds')
+METADATA_SEMANTIC_TIMES=METADATA_CLOCK_TIMES|{'market_start_utc', 'closed_time_utc', 'market_end_utc'}
+
 
 class Boundary:
     def __init__(self, executable):
@@ -51,7 +63,7 @@ def normalize(db, boundary, work, table, expression, e18=False):
 
 
 def typed_subset(files, coordinates, work, number):
-    """仅必要元数据语义行和真实终局声明使用完整类型解码。"""
+    """仅真实WS终局声明仍使用已有完整平台协议解码。"""
     import pyarrow as pa
     import pyarrow.parquet as pq
     out=[]
@@ -74,24 +86,59 @@ def typed_subset(files, coordinates, work, number):
     return out
 
 
+def semantic_subset(db, files, file_id, coordinates, work, number):
+    """元数据映射/参考/终局仅投影实际字段，不读生产身份时间或交易tick。"""
+    if not coordinates:return []
+    source=files[file_id];wanted=sorted(coordinates)
+    columns=[]
+    v6=set(ANCHOR_CLOCK_COLUMNS)|{'anchor_query_result','price_to_beat_decimal','price_to_beat_source_field','twap_enabled','twap_lookback_seconds'}
+    v6.discard('metadata_origin')
+    for name in METADATA_SEMANTIC_COLUMNS:
+        value='NULL' if name in v6 and source['schema_version']!='polymarket_market_metadata_v6' else f'epoch_ms({name})' if name in METADATA_SEMANTIC_TIMES else name
+        columns.append(f'{value} AS {name}')
+    path=work/f'metadata-semantic-{number}-{file_id}.jsonl'
+    ids=','.join(map(str,wanted))
+    db.execute('COPY (SELECT '+','.join(columns)+f" FROM read_parquet({literal(source['path'])},file_row_number=true) WHERE file_row_number IN ({ids}) ORDER BY file_row_number) TO {literal(path)} (FORMAT JSON)")
+    fact=dict(path=str(path),source_kind=source['source_kind'],schema_version=source['schema_version'],bytes=path.stat().st_size,rows=len(wanted),sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    return [dict(file=fact,semantic_projection=str(path),clocks=[coordinates[r] for r in wanted],raw_path=source['path'],row_ids=wanted)]
+
+
 def market_facts(db, config, boundary, work, units, progress):
-    # 公共可信身份/终局构造需要元数据语义字段；PM 先仅读时钟和终局类型。
+    # 元数据只读研究语义字段；PM先仅读时钟和真实终局类型。
     descriptors=[];ordinal=0
     metadata_files=[f for f in config['files'] if f['source_kind']=='polymarket_market_metadata']
     metadata_ids=[i for i,f in enumerate(config['files']) if f['source_kind']=='polymarket_market_metadata']
     request=work/'metadata-clocks.private.json';clocks=work/'metadata-clocks.jsonl'
-    request.write_text(json.dumps(dict(files=[dict(file={k:f[k] for k in ('path','source_kind','schema_version','bytes','rows','sha256')},clocks=[],raw_path=f['path'],row_ids=[]) for f in metadata_files],initialization=config['metadata_initialization'])))
+    clock_projection=work/'metadata-clock-fields.jsonl';parts=[]
+    for local_id,file in enumerate(metadata_files):
+        columns=[]
+        for name in METADATA_CLOCK_COLUMNS+ANCHOR_CLOCK_COLUMNS:
+            value='NULL' if name in ANCHOR_CLOCK_COLUMNS and file['schema_version']!='polymarket_market_metadata_v6' else f'epoch_ms({name})' if name in METADATA_CLOCK_TIMES else name
+            columns.append(f'{value} AS {name}')
+        parts.append(f"SELECT {local_id} AS file_id,file_row_number AS row_id,"+','.join(columns)+f" FROM read_parquet({literal(file['path'])},file_row_number=true)")
+    if parts:db.execute('COPY ('+' UNION ALL '.join(parts)+f') TO {literal(clock_projection)} (FORMAT JSON)')
+    else:clock_projection.write_text('')
+    request.write_text(json.dumps(dict(files=[],initialization=config['metadata_initialization'],clock_projection=str(clock_projection))))
     progress('metadata-public-native-coordinates',total_metadata_rows=sum(f['rows'] for f in metadata_files))
     boundary.call(op='metadata_clocks',input=str(request),output=str(clocks))
     db.execute(f'''CREATE TEMP TABLE metadata_clocks AS SELECT *,max(greatest(received,admitted)) OVER(
         ORDER BY admitted,sequence,source_message_id,file_id,row_id ROWS UNBOUNDED PRECEDING) AS clock
         FROM read_json({literal(clocks)},columns={{file_id:'BIGINT',row_id:'BIGINT',received:'BIGINT',admitted:'BIGINT',sequence:'UBIGINT',source_message_id:'VARCHAR'}})''')
     initialization_clocks=[v[0] for v in db.execute('SELECT clock FROM metadata_clocks WHERE file_id=-1 ORDER BY row_id').fetchall()]
+    catalog_parts=[]
     for local_id,file_id in enumerate(metadata_ids):
-        coordinates={r:c for r,c in db.execute('SELECT row_id,clock FROM metadata_clocks WHERE file_id=? AND clock<? ORDER BY row_id',[local_id,config['end']]).fetchall()}
-        descriptors.extend(typed_subset(config['files'],{file_id:coordinates},work,ordinal));ordinal+=1
-        progress('metadata-typed-boundary',files=1,raw_rows=config['files'][file_id]['rows'])
-    db.execute('DROP TABLE metadata_clocks');request.unlink();clocks.unlink()
+        file=config['files'][file_id]
+        base=f"FROM read_parquet({literal(file['path'])},file_row_number=true) r JOIN metadata_clocks c ON c.file_id={local_id} AND c.row_id=r.file_row_number WHERE c.clock<{config['end']}"
+        # 事后窗口目录只查询共有字段，不建立交易上下文。
+        catalog_parts.append(f"SELECT c.clock AS visible_at,c.received AS received_at,c.source_message_id,r.condition_id,r.clob_market_id,epoch_ms(r.market_start_utc) AS start,epoch_ms(r.market_end_utc) AS end_time,r.asset_ids,r.metadata_row_kind,{literal(file['path'])} AS path,c.row_id,c.admitted,c.sequence "+base)
+        coordinates={r:c for r,c in db.execute("SELECT c.row_id,c.clock "+base+" AND (r.outcomes_raw IS NOT NULL OR r.metadata_row_kind IN ('market_anchor_rule_update','resolution_terminal_ws','resolution_poll_attempt')) ORDER BY c.row_id").fetchall()}
+        descriptors.extend(semantic_subset(db,config['files'],file_id,coordinates,work,ordinal));ordinal+=1
+        progress('metadata-necessary-semantic-subset',files=1,selected_rows=len(coordinates))
+    catalog=work/'market-catalog.jsonl'
+    if catalog_parts:
+        db.execute('COPY (SELECT * EXCLUDE(admitted,sequence) FROM ('+' UNION ALL '.join(catalog_parts)+f') ORDER BY admitted,sequence,source_message_id) TO {literal(catalog)} (FORMAT JSON)')
+    else:catalog.write_text('')
+    db.execute('DROP TABLE metadata_clocks');request.unlink();clocks.unlink();clock_projection.unlink()
     frontier=0
     for unit in (u for u in units if u.source=='polymarket'):
         parts=[]
@@ -112,24 +159,47 @@ def market_facts(db, config, boundary, work, units, progress):
         db.execute('DROP TABLE terminal_clocks')
         progress('pm-terminal-clock-projection',unit=ordinal,physical_candidate_rows=unit.candidate_file_rows)
     descriptor=work/'markets-boundary.private.json'
-    descriptor.write_text(json.dumps(dict(files=descriptors,initialization=config['metadata_initialization'],initialization_clocks=initialization_clocks)))
+    descriptor.write_text(json.dumps(dict(files=descriptors,initialization=config['metadata_initialization'],initialization_clocks=initialization_clocks,catalog=str(catalog))))
     output=work/'market-facts.jsonl'
     boundary.call(op='markets',input=str(descriptor),output=str(output),max_pending_ws_terminals=config['max_pending_ws_terminals'])
     markets,anchors,rules,labels,census=read_market_facts(output)
     # 紧凑标量变化已保存，临时公共边界输入不再有消费者。
     for d in descriptors:Path(d['file']['path']).unlink()
-    descriptor.unlink();output.unlink()
+    descriptor.unlink();output.unlink();catalog.unlink()
     return markets,anchors,rules,labels,census
 
 
 def read_market_facts(path):
     """按公共Rust实际serde格式消费；原始目录不建立合法公共身份。"""
-    markets={};anchors=defaultdict(list);rules=defaultdict(list);labels=defaultdict(list);census={}
+    markets={};anchors=defaultdict(list);rules=defaultdict(list);labels=defaultdict(list);census={};snapshot_observed={}
     with path.open() as lines:
         for line in lines:
             fact=json.loads(line)
             if 'research_census' in fact:
                 body=fact['research_census'];census[body['condition_id']]=body;continue
+            if 'research_snapshot_observed' in fact:
+                body=fact['research_snapshot_observed'];snapshot_observed.setdefault(body['condition_id'],body['at']);continue
+            if 'research_market' in fact:
+                body=fact['research_market'];condition=body['identity']['condition_id']
+                markets[condition]=body
+                continue
+            if 'research_label' in fact:
+                body=fact['research_label'];terminal=body['terminal'];value=None
+                if terminal and terminal['status']=='RESOLVED' and body['quality'] in ('fresh','stale'):
+                    outcome=(terminal.get('winning_outcome') or '').strip().lower()
+                    value=1 if outcome=='up' else 0 if outcome=='down' else None
+                labels[body['condition_id']].append(dict(at=body['at'],label=value,quality=body['quality'],reason=body.get('reason')))
+                continue
+            if 'research_reference' in fact:
+                body=fact['research_reference'];at=body['at'];payload=body['payload']
+                value=payload['reference'];kind=payload['reference_type']
+                if kind=='market_price_anchor_update':
+                    condition=value['market']['condition_id']
+                    anchors[condition].append(dict(at=at,value=float(value['anchor']['price_usd_per_btc'])))
+                if kind=='market_settlement_reference_update':
+                    condition=value['market']['condition_id']
+                    rules[condition].append(dict(at=at,reference=value['reference']))
+                continue
             at=max(fact['at'],fact['dependency_received']);payload=fact['payload']
             if 'MarketFact' in payload:
                 body=payload['MarketFact'];market=body['market'];condition=market['condition_id'];event=body['payload']
@@ -152,6 +222,8 @@ def read_market_facts(path):
                 if kind=='market_settlement_reference_update':
                     condition=body['market']['condition_id']
                     if not rules[condition] or rules[condition][-1]['reference']!=body['reference']:rules[condition].append(dict(at=at,reference=body['reference']))
+    for condition,market in markets.items():
+        if 'production_identity_not_recomputed' in market:market['snapshot_row_at']=snapshot_observed.get(condition)
     return markets,anchors,rules,labels,census
 
 
@@ -159,7 +231,9 @@ def census_coverage(config,census,markets,rows):
     """分开原始事后覆盖、公共身份与实际采样资格；未知目标数保留null。"""
     details=[]
     for condition,raw in sorted(census.items()):
-        public=markets.get(condition);known=public['known_at'] if public else None
+        research_market=markets.get(condition)
+        public=research_market if research_market and not research_market.get('production_identity_not_recomputed') else None
+        known=public['known_at'] if public else None
         windows={(v['market']['window']['start_at_utc_ms'],v['market']['window']['end_at_utc_ms']) for v in raw['variants']}
         conflicts=[]
         if public:
@@ -169,15 +243,25 @@ def census_coverage(config,census,markets,rows):
         raw_count=sum(r['raw_target'] for r in rows if r['condition_id']==condition) if len(windows)==1 else None
         gap_start=max(config['start'],raw['raw_first_seen_at']);gap_end=known if known is not None else config['end']
         details.append(dict(condition_id=condition,raw_first_seen_at=raw['raw_first_seen_at'],identity_at=known,
+            identity_qualification='not_recomputed' if raw.get('production_identity_not_recomputed') else 'existing_public_facts',
+            mapping_at=research_market.get('mapping_known_at') if research_market else None,
+            snapshot_row_at=research_market.get('snapshot_row_at') if research_market else None,
             raw_variants=raw['variants'],raw_rows=raw['raw_rows'],raw_target_count=raw_count,
-            public_target_count=sum(r['public_target'] for r in rows if r['condition_id']==condition),
-            identity_known_samples=sum(r['identity_known'] for r in rows if r['condition_id']==condition),
+            public_target_count=sum(r['public_target'] is True for r in rows if r['condition_id']==condition),
+            identity_known_samples=sum(r['identity_known'] is True for r in rows if r['condition_id']==condition),
             missing_identity_snapshot=raw['missing_identity_snapshot'],census_identity_conflicts=conflicts,
             identity_gap=dict(start=gap_start,end=gap_end,right_censored=known is None) if gap_end>gap_start else None))
-    return dict(raw_markets=len(census),public_markets=len(markets),raw_locatable_markets=sum(d['raw_target_count'] is not None for d in details),
+    not_recomputed=any(r.get('production_identity_not_recomputed') for r in census.values())
+    result=dict(raw_markets=len(census),research_mapped_markets=len(markets),public_markets=None if not_recomputed else len(markets),
+        production_identity_diagnostic='not_recomputed; refer to existing audited coverage on unchanged raw input' if not_recomputed else 'existing_public_facts',raw_locatable_markets=sum(d['raw_target_count'] is not None for d in details),
         raw_locatable_targets=sum(r['raw_target'] for r in rows),raw_target_count_unknown_markets=sum(d['raw_target_count'] is None for d in details),
-        public_targets=sum(r['public_target'] for r in rows),target_union=len(rows),identity_known_samples=sum(r['identity_known'] for r in rows),
+        public_targets=sum(r['public_target'] is True for r in rows),target_union=len(rows),identity_known_samples=sum(r['identity_known'] is True for r in rows),
         identity_missing_samples=sum(not r['identity_known'] for r in rows),markets=details)
+    if not_recomputed:
+        for key in ('public_targets','identity_known_samples','identity_missing_samples'):result[key]=None
+        for detail in details:
+            detail['identity_at']=None;detail['identity_gap']=None;detail['public_target_count']=None;detail['identity_known_samples']=None
+    return result
 
 
 def latest(events, at):
@@ -194,7 +278,7 @@ def target_rows(config, markets, anchors, rules, labels, census=None):
     conditions=set(markets)|set(census or {})
     for condition in sorted(conditions):
         public=markets.get(condition);raw=(census or {}).get(condition)
-        public_window=public['identity']['window'] if public else None
+        public_window=public['identity']['window'] if public and not public.get('production_identity_not_recomputed') else None
         public_key=(public_window['start_at_utc_ms'],public_window['end_at_utc_ms']) if public_window else None
         windows={(v['market']['window']['start_at_utc_ms'],v['market']['window']['end_at_utc_ms']) for v in raw['variants']} if raw else set()
         raw_key=next(iter(windows)) if len(windows)==1 else None
@@ -208,16 +292,17 @@ def target_rows(config, markets, anchors, rules, labels, census=None):
                 w={'chainlink_spot':0,'chainlink_twap_thirty_seconds':30,'chainlink_twap_sixty_seconds':60}.get(reference)
                 public_target=(start,end)==public_key;known=public['known_at'] if public_target else None
                 out.append(dict(condition_id=condition,start=start,end=end,at=at,remaining_s=remaining,day=at//86_400_000,
-                    raw_target=(start,end)==raw_key,public_target=public_target,raw_first_seen_at=raw['raw_first_seen_at'] if raw else None,
-                    identity_known=known is not None and known<=at,reference=float(anchor['value']) if anchor else None,
+                    raw_target=(start,end)==raw_key,public_target=None if raw and raw.get('production_identity_not_recomputed') else public_target,raw_first_seen_at=raw['raw_first_seen_at'] if raw else None,
+                    identity_known=None if raw and raw.get('production_identity_not_recomputed') else known is not None and known<=at,reference=float(anchor['value']) if anchor else None,
                     reference_kind='official' if anchor else 'missing',rule_window_s=w,rule_reference=reference,
-                    rule_visible=rule['at'] if rule else None,rule_segments=rules[condition],market_known_at=known,labels=labels[condition],price=None,price_received=None,
+                    rule_visible=rule['at'] if rule else None,rule_segments=rules[condition],market_known_at=min((v['first']['visible_at'] for v in raw['variants'] if (v['market']['window']['start_at_utc_ms'],v['market']['window']['end_at_utc_ms'])==(start,end)),default=None) if raw else public['known_at'] if public else None,labels=labels[condition],price=None,price_received=None,
                     price_age_ms=None,trade_price=None,innovation=None,depth_pressure=None,trade_pressure=None,
                     integral=None,variance={str(w):dict(pairs=0,seconds=0.0,squared_change=0.0,descriptive_seconds=0.0,descriptive_squared_change=0.0) for w in WINDOWS}))
     return sorted(out,key=lambda r:(r['at'],r['condition_id'],r['start']))
 
 
-def source_sampling(db,config,boundary,work,units,ranges,rows,progress):
+def source_sampling(db,config,boundary,work,units,ranges,rows,progress,stages=None):
+    from .stages import identity
     db.execute('CREATE TABLE targets(id BIGINT,"at" BIGINT,window_start BIGINT)')
     if rows:db.executemany('INSERT INTO targets VALUES (?,?,?)',[(i,r['at'],r['end']-(r['rule_window_s'] or 0)*1000) for i,r in enumerate(rows)])
     db.execute('CREATE TABLE probability_targets(id BIGINT,rule_window_s BIGINT)')
@@ -225,6 +310,15 @@ def source_sampling(db,config,boundary,work,units,ranges,rows,progress):
     pair_bins=[dict(cutoff=config['start']+d*86_400_000,pairs=0,seconds=0.0,squared_change=0.0) for d in (3,6,9,12,15)]
     twap_candidates=defaultdict(list)
     for source in ('chainlink_spot','chainlink_twap60','binance_trade','binance_depth'):
+        stage_key=identity(config,source,rows) if stages else None
+        previous=stages.load(source,stage_key) if stages else None
+        if previous is not None:
+            for row,fields in zip(rows,previous['samples'],strict=True):row.update(fields)
+            if source=='chainlink_spot':pair_bins=previous['pairs']
+            if source=='chainlink_twap60':twap_candidates.update(previous['candidates'])
+            progress('completed-source-reused',source=source,samples=len(rows))
+            continue
+        before=[dict(r) for r in rows]
         runner=direct.SourceQuery(db,config['files'],Path(config['boundary_helper']),work,source,file_ranges=ranges,columns=PRICE_COLUMNS,twap_windows=(30,60))
         lower=config['start'];last_accepted=None
         if source=='chainlink_spot':db.execute('CREATE TABLE spot_support(received BIGINT,visible_at BIGINT,price DOUBLE)')
@@ -276,7 +370,7 @@ def source_sampling(db,config,boundary,work,units,ranges,rows,progress):
                     # 与公共选择器共用候选谓词；SQL 先聚合每市场/规则段的首个候选。
                     db.execute('CREATE TEMP TABLE temporary_targets(condition_id VARCHAR,rule_visible BIGINT,known_at BIGINT,lower_bound BIGINT,upper_bound BIGINT,start BIGINT,end_time BIGINT,last_sample BIGINT,window_s BIGINT)')
                     target=[]
-                    for condition_rows in group_rows([r for r in rows if r.get('public_target',True)]).values():
+                    for condition_rows in group_rows(rows).values():
                         first=condition_rows[0];last_sample=condition_rows[-1]['at']
                         if first.get('market_known_at',first['start']) is None:continue
                         for j,rule in enumerate(first.get('rule_segments',[])):
@@ -326,6 +420,14 @@ def source_sampling(db,config,boundary,work,units,ranges,rows,progress):
             db.execute('DROP TABLE history');db.execute('DROP TABLE price_pairs');db.execute('DROP TABLE spot_support')
         else:apply_price_carry(rows,tail,carry,source)
         db.execute('DROP TABLE carry');db.execute('DROP TABLE trade_carry')
+        if stages:
+            # 每个来源只保留它新增/更新的固定采样字段和必要充分统计。
+            samples=[{k:v for k,v in r.items() if k not in old or old[k]!=v} for r,old in zip(rows,before,strict=True)]
+            # variance的内层在原地更新；spot明确保存该充分统计。
+            if source=='chainlink_spot':
+                for r,fields in zip(rows,samples,strict=True):fields['variance']=r['variance']
+            stages.save(source,stage_key,dict(samples=samples,pairs=pair_bins if source=='chainlink_spot' else None,
+                candidates=dict(twap_candidates) if source=='chainlink_twap60' else None))
     for r in rows:
         if r['reference_kind']!='official':
             candidates=sorted(twap_candidates[r['condition_id']],key=lambda c:c['at'])
@@ -441,10 +543,19 @@ def depth_unit(db,boundary,work,samples,rows,carry):
         else:a.write_text('')
     else:a.write_text(''.join(json.dumps(dict(at=rows[i]['at'],sample=True))+'\n' for i in samples))
     boundary.call(op='depth',input=str(a),output=str(b))
-    facts={r['at']:r for r in map(json.loads,b.read_text().splitlines())}
+    output=list(map(json.loads,b.read_text().splitlines()))
+    facts={r['at']:r for r in output if 'at' in r}
     for i in samples:
         fact=facts[rows[i]['at']]
+        if fact.get('missing') is not None:
+            rows[i]['depth_missing']=fact['missing']
         if fact['bid'] is not None and rows[i].get('binance_depth_status','available')=='available':
             bid,ask=(int(fact[k]['numerator'])/int(fact[k]['denominator']) for k in ('bid','ask'));total=bid+ask
             rows[i]['depth_total']=total;rows[i]['depth_pressure']=(bid-ask)/total if total>0 else None
+    for line in output:
+        if 'depth_missing_interval' not in line:continue
+        interval=line['depth_missing_interval']
+        for r in rows:
+            if r.get('depth_missing',{}).get('start')==interval['start']:
+                r['depth_missing']=interval
     a.unlink();b.unlink()

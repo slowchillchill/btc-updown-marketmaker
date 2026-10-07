@@ -153,6 +153,8 @@ D-0284 已批准的来源健康范围按 #185 §3.5 执行，不由上述研究�
 
 ### 7.2 后续经营回放的完整配置
 
+当前概率研究按[D-0306](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6039845828)直接使用公式所需字段，不以生产FixedIdentity、metadata_snapshot或tick统一阻止可算样本。参考与可信WS/Gamma标签继续复用公共原语，后到事实不回填。生产身份仅引用既有审计诊断；本次不重算时明确未知。可定位深度缺口使数量和依赖压力Missing，baseline与innovation继续；真实snapshot可见后恢复。已完成来源阶段分别保存紧凑数值和完整标记，相关输入、目标及算法不变可复用；旧三次丢失的价格数值不能恢复。具体入口见[当前直接方法](complementary-pair-probability-direct.md)。本轮只实施合成验证，第四次实际研究未获批准，任务3仍未完成。
+
 首折Chainlink来源统计已按[#185此前首折三日分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)完成一次三日选源准备及原重放，见[报告](complementary-pair-initial-sigma-source-20260909-20260912.md)与[机器结果](complementary-pair-initial-sigma-source-20260909-20260912.json)。接收区间为UTC `[2026-09-09,2026-09-12)`，78文件/239591来源事实，保留原gaps 0/17/15、239571接纳点及239570正时间pair，来源候选3.970033377357779 (USD/BTC)/√s未采用为正式参数。最大接纳间隔367.399秒，Fresh事实不证明三日连续完整行情；全局来源前史与每condition记忆及六源单调可见前沿仍区分。此段没有元数据初始化、隐藏材料或市场观察，不是完整账户拟合或收益研究；任务3仍未完成，接续以顶部当前合同为准。
 
 后续经营回放需要真实完整配置，不可直接使用 `synthetic-command.json` 中的占位身份或合成风险。下表对应经营回放的现有CLI结构。`run.preparation`、`canonical`、`recording`、`timing`及`session`仅适用于该完整运行，不是直接概率统计的前置；健康16字段已同步到 CLI 和策略配置，normal≤max，允许零或相等。研究入口见两层说明；占位身份和工程合成数值不能用于正式经营。

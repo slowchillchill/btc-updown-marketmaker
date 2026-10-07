@@ -25,6 +25,119 @@ def row(at=3000,remaining=10):
 
 
 class ProbabilityTests(unittest.TestCase):
+    def test_fields_compute_without_production_identity_and_local_missing(self):
+        r=row();r['identity_known']=False
+        self.assertIsNotNone(model.predict(r,model.Candidate(15,1,0),1)[0])
+        r.update(spot_price=100,spot_received=1,trade_price=105)
+        model.innovation_steps([r]);self.assertEqual(r['innovation'],0)
+        r['reference']=None
+        self.assertEqual(model.predict(r,model.Candidate(15,1,0),1)[1],'missing_reference')
+        r['reference']=100;r['labels']=[]
+        self.assertEqual(evaluation.score([r],model.Candidate(15,1,0),1)['scored'],0)
+        # 新研究外层仍消费公共原语真实serde，不把参考改成另一套规则。
+        lines=[json.loads(l) for l in (ROOT/'tests/probability/fixtures/public-market-scenario.before-identity.jsonl').read_text().splitlines()]
+        references=[dict(research_reference=dict(at=f['at'],payload=f['payload']['ReferenceFact'])) for f in lines if 'ReferenceFact' in f.get('payload',{})]
+        with tempfile.TemporaryDirectory() as t:
+            path=Path(t)/'references.jsonl';path.write_text(''.join(json.dumps(f)+'\n' for f in references))
+            _,anchors,rules,_,_=direct.read_market_facts(path)
+        # 实际SQL时钟/目录入口只需要共同字段，没有生产Snapshot/tick。
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);path=root/'metadata.parquet'
+            values=dict(schema_version='polymarket_market_metadata_v6',metadata_row_kind='market_state_transition',
+                timestamp_received=3100,collector_host_id='fixture-collector',collector_admission_sequence=1,
+                collector_admission_time_utc_ms=3101,slug='btc-updown-5m-fixture',condition_id='0x'+'11'*32,
+                clob_market_id='999',market_start_utc=3000,market_end_utc=303000,asset_ids='["1","2"]',outcomes_raw=None)
+            values.update(metadata_origin='gamma_by_slug',market_lifecycle_state='active',market_runtime_role='current',
+                source_evidence_origin='gamma_by_slug',source_evidence_event_type='gamma_market_by_slug_response',
+                source_evidence_received_at_utc=3100,outcomes_raw='["UP","DOWN"]',outcome_prices_raw='["0.5","0.5"]',
+                source_evidence_payload_json='{"orderPriceMinTickSize":"invalid-not-used"}',fixed_identity_verified_at_utc=0)
+            import hashlib
+            values['source_evidence_raw_sha256']=hashlib.sha256(values['source_evidence_payload_json'].encode()).hexdigest()
+            fields={k:values.get(k) for k in set(direct.METADATA_CLOCK_COLUMNS+direct.ANCHOR_CLOCK_COLUMNS+direct.METADATA_SEMANTIC_COLUMNS)}
+            fields.update(values)
+            times=direct.METADATA_SEMANTIC_TIMES|{'fixed_identity_verified_at_utc'}
+            integers={'collector_admission_sequence','ws_claimant_collector_admission_sequence','anchor_query_ordinal','twap_lookback_seconds'}
+            booleans={'active','closed','accepting_orders','twap_enabled'}
+            schema=pa.schema([(k,pa.timestamp('ms',tz='UTC') if k in times else pa.int64() if k in integers else pa.bool_() if k in booleans else pa.string()) for k in fields])
+            valid_terminal=dict(fields,metadata_row_kind='resolution_poll_attempt',timestamp_received=303100,
+                collector_admission_sequence=2,collector_admission_time_utc_ms=303101,source_evidence_received_at_utc=303100,
+                closed=True,closed_time_utc=303001,uma_resolution_status='resolved',accepting_orders=False,
+                market_lifecycle_state='retired',market_lifecycle_transition='active_to_retired',market_runtime_role='none',
+                market_runtime_role_transition='resolution_pending_to_none',resolution_evidence_source='gamma_by_slug',
+                terminal_claim_owner='gamma_by_slug',resolution_poll_result='terminal',resolution_followup_status='terminal_gamma_fallback',
+                winning_asset_id='1',winning_outcome='UP',outcome_prices_raw='["1","0"]')
+            conflict=dict(valid_terminal,timestamp_received=304100,collector_admission_sequence=3,collector_admission_time_utc_ms=304101,
+                source_evidence_received_at_utc=304100,outcomes_raw='["YES","NO"]',winning_outcome='YES')
+            pq.write_table(pa.Table.from_pylist([fields,valid_terminal,conflict],schema=schema),path)
+            import hashlib
+            config=dict(files=[dict(path=str(path),source_kind='polymarket_market_metadata',schema_version='polymarket_market_metadata_v6',bytes=path.stat().st_size,rows=3,sha256=hashlib.sha256(path.read_bytes()).hexdigest())],
+                start=3000,end=903001,max_pending_ws_terminals=10,metadata_initialization=dict(files=[],markets=[],received_start_utc_ms=3000,received_end_utc_ms=3000,purpose='synthetic'))
+            db=duckdb.connect();boundary=direct.Boundary(HELPER)
+            try:result=direct.market_facts(db,config,boundary,root,[],lambda *a,**k:None)
+            finally:boundary.close();db.close()
+            targets=direct.target_rows(config,*result)
+            self.assertEqual(len(targets),8)
+            condition='0x'+'11'*32
+            self.assertEqual(result[0][condition]['asset_outcomes'][0]['outcome']['label'],'UP')
+            self.assertEqual(result[0][condition]['mapping_known_at'],3101)
+            self.assertEqual(direct.latest(result[3][condition],303500)['label'],1)
+            self.assertEqual(direct.latest(result[3][condition],304100)['label'],1)
+            self.assertIsNone(direct.latest(result[3][condition],304101)['label'])
+            self.assertEqual(direct.latest(result[3][condition],304101)['quality'],'invalid')
+            self.assertEqual(direct.latest(result[3][condition],304101)['reason'],'POLYMARKET_TERMINAL_ASSET_IDENTITY_CONFLICT')
+            labelled=row(at=3000);labelled['labels']=result[3][condition]
+            self.assertEqual(evaluation.score([labelled],model.Candidate(15,1,0),1,label_before=303500)['scored'],1)
+            self.assertEqual(evaluation.score([labelled],model.Candidate(15,1,0),1,label_before=304102)['scored'],0)
+            self.assertTrue(all(r['identity_known'] is None for r in targets))
+            summary=direct.census_coverage(config,result[4],result[0],targets)
+            self.assertIsNone(summary['public_markets']);self.assertIsNone(summary['markets'][0]['identity_at'])
+        condition='0x'+'11'*32
+        self.assertEqual(anchors[condition][0]['value'],100)
+        self.assertIsNone(direct.latest(anchors[condition],3300))
+        self.assertEqual(rules[condition][0]['reference'],'chainlink_twap_sixty_seconds')
+
+    def test_completed_sources_survive_last_source_failure_and_reuse(self):
+        from probability.stages import CompletedStages, identity
+        import hashlib
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);work=root/'work';work.mkdir();material=root/'material';material.mkdir()
+            path=root/'spot.parquet'
+            schema=pa.schema([('timestamp_received',pa.timestamp('ms')),('payload_timestamp',pa.timestamp('ms')),
+                ('freshness_status',pa.string()),('source_native_payload_json',pa.string()),('value',pa.string())])
+            facts=[dict(timestamp_received=at,payload_timestamp=at-1,freshness_status='fresh',source_native_payload_json=json.dumps({'price':p,'at':at}),value=p) for at,p in [(1000,'100'),(2000,'101')]]
+            pq.write_table(pa.Table.from_pylist(facts,schema=schema),path)
+            files=[dict(path=str(path),source_kind='polymarket_rtds_chainlink_btc_usd',schema_version='polymarket_rtds_chainlink_btc_usd_v4',bytes=path.stat().st_size,rows=2,sha256=hashlib.sha256(path.read_bytes()).hexdigest())]
+            cfg=dict(files=files,boundary_helper=str(HELPER),start=0,end=3001,implementation_commit='first',probability_helper_sha256='first')
+            original=row(2500);original.update(start=0,end=12500,rule_segments=[])
+            rows=[copy.deepcopy(original)];db=duckdb.connect();boundary=direct.Boundary(HELPER);stages=CompletedStages(material,cfg)
+            ranges=direct.direct.range_index(db,files,lambda *a,**k:None);units=list(direct.direct.query_units(ranges))
+            try:
+                with patch.object(direct,'depth_unit',side_effect=RuntimeError('synthetic last-source program failure')):
+                    with self.assertRaisesRegex(RuntimeError,'last-source'):
+                        direct.source_sampling(db,cfg,boundary,work,units,ranges,rows,lambda *a,**k:None,stages)
+            finally:boundary.close();db.close()
+            for name in ('chainlink_spot','chainlink_twap60','binance_trade'):
+                self.assertIsNotNone(stages.load(name,identity(cfg,name,[original])))
+            self.assertIsNone(stages.load('binance_depth',identity(cfg,'binance_depth',[original])))
+            self.assertFalse((material/'material.json').exists())
+            # New output/resources and unrelated helper provenance preserve completed stages.
+            changed=dict(cfg,run_root='another-root',engine={'threads':24},implementation_commit='depth-only-patch',probability_helper_sha256='depth-only-helper')
+            other=root/'other';other.mkdir();reused=CompletedStages(other,changed,material)
+            db=duckdb.connect();boundary=direct.Boundary(HELPER);rows=[copy.deepcopy(original)]
+            try:
+                with patch.object(direct.direct,'SourceQuery',wraps=direct.direct.SourceQuery) as query:
+                    direct.source_sampling(db,changed,boundary,work,units,ranges,rows,lambda *a,**k:None,reused)
+                    self.assertEqual(query.call_count,1) # Only previously incomplete depth starts.
+                self.assertEqual(rows[0]['price'],101)
+                self.assertEqual(rows[0]['variance']['15']['squared_change'],1)
+            finally:boundary.close();db.close()
+            for name in ('chainlink_spot','chainlink_twap60','binance_trade'):
+                producer=json.loads((other/'stages'/f'{name}.complete.json').read_text())
+                self.assertEqual(producer['implementation_commit'],'first')
+                self.assertEqual(producer['helper_sha256'],'first')
+                self.assertEqual((other/'stages'/f'{name}.complete.json').read_bytes(),(material/'stages'/f'{name}.complete.json').read_bytes())
+            self.assertNotEqual(identity(cfg,'chainlink_spot',[original]),identity(dict(cfg,files=[dict(files[0],sha256='changed')]),'chainlink_spot',[original]))
+
     def test_formula_piecewise_missing_integral_and_degenerate_up(self):
         r=row();c=model.Candidate(15,1,0)
         result,reason=model.predict(r,c,2);self.assertIsNone(reason)
@@ -223,20 +336,36 @@ class ProbabilityTests(unittest.TestCase):
             gap=dict(update,timestamp_received=2003,event_time=1503,first_update_id=105,final_update_id=105,local_u_before=101,
                 bids='[["99","5"]]',stitch_verdict='not_applied_confirmed_hole',stitch_evidence='U > local_u + 1',stitch_gap_reason='U > local_u + 1',
                 depth_ingress_sequence=3,collector_admission_sequence=3,collector_admission_time_utc_ms=2103,clock=2103,order_id=3)
-            facts=[snap,update,gap];keys=sorted(set().union(*(r.keys() for r in facts)));fields=[]
+            conflict=dict(gap,local_u_before=999,stitch_verdict='applied',stitch_evidence='continuous_depth_update',stitch_gap_reason=None)
+            delta=dict(conflict,timestamp_received=2004,event_time=1504,first_update_id=106,final_update_id=106,local_u_before=105,
+                depth_ingress_sequence=4,collector_admission_sequence=4,collector_admission_time_utc_ms=2104,clock=2104,order_id=4)
+            recovery=dict(snap,timestamp_received=2005,last_update_id=200,depth_ingress_sequence=5,collector_admission_sequence=5,
+                collector_admission_time_utc_ms=2105,clock=2105,order_id=5)
+            facts=[snap,update,conflict,delta,recovery];keys=sorted(set().union(*(r.keys() for r in facts)));fields=[]
             for k in keys:
                 values=[r.get(k) for r in facts];value=next((v for v in values if v is not None),None)
                 kind=pa.timestamp('ms') if k in ('timestamp_received','snapshot_fetch_start_utc','event_time','collector_admission_time_utc_ms') else pa.int64() if isinstance(value,int) else pa.string()
                 fields.append((k,kind))
             path=root/'depth.parquet';pq.write_table(pa.Table.from_pylist(facts,schema=pa.schema(fields)),path)
             db=duckdb.connect();db.execute('CREATE VIEW effective_common AS SELECT * FROM read_parquet('+direct.literal(path)+')')
-            db.execute('CREATE TABLE targets AS SELECT * FROM (VALUES (0,2102),(1,2103)) t(id,"at")')
-            boundary=direct.Boundary(HELPER);rows=[row(2102),row(2103)]
+            db.execute('CREATE TABLE targets AS SELECT * FROM (VALUES (0,2102),(1,2103),(2,2104),(3,2105)) t(id,"at")')
+            boundary=direct.Boundary(HELPER);rows=[row(at) for at in (2102,2103,2104,2105)]
             try:
-                direct.depth_unit(db,boundary,root,[0,1],rows,[])
+                direct.depth_unit(db,boundary,root,list(range(4)),rows,[])
                 self.assertEqual(rows[0]['depth_total'],5)
                 self.assertEqual(rows[0]['depth_pressure'],.6)
-                self.assertIsNone(rows[1].get('depth_total'))
+                self.assertIsNone(rows[1].get('depth_total'));self.assertIsNone(rows[2].get('depth_total'))
+                self.assertEqual(rows[3]['depth_total'],4)
+                self.assertIn('stitch_coordinates',rows[1]['depth_missing']['reason'])
+                self.assertEqual(rows[1]['depth_missing']['start'],2103)
+                self.assertEqual(rows[1]['depth_missing']['end'],2105)
+                for r in rows:r.update(spot_price=101,spot_received=r['at'],trade_price=105)
+                model.innovation_steps(rows)
+                self.assertTrue(all(r['innovation'] is not None for r in rows))
+                self.assertEqual(evaluation.score(rows,model.Candidate(15,1,0),1)['scored'],4)
+                compared=evaluation.evaluate(rows,[model.Candidate(15,1,0,'depth_pressure',.5)],1)[0]
+                self.assertEqual(compared['score']['scored'],2)
+                self.assertEqual(compared['paired_baseline']['scored'],2)
             finally:boundary.close();db.close()
             # 经过实际helper类型解析及applied更新后，采样仍保留精确大数量。
             large=dict(update,bids='[["100","79228162514264337593543950335"],["99","79228162514264337593543950335"]]')
@@ -266,7 +395,7 @@ class ProbabilityTests(unittest.TestCase):
         targets=[r for r in rows if r['condition_id']==condition]
         self.assertEqual(len(targets),8)
         self.assertTrue(all(not r['identity_known'] and r['raw_target'] and not r['public_target'] for r in targets))
-        self.assertTrue(all(model.predict(r,model.Candidate(15,1,0),1)[1]=='missing_market_identity' for r in targets))
+        self.assertTrue(all(model.predict(r,model.Candidate(15,1,0),1)[1] in ('missing_settlement_rule','missing_settlement_price') for r in targets))
         summary=direct.census_coverage(config,census,markets,rows)
         raw=next(v for v in summary['markets'] if v['condition_id']==condition)
         self.assertIsNone(raw['identity_at']);self.assertTrue(raw['identity_gap']['right_censored'])
