@@ -203,6 +203,14 @@ def validate_actual_cancel(source,delta):
     native=Numbers.run_exact_batch(lambda:frozen_account_inputs(account_after,current_and_empty_old,scope_known,scope_known,
         scope_conditions=condition_scopes,scope_present=condition_present,asset_outcomes=torch.tensor([0,1],device='cuda')))
     assert native.fault.cpu().tolist()==[0]
+    assert not native.provided[:,212:284].any().cpu().item()
+    # 实际公开账户消费者显式安装返佣接口；本冷根没有完整返佣前缀，current仍Unknown。
+    native_rebates=Numbers.run_exact_batch(lambda:frozen_account_inputs(account_after,current_and_empty_old,scope_known,scope_known,
+        scope_conditions=condition_scopes,scope_present=condition_present,asset_outcomes=torch.tensor([0,1],device='cuda'),
+        rebate_prefix_known=torch.zeros(1,dtype=torch.bool,device='cuda')))
+    assert native_rebates.fault.cpu().tolist()==[0] and native_rebates.provided[:,212:284].all().cpu().item()
+    assert torch.equal(native_rebates.slow[0,212:248].reshape(2,6,3),torch.tensor([0.,0.,1.],device='cuda').expand(2,6,3))
+    assert torch.equal(native_rebates.slow[0,248:284].reshape(2,6,3),torch.tensor([0.,1.,1.],device='cuda').expand(2,6,3))
     def log(value):
         import math
         value=float(Fraction(value))

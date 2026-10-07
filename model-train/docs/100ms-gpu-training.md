@@ -878,6 +878,16 @@ SiLU 和第二层 `BookLinear`，编码后把无效输出置零。它不再用�
 分配和原稀疏入口／固定形状入口的 eager 墙钟。共享 CPU／动态 ONNX 回归仍在 AutoDL
 执行；这些证据仅属于模型组件，不代表完整学习工作集或训练吞吐。
 
+### Native 返佣字段的公开冻结接线
+
+`input_rebates.py` 直接消费所属 Ledger 的 `read_rebates`，按原 current／old 作用域和
+Maker／Taker次序写入 slow212:284。先精确归约，最后才投影；estimated 使用
+`estimated_known`，其余五项使用 `amounts_known`，不能用一个已知位掩盖来源缺口。
+账户接线显式传入完整返佣冷前缀的 `rebate_prefix_known`；未安装时保持 provided=False，
+不完整的非空 old 人口保持 Unknown，完整空集合为 Known零，不存在 current 为NA。
+这条输入接线不改变现有返佣归属、全日门槛或付款政策，也不宣称完整账户已交付。
+共享返佣验证将原oracle市场显式装入old输入布局来检查槽位；它不证明根old选择器。
+
 ### 当前公开 Registry 与物理人口接缝
 
 `shared-run/gpu/registry.py` 在原 NOE 首次公开领取后、Ledger 等待前接纳公开订单/Trade；

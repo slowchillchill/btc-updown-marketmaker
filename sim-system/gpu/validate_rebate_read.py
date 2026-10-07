@@ -1,5 +1,8 @@
 """当前有限原市场返佣读面的逐项精确oracle。"""
 from fractions import Fraction
+from pathlib import Path
+import math
+import sys
 import torch
 from queues import Numbers
 from rebate_read import read_rebates
@@ -25,4 +28,29 @@ def check(admission,checkpoint,condition):
             amount=expected['Known']
             n,d=values(read.estimated.numerator),values(read.estimated.denominator)
             assert Fraction(n[role],d[role])==Fraction(int(amount['numerator']),int(amount['denominator']))
+    sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'model-train/native-inputs/gpu'))
+    from input_rebates import rebate_inputs,write_rebate_fields
+    # 原oracle的condition0显式装入old输入布局，current为NA；不证明根old选择器。
+    conditions=torch.tensor([[[-1],[0]]],device='cuda')
+    present=conditions>=0;applicable=torch.tensor([[False,True]],device='cuda')
+    encoded=Numbers.run_exact_batch(lambda:rebate_inputs(admission,conditions,present,applicable,prefix_known=yes))
+    actual=write_rebate_fields(torch.zeros((roots,433),device='cuda'),encoded)
+    expected=[]
+    for role in original:
+        for key in ('estimated_pusd','accrued_unmatured_pusd','below_threshold_pusd',
+                'confirmed_unpaid_pusd','paid_pusd','locked_remainder_pusd'):
+            value=role[key]
+            known=key!='estimated_pusd' or (isinstance(value,dict) and 'Known' in value)
+            if key=='estimated_pusd' and known: value=value['Known']
+            amount=Fraction(int(value['numerator']),int(value['denominator'])) if known else Fraction(0)
+            expected.extend((math.copysign(math.log1p(abs(float(amount))),float(amount)),float(known),1.))
+    assert torch.equal(actual[0,212:248],torch.zeros(36,device='cuda'))
+    assert torch.equal(actual[0,248:284],torch.tensor(expected,dtype=torch.float32,device='cuda'))
+    assert encoded.fault.cpu().tolist()==[0]
+    unknown=Numbers.run_exact_batch(lambda:rebate_inputs(admission,conditions,present,applicable,prefix_known=~yes))
+    assert torch.equal(unknown.values[0,1],torch.tensor([0.,0.,1.],device='cuda').expand(2,6,3))
+    # 原完整空old集合是Known零；没有完整非空前缀时仍独立保持这个语义。
+    empty=Numbers.run_exact_batch(lambda:rebate_inputs(admission,conditions,torch.zeros_like(present),
+        torch.tensor([[False,True]],device='cuda'),prefix_known=~yes))
+    assert torch.equal(empty.values[0,1],torch.tensor([0.,1.,1.],device='cuda').expand(2,6,3))
     return True

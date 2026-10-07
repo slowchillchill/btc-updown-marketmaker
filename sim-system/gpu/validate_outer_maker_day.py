@@ -309,6 +309,7 @@ def main():
         'Registry_missing_cold_submission_remains_Unknown':True,'replaced_malformed_Trade_keeps_fault':True,
         'reference_attempt_order_drives_device':False,'repeat_keeps_first_visibility_and_delivery':True,
         'cold_prefix_initializations':1,'actual_trade_role_and_net_fee_executed_read_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'day_and_payment_money_seq_and_positions_checked':True,'actual_Maker_day_unresolved_Pi_and_maximum_loss_checked':True,'actual_original_six_rebate_read_fields_checked':True,
+        'Native_slow_old_Maker_Taker_six_rebate_fields_original_reference_and_unknown_empty_NA_checked':True,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-start,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'complete_global_SIM_clock_or_activity_recovery_delivered':False}))
 
