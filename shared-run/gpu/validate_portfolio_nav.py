@@ -80,7 +80,8 @@ def cold_ledger(checkpoint,pm):
         value=fact['disposition']['AccountTransition'];transition=value['transition']
         if isinstance(transition,dict) and 'Existing' in transition:transition=transition['Existing']
         name,fields=(transition,{}) if isinstance(transition,str) else next(iter(transition.items()))
-        tag={'OrderAcceptedEncumbranceApplied':0,'FillFinalityEconomicApplied':6,'MakerRebateAccrualFinalized':9}[name]
+        tag={'OrderAcceptedEncumbranceApplied':0,'FillFinalityEconomicApplied':6,
+            'MakerRebateAccrualFinalized':9,'TakerRebateAccrualApplied':10}[name]
         seq=fact['economic_identity']['AccountTransition']['account_transition_seq'];sequences.append(seq)
         delta=value['balance_delta'];v2=next(iter(row['record']))=='EconomicFactV2'
         balance=delta['existing'] if v2 else delta;members=balance['outcome_balance_deltas']
