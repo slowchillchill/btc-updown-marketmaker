@@ -306,8 +306,8 @@ def main():
     assert batch.source_categories.cpu().tolist()==[[3]]
     ordinal=integers([int(projection.normalizer.bank.source_order[actual_row,3].cpu().item())])
     assert values(ordinal)==[evidence['source_order']['ordinal']]
-    old_public=public
     public=Numbers.run_exact_batch(lambda:public.append_batch(projection.normalizer.bank,batch))
+    old_public=public  # 已有真实记录但尚未领取；缺绑定代表沿这个实际应用入口。
     gates=ReceiveGates.unset(1).set_receive(tensor([source['resolved_close_at']]),enabled)
     public,blocked=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,
         torch.ones_like(public.waiting.received)))
