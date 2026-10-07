@@ -946,7 +946,10 @@ fn gpu_accept_projection_reference(actor:&mut SimRunActorV2,state:BusinessReduce
     let batch=batch.expect("真实接单/最终性应产生非空原投影");
     let direct=batch.direct_responses().map(|response| match response {
         BusinessDirectResponse::PostOrders(result)=>serde_json::json!({"metadata":result.metadata}),
-        _=>panic!("当前真实短链仅PostOrders直接响应"),
+        BusinessDirectResponse::CancelOrder(result)=>serde_json::json!({"metadata":result.metadata}),
+        BusinessDirectResponse::CancelOrders(result)=>serde_json::json!({"metadata":result.metadata}),
+        BusinessDirectResponse::CancelMarketOrders(result)=>serde_json::json!({"metadata":result.metadata}),
+        _=>panic!("此有限工程入口尚未映射该直接响应"),
     }).collect::<Vec<_>>();
     batches.push(serde_json::json!({"batch_sequence":batch.projection_batch_sequence,
         "has_control_admission":batch.account_opening.is_some() || batch.market_enrollment.is_some(),
