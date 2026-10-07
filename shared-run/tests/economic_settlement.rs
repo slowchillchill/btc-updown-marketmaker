@@ -1914,9 +1914,11 @@ async fn gpu_actual_pair_and_winner_orphan_redemption_preserves_one_economic_fac
             assert!(writer.write(material).unwrap());writer.finish().unwrap();
             let after=snapshot(&LedgerWriterV1::open_durable(&restored_root).unwrap());
             let record=material.consumed_record_v2().unwrap();
-            let request=material_guard.iter().filter_map(LedgerRecordMaterialV2::consumed_record_v2)
-                .find(|candidate|candidate.position().source_watermark==record.position().source_watermark && candidate.position().record_ordinal==0).unwrap();
-            checked=Some(serde_json::json!({"request_record":{"record":request.record(),"position":request.position(),"visibility":request.visibility()},
+            let request_material=material_guard.iter().find(|material|material.consumed_record_v2().is_some_and(
+                |candidate|candidate.position().source_watermark==record.position().source_watermark && candidate.position().record_ordinal==0)).unwrap();
+            let request=request_material.consumed_record_v2().unwrap();
+            checked=Some(serde_json::json!({"request_record":{"record":request.record(),"position":request.position(),"visibility":request.visibility(),
+                "ledger_entry_seq":request_material.ledger_entry_seq().unwrap()},
                 "before":before,"after":after,"record":record.record(),
                 "position":record.position(),"context":record.context(),"visibility":record.visibility()}));
             break;

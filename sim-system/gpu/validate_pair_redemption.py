@@ -51,6 +51,7 @@ def main():
     from projection import Projection
     from feedback import FeedbackEmitter
     from validate_projection import expected_semantic
+    from fields import encode_fields
     from consumption import PendingRecords,ReceiveGates
     original=source['record']['EconomicFactV2']
     private=original['source_order']['sequence']['PrivateFeedback']['private_feedback_sequence']
@@ -76,6 +77,11 @@ def main():
         assert batch.received_at[0,column].cpu().item()==record['feedback_received_at_utc_ms']
         assert batch.platform_at[0,column].cpu().item()==record['platform_event_at_utc_ms']
     assert values(batch.economic_sequences)[1]==original['fact']['economic_identity']['AccountTransition']['account_transition_seq']
+    sequence=original['fact']['economic_identity']['AccountTransition']['account_transition_seq']
+    expected_keys=[encode_fields([zero,tensor([9]),integers([private])]),encode_fields([zero,tensor([11]),integers([sequence])])]
+    for column,key in enumerate(expected_keys):
+        actual=projection.normalizer.bank.logical_keys[batch.rows[0,column]]
+        assert torch.equal(actual[:key.size(1)],key[0]) and not actual[key.size(1):].any().cpu().item()
     members=original['fact']['disposition']['AccountTransition']['balance_delta']['existing']['outcome_balance_deltas']
     assert [(v['token_id'],v['balance_shares_delta']) for v in members]==[('3','-5'),('20','-6')]
     sys.path.insert(0,str(root/'ledger/gpu'))
@@ -106,13 +112,15 @@ def main():
         resolutions=replace(resolutions,realized_pnl=rational([balances['realized_pnl_pusd']]),directional_cash=rational([before['directional_cash']]))
         costs=PositionCosts.empty(1,2,'cuda')
         costs=replace(costs,active=tensor([[True,True]],torch.bool),conditions=tensor([[0,0]]),assets=tensor([[0,1]]),
-            cost=rational([original_outcomes[token]['position_cost_basis_pusd'] for token in tokens]))
+            cost=rational([original_outcomes[token]['position_cost_basis_pusd'] for token in tokens]),
+            fee=rational([sum((Fraction(trade['fact']['immediate_taker_fee_pusd']) for trade in before['successful_trades']
+                if trade['fact']['token_id']==token),Fraction(0)) for token in tokens]))
         ledger=AdmissionLifecycle.open(platform,projection.normalizer.bank,columns,
             integers([before['projection']['ledger_entry_seq']]),integers([before['projection']['ledger_local_prefix']]),pools,
             position_costs=costs,order_funds=OrderFunds.empty(1,2,2,2,'cuda',known=True),resolutions=resolutions)
         # before为成功Request已实际消费、Economic尚未消费的原提交前缀。
         return replace(ledger,applied=tensor([[True,False]],torch.bool),
-            applied_sequences=integers([before['projection']['ledger_entry_seq'],0]),
+            applied_sequences=integers([source['request_record']['ledger_entry_seq'],0]),
             maker_cash=rational([Fraction(before['cash']['maker_available_pusd'])+Fraction(before['cash']['maker_reserved_pusd'])]))
     ledger=Numbers.run_exact_batch(initialize_ledger)
     old=ledger
@@ -128,10 +136,14 @@ def main():
     assert ledger.fault.cpu().tolist()==[0] and not (waiting.received&~waiting.consumed).any().cpu().item()
     assert values(ledger.current_entry_sequence)==[after['projection']['ledger_entry_seq']]
     assert values(ledger.platform.platform_source_prefix)==[after['projection']['platform_source_prefix']]
+    assert values(ledger.current_local_prefix)==[after['projection']['ledger_local_prefix']]
+    assert values(ledger.applied_sequences)==[source['request_record']['ledger_entry_seq'],after['projection']['ledger_entry_seq']]
+    assert ledger.available_at.cpu().tolist()[0][1]==visible
     ratio=lambda value:[Fraction(n,d) for n,d in zip(values(value.numerator),values(value.denominator))]
     assert ratio(ledger.platform.balances)==[Fraction(after['projection']['platform_confirmed_projection'][name]) for name in names]
     assert ratio(ledger.platform.outcomes)==[Fraction(0),Fraction(0)]
     assert ratio(ledger.position_costs.read().cost)==[Fraction(0)]
+    assert ratio(ledger.position_costs.read().fee)==[Fraction(after['projection']['platform_confirmed_projection']['fees_pusd'])]
     assert ratio(ledger.resolutions.realized_pnl)==[Fraction(after['projection']['platform_confirmed_projection']['realized_pnl_pusd'])]
     assert ratio(ledger.maker_cash)==[Fraction(after['cash']['maker_available_pusd'])+Fraction(after['cash']['maker_reserved_pusd'])]
     assert ratio(ledger.resolutions.directional_cash)==[Fraction(after['directional_cash'])]
