@@ -9,6 +9,7 @@ from prepare import _numbers
 from asset_buy import take_ratio
 from success_pool import select
 from trade_success import sum_rows
+from success_read import net_success
 
 
 @dataclass(frozen=True)
@@ -20,7 +21,8 @@ class SuccessInputs:
     fault: torch.Tensor
 
 
-def success_inputs(pools, conditions, present, applicable, asset_outcomes, *, prefix_known):
+def success_inputs(pools, conditions, present, applicable, asset_outcomes, *, prefix_known,
+                   resolutions=None,settlement_prefix_known=None):
     roots = pools.fault.numel()
     assets = pools.asset_roots.numel()
     device = pools.asset_roots.device
@@ -32,6 +34,9 @@ def success_inputs(pools, conditions, present, applicable, asset_outcomes, *, pr
             or prefix_known.shape != (roots,) or prefix_known.dtype != torch.bool or prefix_known.device != device):
         raise TypeError('成功字段需要同设备原作用域、资产outcome与完整成功前缀known')
     numbers = _numbers()
+    if settlement_prefix_known is None:
+        settlement_prefix_known=torch.zeros_like(prefix_known)
+    net=net_success(pools,resolutions,prefix_known=settlement_prefix_known)
     owner = pools.asset_roots
     side = torch.arange(2,device=device)
     member = ((pools.condition_slots[None,None,:,None] == conditions[:,:,None,:])
@@ -42,8 +47,9 @@ def success_inputs(pools, conditions, present, applicable, asset_outcomes, *, pr
         & (owner[None,None,None,None,:] == torch.arange(roots,device=device)[:,None,None,None,None])
         & (asset_outcomes[None,None,None,None,:] == side[None,None,:,None,None])).any(4)
     binding_known = (~present[:,:,None,:] | bound).all(3)
-    known = ((prefix_known[:,None] | ~present.any(2)) & applicable)[:,:,None] & binding_known
-    fault = pools.fault.clone()
+    settlement_known=~(sides&~net.known[None,None,None,:]).any(3)
+    known = ((prefix_known[:,None] | ~present.any(2)) & applicable)[:,:,None] & binding_known & settlement_known
+    fault = net.fault.clone()
     index = torch.arange(assets,device=device)[None,None,None,:].expand(roots,2,2,assets).flatten()
     def encode(source, population):
         nonlocal fault
@@ -55,9 +61,9 @@ def success_inputs(pools, conditions, present, applicable, asset_outcomes, *, pr
         fault |= numbers.combine_fault_rows(torch.where(applicable[:,:,None],error.reshape(roots,2,2),0).flatten(1))
         return torch.stack((torch.where(enabled,projected.reshape(roots,2,2),0.0),
             enabled.float(),applicable[:,:,None].expand(roots,2,2).float()),-1)
-    quantity = encode(pools.success_quantity,sides)
-    cost = encode(pools.success_cost,sides)
-    orphan = encode(pools.quantity,sides)
+    quantity = encode(net.quantity,sides)
+    cost = encode(net.cost,sides)
+    orphan = encode(net.orphan,sides)
     # 原paired_shares是市场量，不依赖outcome绑定。池按资产重复存同一市场值；
     # 仅按(root,condition)稳定取一次，不能借逐腿known决定市场级适用性。
     order = pools.condition_slots.argsort(stable=True)
@@ -68,11 +74,13 @@ def success_inputs(pools, conditions, present, applicable, asset_outcomes, *, pr
             | (pools.condition_slots[order][1:]!=pools.condition_slots[order][:-1]))
     representative = torch.zeros_like(first).scatter(0,order,first)
     pair_index = torch.arange(assets,device=device)[None,None,:].expand(roots,2,assets).flatten()
-    value = take_ratio(pools.paired_quantity,pair_index)
+    value = take_ratio(net.paired,pair_index)
     empty = numbers.ExactRational(value.numerator.constant(0),value.denominator.constant(1))
     total = sum_rows(select(value,(member & representative[None,None,:]).flatten(),empty),roots*2,assets)
     projected,error = total.project(operation=1)
-    paired_known = (prefix_known[:,None] | ~present.any(2)) & applicable
+    empty_scope=~present.any(2)
+    paired_known = (prefix_known[:,None] | empty_scope) & (settlement_prefix_known[:,None] | empty_scope)
+    paired_known &= applicable & ~(member&~net.known[None,None,:]).any(2)
     fault |= numbers.combine_fault_rows(torch.where(applicable,error.reshape(roots,2),0))
     paired = torch.stack((torch.where(paired_known,projected.reshape(roots,2),0.0),
         paired_known.float(),applicable.float()),-1)

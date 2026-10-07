@@ -387,6 +387,20 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert check_rebates(admission,source['reservation_checkpoints'][-1],source['initial'][0]['market']['condition_id'])
     check_principal(admission,source['reservation_checkpoints'][-1])
     check_principal_growth(admission,source,delivered)
+    # 该同一实际来源已登记第二市场，但成功池只安装原condition0；非空scope没有池成员
+    # 不能用其零归约猜结算历史完整。与累计增长相同，cold槽1绑定真实Enrollment canonical身份。
+    enrollment=next(row['kind']['MarketEnrollment']['result']['market']['condition_id']
+        for source_batch in source['normalization_reference'] if source_batch['name']=='actual_source'
+        for row in source_batch['input']['evidence'] if 'MarketEnrollment' in row['kind'])
+    assert enrollment!=source['initial'][0]['market']['condition_id']
+    assert admission.success_pools.condition_slots.cpu().tolist()==[0,0]
+    from input_success import success_inputs
+    uninstalled_scope=Numbers.run_exact_batch(lambda:success_inputs(admission.success_pools,
+        torch.tensor([[[1],[-1]]],device='cuda'),torch.tensor([[[True],[False]]],device='cuda'),
+        torch.ones((1,2),dtype=torch.bool,device='cuda'),torch.tensor([0,1],device='cuda'),
+        prefix_known=torch.ones(1,dtype=torch.bool,device='cuda')))
+    assert uninstalled_scope.fault.cpu().tolist()==[0]
+    assert uninstalled_scope.paired.cpu().tolist()==[[[0.,0.,1.],[0.,1.,1.]]]
     again,remaining=Numbers.run_exact_batch(lambda:admission.apply_closed(delivered,
         torch.ones_like(columns.enabled),maximum_retry_rounds=1))
     assert values(again.current_entry_sequence)==values(admission.current_entry_sequence)

@@ -947,6 +947,21 @@ Trade 详情到达后绑定原订单身份，消费这些原分录；不新增�
 当前未关联目录绑定一个共享 NOE 块，跨块宿主必须迁移仍需保留的引用、身份和金额后才能退役输入。
 完整账户冻结、100ms 宿主及活动根恢复仍由后续协调器接齐。
 
+### 兑付后的净成功读面
+
+`ledger/gpu/success_read.py` 沿同一公开 `MarketResolutions` 读取净成功量、成功本金成本、
+配对量和孤腿量。成功量扣已兑付 pair 和本腿 orphan，配对量扣已兑付 pair，
+孤腿量扣本腿已兑付 orphan；本腿有任何正额 pair 或 orphan 兑付时，成功本金成本按原读面为零。
+它不修改成功池的历史，也不改变真实持仓成本或累计接纳本金。
+Native `input_success` 只按同冻结 scope 精确归约这个公共读面，再投影到 slow122:164。
+结算完整冷前缀与成功成交完整冷前缀分别安装；未提供结算历史时，非空 scope 为 Unknown，
+不能把 `resolutions=None` 默认解释为已知 Unresolved，完整空 scope 仍为 Known0。
+实际 typed resolution 的 known 和 fault 继续传到同一次冻结输入。
+
+验证入口沿真实双腿清偿的公开 before/after 和同次冻结核对这些字段及旧冻结，
+原未判定的两腿成功来源显式提供完整无兑付前缀；指定单市场布局不代表根权威 current/old 选择。
+这只是成功字段组件接线，完整账户及活动根恢复仍未交付。
+
 ### 累计接纳本金
 
 `ledger/gpu/accepted_principal.py` 保存每根、原 condition 的精确累计接纳本金，

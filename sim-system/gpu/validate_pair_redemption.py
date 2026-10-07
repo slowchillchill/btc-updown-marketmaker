@@ -146,6 +146,32 @@ def main():
     pending,closed=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
     assert values(closed.delivered_sequences)==[delivered,delivered]
     waiting=ClosedAdmission.empty(columns).accept(columns,closed)
+    original_waiting=waiting
+    # 沿真实公共冻结入口消费同一before/after的typed resolution净读面。
+    sys.path[:0]=[str(root/'shared-run/gpu'),str(root/'model-train/native-inputs/gpu')]
+    from public_ledger import PublicLedgerState
+    from registry import PublicRegistryState,PublicRegistryEvents,FrozenIntentOrders
+    from input_account import frozen_account_inputs
+    from input_success import success_inputs,write_success_fields
+    from success_read import net_success
+    import math
+    empty=tensor([[]],torch.bool);integer=integers([])
+    ratio_empty=type(rational(['0']))(integer,integer.constant(1))
+    intents=FrozenIntentOrders(empty,integer,empty,ratio_empty,empty,empty)
+    registry=PublicRegistryState(PublicRegistryEvents.empty(1,'cuda'))
+    scopes=tensor([[[0],[-1]]]);present=tensor([[[True],[False]]],torch.bool)
+    applicable=tensor([[True,True]],torch.bool)
+    source_sides=[asset['outcome']['index'] for asset in assets]
+    outcomes=tensor(source_sides)
+    order_members=tensor([[[],[]]],torch.bool)
+    def frozen_inputs(current,current_waiting):
+        public=PublicLedgerState(pending,registry,current_waiting,current)
+        frozen=public.freeze_account(intents,tensor([visible]))
+        inputs=frozen_account_inputs(frozen,order_members,applicable,applicable,
+            scope_conditions=scopes,scope_present=present,asset_outcomes=outcomes,
+            success_prefix_known=enabled,settlement_prefix_known=enabled)
+        return frozen,inputs
+    before_frozen,before_native=Numbers.run_exact_batch(lambda:frozen_inputs(old,original_waiting))
     ledger,waiting=Numbers.run_exact_batch(lambda:waiting.drain(ledger,torch.ones_like(columns.enabled)))
     assert ledger.fault.cpu().tolist()==[0] and not (waiting.received&~waiting.consumed).any().cpu().item()
     assert values(ledger.current_entry_sequence)==[after['projection']['ledger_entry_seq']]
@@ -167,6 +193,58 @@ def main():
     read=Numbers.run_exact_batch(lambda:ledger.resolutions.read(ledger.success_pools))
     assert ratio(read.paired_receivable)==[0] and ratio(read.winner_orphan_receivable)==[0]
     assert ratio(old.platform.outcomes)==[Fraction(5),Fraction(6)] and ratio(old.position_costs.read().cost)==[Fraction('6.6')]
+    after_frozen,after_native=Numbers.run_exact_batch(lambda:frozen_inputs(ledger,waiting))
+    def source_cost(value):return Fraction(value['numerator'])/Fraction(value['denominator'])
+    def triple(value):return [math.copysign(math.log1p(abs(float(value))),float(value)),1.,1.]
+    for current,reference,native in [(old,before,before_native),(ledger,after,after_native)]:
+        expected=reference['markets'][0]
+        read=Numbers.run_exact_batch(lambda:net_success(current.success_pools,current.resolutions,prefix_known=enabled))
+        assert read.known.cpu().tolist()==[True,True] and read.fault.cpu().tolist()==[0]
+        for field,key,first in [('quantity','success_shares',122),('cost','success_principal_cost_pusd',134),('orphan','orphan_shares',149)]:
+            # CPU数组沿其assets存储顺序；公共read也沿原运行资产坐标，不先换outcome序。
+            original=[(source_cost if field=='cost' else Fraction)(expected[key][position]) for position in range(len(assets))]
+            assert ratio(getattr(read,field))==original
+            # 此单市场作用域只核消费布局，不冒称Root current/old选择。
+            by_side=[original[source_sides.index(side)] for side in range(2)]
+            torch.testing.assert_close(native.slow[0,first:first+6].cpu(),torch.tensor([v for q in by_side for v in triple(q)],dtype=torch.float32),rtol=1e-6,atol=1e-7)
+        pair=Fraction(expected['paired_shares'])
+        assert ratio(read.paired)==[pair,pair]
+        torch.testing.assert_close(native.slow[0,146:149].cpu(),torch.tensor(triple(pair)),rtol=1e-6,atol=1e-7)
+        assert native.fault.cpu().tolist()==[0] and native.provided[0,122:164].all().cpu().item()
+        for start,end in [(128,134),(140,146),(155,164)]:
+            assert native.slow[0,start:end].cpu().tolist()==[0.,1.,1.]*((end-start)//3)
+    # 缺结算历史不是已知Unresolved；完整空scope仍为Known零。
+    unavailable=replace(after_frozen,ledger=replace(ledger,resolutions=None))
+    unknown=Numbers.run_exact_batch(lambda:frozen_account_inputs(unavailable,order_members,applicable,applicable,
+        scope_conditions=scopes,scope_present=present,asset_outcomes=outcomes,success_prefix_known=enabled))
+    for start,end in [(122,128),(134,140),(146,155)]:
+        assert unknown.slow[0,start:end].cpu().tolist()==[0.,0.,1.]*((end-start)//3)
+    _,old_again=Numbers.run_exact_batch(lambda:frozen_inputs(before_frozen.ledger,original_waiting))
+    assert torch.equal(old_again.slow[:,122:164],before_native.slow[:,122:164])
+    # 同一固定地址typed resolution图从真实未兑付切到实际兑付；不改历史成功池。
+    from ledger_drain import _owned,_pairs,installed_word_capacity
+    live=_owned(old.resolutions,ledger.resolutions)
+    words=installed_word_capacity(ledger)
+    def encode_live():
+        return success_inputs(old.success_pools,scopes,present,applicable,outcomes,
+            prefix_known=enabled,resolutions=live,settlement_prefix_known=enabled)
+    Numbers.device_exact_batch(encode_live,word_capacity=words,device='cuda')
+    graph=torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        candidate=Numbers.device_exact_batch(encode_live,word_capacity=words,device='cuda')
+    graph.replay()
+    assert candidate.fits.cpu().item()
+    old_graph=write_success_fields(torch.zeros((1,433),device='cuda'),candidate.value)
+    torch.testing.assert_close(old_graph[:,122:164],before_native.slow[:,122:164],rtol=1e-6,atol=1e-7)
+    saved_graph=old_graph.clone()
+    incoming_resolution=_owned(ledger.resolutions,live)
+    with torch.no_grad():
+        for target,incoming in _pairs(live,incoming_resolution):target.copy_(incoming)
+    graph.replay()
+    assert candidate.fits.cpu().item() and candidate.value.fault.cpu().tolist()==[0]
+    new_graph=write_success_fields(torch.zeros((1,433),device='cuda'),candidate.value)
+    torch.testing.assert_close(new_graph[:,122:164],after_native.slow[:,122:164],rtol=1e-6,atol=1e-7)
+    assert torch.equal(old_graph,saved_graph)
     repeated,waiting=Numbers.run_exact_batch(lambda:waiting.drain(ledger,torch.ones_like(columns.enabled)))
     assert values(repeated.current_entry_sequence)==values(ledger.current_entry_sequence)
     print(json.dumps({'actual_V4_two_positive_assets_one_economic_fact_and_original_vector_order_checked':True,
@@ -174,6 +252,8 @@ def main():
         'same_NOE_closed_first_visibility_direct_platform_prefix_and_no_double_apply_checked':True,
         'actual_pair_five_maker_and_orphan_one_directional_attribution_checked':True,
         'actual_already_consumed_FinalSuccess_Request_and_sticky_state_cold_prefix_preserved_checked':True,
+        'same_public_freeze_Native_net_success_122_to_163_and_missing_settlement_Unknown_checked':True,
+        'same_device_typed_resolution_net_success_graph_replay_and_old_frozen_checked':True,
         'cold_actual_committed_before_initialized_once':True,'continuous_full_1716_root_checked':False,
         'settlement_cost_query_retry_consumers_checked':False,'wall_seconds_including_cold_reference':time.perf_counter()-started,
         'peak_allocated_bytes':torch.cuda.max_memory_allocated()}))

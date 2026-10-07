@@ -63,9 +63,11 @@ def main():
     sys.path[:0]=[str(Path(__file__).resolve().parents[1]/'native-inputs/gpu'),
                   str(Path(__file__).resolve().parents[2]/'data-pipeline/gpu')]
     from input_success import success_inputs,write_success_fields
+    assert market['settlement_state']=='Unresolved', '本入口完整原成交历史没有判定或兑付'
     native=Numbers.run_exact_batch(lambda:success_inputs(pool,torch.tensor([[[0],[-1]]],device='cuda'),
         torch.tensor([[[True],[False]]],device='cuda'),torch.ones((1,2),dtype=torch.bool,device='cuda'),
-        torch.tensor([0,1],device='cuda'),prefix_known=torch.ones(1,dtype=torch.bool,device='cuda')))
+        torch.tensor([0,1],device='cuda'),prefix_known=torch.ones(1,dtype=torch.bool,device='cuda'),
+        settlement_prefix_known=torch.ones(1,dtype=torch.bool,device='cuda')))
     assert native.fault.cpu().tolist()==[0]
     slow=write_success_fields(torch.zeros((1,433),device='cuda'),native)
     import math
@@ -82,7 +84,8 @@ def main():
         assert slow[0,first:last].cpu().tolist()==[0.,1.,1.]*((last-first)//3)
     missing_side=Numbers.run_exact_batch(lambda:success_inputs(pool,torch.tensor([[[0],[-1]]],device='cuda'),
         torch.tensor([[[True],[False]]],device='cuda'),torch.ones((1,2),dtype=torch.bool,device='cuda'),
-        torch.tensor([0,-1],device='cuda'),prefix_known=torch.ones(1,dtype=torch.bool,device='cuda')))
+        torch.tensor([0,-1],device='cuda'),prefix_known=torch.ones(1,dtype=torch.bool,device='cuda'),
+        settlement_prefix_known=torch.ones(1,dtype=torch.bool,device='cuda')))
     assert missing_side.fault.cpu().tolist()==[0]
     torch.testing.assert_close(missing_side.paired[0,0].cpu(),torch.tensor(project(Fraction(market['paired_shares']))),
         rtol=1e-6,atol=1e-7)
