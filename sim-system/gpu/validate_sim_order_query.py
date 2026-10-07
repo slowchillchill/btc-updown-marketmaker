@@ -70,7 +70,6 @@ def check(source,runtime,noe,sampler,asset_tokens,state,live_resources):
     root=Path(__file__).resolve().parents[2]
     sys.path[:0]=[str(root/'ledger/gpu'),str(root/'shared-run/gpu')]
     from query_submission import submit_order_query
-    from query_association import QueryAssociations
     from fields import encode_fields
     from consumption import ReceiveGates
     from base_runtime_storage import BaseRuntimeStorage
@@ -85,8 +84,8 @@ def check(source,runtime,noe,sampler,asset_tokens,state,live_resources):
     keys=[source['post_request_key'],source['cancel_request_key'],source['live_query']['request'],*[f['request'] for f in frames],payload['reservation']]
     identities,offsets=byte_column([key.encode() for key in keys])
     request=len(keys)-1
-    assert state.ledger.query_associations is None
-    state=replace(state,ledger=replace(state.ledger,query_associations=QueryAssociations.empty(1,1,'cuda')))
+    assert state.ledger.query_associations is not None
+    assert (state.ledger.query_associations.events<0).all().cpu().item()
     account,decision=run(lambda:state.ledger.reserve_action(t([[request]]),zero[:,None],
         rational([payload['principal']]),rational(['0']),yes[:,None]))
     assert decision.fault.cpu().tolist()==[0]

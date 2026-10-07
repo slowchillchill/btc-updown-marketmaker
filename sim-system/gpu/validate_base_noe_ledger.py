@@ -50,12 +50,16 @@ def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=Fa
     columns=run(lambda:EconomicColumns.from_projection_batches([first]))
     width=columns.row_refs.size(1)
     pools=run(lambda:SuccessPools.open(tensor([0,0]),tensor([0,0]),tensor([0,1]),tensor([1,0]),1))
+    # 原同账户从开户到活动Query均没有本地Query关联；后继才显式登记。
+    from query_association import QueryAssociations
+    query_associations=QueryAssociations.empty(1,1,'cuda') if source.get('order_queries') is not None else None
     admission=run(lambda:AdmissionLifecycle.open(platform,noe.normalizer.bank,columns,
         integers([initial['ledger_entry_seq']]),integers([initial['ledger_local_prefix']]),pools,
         position_costs=PositionCosts.empty(1,max(1,width),'cuda'),
         order_funds=OrderFunds.empty(1,max(1,width),max(1,width),width,'cuda'),
         unresolved_markets=UnresolvedMarkets.open(pools,zero),
-        market_balance_origin=market_origin(source['opening_ledger'],source['initial'][0]['market']['condition_id'])))
+        market_balance_origin=market_origin(source['opening_ledger'],source['initial'][0]['market']['condition_id']),
+        query_associations=query_associations))
     pending=run(lambda:PendingRecords.from_columns(first.emitted,first.received_at,first.private_sequences,
         Numbers.ExactInt.from_i64_tensor(noe.normalizer.bank.source_order[first.rows.flatten(),3]),first.rows,integers([0])))
     state=PublicLedgerState(pending,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),
