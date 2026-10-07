@@ -413,7 +413,7 @@ async fn public_execution_with_scenario_capacity(
     capacity: usize,
     rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
 ) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
-    public_execution_with_scenario_capacity_and_projection(path,scenario,role,capacity,rules,None).await
+    public_execution_with_scenario_capacity_and_projection(path,scenario,role,capacity,rules,None,None).await
 }
 async fn public_execution_with_scenario_capacity_and_projection(
     path: &Path,
@@ -422,12 +422,13 @@ async fn public_execution_with_scenario_capacity_and_projection(
     capacity: usize,
     rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
     make_projection: Option<Box<dyn FnOnce(&Path,&mut RunOpenedV2)->Box<dyn PublicProjectionPortV1>>>,
+    finality: Option<Arc<TradeFinalityPolicyV2>>,
 ) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
     let rules = match rules {
         Some(rules) => rules,
         None => successful_snapshot_v3_for_sim_tests().await,
     };
-    let finality = successful_policy_v2_for_tests();
+    let finality = finality.unwrap_or_else(successful_policy_v2_for_tests);
     let latency = load_embedded_proxy_latency_profile().unwrap();
     let mut opened = opened(
         "public-consumption-test",

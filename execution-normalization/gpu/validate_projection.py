@@ -69,7 +69,7 @@ def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=
         value=value['result']
         state={'MatchedNotBroadcasted':0,'Matched':1,'Retrying':2,'Mined':3,'Confirmed':4,'Failed':5}[value['state']]
         disposition={'PendingUnapplied':0,'PendingApplied':1,'FinalSuccess':2,'FinalFailureUnapplied':3,'FinalFailureCompensated':4}[value['economic_disposition']]
-        return encode_fields([zero,zero,zero,integers([value['fill_sequence']]),integers([entity_sequence(value['order_identity'],'Order')]),
+        return encode_fields([zero,zero,torch.full_like(zero,token_index),integers([value['fill_sequence']]),integers([entity_sequence(value['order_identity'],'Order')]),
             torch.full_like(zero,state),torch.full_like(zero,disposition),torch.tensor([value['matched_at_utc_ms']],device='cuda'),
             torch.full_like(zero,{'Taker':0,'MakerInferred':1}[value['liquidity_role']]),rational([value['source_price_pusd_per_share']]),integers([units(value['base_quantity_shares'])]),
             integers([units(value['quote_amount_pusd'])]),integers([units(value['immediate_taker_fee_pusd'])]),

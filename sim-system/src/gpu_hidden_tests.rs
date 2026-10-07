@@ -89,18 +89,25 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
 #[tokio::test(flavor="current_thread")]
 #[ignore="AutoDL真实紧凑TWAP/空Book/Terminal→一次原Resolved与后继Lifecycle"]
 async fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_effects() {
-    gpu_hidden_terminal_source(false).await;
+    gpu_hidden_terminal_source(false,false).await;
 }
 
 #[cfg(feature="shared-execution")]
 #[tokio::test(flavor="current_thread")]
 #[ignore="AutoDL真实空Book→外层GTC挂单→Terminal市场关闭/释放→同NOE/Ledger"]
 async fn gpu_compact_hidden_terminal_closes_real_resting_gtc_and_releases_once() {
-    gpu_hidden_terminal_source(true).await;
+    gpu_hidden_terminal_source(true,false).await;
 }
 
 #[cfg(feature="shared-execution")]
-async fn gpu_hidden_terminal_source(with_order: bool) {
+#[tokio::test(flavor="current_thread")]
+#[ignore="AutoDL真实Maker→Terminal→实际最终性关闭请求前驱"]
+async fn gpu_compact_hidden_terminal_keeps_actual_maker_pending_until_terminal() {
+    gpu_hidden_terminal_source(true,true).await;
+}
+
+#[cfg(feature="shared-execution")]
+async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
     use data_pipeline_training::{compact_public::{PublicCompactWriterV1, CompactFactPayloadV1},
         compact_hidden_material::{prepare_compact_hidden_material_v1, CompactHiddenMaterialReaderV1},
         compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1, gpu_initial_sort::GpuInitialRunOrderV1};
@@ -125,12 +132,20 @@ async fn gpu_hidden_terminal_source(with_order: bool) {
     let empty = |token: &str| PolymarketOrderbookEvent::Book {
         asset_id: token.into(), last_trade_price: None, bids: Vec::new(), asks: Vec::new(),
     };
-    for input in [meta(0), record(1, TypedRawRowV2::PolymarketRtdsChainlinkTwap(reference(30, 1))),
+    let mut inputs=vec![meta(0), record(1, TypedRawRowV2::PolymarketRtdsChainlinkTwap(reference(30, 1))),
         record(2, TypedRawRowV2::PolymarketRtdsChainlinkTwap(reference(60, 2))),
         record(3, TypedRawRowV2::PolymarketRtdsChainlinkTwap(missing)),
         pm(4, 1, 22000, empty(UP_TOKEN_ID)), pm(5, 2, 22000, empty(DOWN_TOKEN_ID)),
-        record(6, TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(terminal_metadata_row(&market()))))),
-        record(7, TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(terminal_orderbook_row(&market())))), end(8)] {
+        record(if with_pending {8} else {6}, TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(terminal_metadata_row(&market()))))),
+        record(if with_pending {9} else {7}, TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(terminal_orderbook_row(&market()))))];
+    if with_pending {
+        let delta=|size:&str|PolymarketOrderbookEvent::PriceChange {price_changes:vec![PolymarketPriceChangeEntry {
+            asset_id:UP_TOKEN_ID.into(),price:"0.4".into(),size:Some(size.into()),side:PolymarketSide::Buy,best_bid:None,best_ask:None}]};
+        inputs.insert(6,pm(6,3,26000,delta("3")));
+        inputs.insert(7,pm(7,4,27000,delta("0")));
+    }
+    inputs.push(end(10));
+    for input in inputs {
         let prepared = prepare_public_ingress_v1(&public, &input, &BTreeMap::new(), &[]).unwrap();
         let applied = public.push_facts(&prepared).unwrap();
         writer.push_prepared(&input, &prepared, &applied).unwrap();
@@ -171,15 +186,21 @@ async fn gpu_hidden_terminal_source(with_order: bool) {
         }
         buckets.push(bucket);
     }
-    assert_eq!(buckets.iter().map(|b| b.bucket.bucket_time_utc_ms).collect::<Vec<_>>(), vec![21000,22000,31000]);
+    assert_eq!(buckets.iter().map(|b| b.bucket.bucket_time_utc_ms).collect::<Vec<_>>(), if with_pending {vec![21000,22000,26000,27000,31000]} else {vec![21000,22000,31000]});
     assert_eq!(buckets[0].references.len(), 2);
     assert!(buckets[0].steps.is_empty());
     assert!(buckets[0].references.iter().all(|r| matches!(r.payload,
         CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::ReferenceFact(CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(_))))));
-    assert!(buckets[2].references.iter().any(|r| matches!(r.payload,
+    assert!(buckets.last().unwrap().references.iter().any(|r| matches!(r.payload,
         CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact { .. }))));
     let scenario = sealed_scenario_for_markets(vec![crate::scenario::PlatformMarketV1::try_new(
         market(), assets.clone().try_into().unwrap()).unwrap()]);
+    // 有限工程profile，仅将真实Maker终态放在Terminal之后，不是训练默认。
+    let finality_path=serde_json::json!({"steps":[{"state":"MATCHED","offset_ms":0},
+        {"state":"MINED","offset_ms":5000},{"state":"CONFIRMED","offset_ms":6000}],"economic_application_ordinal":1});
+    let finality=with_pending.then(||Arc::new(TradeFinalityPolicyV2::decode_and_seal(
+        &serde_json::to_vec(&serde_json::json!({"schema_version":"trade_finality_policy_v2",
+        "normal_path":finality_path,"failure_overrides":[]})).unwrap()).unwrap()));
     let saved=Rc::new(RefCell::new(None));
     let capture=Rc::clone(&saved);
     let normalization=Rc::new(RefCell::new(Vec::new()));
@@ -196,7 +217,7 @@ async fn gpu_hidden_terminal_source(with_order: bool) {
             let durable=noe_projection::SimV2NoeProjectionPortV4::new(path.parent().unwrap().join("noe-durable"),
                 opened.clone(),reference.clone(),reference,"create-public".into(),"gpu-hidden-terminal".into());
             Box::new(GpuNoeReferencePort {memory,durable,normalization_reference:normalization_capture,normalization_core:None})
-        }))).await;
+        })),finality).await;
     // 此无订单/零持仓工程例不执行请求脚本；显式安装已定请求式模式，禁止自动兑付。
     execution.configure_resolution_redeem_v1(crate::ResolutionRedeemScenarioV1 {
         steps:Vec::new(),costs:Vec::new()}).unwrap();
@@ -218,9 +239,15 @@ async fn gpu_hidden_terminal_source(with_order: bool) {
     let mut post_reference=None;
     let mut accepted_records=Vec::new();
     let mut ledger_accepted=None;
+    let mut maker_checkpoints=Vec::new();
     let mut reference_index = 0;
     let mut terminal_index = None;
     for bucket in &buckets {
+        if with_pending && bucket.bucket.bucket_time_utc_ms==31000 {
+            let (next,effects)=advance_rebate_clock_to_candidate(state,MARKET_END_AT);
+            state=next;
+            assert!(effects.into_lifecycle_feedback().unwrap().is_empty(),"Maker end仍有真实pending fill，不提前市场结果");
+        }
         for reference in &bucket.references {
             if let CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact { payload, .. }) = &reference.payload {
                 if matches!(payload, CanonicalMarketFactPayloadV1::Terminal(_)) {
@@ -269,7 +296,12 @@ async fn gpu_hidden_terminal_source(with_order: bool) {
                 state=next;
                 let mut lifecycle=Vec::new();
                 for effect in effects.execution {lifecycle.extend(effect.into_lifecycle_feedback().unwrap());}
-                assert!(lifecycle.is_empty(),"原空Book不产生账户或成交反馈");
+                if with_pending && !lifecycle.is_empty() {
+                    maker_checkpoints.push(serde_json::json!({"at":bucket.bucket.bucket_time_utc_ms,
+                        "order":state.session.as_ref().unwrap().execution_state.gpu_order_checkpoint_for_tests("sim-1")}));
+                    state=gpu_accept_projection_reference(&mut execution.actor,state,
+                        BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2 {lifecycle,..Default::default()}),&mut batches);
+                } else {assert!(lifecycle.is_empty(),"原空Book不产生账户或成交反馈");}
             }
         }
         if with_order && bucket.bucket.bucket_time_utc_ms==22000 {
@@ -310,9 +342,9 @@ async fn gpu_hidden_terminal_source(with_order: bool) {
     assert_eq!(lifecycle_count,if with_order {2} else {1},"每订单关闭加首次Resolved，后继qualified不重复，不自动兑付");
     assert_eq!(qualified_sources[0]["event_id"],qualified_sources[1]["event_id"]);
     assert!(canonical_market_facts_checked > 0);
-    assert!(matches!(buckets[2].references[0].payload,
+    assert!(matches!(buckets.last().unwrap().references[0].payload,
         CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact {payload:CanonicalMarketFactPayloadV1::Terminal(_),..})));
-    assert!(matches!(buckets[2].references[1].payload,
+    assert!(matches!(buckets.last().unwrap().references[1].payload,
         CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact {payload:CanonicalMarketFactPayloadV1::LifecycleTransition(_),..})));
     let close_at=41000;
     execution.actor.projection_port.close_receive_prefix(close_at);
@@ -337,9 +369,33 @@ async fn gpu_hidden_terminal_source(with_order: bool) {
     for record in &closed_records {ledger.apply_noe_memory_v2(record).unwrap();}
     assert_eq!(ledger.projection_v2().unwrap(),before_repeat,
         "重读完整原position不产生Ledger条目");
-    assert_eq!(records.len(),if with_order {3} else {1},"Terminal订单关闭/经济释放/Resolved，零单仅一条Resolved");
+    assert_eq!(records.len(),if with_pending {4} else if with_order {3} else {1},"Terminal订单关闭/经济释放/Resolved，零单仅一条Resolved");
     assert!(observation.take_closed_records().is_empty());
-    let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,
+    let mut finality_reference=Vec::new();
+    if with_pending {
+        assert_eq!(maker_checkpoints.len(),1,"一条真实Maker fill");
+        assert_eq!(resolutions[0]["economic_predecessors_closed"],serde_json::json!({"Known":false}));
+        for at in [32000,33000] {
+            let (next,effects)=advance_finality_to_candidate(state,at,execution.actor._rule_snapshot.snapshot(),execution.actor._finality_policy.as_ref());
+            state=next;
+            let lifecycle=effects.into_lifecycle_feedback().unwrap();
+            state=gpu_accept_projection_reference(&mut execution.actor,state,
+                BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2 {lifecycle,..Default::default()}),&mut batches);
+            execution.actor.projection_port.close_receive_prefix(50000);
+            execution.actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
+                crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:1,logical_time_utc_ms:50000}));
+            let received=observation.take_closed_records();
+            let rows=received.iter().map(|r|serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
+            for record in &received {ledger.apply_noe_memory_v2(record).unwrap();}
+            finality_reference.push(serde_json::json!({"at":at,"records":rows,
+                "order":state.session.as_ref().unwrap().execution_state.gpu_order_checkpoint_for_tests("sim-1"),
+                "ledger":gpu_ledger_reservation_checkpoint(&ledger,"actual_pending_finality"),
+                "resolutions":ledger.economic_read().unwrap().resolutions().map(|r|serde_json::json!({"economic_predecessors_closed":r.economic_predecessors_closed,
+                    "paired_receivable":r.paired_receivable_pusd,"orphan_receivable":r.winner_orphan_receivable_pusd})).collect::<Vec<_>>()}));
+        }
+    }
+    let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,"with_pending":with_pending,
+        "engineering_finality_path":finality_path,"maker_checkpoints":maker_checkpoints,"finality_reference":finality_reference,
         "original_controls":controls,"qualified_sources":qualified_sources,"resolved_records":records,
         "ledger_before":ledger_before,"ledger_after":ledger_after,"ledger_resolutions":resolutions,
         "next_private":next_private,"next_batch":next_batch,"session_seed":session_seed,"resolved_close_at":close_at,

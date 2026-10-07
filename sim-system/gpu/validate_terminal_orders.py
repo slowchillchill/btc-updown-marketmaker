@@ -39,6 +39,7 @@ def main():
     root=Path(__file__).resolve().parents[2]
     tensor=lambda x,dtype=torch.int64:torch.tensor(x,dtype=dtype,device='cuda')
     enabled,zero=tensor([True],torch.bool),tensor([0])
+    with_pending=source.get('with_pending',False)
     post=source['post_reference']
     request=post['request']['request']
     item=request['items'][0]
@@ -54,9 +55,9 @@ def main():
         blank=integers([0])
         quantity=BaseOrderQuantity.from_taker_plan(integers([1]),integers([1]),blank,blank)
         fill=FillRecord.create(integers([1]),integers([1]),blank,zero,zero,tensor([False],torch.bool),
-            {'steps':[{'state':'MATCHED','offset_ms':0},{'state':'MINED','offset_ms':10},{'state':'CONFIRMED','offset_ms':20}],
+            source['engineering_finality_path'] if with_pending else {'steps':[{'state':'MATCHED','offset_ms':0},{'state':'MINED','offset_ms':10},{'state':'CONFIRMED','offset_ms':20}],
              'economic_application_ordinal':1})
-        return BaseSimRuntime(block.empty_state(segment_capacity=1),MutationRequests.empty(blank,capacity=1,action_capacity=1),BaseOrders.empty(quantity),
+        return BaseSimRuntime(block.empty_state(segment_capacity=2 if with_pending else 1),MutationRequests.empty(blank,capacity=1,action_capacity=1),BaseOrders.empty(quantity),
             PlatformAccountState.open(integers([units(opening['cash_pusd'])]),tensor([0,0])),FillPool.empty(fill),
             RebateCoordinator(MakerDays.empty(tensor([[0]]),tensor([[source['market_end']]]),enabled[:,None]),
                 TakerDays.empty(1,'cuda')),HiddenBucketFrontier.open(HiddenBucketColumns.from_block(block),1))
@@ -65,7 +66,7 @@ def main():
     end=tensor([source['market_end']]*2)
     storage=BaseRuntimeStorage(runtime,runtime)
     horizon=tensor([22000])
-    loop=CapturedHiddenBuckets(storage,horizon,enabled,tensor([0,0]),tensor([[0]]),fee,1,rebate,end,
+    loop=CapturedHiddenBuckets(storage,horizon,enabled,tensor([0,0]),tensor([[0]*runtime.hidden.queues.capacity]),fee,1,rebate,end,
         word_capacity=4,feedback_capacity=1,stage_progress=lambda stage:progress('resting_'+stage))
     loop.replay();torch.cuda.synchronize()
     runtime=storage.runtime
@@ -89,7 +90,7 @@ def main():
     runtime,effect=Numbers.run_exact_batch(lambda:runtime.accept_base(choice,terms,tensor([[-1]]),fee,1,tensor([[0]]),rebate,zero,zero))
     assert effect.order.emitted.cpu().tolist()==[True] and effect.fault.cpu().tolist()==[0]
     assert values(runtime.orders.read(effect.order.slots).quantity.open_base_units)==[5_000_000]
-    assert runtime.hidden.queues.kind.cpu().tolist()==[[2]] and not runtime.fills.occupied.any().cpu().item()
+    assert (runtime.hidden.queues.kind==2).sum().cpu().item()==1 and not runtime.fills.occupied.any().cpu().item()
     progress('actual_empty_book_GTC_accepted')
     sys.path.insert(0,str(root/'execution-normalization/gpu'))
     from projection import Projection
@@ -100,6 +101,23 @@ def main():
     projection=Projection.open(emitter,zero,zero,zero,zero,tensor([0,0]),integers([0]),zero,zero,zero,zero)
     projection,accepted_batch=Numbers.run_exact_batch(lambda:projection.pending_base_acceptance(sampler,runtime.orders,runtime.fills,effect,tensor([0,1])))
     assert accepted_batch.emitted.sum().cpu().item()==3
+    maker_batches=[]
+    if with_pending:
+        horizon.fill_(27000)
+        maker_storage=BaseRuntimeStorage(runtime,runtime)
+        maker_loop=CapturedHiddenBuckets(maker_storage,horizon,enabled,tensor([0,0]),
+            tensor([[0]*runtime.hidden.queues.capacity]),fee,1,rebate,end,word_capacity=4,feedback_capacity=1,
+            stage_progress=lambda stage:progress('actual_pending_Maker_'+stage))
+        maker_loop.replay();torch.cuda.synchronize();runtime=maker_storage.runtime
+        assert maker_loop.page.count.cpu().item()==1 and runtime.fills.occupied.sum().cpu().item()==1
+        frame=maker_loop.page.read(0)
+        for transition in frame.effects.fills:
+            projection,batch=Numbers.run_exact_batch(lambda:projection.fill_from_origin(sampler,runtime.orders,
+                runtime.fills,transition,tensor([0,1]),runtime.calendars,rebate,frame.at))
+            maker_batches.append(batch)
+        assert sum(int(batch.emitted.sum().cpu()) for batch in maker_batches)==1
+        assert values(runtime.orders.read(effect.order.slots).quantity.matched_base_units)==[3_000_000]
+        assert values(runtime.orders.read(effect.order.slots).quantity.open_base_units)==[2_000_000]
     accepted_runtime=runtime
     horizon.fill_(31000)
     choice=runtime.choose(None,None,horizon,enabled)
@@ -110,7 +128,7 @@ def main():
     assert values(runtime.account.principal)==values(accepted_runtime.account.principal)
     # 同一固定源图的下一真实桶停于Terminal，不预消费后继Lifecycle。
     terminal_storage=BaseRuntimeStorage(runtime,runtime)
-    terminal_loop=CapturedHiddenBuckets(terminal_storage,horizon,enabled,tensor([0,0]),tensor([[0]]),fee,1,rebate,end,
+    terminal_loop=CapturedHiddenBuckets(terminal_storage,horizon,enabled,tensor([0,0]),tensor([[0]*runtime.hidden.queues.capacity]),fee,1,rebate,end,
         word_capacity=4,feedback_capacity=1,stage_progress=lambda stage:progress('terminal_'+stage))
     terminal_loop.replay();torch.cuda.synchronize()
     runtime=terminal_storage.runtime
@@ -125,10 +143,15 @@ def main():
     assert not denied.batch.emitted.any().cpu().item()
     committed=terminal_storage.commit(candidate,tensor(True,torch.bool),TerminalFeedback(terminal,terminal_batch))
     projection=projected;terminal_batch=committed.batch;runtime=terminal_storage.runtime
-    assert values(runtime.orders.read(effect.order.slots).quantity.market_resolved_canceled_base_units)==[5_000_000]
+    assert values(runtime.orders.read(effect.order.slots).quantity.market_resolved_canceled_base_units)==[2_000_000 if with_pending else 5_000_000]
     assert values(runtime.orders.read(effect.order.slots).quantity.open_base_units)==[0]
-    assert values(runtime.account.principal)==[0] and values(runtime.account.available)==[units(opening['cash_pusd'])]
-    assert terminal_batch.emitted.sum().cpu().item()==3 and not runtime.resolution_obligations.pending.any().cpu().item()
+    assert values(runtime.account.principal)==[1_200_000 if with_pending else 0]
+    assert values(runtime.account.available)==[units(opening['cash_pusd'])-(1_200_000 if with_pending else 0)]
+    assert terminal_batch.emitted.sum().cpu().item()==3
+    assert runtime.resolution_obligations.pending.sum().cpu().item()==int(with_pending)
+    if with_pending:
+        assert values(runtime.resolution_obligations.sequences)[0]==1
+        assert runtime.calendars.maker.market_result.cpu().tolist()==[[0]]
     sys.path.insert(0,str(root/'ledger/gpu'));sys.path.insert(0,str(root/'shared-run/gpu'))
     from fields import decode_fields
     from memory import EconomicColumns
@@ -138,6 +161,7 @@ def main():
     from success_pool import SuccessPools
     from position_cost import PositionCosts
     from market_economics import UnresolvedMarkets
+    from rebate_day import RebateDays
     from resolution import ResolutionSources,MarketResolutions
     from registry import PublicRegistryEvents,PublicRegistryState
     from public_ledger import PublicLedgerState
@@ -147,13 +171,14 @@ def main():
     assert source["ledger_before"]["order_funds"]==[] and source["ledger_before"]["trades"]==[]
     def assemble():
         balances=module.PlatformBalances.open(rational([opening[key] for key in names]),rational(['0','0']),tensor([0,0]),integers([before['platform_source_prefix']]))
-        pools=SuccessPools.open(tensor([0,0]),tensor([0,0]),tensor([0,1]),tensor([1,0]),1)
+        pools=SuccessPools.open(tensor([0,0]),tensor([0,0]),tensor([a["outcome"]["index"] for a in block.assets]),tensor([1,0]),1)
         markets=UnresolvedMarkets.open(pools,zero)
         resolutions=MarketResolutions.open(pools,markets,ResolutionSources.bind(block.terminal_columns,[a['token_id'] for a in block.assets]))
         columns=EconomicColumns.from_projection_batches([accepted_batch])
         ledger=AdmissionLifecycle.open(balances,projection.normalizer.bank,columns,integers([before['ledger_entry_seq']]),
             integers([before['ledger_local_prefix']]),pools,position_costs=PositionCosts.empty(1,1,'cuda'),
             order_funds=OrderFunds.empty(1,columns.row_refs.size(1),columns.row_refs.size(1),columns.row_refs.size(1),'cuda'),
+            rebate_days=RebateDays.empty(tensor([[0]]),2) if with_pending else None,
             unresolved_markets=markets,resolutions=resolutions)
         ordinal=integers(projection.normalizer.bank.source_order[accepted_batch.rows.flatten(),3].cpu().tolist())
         pending=PendingRecords.from_columns(accepted_batch.emitted,accepted_batch.received_at,accepted_batch.private_sequences,ordinal,accepted_batch.rows,integers([0]))
@@ -164,10 +189,11 @@ def main():
     assert first.fault.cpu().tolist()==[0] and first.closed.emitted.sum().cpu().item()==3
     assert values(public.ledger.current_entry_sequence)==[source['ledger_accepted']['projection']['ledger_entry_seq']]
     old_public=public
-    public=Numbers.run_exact_batch(lambda:public.append_batch(projection.normalizer.bank,terminal_batch))
+    for incoming in [*maker_batches,terminal_batch]:
+        public=Numbers.run_exact_batch(lambda:public.append_batch(projection.normalizer.bank,incoming))
     gates=gates.set_receive(tensor([41000]),enabled).set_public(tensor([41000]),enabled)
     public,last=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,torch.ones_like(public.waiting.received)))
-    assert last.fault.cpu().tolist()==[0] and last.closed.emitted.sum().cpu().item()==3
+    assert last.fault.cpu().tolist()==[0] and last.closed.emitted.sum().cpu().item()==(4 if with_pending else 3)
     assert not public.waiting.received.logical_and(~public.waiting.consumed).any().cpu().item()
     after=source['ledger_after']['projection']
     assert values(public.ledger.current_entry_sequence)==[after['ledger_entry_seq']]
@@ -187,14 +213,14 @@ def main():
         tensor([[False]],torch.bool),enabled[:,None]))
     public_orders=Numbers.run_exact_batch(lambda:public.registry.freeze_orders(intents,tensor([41000])))
     assert public_orders.active_known.cpu().tolist()==[[True]] and public_orders.cancellable.cpu().tolist()==[[False]]
-    assert not public_orders.commitment_present.any().cpu().item()
+    assert public_orders.commitment_present.cpu().tolist()==[[with_pending]]
     assert not old_public.ledger.resolutions.present.any().cpu().item() and old_public.ledger.orders.flags.any().cpu().item()
     # 原正文/位置/序号逐记录对照；原数据只作oracle，不驱动设备消费。
-    for batch,records in [(accepted_batch,source['accepted_records']),(terminal_batch,source['resolved_records'])]:
+    for batch,records in [(accepted_batch,source['accepted_records']),*[(b,source['resolved_records']) for b in maker_batches],(terminal_batch,source['resolved_records'])]:
         for column,present in enumerate(batch.emitted.cpu().tolist()[0]):
             if not present:continue
             ordinal=values(batch.record_ordinals)[column]
-            original=next(r for r in records if r['position']['record_ordinal']==ordinal)
+            original=next(r for r in records if r['position']['record_ordinal']==ordinal and r['position']['source_watermark']['projection_batch_sequence']==values(batch.batch_sequences)[column])
             row=batch.rows[0,column]
             expected=Numbers.run_exact_batch(lambda:expected_semantic(original,token_index=asset))
             semantic=projection.normalizer.bank.semantic[row]
@@ -208,15 +234,43 @@ def main():
     assert not repeat.closed.emitted.any().cpu().item();compare(public.ledger,held.ledger,'repeat_whole_actual_Terminal')
     # 同一Runtime的后继Lifecycle不再生成第二个Resolved，原reference索引共同完成。
     resumed_storage=BaseRuntimeStorage(runtime,runtime)
-    resumed=CapturedHiddenBuckets(resumed_storage,horizon,enabled,tensor([0,0]),tensor([[0]]),fee,1,rebate,end,word_capacity=4,feedback_capacity=1)
+    resumed=CapturedHiddenBuckets(resumed_storage,horizon,enabled,tensor([0,0]),tensor([[0]*runtime.hidden.queues.capacity]),fee,1,rebate,end,word_capacity=4,feedback_capacity=1)
     resumed.replay();torch.cuda.synchronize()
     assert resumed_storage.runtime.hidden_frontier.closed_at.cpu().tolist()==[31000]
+    runtime=resumed_storage.runtime
+    if with_pending:
+        maker_rate=Numbers.run_exact_batch(lambda:rational(['0.2']))
+        for original in source['finality_reference']:
+            horizon.fill_(original['at'])
+            choice=runtime.choose(None,None,horizon,enabled)
+            assert choice.enabled(2).cpu().tolist()==[True] and choice.at.cpu().tolist()==[original['at']]
+            runtime,transition,market=runtime.finality(choice,maker_rate,rebate,end)
+            confirmed=original['at']==33000
+            assert runtime.resolution_obligations.pending.sum().cpu().item()==int(not confirmed)
+            assert bool(runtime.calendars.maker.market_result.cpu().item())==confirmed
+            assert transition.event.emitted.cpu().tolist()==[True]
+            projection,batch=Numbers.run_exact_batch(lambda:projection.fill_from_origin(sampler,runtime.orders,
+                runtime.fills,transition,tensor([0,1]),runtime.calendars,rebate,choice.at,maker_results=(market,)))
+            assert batch.emitted.sum().cpu().item()==len(original['records'])
+            public=Numbers.run_exact_batch(lambda:public.append_batch(projection.normalizer.bank,batch))
+            gates=gates.set_receive(tensor([50000]),enabled).set_public(tensor([50000]),enabled)
+            public,received=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,torch.ones_like(public.waiting.received)))
+            assert received.fault.cpu().tolist()==[0]
+            expected=original['ledger']['projection']
+            assert values(public.ledger.current_entry_sequence)==[expected['ledger_entry_seq']]
+            assert values(public.ledger.platform.platform_source_prefix)==[expected['platform_source_prefix']]
+            balances=public.ledger.platform.balances
+            assert [Fraction(n,d) for n,d in zip(values(balances.numerator),values(balances.denominator))]==[Fraction(expected['platform_confirmed_projection'][key]) for key in names]
+            result=Numbers.run_exact_batch(lambda:public.ledger.resolutions.read(public.ledger.success_pools))
+            assert [Fraction(n,d) for n,d in zip(values(result.winner_orphan_receivable.numerator),values(result.winner_orphan_receivable.denominator))]==[Fraction(original['resolutions'][0]['orphan_receivable']['Known'])]
+            assert public.ledger.rebate_days.maker_accrual_finalized.cpu().tolist()==[[confirmed]]
     print(json.dumps({'actual_empty_source_Books_to_outer_GTC_new_runtime_bid_checked':True,
         'actual_Terminal_order_close_tag5_release_and_Resolved_same_public_Ledger_checked':True,
         'original_end_clears_FIFO_without_releasing_GTC_then_Terminal_releases_once_checked':True,
         'new_schema18_19_complete_resolution_identity_and_original_NOE_positions_checked':True,
         'old_public_prefix_and_resource_denied_Terminal_preserved_checked':True,
-        'actual_records':6,'pending_actual_fill_population':0,'full_root_and_requested_settlement':False,
+        'actual_records':6+int(with_pending),'pending_actual_fill_population':int(with_pending),
+        'actual_Maker_pending_Terminal_then_MINED_CONFIRMED_and_market_result_checked':with_pending,'full_root_and_requested_settlement':False,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 
 

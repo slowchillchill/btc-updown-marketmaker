@@ -367,7 +367,26 @@ class BaseSimRuntime:
         fills,account,maker,taker,effect,market=Numbers.run_exact_batch(lambda:self.fills.advance_mixed(
             self.account,self.calendars.maker,self.calendars.taker,choice.at,maker_rate,taker_rate,
             enabled=choice.enabled(2)))
-        candidate=replace(self,fills=fills,account=account,calendars=RebateCoordinator(maker,taker))
+        obligations = self.resolution_obligations
+        if obligations is not None:
+            from taker_days import coordinate_calendar
+            obligations=Numbers.run_exact_batch(lambda:obligations.complete(effect))
+            fault=effect.event.fault | obligations.fault
+            committed=effect.event.emitted & (fault==0)
+            fills=fills.coordinate_result(self.fills,committed,fault)
+            account=account.coordinate_result(self.account,fault)
+            maker=coordinate_calendar(maker,self.calendars.maker,committed,fault)
+            taker=coordinate_calendar(taker,self.calendars.taker,committed,fault)
+            obligations=obligations.coordinate_result(self.resolution_obligations,fault)
+            event=replace(effect.event,emitted=committed,terminal=effect.event.terminal & committed,fault=fault,
+                economic_delta=account.coordinate_delta(effect.event.economic_delta,committed,fault),
+                failure_delta=account.coordinate_delta(effect.event.failure_delta,committed,fault),
+                rebate_delta=account.coordinate_delta(effect.event.rebate_delta,committed,fault))
+            effect=replace(effect,event=event)
+            market=replace(market,emitted=market.emitted & committed,fault=fault,
+                account_delta=account.coordinate_delta(market.account_delta,committed,fault))
+        candidate=replace(self,fills=fills,account=account,calendars=RebateCoordinator(maker,taker),
+            resolution_obligations=obligations)
         return candidate._finish_obligation_time(choice.at,effect.event.emitted,market_end),effect,market
 
     def rebate_clock(self, choice, market_end):

@@ -181,6 +181,22 @@ class ResolutionObligations:
             sequences=pool.sequences.select(sequence_mask,self.sequences),fault=fault)
         return candidate,fresh
 
+    def complete(self, transition):
+        """真实终态消费只移除该完整fill身份；MINED/经济应用不关闭屏障。"""
+        from queues import _take
+        roots, _, width = self.pending.shape
+        axis = torch.arange(roots,device=self.pending.device)
+        slot = transition.slot.clamp(0,width-1)
+        members = self.pending[axis,:,slot].any(1)
+        terminal = transition.event.emitted & transition.event.terminal
+        identity = _take(self.sequences,axis*width+slot).compare(transition.fill_sequence)
+        fault = self.fault | transition.event.fault | torch.where(terminal & members,
+            identity.fault | (identity.order!=0).to(torch.int32) |
+            ((transition.slot<0)|(transition.slot>=width)).to(torch.int32),0)
+        selected = torch.arange(width,device=self.pending.device)[None,:] == slot[:,None]
+        remove = terminal & members & (fault==0)
+        return replace(self,pending=self.pending & ~(remove[:,None,None] & selected[:,None,:]),fault=fault)
+
     def coordinate_result(self, original, root_fault):
         valid = root_fault == 0
         width = self.pending.size(2)
