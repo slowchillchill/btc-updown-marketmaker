@@ -12,6 +12,7 @@ from base_acceptance import _coordinate_queue, _coordinate_pool
 from pending_base_execution import _coordinate_orders
 from taker_days import coordinate_calendar
 from maker_execution import start_maker_fill
+from hidden_market import rational_select, rational_take
 
 
 @dataclass(frozen=True)
@@ -132,5 +133,81 @@ def run_base_level_transition(queue, orders, account, fills, calendars, rows, be
         selected_paths = torch.nn.functional.pad(selected_paths,(0,queue.capacity-old_capacity),value=0)
         fills = fills.resized(1 << (max(1,fill_capacity)-1).bit_length())
         calendars = replace(calendars,maker=calendars.maker.resized(
+            fills=max(calendars.maker.fill_occupied.size(1),1 << (max(1,maker_fills)-1).bit_length()),
+            days=max(calendars.maker.occupied.size(1),1 << (max(1,maker_days)-1).bit_length())))
+
+
+def apply_hidden_base_transition(state, orders, account, fills, calendars, rows, before, after,
+        source_price, condition, at, enabled, resync_inference, selected_paths, row_roots,
+        fee_rate, fee_exponent, taker_rate):
+    """资产前驱检查→唯一FIFO更新→订单/逐fill/账户，整条原step共同提交。
+
+    before/after保留源shares全部精度；只在撮合单位边界转换micro量。
+    不先调用HiddenAssetState.level_transition，再重复应用它的queue候选。
+    """
+    roots=orders.roots
+    owner=account.asset_roots
+    if owner.shape != state.initialized.shape:
+        raise ValueError('hidden资产与账户完整资产目录不一致')
+    level_roots=owner[state.level_assets]
+    if row_roots.shape != level_roots.shape:
+        raise ValueError('hidden原价位与FIFO行绑定不一致')
+    original=state
+    valid_row=(rows>=0) & (rows<state.queues.rows)
+    safe=rows.clamp(0,max(0,state.queues.rows-1))
+    fault=grouped_fault(state.fault,owner,roots)
+    fault=fault | ((before.fault | after.fault | source_price.fault |
+        (~valid_row).to(torch.int32))*enabled.to(torch.int32))
+    fault=fault | grouped_fault((row_roots != level_roots).to(torch.int32),level_roots,roots)
+    row_axis=torch.arange(state.queues.rows,device=owner.device)
+    selected=enabled[level_roots] & (row_axis==rows[level_roots]) & (fault[level_roots]==0)
+    row_before=rational_take(before,level_roots)
+    row_after=rational_take(after,level_roots)
+    prepared,old_units,new_units,queue_enabled=state.prepare_level_transition(
+        selected,row_before,row_after,resync_inference[level_roots])
+    fault=fault | grouped_fault(prepared.fault,owner,roots)
+    # 原资产故障由本根所有候选共同携带；未选中根仍保留既有故障。
+    candidate_orders=replace(orders,fault=orders.fault | fault)
+    candidate_account=replace(account,fault=account.fault | fault)
+    candidate_fills=replace(fills,fault=fills.fault | fault)
+    use=enabled & valid_row & (fault==0)
+    if state.queues.rows:
+        use=use & queue_enabled[safe]
+        old=_take(old_units,safe)
+        new=_take(new_units,safe)
+    else:
+        old=new=account.cash.constant(0)
+    queue,orders,account,fills,calendars,effects=apply_base_level_transition(state.queues,
+        candidate_orders,candidate_account,candidate_fills,calendars,rows,old,new,source_price,
+        condition,at,use,selected_paths,row_roots,state.level_assets,fee_rate,fee_exponent,taker_rate)
+    fault=effects.fault | fault
+    committed=(fault==0)[owner]
+    prepared=replace(prepared,
+        external_shares=rational_select(prepared.external_shares,committed[state.level_assets],original.external_shares),
+        queues=queue,fault=original.fault | fault[owner])
+    return prepared,orders,account,fills,calendars,replace(effects,fault=fault)
+
+
+def run_hidden_base_transition(state, orders, account, fills, calendars, rows, before, after,
+        source_price, condition, at, enabled, resync_inference, selected_paths, row_roots,
+        fee_rate, fee_exponent, taker_rate):
+    """重试同一原step；容量需求仅在纯候选边界回读，不推进源/RNG/运行前沿。"""
+    while True:
+        result=Numbers.run_exact_batch(lambda:apply_hidden_base_transition(state,orders,account,fills,calendars,
+            rows,before,after,source_price,condition,at,enabled,resync_inference,selected_paths,row_roots,
+            fee_rate,fee_exponent,taker_rate))
+        effect=result[-1]
+        segments=int(effect.required_segments.max().cpu()) if state.queues.rows else 0
+        records=int(effect.required_records.max().cpu())
+        maker_fills=int(effect.required_maker_fills.max().cpu())
+        maker_days=int(effect.required_maker_days.max().cpu())
+        if (segments<=state.queues.capacity and records<=fills.capacity and
+            maker_fills<=calendars.maker.fill_occupied.size(1) and maker_days<=calendars.maker.occupied.size(1)):
+            return result
+        old=state.queues.capacity
+        state=replace(state,queues=state.queues.resized(max(old,1 << (max(1,segments)-1).bit_length())))
+        selected_paths=torch.nn.functional.pad(selected_paths,(0,state.queues.capacity-old),value=0)
+        fills=fills.resized(max(fills.capacity,1 << (max(1,records)-1).bit_length()))
+        calendars=replace(calendars,maker=calendars.maker.resized(
             fills=max(calendars.maker.fill_occupied.size(1),1 << (max(1,maker_fills)-1).bit_length()),
             days=max(calendars.maker.occupied.size(1),1 << (max(1,maker_days)-1).bit_length())))

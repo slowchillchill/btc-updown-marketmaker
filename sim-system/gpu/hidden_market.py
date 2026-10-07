@@ -152,8 +152,8 @@ class HiddenAssetState:
                        external_shares=rational_select(zeros(self.external_shares), clear[self.level_assets], self.external_shares),
                        fault=fault | self._asset_fault(queues.fault))
 
-    def level_transition(self, enabled, before, after, resync_inference):
-        """原精确档位前驱检查后驱动队列；PublicTrade/BBA没有本调用。"""
+    def prepare_level_transition(self, enabled, before, after, resync_inference):
+        """检查原资产/精确档位前驱；队列由同一次SIM事务更新一次。"""
         if enabled.dtype != torch.bool or enabled.shape != self.level_assets.shape or enabled.device != self.level_assets.device:
             raise TypeError('档位事件掩码须为同设备bool[levels]')
         enabled = enabled & ~self.book_closed[self.level_assets]
@@ -168,12 +168,15 @@ class HiddenAssetState:
         valid = enabled & (fault[self.level_assets] == 0)
         old_units = micro_units(before)
         new_units = micro_units(after)
-        queues, effects = self.queues.apply_level_transition(
-            old_units.select(valid & ~self.matching_closed[self.level_assets], old_units.constant(0)),
-            new_units.select(valid & ~self.matching_closed[self.level_assets], new_units.constant(0)))
-        fault = fault | self._asset_fault(effects.fault)
         return replace(self, external_shares=rational_select(after, valid, self.external_shares),
-                       queues=queues, fault=fault), effects
+                       fault=fault), old_units, new_units, valid & ~self.matching_closed[self.level_assets]
+
+    def level_transition(self, enabled, before, after, resync_inference):
+        """无账户订单消费者的资产候选；复用同一前驱检查与唯一队列更新。"""
+        prepared, old_units, new_units, valid = self.prepare_level_transition(enabled,before,after,resync_inference)
+        queues, effects = self.queues.apply_level_transition(
+            old_units.select(valid, old_units.constant(0)), new_units.select(valid, new_units.constant(0)))
+        return replace(prepared,queues=queues,fault=prepared.fault | self._asset_fault(effects.fault)), effects
 
 
 def run_hidden_asset_batch(state, compute):

@@ -16,7 +16,8 @@ from pending_base_execution import FrozenBaseTerms, run_pending_base_acceptance
 from base_execution import cancel_base_order
 from fill_finality import FillRecord
 from fill_pool import FillPool, run_fill_pool_batch
-from hidden_base_execution import run_base_level_transition
+from hidden_base_execution import run_hidden_base_transition
+from hidden_market import HiddenAssetState,run_hidden_asset_batch
 from maker_days import MakerDays
 from taker_days import TakerDays
 from rebate_coordinator import RebateCoordinator
@@ -58,6 +59,24 @@ def main():
     assert receipt.arrived_at.cpu().tolist() == [source['processing_at']]
     ask = source['initial'][0]['payload']['event']['asks'][0]
     queue, account, prepared = Numbers.run_exact_batch(lambda: setup(ask, source))
+    # 完整原双资产初始簿及本链后来出现的bid价位一次绑定；不从接单余量反推hidden前量。
+    prices=['0.2','0.3','0.4','0.4','0.6']
+    level_assets=tensor([0,0,0,1,1])
+    row_roots=tensor([0]*len(prices))
+    hidden_state=Numbers.run_exact_batch(lambda:HiddenAssetState.empty(level_assets,rational(prices),
+        tensor([0,0]),1,segment_capacity=2))
+    for asset,event in enumerate(source['initial']):
+        book=event['payload']['event']
+        quantities=['0']*len(prices)
+        for name,side_rows in [('bids',[1,2] if asset==0 else [3]),('asks',[0] if asset==0 else [4])]:
+            for level in book[name]:
+                index=next(index for index in side_rows if prices[index]==level['price_pusd_per_share'])
+                quantities[index]=level['quantity_shares']
+        shares,tick=Numbers.run_exact_batch(lambda:(rational(quantities),
+            rational([book['initial_tick_size_pusd_per_share']]*2)))
+        hidden_state,_=run_hidden_asset_batch(hidden_state,lambda state:state.initial_snapshot(
+            tensor([asset==0,asset==1],torch.bool),shares,tick,tensor([0,0])))
+    queue=hidden_state.queues
     orders = BaseOrders.empty(prepared.quantity, capacity=1)
     initial_time = requests.next_pending().effective_at
     template = FillRecord.create(integers([1]), integers([1]), integers([0]), tensor([0]), initial_time,
@@ -71,12 +90,12 @@ def main():
         tensor([[True]],torch.bool),fills=1,days=1),TakerDays.empty(1,'cuda',fills=1,days=1))
     held=run_pending_base_acceptance(requests,orders,queue,account,fills,terms,tensor([[0]]),
         fee_rate,source['fee_exponent'],torch.zeros((1,queue.capacity),dtype=torch.int64,device='cuda'),
-        rebate,tensor([0,0]),tensor([0]),calendars=calendars,enabled=tensor([False],torch.bool))
+        rebate,row_roots,tensor([0]),calendars=calendars,enabled=tensor([False],torch.bool))
     assert held[-1].fault.cpu().tolist()==[0] and torch.equal(held[0].done,requests.done)
     assert values(held[3].cash)==values(account.cash) and values(held[1].next_sequence)==[1]
     requests, orders, queue, account, fills, accepted = run_pending_base_acceptance(requests, orders, queue,
         account, fills, terms, tensor([[0]]), fee_rate, source['fee_exponent'],
-        torch.zeros((1,queue.capacity), dtype=torch.int64, device='cuda'), rebate, tensor([0, 0]), tensor([0]),
+        torch.zeros((1,queue.capacity), dtype=torch.int64, device='cuda'), rebate, row_roots, tensor([0]),
         calendars=calendars)
     calendars = accepted.calendars
     noe,batch=Numbers.run_exact_batch(lambda:noe.pending_base_acceptance(sampler,orders,fills,accepted,asset_tokens))
@@ -98,6 +117,7 @@ def main():
     maker_record = None
     cancel_batch=None
     observed_pending_zero_quote = False
+    checked_bad_hidden_predecessor=False
     for checkpoint in source['checkpoints'][1:]:
         stage = checkpoint['stage']
         if stage in ('taker_finality', 'maker_finality'):
@@ -112,13 +132,28 @@ def main():
         elif stage == 'hidden_step':
             event = source['events'][checkpoint['ordinal']]['payload']['event']
             bid = event['side'] == 'BID'
-            before = integers([units(event['quantity_before_shares'])])
-            after = integers([units(event['quantity_after_shares'])])
+            before = Numbers.run_exact_batch(lambda:rational([event['quantity_before_shares']]))
+            after = Numbers.run_exact_batch(lambda:rational([event['quantity_after_shares']]))
             source_price = Numbers.run_exact_batch(lambda:rational([event['price_pusd_per_share']]))
-            queue,orders,account,fills,calendars,hidden = run_base_level_transition(queue,orders,account,fills,
+            hidden_state=replace(hidden_state,queues=queue)
+            if not checked_bad_hidden_predecessor:
+                wrong_before=Numbers.run_exact_batch(lambda:before+rational(['0.000001']))
+                bad=run_hidden_base_transition(hidden_state,orders,account,fills,calendars,
+                    tensor([1 if bid else 0]),wrong_before,after,source_price,tensor([0]),
+                    tensor([source['maker_at']]),active,active,tensor([[0]*queue.capacity]),row_roots,
+                    fee_rate,source['fee_exponent'],rebate)
+                assert bad[-1].fault.cpu().tolist()==[1]
+                assert torch.equal(bad[0].queues.kind,queue.kind)
+                assert values(bad[0].external_shares.numerator)==values(hidden_state.external_shares.numerator)
+                assert values(bad[1].read(slot).quantity.open_base_units)==values(orders.read(slot).quantity.open_base_units)
+                assert values(bad[2].cash)==values(account.cash) and values(bad[3].next_sequence)==values(fills.next_sequence)
+                assert not any(frame.event.emitted.any().cpu().item() for frame in bad[-1].fills)
+                checked_bad_hidden_predecessor=True
+            hidden_state,orders,account,fills,calendars,hidden = run_hidden_base_transition(hidden_state,orders,account,fills,
                 calendars,tensor([1 if bid else 0]),before,after,source_price,tensor([0]),
-                tensor([source['maker_at']]),active,tensor([[0]*queue.capacity]),tensor([0,0]),tensor([0,0]),
+                tensor([source['maker_at']]),active,active,tensor([[0]*queue.capacity]),row_roots,
                 fee_rate,source['fee_exponent'],rebate)
+            queue=hidden_state.queues
             assert hidden.fault.cpu().tolist() == [0]
             read = orders.read(slot)
             if values(read.quantity.pending_maker_depletion_base_units)[0] > 0:
@@ -143,7 +178,7 @@ def main():
             from pending_cancel_execution import BaseCancelTarget,run_pending_base_cancel
             target=BaseCancelTarget(tensor([1]),read.sequence,zero_fault)
             requests,orders,queue,account,canceled=run_pending_base_cancel(requests,orders,queue,account,target,
-                tensor([0,0]),tensor([False],torch.bool),tensor([1]),active)
+                row_roots,tensor([False],torch.bool),tensor([1]),active)
             assert canceled.delta.emitted.cpu().tolist()==[True] and canceled.response.emitted.cpu().tolist()==[True]
             from projection import CancelTargetFeedback
             from fields import RecordList
@@ -211,7 +246,7 @@ def main():
     old_requests, old_orders, old_queue, old_account, old_fills = requests, orders, queue, account, fills
     requests, orders, queue, account, fills, idle = run_pending_base_acceptance(requests, orders, queue,
         account, fills, padding, tensor([[-1]]), fee_rate, source['fee_exponent'],
-        torch.zeros((1,queue.capacity), dtype=torch.int64, device='cuda'), rebate, tensor([0, 0]), tensor([-1]),
+        torch.zeros((1,queue.capacity), dtype=torch.int64, device='cuda'), rebate, row_roots, tensor([-1]),
         calendars=calendars)
     calendars = idle.calendars
     assert idle.fault.cpu().tolist() == [0]
@@ -232,7 +267,7 @@ def main():
     next_terms = replace(terms, item_refs=tensor([1]))
     requests, orders, queue, account, fills, next_effect = run_pending_base_acceptance(requests, orders, queue,
         account, fills, next_terms, tensor([[0]]), fee_rate, source['fee_exponent'],
-        torch.zeros((1,8), dtype=torch.int64, device='cuda'), rebate, tensor([0, 0]), tensor([1]),calendars=calendars)
+        torch.zeros((1,8), dtype=torch.int64, device='cuda'), rebate, row_roots, tensor([1]),calendars=calendars)
     assert next_effect.fault.cpu().tolist() == [0] and next_effect.order.emitted.cpu().tolist() == [True]
     assert orders.capacity == 2 and queue.capacity == 8
     assert values(orders.next_sequence) == [3] and values(fills.next_sequence) == [3]
@@ -254,6 +289,8 @@ def main():
         'actual_order_role_and_source_price_bound_to_each_fill_checked':True,
         'same_fill_pool_finality_uses_actual_role_and_calendar_predecessors_checked':True,
         'single_original_hidden_transition_queue_order_fill_calendar_common_commit_checked':True,
+        'original_full_initial_books_and_exact_hidden_predecessor_joined_once_checked':True,
+        'bad_hidden_predecessor_rolls_back_book_queue_order_account_fill_checked':checked_bad_hidden_predecessor,
         'continuous_directory_bound_order_taker_maker_NOE_payload_and_positions_checked':True,
         'dynamic_NOE_records':len(by_row),
         'device_phase_gate_keeps_future_pending_without_submission_checked':True,

@@ -860,3 +860,11 @@ order/request/item/condition/asset，从成交池取得原角色和原价，并�
 当前真实短链只覆盖单target成功取消，不代表CancelMarket展开、多target累计或场景失败已接通。
 pending接单和取消入口接受设备phase许可；未选中的未来动作不提交完成或资金。
 完整宿主仍须按原义务/hidden/public前沿选择该许可，不能只因请求exists便处理未来动作。
+
+统一hidden与订单处理时，`HiddenAssetState.prepare_level_transition`先核对原资产初始化、
+quality/resync和精确shares前驱。`apply_hidden_base_transition`在同一候选中仅更新一次FIFO，
+再沿原Account encounter处理订单量、逐fill、账户及Maker前驱，最后共同安装精确外部簿和撮合状态。
+不能先调用旧资产`level_transition`，再把它的queue送到订单入口重复扣量。
+任一错误或物理需求保留该条原step前的盘口、队列与经济状态；此前已成功源前缀不回滚。
+原Active/end的资产门和matching关闭门继续分开，公开观察前沿不从这次候选抬高。
+本入口仍处理每根一条已绑定价位的原step，不代替完整桶reference、运行关闭凭据和全局义务选择。
