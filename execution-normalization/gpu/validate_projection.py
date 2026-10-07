@@ -232,6 +232,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     from position_cost import PositionCosts
     from validate_order_funds import open_prefix,check as check_order_funds
     from validate_market_economics import open_prefix as open_markets,check as check_markets
+    from validate_rebate_read import check as check_rebates
     from success_pool import SuccessPools
     pools=Numbers.run_exact_batch(lambda:SuccessPools.open(torch.tensor([0,0],device='cuda'),
         torch.tensor([0,0],device='cuda'),torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1))
@@ -279,6 +280,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert int(admission.orders.flags.sum().cpu())==1 and int(admission.trades.flags.sum().cpu())==0
     assert check_order_funds(admission,source['reservation_checkpoints'][-1])
     assert check_markets(admission,source['reservation_checkpoints'][-1],source['initial'][0]['market']['condition_id'])
+    assert check_rebates(admission,source['reservation_checkpoints'][-1],source['initial'][0]['market']['condition_id'])
     again,remaining=Numbers.run_exact_batch(lambda:admission.apply_closed(delivered,
         torch.ones_like(columns.enabled),maximum_retry_rounds=1))
     assert values(again.current_entry_sequence)==values(admission.current_entry_sequence)
@@ -475,4 +477,4 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
         'device_closed_cache_waiting_then_new_records_retry_checked':True,
-        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_per_Ledger_record_unresolved_Pi_and_maximum_loss_checked':True,'actual_economic_before_Trade_OrderFunds_Unknown_and_binding_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'actual_trade_role_and_net_fee_executed_read_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'full_clock_Ledger_reservation_delivered':False}
+        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_original_six_rebate_read_fields_checked':True,'actual_per_Ledger_record_unresolved_Pi_and_maximum_loss_checked':True,'actual_economic_before_Trade_OrderFunds_Unknown_and_binding_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'actual_trade_role_and_net_fee_executed_read_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'full_clock_Ledger_reservation_delivered':False}
