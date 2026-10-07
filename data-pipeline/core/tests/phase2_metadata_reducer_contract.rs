@@ -811,3 +811,19 @@ fn legacy_metadata_without_source_token_order_keeps_its_existing_reading() {
             .all(|v| v.outcome.is_none() && v.price.is_none())
     );
 }
+
+#[test]
+fn first_local_transition_without_real_gamma_payload_cannot_build_identity() {
+    let mut row = local_transition_row(metadata_snapshot_row(), MARKET_START_AT + 5);
+    row.market_lifecycle_state = MetadataMarketLifecycleState::Active;
+    row.market_lifecycle_transition = Some(MetadataMarketLifecycleTransition::PrefetchedToActive);
+    row.lifecycle_scheduled_at_utc = Some(MARKET_START_AT);
+    row.lifecycle_applied_at_utc = Some(MARKET_START_AT + 5);
+    row.market_runtime_role = MetadataMarketRuntimeRole::Current;
+    row.market_runtime_role_transition = Some(MetadataMarketRuntimeRoleTransition::NextToCurrent);
+    row.runtime_role_scheduled_at_utc = Some(MARKET_START_AT);
+    row.runtime_role_applied_at_utc = Some(MARKET_START_AT + 5);
+    row.validate().unwrap();
+    let result = PolymarketMetadataReducer::from_identity_snapshot(metadata_input(row), "rule-v1");
+    assert!(result.unwrap_err().to_string().contains("complete Gamma"));
+}

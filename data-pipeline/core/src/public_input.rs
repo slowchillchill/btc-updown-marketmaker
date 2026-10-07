@@ -346,7 +346,8 @@ fn prepare_ingress_view_v1<'a>(
     let mut prepared_group_id = Some(source.source_message_id.clone());
     let metadata = |row: &'a PolymarketMarketMetadataRow| -> Result<PreparedCanonicalInputV1<'a>, crate::ContractError> {
         let outcomes = row.outcome_evidence().map_err(crate::typed_raw_contract_error)?;
-        let initial_tick = if row.metadata_row_kind == crate::typed_raw::PolymarketMetadataRowKind::MetadataSnapshot {
+        let initial_tick = if row.metadata_row_kind == crate::typed_raw::PolymarketMetadataRowKind::MetadataSnapshot
+            || (pm_context.is_none() && row.metadata_row_kind == crate::typed_raw::PolymarketMetadataRowKind::MarketStateTransition) {
             row.source_evidence_payload_json.as_deref().map(crate::typed_raw::extract_metadata_initial_tick).transpose().map_err(crate::typed_raw_contract_error)?.flatten()
         } else { None };
         Ok(PreparedCanonicalInputV1::Metadata(PreparedMetadataV1 { row, source: prepared_source()?, outcomes, initial_tick }))
