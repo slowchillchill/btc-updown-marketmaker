@@ -42,6 +42,7 @@ def frozen_account_inputs(account, scope_members, scope_known, scope_applicable,
             slow=write_rebate_fields(slow,rebates)
             provided[:,212:284]=True
             fault|=rebates.fault
+        commitments = None
         frozen_commitments = getattr(account,'commitments',None)
         if frozen_commitments is not None and frozen_commitments.condition_slots is not None:
             from input_commitments import commitment_inputs,write_commitment_fields
@@ -57,6 +58,14 @@ def frozen_account_inputs(account, scope_members, scope_known, scope_applicable,
             provided[:,176:212] = True
             fault |= executed.fault
         if asset_outcomes is not None:
+            if executed_prefix_known is not None:
+                from input_repair import repair_inputs,write_repair_fields
+                repair=repair_inputs(account.ledger,scope_conditions,scope_present,scope_applicable,
+                    asset_outcomes,prefix_known=executed_prefix_known,
+                    settlement_prefix_known=settlement_prefix_known,commitments=commitments)
+                slow=write_repair_fields(slow,repair)
+                provided[:,164:176]=True
+                fault|=repair.fault
             from input_positions import position_inputs, write_position_fields
             positions = position_inputs(account.ledger,scope_conditions,scope_present,scope_applicable,asset_outcomes)
             slow = write_position_fields(slow,positions)

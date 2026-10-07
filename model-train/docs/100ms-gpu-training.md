@@ -962,6 +962,25 @@ Native `input_success` 只按同冻结 scope 精确归约这个公共读面，�
 原未判定的两腿成功来源显式提供完整无兑付前缀；指定单市场布局不代表根权威 current/old 选择。
 这只是成功字段组件接线，完整账户及活动根恢复仍未交付。
 
+### 当前市场的修复差与cap
+
+`ledger/gpu/repair_gap.py` 按原根、condition、token归约公开 `FinalSuccess` Trade份额，
+不等待 `economic_applied`，也不用成功池余额替代公开成交。它沿真实counterpart在每市场
+计算 `max(对腿FinalSuccess份额−本腿FinalSuccess份额,0)`，再交Native按原scope求和。
+`input_commitments.py` 保留同一次完整receipt逐腿归约的精确剩余承诺；`input_repair.py`
+使用该精确结果计算 `max(gap−commitment,0)`，最后才投影到slow164:176。
+
+非空current需完整公开Trade和结算前缀、实际typed市场及固定outcome绑定，缺项仍为Unknown。
+任一实际已判定市场使current gap/cap为NA。无current由根的applicable位给NA，
+不能将中间空集合的Known0解释为存在可交易市场。缺完整承诺只影响cap，不改已知gap。
+本批沿同冻结账户写入provided位，保留原窗口、账户前缀和累计接纳本金职责。
+
+有限验证复用原三fill来源的真实FinalSuccess NOE，单独交原CPU Ledger形成经济到达前的
+独立检查点；它证明Ledger合法到达次序，不代表自然receive/public宿主调度。
+承诺对照沿同一真实请求和receipt进入原共享逐腿冻结入口，另核同设备图的成交更新、
+旧冻结、缺typed结算与无current边界。实际双腿兑付冻结入口核已判定市场NA。
+完整账户、连续宿主及活动根恢复仍未交付。
+
 ### 累计接纳本金
 
 `ledger/gpu/accepted_principal.py` 保存每根、原 condition 的精确累计接纳本金，

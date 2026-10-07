@@ -752,6 +752,37 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
     };
     #[cfg(not(feature="shared-execution"))]
     let contribution_first_reference=serde_json::Value::Null;
+    #[cfg(feature="shared-execution")]
+    let final_success_before_economic_reference={
+        // 原自然来源的真实FinalSuccess先交公开Ledger；不生成或改写NOE。
+        // 此处验证Ledger允许的到达次序，不声称receive/public宿主自然采用此顺序。
+        let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
+        for record in &initial_records { ledger.apply_noe_memory_v2(record).unwrap(); }
+        let final_success=noe.iter().find(|record|match record.record() {
+            execution_normalization::NormalizationRecord::Evidence {
+                evidence:execution_normalization::SourceNeutralEvidenceKind::TradeLifecycleV3 {result},..
+            }=>result.result.economic_disposition==contracts::execution_normalization::SourceNeutralTradeEconomicDispositionV1::FinalSuccess,
+            _=>false,
+        }).unwrap();
+        ledger.apply_noe_memory_v2(final_success).unwrap();
+        let checkpoint=gpu_ledger_reservation_checkpoint(&ledger,"public_final_success_before_economic");
+        assert_eq!(checkpoint["trades"].as_array().unwrap().len(),1);
+        assert_eq!(checkpoint["trades"][0]["economic_applied"],false);
+        assert_eq!(checkpoint["trades"][0]["success_applied"],false);
+        serde_json::json!({"record":final_success.record(),"checkpoint":checkpoint})
+    };
+    #[cfg(not(feature="shared-execution"))]
+    let final_success_before_economic_reference=serde_json::Value::Null;
+    // 正修复gap在原token2；通过实际登记取得新receipt，而非改写旧token1的回执。
+    // 仅登记待发送责任，不推进接纳/撮合，不改变上面已封闭的21条NOE来源。
+    let repair_request=BusinessRequestV2::PostOrders(PostOrdersRequestV2 {
+        context:RequestContextV2 {global_request_id:"gpu-repair-post".into(),caller_correlation_id:None},
+        items:vec![PostOrderBatchItemV2 {batch_item_ordinal:0,item:post_item("gpu-repair-item",&condition,&TokenId("2".into()),
+            SimBuyOrderKindV1::GtcLimit {limit_price_pusd_per_share:"0.3".parse().unwrap(),size_shares:"5".parse().unwrap(),post_only:false})}],
+    });
+    let (state,repair_receipt)=register_request_candidate(&actor.opened,actor.scenario.initial_market_directory(),state,
+        &request_cutoff(10_000),&repair_request,12,actor._latency_profile.as_ref(),actor._rule_snapshot.snapshot());
     let records=noe.iter().map(|record|serde_json::json!({"record":record.record(),
         "position":record.position(),"visibility":record.visibility()})).collect::<Vec<_>>();
     let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
@@ -760,6 +791,10 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
         "fee_exponent":rules.fee_schedule.exponent,"taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
         "feedback_batches":feedback_batches,"noe_records":records,"initial_noe_records":initial_records.len(),
         "economic_first_reference":economic_first_reference,"contribution_first_reference":contribution_first_reference,
+        "final_success_before_economic_reference":final_success_before_economic_reference,"post_request":request,
+        "repair_request":repair_request,"repair_receipt":{"input_sequence":repair_receipt.input_sequence(),
+            "platform_arrived_at_utc_ms":repair_receipt.platform_arrived_at_utc_ms(),
+            "scheduled_actions":repair_receipt.scheduled_action_count()},
         "normalization_reference":normalization_reference.borrow().clone(),
         "ledger_projection":ledger_projection,"reservation_checkpoints":reservation_checkpoints,
         "opening_available_pusd":state.session.as_ref().unwrap().opening_fact.initial_account_state.available_pusd,

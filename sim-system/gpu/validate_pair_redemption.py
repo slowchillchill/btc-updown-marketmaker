@@ -169,7 +169,8 @@ def main():
         frozen=public.freeze_account(intents,tensor([visible]))
         inputs=frozen_account_inputs(frozen,order_members,applicable,applicable,
             scope_conditions=scopes,scope_present=present,asset_outcomes=outcomes,
-            success_prefix_known=enabled,settlement_prefix_known=enabled)
+            success_prefix_known=enabled,settlement_prefix_known=enabled,
+            executed_prefix_known=~enabled)
         return frozen,inputs
     before_frozen,before_native=Numbers.run_exact_batch(lambda:frozen_inputs(old,original_waiting))
     ledger,waiting=Numbers.run_exact_batch(lambda:waiting.drain(ledger,torch.ones_like(columns.enabled)))
@@ -211,6 +212,9 @@ def main():
         assert ratio(read.paired)==[pair,pair]
         torch.testing.assert_close(native.slow[0,146:149].cpu(),torch.tensor(triple(pair)),rtol=1e-6,atol=1e-7)
         assert native.fault.cpu().tolist()==[0] and native.provided[0,122:164].all().cpu().item()
+        # 本冷前缀没有完整Trade详情；实际typed Resolved仍使current gap/cap为NA。
+        assert native.provided[0,164:176].all().cpu().item()
+        assert native.slow[0,164:176].cpu().tolist()==[0.]*12
         for start,end in [(128,134),(140,146),(155,164)]:
             assert native.slow[0,start:end].cpu().tolist()==[0.,1.,1.]*((end-start)//3)
     # 缺结算历史不是已知Unresolved；完整空scope仍为Known零。

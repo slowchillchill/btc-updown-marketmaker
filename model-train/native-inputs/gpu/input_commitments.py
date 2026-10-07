@@ -10,6 +10,8 @@ from trade_success import sum_rows
 @dataclass(frozen=True)
 class CommitmentInputs:
     values: torch.Tensor  # [roots,2scopes,2sides,3]
+    remaining: object    # 相同人口的精确结果，供repair cap末端做差。
+    known: torch.Tensor
     fault: torch.Tensor
 
 
@@ -53,7 +55,7 @@ def commitment_inputs(commitments, conditions, present, applicable):
     values = torch.stack((torch.where(enabled,projected.reshape(roots,2,2),0.),enabled.float(),
         applicable[:,:,None].expand(roots,2,2).float()),-1)
     fault = commitments.fault | numbers.combine_fault_rows(torch.where(applicable[:,:,None],error.reshape(roots,2,2),0).flatten(1))
-    return CommitmentInputs(values,fault)
+    return CommitmentInputs(values,total,known,fault)
 
 
 def write_commitment_fields(slow, inputs):

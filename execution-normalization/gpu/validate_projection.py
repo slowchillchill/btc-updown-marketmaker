@@ -386,6 +386,9 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert check_markets(admission,source['reservation_checkpoints'][-1],source['initial'][0]['market']['condition_id'])
     assert check_rebates(admission,source['reservation_checkpoints'][-1],source['initial'][0]['market']['condition_id'])
     check_principal(admission,source['reservation_checkpoints'][-1])
+    from validate_repair import check as check_repair
+    repair_checked=check_repair(source,append_start,admission,bank=state.normalizer.bank,
+        pending=pending,waiting=cache,delivered=delivered)
     check_principal_growth(admission,source,delivered)
     # 该同一实际来源已登记第二市场，但成功池只安装原condition0；非空scope没有池成员
     # 不能用其零归约猜结算历史完整。与累计增长相同，cold槽1绑定真实Enrollment canonical身份。
@@ -611,7 +614,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert ledger.available_at[ledger.received].cpu().tolist()==[10000]*7
     from validate_two_root_projection import validate_two_root_projection
     two_root_report=validate_two_root_projection(source)
-    return {'two_root_projection':two_root_report,'device_generated_NOE_records':checked,'device_batches':len(batches),'original_positions_and_receive_order_checked':True,
+    return {'repair_fields':repair_checked,'two_root_projection':two_root_report,'device_generated_NOE_records':checked,'device_batches':len(batches),'original_positions_and_receive_order_checked':True,
         'bank_physical_rows':state.normalizer.bank.kinds.numel(),'masked_or_unemitted_rows':state.normalizer.bank.kinds.numel()-checked,
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
