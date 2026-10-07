@@ -30,6 +30,14 @@ run_test() {
     tail -4 "$artifact_dir/$log"
 }
 case "$case_name" in
+    pair-redemption)
+        command=(cargo test -p shared-run --test economic_settlement --locked --offline
+            gpu_actual_pair_and_winner_orphan_redemption_preserves_one_economic_fact -- --ignored --nocapture)
+        printf '%q ' "${command[@]}" >> "$artifact_dir/commands.txt"
+        printf '\n' >> "$artifact_dir/commands.txt"
+        "${command[@]}" > "$artifact_dir/pair-redemption.log" 2>&1
+        tail -4 "$artifact_dir/pair-redemption.log"
+        ;;
     main-public)
         # 主线共同原归约提取，仅覆盖B使用的完整入口；不运行A研究。
         for target in core-lib core-reference core-binance training-compact; do

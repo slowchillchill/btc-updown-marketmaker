@@ -1836,3 +1836,102 @@ async fn paired_receivable_precedes_loser_failure_and_compensation_barrier() {
         market
     );
 }
+
+
+/// 原1716实际六／五份双腿与失败补偿屏障；只导出实际提交材料中的兑付前后。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "AutoDL真实双资产V4清偿经济及GPU多成员验证"]
+async fn gpu_actual_pair_and_winner_orphan_redemption_preserves_one_economic_fact() {
+    let temp=tempfile::tempdir().unwrap();
+    let root=temp.path().join("dpt");
+    let (core,times)=recorded_settlement_pending_loser(&root);
+    let account=AccountInstanceKeyV1 {run_id:"shared-combination".into(),caller_role:SimCallerRoleV1::Paper,
+        caller_instance_id:"shared-caller".into(),account_id:"shared-account".into(),platform_source:PlatformSourceV1::Simulated};
+    let policy=serde_json::to_vec(&serde_json::json!({"schema_version":"trade_finality_policy_v2",
+        "normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10},{"state":"CONFIRMED","offset_ms":20}],"economic_application_ordinal":1},
+        "failure_overrides":[{"selector":{"selector_domain":"REQUEST","account_instance_key":account,"global_request_id":"pending-one"},
+            "path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10},{"state":"FAILED","offset_ms":20000}],"economic_application_ordinal":1}}]})).unwrap();
+    let (mut execution,observation,_)=execution_with_rules_v4(&temp.path().join("sim.jsonl"),&core,&policy,None,"e".repeat(64),"100");
+    execution.configure_resolution_redeem_v1(script(0)).unwrap();
+    let materials=Arc::new(std::sync::Mutex::new(Vec::<LedgerRecordMaterialV2>::new()));
+    let output=materials.clone();
+    let mut ledger=LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    ledger.bind_record_sink_v2(Box::new(move |material|output.lock().unwrap().push(material)));
+    let mut shared=SharedExecutionV2::from_opening(ledger,observation).unwrap().unwrap();
+    let source=RecordedPublicGroupSourceV1::open(&root,1,1<<20,times).unwrap();
+    let mut driver=FinitePublicConsumptionV1::new(execution,source,"gpu-pair-redemption".into());
+    for _ in 0..4 { driver.next_group().unwrap().unwrap(); }
+    let mut first=true;
+    let mut pending_sent=false;
+    let mut saw_blocked=false;
+    let mut coordinator=SettlementCoordinatorV1::default();
+    loop {
+        let at=driver.decision().unwrap().cutoff().decision_time().logical_time_utc_ms();
+        let orders=if first {vec![(UP_TOKEN_ID,"six-a",6),(DOWN_TOKEN_ID,"five-b",5)]}
+            else if at>=56000 && !pending_sent {pending_sent=true;vec![(DOWN_TOKEN_ID,"pending-one",5)]} else {vec![]};
+        first=false;
+        for (token,id,q) in orders {
+            shared.execute(&mut driver.decision().unwrap(),RequestContextV2 {global_request_id:id.into(),caller_correlation_id:None},
+                Some(Arc::new(ModelIntentV1::SubmitSingleBuy {condition_id:ConditionId(CONDITION_ID.into()),order:BuyLegIntentV1 {
+                    token_id:TokenId(token.into()),order:BuyOrderIntentV1::GtcLimit {
+                        limit_price_pusd_per_share:Decimal::new(6,1),size_shares:Decimal::from(q),post_only:false}}}))).await.unwrap();
+        }
+        if shared.advance_settlement(&mut coordinator,&mut driver).unwrap() {
+            for resolution in shared.ledger().economic_read().unwrap().resolutions() {
+                if resolution.economic_predecessors_closed==ExecutionReadValueV1::Known(false) {
+                    assert_eq!(resolution.paired_receivable_pusd.0,"5");
+                    assert_eq!(resolution.winner_orphan_receivable_pusd.0,"1");
+                    assert!(resolution.request.is_none());saw_blocked=true;
+                }
+            }
+        }
+        if driver.next_group().unwrap().is_none() {break;}
+    }
+    assert!(saw_blocked && shared.apply_closed().unwrap());
+    assert_eq!(shared.ledger().economic_read().unwrap().cash().actual_available_pusd.0,"99.1152");
+    driver.complete().unwrap();
+    let snapshot=|ledger:&LedgerWriterV1| {
+        let read=ledger.economic_read().unwrap();
+        serde_json::json!({"projection":read.base(),"cash":read.cash(),"directional_cash":read.residual_cash().directional_cash_pusd,
+            "markets":read.market_totals().collect::<Vec<_>>(),
+            "resolved":read.resolutions().next().unwrap().resolved,
+            "successful_trades":read.successful_trades().map(|trade|serde_json::json!({
+                "identity":trade.trade_identity,"fact":trade.terminal,"remaining_shares":trade.remaining_success_shares,
+                "remaining_principal":trade.remaining_principal_cost_pusd})).collect::<Vec<_>>()})
+    };
+    let restored_root=temp.path().join("actual-prefix");
+    let mut writer=LedgerBackgroundWriterV2::new(&restored_root);
+    let mut checked=None;
+    let material_guard=materials.lock().unwrap();
+    for material in material_guard.iter() {
+        let redeem=material.consumed_record_v2().is_some_and(|record|matches!(record.record(),
+            ::execution_normalization::NormalizationRecord::EconomicFactV2 { fact,.. }
+            if matches!(&fact.disposition,SourceNeutralEconomicDispositionV2::AccountTransition {
+                transition:SourceNeutralAccountTransitionKindV2::ResolutionRedeemApplied {..},..})));
+        if redeem {
+            writer.flush_accepted_batch().unwrap();
+            let before=snapshot(&LedgerWriterV1::open_durable(&restored_root).unwrap());
+            assert!(writer.write(material).unwrap());writer.flush_accepted_batch().unwrap();
+            let after=snapshot(&LedgerWriterV1::open_durable(&restored_root).unwrap());
+            let record=material.consumed_record_v2().unwrap();
+            let request=material_guard.iter().filter_map(LedgerRecordMaterialV2::consumed_record_v2)
+                .find(|candidate|candidate.position().source_watermark==record.position().source_watermark && candidate.position().record_ordinal==0).unwrap();
+            checked=Some(serde_json::json!({"request_record":{"record":request.record(),"position":request.position(),"visibility":request.visibility()},
+                "before":before,"after":after,"record":record.record(),
+                "position":record.position(),"context":record.context(),"visibility":record.visibility()}));
+            break;
+        }
+        assert!(writer.write(material).unwrap());
+    }
+    let source=checked.expect("真实双腿到账必须生成唯一EconomicV2");
+    if let Ok(directory)=std::env::var("B_GPU_ORDER_ARTIFACT_DIR") {
+        std::fs::write(std::path::Path::new(&directory).join("original-pair-redemption.json"),serde_json::to_vec_pretty(&source).unwrap()).unwrap();
+    }
+    if let Ok(validator)=std::env::var("B_GPU_PAIR_REDEMPTION_VALIDATOR") {
+        let mut child=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap()).arg(validator)
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        serde_json::to_writer(child.stdin.take().unwrap(),&source).unwrap();
+        let output=child.wait_with_output().unwrap();assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+        println!("gpu_pair_redemption={}",String::from_utf8(output.stdout).unwrap());
+    }
+}

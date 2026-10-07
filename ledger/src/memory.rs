@@ -45,6 +45,16 @@ impl LedgerRecordMaterialV2 {
             }
         }
     }
+    /// 仅借用本条实际消费的V4来源；不从耐久正文重新构造领取引用。
+    pub fn consumed_record_v2(&self) -> Option<&execution_normalization::NoeConsumedRecordRefV2> {
+        match self.payload.as_ref() {
+            DurablePayloadV1::Transaction(effect) => match &effect.transaction.source {
+                LedgerTransactionSourceV1::MemoryV2(record) => Some(record),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
     pub fn ledger_entry_seq(&self) -> Option<u64> {
         match self.payload.as_ref() {
             DurablePayloadV1::Transaction(e) => Some(e.ledger_entry_seq()),
