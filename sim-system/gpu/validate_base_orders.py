@@ -69,6 +69,11 @@ def main():
     maker_rate = Numbers.run_exact_batch(lambda:rational([source['maker_rebate_rate']]))
     calendars = RebateCoordinator(MakerDays.empty(tensor([[0]]),tensor([[source['market_end']]]),
         tensor([[True]],torch.bool),fills=1,days=1),TakerDays.empty(1,'cuda',fills=1,days=1))
+    held=run_pending_base_acceptance(requests,orders,queue,account,fills,terms,tensor([[0]]),
+        fee_rate,source['fee_exponent'],torch.zeros((1,queue.capacity),dtype=torch.int64,device='cuda'),
+        rebate,tensor([0,0]),tensor([0]),calendars=calendars,enabled=tensor([False],torch.bool))
+    assert held[-1].fault.cpu().tolist()==[0] and torch.equal(held[0].done,requests.done)
+    assert values(held[3].cash)==values(account.cash) and values(held[1].next_sequence)==[1]
     requests, orders, queue, account, fills, accepted = run_pending_base_acceptance(requests, orders, queue,
         account, fills, terms, tensor([[0]]), fee_rate, source['fee_exponent'],
         torch.zeros((1,queue.capacity), dtype=torch.int64, device='cuda'), rebate, tensor([0, 0]), tensor([0]),
@@ -91,6 +96,7 @@ def main():
     assert values(fills.origins.prices.numerator) == [1] and values(fills.origins.prices.denominator) == [5]
     assert queue.order_ids[1][queue.kind[1] == 2].cpu().tolist() == [int(slot.cpu()[0])]
     maker_record = None
+    cancel_batch=None
     observed_pending_zero_quote = False
     for checkpoint in source['checkpoints'][1:]:
         stage = checkpoint['stage']
@@ -128,11 +134,26 @@ def main():
                     assert maker_transition.origin.roles.cpu().tolist() == [1]
         elif stage == 'canceled':
             read = orders.read(slot)
-            queue, quantity, account, _, _, _, delta = Numbers.run_exact_batch(lambda: cancel_base_order(queue,
-                read.quantity, account, tensor([-1, int(slot.cpu()[0])]), tensor([0, 0]),
-                tensor([False], torch.bool), active))
-            orders = Numbers.run_exact_batch(lambda: orders.update(read, quantity, delta.emitted))
-            assert delta.emitted.cpu().tolist() == [True]
+            ids,offsets=byte_column([source['post_request_key'].encode(),source['cancel_request_key'].encode()])
+            requests,cancel_receipt=requests.run_registration(sampler,ids,offsets,tensor([1]),tensor([1]),
+                integers([source['cancel_input_sequence']]),tensor([source['cancel_sent_at']]),
+                tensor([[1]]),tensor([[0]]),tensor([[True]],torch.bool),tensor([[False]],torch.bool),
+                tensor([0]),active,zero_fault)
+            assert cancel_receipt.arrived_at.cpu().tolist()==[source['cancel_arrived_at']]
+            from pending_cancel_execution import BaseCancelTarget,run_pending_base_cancel
+            target=BaseCancelTarget(tensor([1]),read.sequence,zero_fault)
+            requests,orders,queue,account,canceled=run_pending_base_cancel(requests,orders,queue,account,target,
+                tensor([0,0]),tensor([False],torch.bool),tensor([1]),active)
+            assert canceled.delta.emitted.cpu().tolist()==[True] and canceled.response.emitted.cpu().tolist()==[True]
+            from projection import CancelTargetFeedback
+            from fields import RecordList
+            refs=RecordList((zero,zero),active[:,None])
+            bound=noe.bind_base_order(canceled.order,asset_tokens,canceled.delta.emitted)
+            bound=replace(bound,request_slots=canceled.response.request_key,item_ordinals=canceled.pending.ordinal)
+            feedback=CancelTargetFeedback(canceled.order_sequence,integers([0]),refs,canceled.outcome,
+                canceled.processed,canceled.delta,canceled.fault)
+            noe,cancel_batch=Numbers.run_exact_batch(lambda:bound.cancellation(sampler,(feedback,),
+                canceled.pending.effective_at,canceled.response.received_at,canceled.response.method,canceled.response.emitted))
         assert_checkpoint(checkpoint['state'], orders.read(slot).quantity, account)
     assert observed_pending_zero_quote and maker_record is not None
     assert values(fills.next_sequence) == [3] and values(orders.next_sequence) == [2]
@@ -183,7 +204,7 @@ def main():
     assert not repeat.emitted.any().cpu().item()
     from validate_base_noe_ledger import check as check_public_account
     account_report=check_public_account(source,noe,batches,orders.read(slot),receipt,
-        Numbers.run_exact_batch(lambda:rational([original_kind['size_shares']])))
+        Numbers.run_exact_batch(lambda:rational([original_kind['size_shares']])),cancel_batch)
     # 已完成请求无pending：调度padding零terms/故障不得污染既存状态。
     padding = FrozenBaseTerms(tensor([-1]), integers([0]), integers([0]), rational(['0']),
                               tensor([-1]), tensor([-1]), tensor([1], torch.int32),tensor([-1]))
@@ -201,8 +222,8 @@ def main():
     assert torch.equal(requests.done, old_requests.done) and torch.equal(queue.kind, old_queue.kind)
     # 受控新工程请求复用同原SDK terms：只有订单目录满，队列已有8槽余量。
     # 不改变原13个checkpoint或把此新增请求称原会话自然输入。
-    identity_bytes, identity_offsets = byte_column([source['post_request_key'].encode(), b'gpu-next-engineering-post'])
-    requests, _ = requests.run_registration(sampler, identity_bytes, identity_offsets, tensor([1]), tensor([1]),
+    identity_bytes, identity_offsets = byte_column([source['post_request_key'].encode(),source['cancel_request_key'].encode(), b'gpu-next-engineering-post'])
+    requests, _ = requests.run_registration(sampler, identity_bytes, identity_offsets, tensor([2]), tensor([1]),
         integers([13]), tensor([source['cancel_arrived_at']+1]), tensor([[1]]), tensor([[ordinal]]),
         tensor([[True]], torch.bool), tensor([[False]], torch.bool), tensor([0]), active, zero_fault)
     assert orders.capacity == 1 and orders.occupied.sum().cpu().item() == 1
@@ -235,6 +256,7 @@ def main():
         'single_original_hidden_transition_queue_order_fill_calendar_common_commit_checked':True,
         'continuous_directory_bound_order_taker_maker_NOE_payload_and_positions_checked':True,
         'dynamic_NOE_records':len(by_row),
+        'device_phase_gate_keeps_future_pending_without_submission_checked':True,
         'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
         'elapsed_seconds_with_reference_reads': time.perf_counter()-started,

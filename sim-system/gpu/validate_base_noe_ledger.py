@@ -11,7 +11,7 @@ from queues import Numbers
 from validate_base_execution import integers,rational,values
 
 
-def check(source,noe,batches,order,receipt,target):
+def check(source,noe,batches,order,receipt,target,cancel_batch):
     root=Path(__file__).resolve().parents[2]
     sys.path[:0]=[str(root/'ledger/gpu'),str(root/'shared-run/gpu')]
     from memory import EconomicColumns
@@ -92,8 +92,54 @@ def check(source,noe,batches,order,receipt,target):
         torch.ones_like(state.ledger.columns.enabled)))
     assert not repeat.closed.emitted.any().cpu().item() and values(state.ledger.current_entry_sequence)==saved
     assert amounts(frozen.funds.actual_available)==[Fraction(source['cancel_ledger_before']['cash']['actual_available_pusd'])]
+    # 同一个请求、发射器、Normalizer和公开账户接实际取消批，不另装取消冷前缀。
+    from validate_projection import expected_semantic
+    original_cancel={record['position']['record_ordinal']:record for record in source['cancel_records']}
+    row_reference={}
+    for column,present in enumerate(cancel_batch.emitted.cpu().tolist()[0]):
+        if not present:continue
+        reference=original_cancel[values(cancel_batch.record_ordinals)[column]]
+        assert values(cancel_batch.batch_sequences)[column]==reference['position']['source_watermark']['projection_batch_sequence']
+        body=next(iter(reference['record'].values()))
+        original_ref=body.get('source_reference') or body['fact']['source_reference']
+        category,metadata=next(iter(original_ref['record'].items()))
+        assert values(cancel_batch.private_sequences)[column]==metadata['private_feedback_sequence']
+        time_name='response_received_at_utc_ms' if category=='DirectResponse' else 'feedback_received_at_utc_ms'
+        assert int(cancel_batch.received_at[0,column].cpu())==metadata[time_name]
+        row=int(cancel_batch.rows[0,column].cpu())
+        semantic=run(lambda:expected_semantic(reference))
+        actual=noe.normalizer.bank.semantic[row:row+1]
+        width=max(actual.size(1),semantic.size(1))
+        assert torch.equal(torch.nn.functional.pad(actual,(0,width-actual.size(1))),
+            torch.nn.functional.pad(semantic,(0,width-semantic.size(1))))
+        row_reference[row]=reference
+    assert len(row_reference)==4
+    state=run(lambda:state.append_batch(noe.normalizer.bank,cancel_batch))
+    at=tensor([source['cancel_closed_at']])
+    gates=gates.set_receive(at,active).set_public(at,active)
+    state,delivery=run(lambda:state.receive(noe.normalizer.bank,gates,
+        torch.ones_like(state.ledger.columns.enabled)))
+    assert delivery.fault.cpu().tolist()==[0]
+    actual=[row_reference[row]['position'] for row,present in zip(delivery.closed.record_refs.cpu().tolist()[0],
+        delivery.closed.emitted.cpu().tolist()[0]) if present]
+    assert actual==[reference['position'] for reference in source['cancel_records']]
+    expected=source['cancel_ledger_after']['projection']
+    for actual,key in [(state.ledger.current_entry_sequence,'ledger_entry_seq'),
+        (state.ledger.current_local_prefix,'ledger_local_prefix'),
+        (state.ledger.platform.platform_source_prefix,'platform_source_prefix')]:
+        assert values(actual)==[expected[key]],key
+    assert not (state.waiting.received & ~state.waiting.consumed).any().cpu().item()
+    original=expected['platform_confirmed_projection']
+    assert amounts(state.ledger.platform.balances)==[Fraction(original[name]) for name in names]
+    assert check_funds(state.ledger,source['cancel_ledger_after'])
+    canceled=run(lambda:state.freeze_account(intents,at))
+    assert canceled.fault.cpu().tolist()==[0] and canceled.orders.cancellable.cpu().tolist()==[[False]]
+    assert amounts(canceled.funds.actual_available)==[Fraction(source['cancel_ledger_after']['cash']['actual_available_pusd'])]
+    assert amounts(frozen.funds.actual_available)==[Fraction(source['cancel_ledger_before']['cash']['actual_available_pusd'])]
     return {'natural_dynamic_base_batches_to_single_public_ledger_checked':True,
         'initialization_only_at_original_opening_checked':True,
         'actual_NOE_population':len(source['prior_records']),
         'device_ledger_attempt_order_from_original_reference':False,
+        'dynamic_cancel_request_to_same_account_and_old_freeze_checked':True,
+        'dynamic_cancel_NOE_population':4,
         'original_public_closure_frontier_supplied':True}

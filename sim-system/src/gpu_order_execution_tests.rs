@@ -257,6 +257,8 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
             _ => unreachable!(),
         },"proxy_latency_sha256":actor._latency_profile.file_sha256(),
         "cancel_arrived_at":cancel_receipt.platform_arrived_at_utc_ms,
+        "cancel_request_key":"gpu-legal-gtc-cancel","cancel_input_sequence":cancel_receipt.input_sequence(),
+        "cancel_sent_at":maker_at+30,
         "cancel_records":cancel_records,"cancel_batches":cancel_batches,"cancel_closed_at":closed_at,
         "prior_records":prior_records,"prior_batches":prior_batches,"prior_closed_at":prefix_at,
         "opening_ledger":opening_ledger,

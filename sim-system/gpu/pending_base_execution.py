@@ -60,7 +60,7 @@ def _coordinate_orders(candidate, original, fault):
 
 def accept_pending_base(requests, pending, orders, queue, account, fills, terms, ask_rows,
                         fee_rate, fee_exponent, selected_paths, taker_rebate_rate, row_roots, result_refs,
-                        *, calendars=None):
+                        *, calendars=None, enabled=None):
     """从当前pending的原item引用规划。result_refs为本次原Post结果材料的预留引用。
 
     返回候选仍须与结果正文/反馈共同安装。整root某项故障只回退本动作，保留先前
@@ -68,7 +68,9 @@ def accept_pending_base(requests, pending, orders, queue, account, fills, terms,
     """
     if pending.source is not requests:
         raise ValueError('接单须使用选择pending时同一请求状态')
-    active = pending.exists
+    if enabled is not None and (enabled.shape!=pending.exists.shape or enabled.dtype!=torch.bool or enabled.device!=pending.exists.device):
+        raise TypeError('实际接单phase需同设备bool[roots]')
+    active = pending.exists if enabled is None else pending.exists & enabled
     source_fault = requests.fault | orders.fault | terms.fault*active.to(torch.int32)
     source_fault = source_fault | (active & (terms.item_refs != pending.item_ref)).to(torch.int32)
     prepared = prepare_base_order(queue, account, ask_rows, terms.accepted_base, terms.accepted_quote,
@@ -150,13 +152,13 @@ def accept_pending_base(requests, pending, orders, queue, account, fills, terms,
 
 def run_pending_base_acceptance(requests, orders, queue, account, fills, terms, ask_rows,
                                 fee_rate, fee_exponent, selected_paths, taker_rebate_rate, row_roots, result_refs,
-                                *, calendars=None):
+                                *, calendars=None, enabled=None):
     """仅在物理边界读取三个容量请求；原input/RNG/队列/账户不推进就重算。"""
     while True:
         pending = requests.next_pending()
         result = Numbers.run_exact_batch(lambda: accept_pending_base(requests, pending, orders, queue, account,
             fills, terms, ask_rows, fee_rate, fee_exponent, selected_paths, taker_rebate_rate, row_roots, result_refs,
-            calendars=calendars))
+            calendars=calendars,enabled=enabled))
         effects = result[-1]
         required_orders = int(effects.order.required_orders.max().cpu())
         required_fills = int(effects.acceptance.required_records.max().cpu())

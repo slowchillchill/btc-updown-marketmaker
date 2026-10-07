@@ -209,6 +209,18 @@ class BaseOrders:
             self.assets[root, safe], self.bid_rows[root, safe], self.accepted_at[root, safe], present, self.fault,
             self.conditions[root,safe])
 
+    def find(self,sequence):
+        """按完整原u64身份找当前Base订单；slot只在本目录内返回。"""
+        if sequence.sign.shape!=(self.roots,) or sequence.words.device!=self.occupied.device:
+            raise ValueError('原订单序号需同根同设备精确列')
+        owner=torch.arange(self.roots,device=self.occupied.device).repeat_interleave(self.capacity)
+        comparison=self.sequences.compare(_take(sequence,owner))
+        matches=self.occupied & (comparison.order.reshape_as(self.occupied)==0)
+        slots=torch.where(matches.any(1),matches.to(torch.int64).argmax(1),-1)
+        read=self.read(slots)
+        error=Numbers.combine_fault_rows(torch.where(self.occupied,comparison.fault.reshape_as(self.occupied),0))
+        return replace(read,fault=read.fault | error)
+
     def update(self, read, quantity, enabled):
         if read.source is not self:
             raise ValueError('订单更新须绑定读取时同一目录状态')

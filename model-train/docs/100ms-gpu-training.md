@@ -853,3 +853,10 @@ order/request/item/condition/asset，从成交池取得原角色和原价，并�
 首Maker反馈与后续最终性采用同一逐fill来源；Maker费用等价沿其登记时冻结的原H5值。
 单项Base接纳只在原请求已封口时发直接响应。本切片没有装配完整Pair响应、拒绝正文或全部取消请求。
 原工程步骤和密封路径仍驱动短链；来源批连续生成及双门领取不等于全局时钟已经交付。
+
+`pending_cancel_execution.py`从原pending item的完整order序号查同一动态Base目录，
+组合队列撤段、订单剩量、本金释放和该item完成的共同候选。不存在订单或没有可撤余量
+返回NoEffect，不造账户delta。反馈映射仍须保留所有target，直至原请求完成后统一封口。
+当前真实短链只覆盖单target成功取消，不代表CancelMarket展开、多target累计或场景失败已接通。
+pending接单和取消入口接受设备phase许可；未选中的未来动作不提交完成或资金。
+完整宿主仍须按原义务/hidden/public前沿选择该许可，不能只因请求exists便处理未来动作。
