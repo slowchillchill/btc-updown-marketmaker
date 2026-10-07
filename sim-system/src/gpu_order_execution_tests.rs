@@ -836,7 +836,8 @@ async fn gpu_actual_fok_mature_day_preserves_noe_batch_and_continuous_ledger() {
     let observation=saved.borrow_mut().take().unwrap();
     let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
     ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
-    for record in observation.take_closed_records() { ledger.apply_noe_memory_v2(&record).unwrap(); }
+    let initial_records=observation.take_closed_records();
+    for record in &initial_records { ledger.apply_noe_memory_v2(record).unwrap(); }
     let mut initial=decoded_maker_initial_events();
     let ExecutionMarketEventPayloadV3::InitialL2Snapshot(book)=&mut initial[0].payload else {unreachable!()};
     book.asks=vec![contracts::PriceLevelV1 {price_pusd_per_share:ExactDecimal("0.5".into()),
@@ -911,6 +912,24 @@ async fn gpu_actual_fok_mature_day_preserves_noe_batch_and_continuous_ledger() {
     actor.projection_port.observe_public_time(&public_time(closed_at));
     let received=observation.take_closed_records();
     assert_eq!(received.len(),7,"真实终态Trade/Accrual/Day/Payment与3经济事实");
+    // 独立合法乱序归约：原FOK的Contribution/Day无需Trade或Economic前驱。
+    // 来源仍为同一实际NOE正文/位置；不把该验证次序称自然receive调度。
+    let mut rebate_first=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    rebate_first.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
+    for record in &initial_records { rebate_first.apply_noe_memory_v2(record).unwrap(); }
+    let rebate_first_before=gpu_ledger_reservation_checkpoint(&rebate_first,"before_Contribution_Day");
+    for wanted in 0..2 {
+        let record=received.iter().find(|record| matches!(record.record(),
+            execution_normalization::NormalizationRecord::Evidence {
+                evidence:execution_normalization::SourceNeutralEvidenceKind::SettlementLifecycleV2 {result},..
+            } if matches!((wanted,result),(0,contracts::economics::SourceNeutralSettlementLifecycleResultV2::Contribution(_))
+                | (1,contracts::economics::SourceNeutralSettlementLifecycleResultV2::DayFinalized(_))))).unwrap();
+        rebate_first.apply_noe_memory_v2(record).unwrap();
+    }
+    let rebate_first_after=gpu_ledger_reservation_checkpoint(&rebate_first,"after_Contribution_Day_before_Trade_Economic");
+    assert_eq!(rebate_first_after["projection"]["platform_source_prefix"],0);
+    assert!(rebate_first_after["trades"].as_array().unwrap().is_empty());
+    assert!(rebate_first_after["projection"]["market_projections"].as_array().unwrap().is_empty());
     let mut pending=received.clone();
     let mut attempts=Vec::new();
     while !pending.is_empty() {
@@ -932,6 +951,7 @@ async fn gpu_actual_fok_mature_day_preserves_noe_batch_and_continuous_ledger() {
         "visibility":record.visibility()})).collect::<Vec<_>>();
     let source=serde_json::json!({"source_contract":"original_outer_FOK_SIM_NOE_V4_Ledger",
         "before":before,"account_before":account_before,"after":gpu_ledger_reservation_checkpoint(&ledger,"after_all"),
+        "rebate_first_before":rebate_first_before,"rebate_first_after":rebate_first_after,
         "records":records,"attempts":attempts,"next_private":next_private,"next_batch":next_batch,
         "processing_at":processing,"confirmed_at":final_at,"closed_at":closed_at,
         "finality_path":policy.normal_path(),"session_seed":state.session.as_ref().unwrap().session_seed.0,
@@ -1197,7 +1217,7 @@ fn gpu_ledger_reservation_checkpoint(ledger:&ledger::LedgerWriterV1,stage:&str) 
             "open":life.open, "last_ledger_entry_seq":life.last_ledger_entry_seq}))
     }).collect::<Vec<_>>();
     serde_json::json!({"stage":stage,"projection":ledger.projection_v2().unwrap(),
-        "cash":read.cash(),"request":request,"markets":read.market_totals().collect::<Vec<_>>(),"trades":trades,"rebate_days":rebate_days,"order_lifecycle":order_lifecycle,"order_funds":order_funds})
+        "cash":read.cash(),"other_cash":read.residual_cash().other_cash_pusd,"request":request,"markets":read.market_totals().collect::<Vec<_>>(),"trades":trades,"rebate_days":rebate_days,"order_lifecycle":order_lifecycle,"order_funds":order_funds})
 }
 
 #[test]

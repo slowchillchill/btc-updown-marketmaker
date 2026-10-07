@@ -30,6 +30,10 @@ run_test() {
     tail -4 "$artifact_dir/$log"
 }
 case "$case_name" in
+    fok-day)
+        export B_GPU_FOK_DAY_VALIDATOR="$repo_root/sim-system/gpu/validate_fok_day.py"
+        run_test gpu_actual_fok_mature_day_preserves_noe_batch_and_continuous_ledger fok-day.log
+        ;;
     pair-redemption)
         export B_GPU_PAIR_REDEMPTION_VALIDATOR="$repo_root/sim-system/gpu/validate_pair_redemption.py"
         command=(cargo test -p shared-run --test economic_settlement --locked --offline

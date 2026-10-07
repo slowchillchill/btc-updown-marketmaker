@@ -17,7 +17,11 @@ pub fn bind(execution: &mut PublicSimExecutionV1, ledger: &mut LedgerWriterV1, r
 
 fn snapshot(ledger: &LedgerWriterV1) -> serde_json::Value {
     let read = ledger.economic_read().unwrap();
+    let account=AccountEconomicsReadV1::from_ledger(&read);
     serde_json::json!({"projection":read.base(),"cash":read.cash(),
+        "portfolio_reference":{"worst_case_maker_nav_pusd":account.worst_case_maker_nav_pusd,
+            "other_account_residual_pusd":account.other_account_residual_pusd,
+            "other_receivable_pusd":account.other_receivable_pusd,"other_liability_pusd":account.other_liability_pusd},
         "directional_cash":read.residual_cash().directional_cash_pusd,
         "other_cash":read.residual_cash().other_cash_pusd,
         "markets":read.market_totals().collect::<Vec<_>>(),

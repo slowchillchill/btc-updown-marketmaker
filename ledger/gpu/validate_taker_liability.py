@@ -34,6 +34,11 @@ from public_ledger import PublicLedgerState
 from input_account import frozen_account_inputs
 from liability_read import read_economic_liabilities
 from validate_append import _device_scan
+from resolution import MarketResolutions,ResolutionSources
+from market_economics import UnresolvedMarkets
+from settlement_accounting import SettlementCosts,ExternalCashIdentities
+from types import SimpleNamespace
+from validate_portfolio_economics import check_complete as check_portfolio
 
 spec=importlib.util.spec_from_file_location('taker_liability_platform',ROOT/'ledger/gpu/platform.py')
 platform_module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=platform_module
@@ -91,9 +96,16 @@ def validate(source):
         projection.asset_roots,integers([0])))
     pools=run(lambda:SuccessPools.open(projection.asset_roots,torch.zeros(2,dtype=torch.int64,device='cuda'),
         torch.arange(2,device='cuda'),torch.tensor([1,0],device='cuda'),1))
+    markets=run(lambda:UnresolvedMarkets.open(pools,zero,known=True))
+    resolutions=run(lambda:MarketResolutions.open(pools,markets,ResolutionSources.bind(
+        SimpleNamespace(terminals=[],canonical_ids=[]),[asset['token_id'] for asset in assets])))
     ledger=run(lambda:AdmissionLifecycle.open(platform,bank,columns,integers([source['opening_entry']]),
         integers([0]),pools,position_costs=PositionCosts.empty(1,2,'cuda'),
         accepted_principal=AcceptedPrincipal.open(1,zero,known=True),
+        unresolved_markets=markets,resolutions=resolutions,
+        settlement_costs=SettlementCosts.empty(1,2,'cuda',known=True),
+        external_cash=ExternalCashIdentities.empty(1,2,'cuda',known=True),
+        other_cash=rational([source['opening_other_cash_pusd']]),
         projected_markets=ProjectedMarkets.open(zero,yes[:,None],yes)))
     first=batches[0]
     pending=run(lambda:PendingRecords.from_columns(first.emitted,first.received_at,first.private_sequences,
@@ -118,7 +130,10 @@ def validate(source):
         torch.testing.assert_close(target.cpu(),torch.tensor(encoded),rtol=1e-6,atol=1e-7)
         assert other.cpu().tolist()==([0.,0.,0.] if old_scope else [0.,1.,1.])
         assert packed.provided[0,293:296].all().cpu().item() and packed.provided[0,308:311].all().cpu().item()
-        assert not packed.provided[0,296:308].any().cpu().item()
+        assert packed.provided[0,296:299].all().cpu().item()
+        assert packed.slow[0,296:299].cpu().tolist()==([0.,0.,0.] if old_scope else [0.,1.,1.])
+        assert packed.slow[0,311:314].cpu().tolist()==[0.,1.,1.]
+        assert not packed.provided[0,299:308].any().cpu().item()
         return packed
     scans=[];old=None
     for index,(batch,row) in enumerate(zip(batches,source['records'])):
@@ -145,6 +160,9 @@ def validate(source):
         assert state.ledger.has_available.cpu().tolist()==[True]
         frozen=run(lambda:state.freeze_account(intents,gate.public_visible_at))
         check_frozen(frozen,expected)
+        reference=dict(row['checkpoint'],markets=[row['checkpoint']['market']])
+        portfolio_reference=check_portfolio(state.ledger,reference)
+        assert portfolio_reference['worst_case_maker_nav_pusd']==Fraction(100)-expected
         duplicate,used=run(lambda:state.ledger.apply_record(torch.full_like(zero,index),yes,gate.closed_receive_at,yes))
         assert not used.any().cpu().item()
         again=run(lambda:read_economic_liabilities(duplicate,zero[:,None],yes[:,None],prefix_known=yes))
@@ -153,6 +171,8 @@ def validate(source):
             old=frozen;old_expected=expected
         else:
             check_frozen(old,old_expected)
+            check_portfolio(old.ledger,old_portfolio_checkpoint)
+        if index==0:old_portfolio_checkpoint=reference
     check_frozen(frozen,expected,torch.zeros_like(yes))
     # 原合法market已结束且无新current；指定真实已投影condition为old子集，
     # 检查旧布局非零和current NA，不借本夹具宣称完整Root old人口选择。

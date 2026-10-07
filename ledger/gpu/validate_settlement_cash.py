@@ -41,6 +41,7 @@ from ledger_drain import _owned
 from input_account import frozen_account_inputs
 from validate_append import _device_scan
 from validate_native_market_economics import check as check_economics
+from validate_portfolio_economics import check as check_portfolio
 
 spec=importlib.util.spec_from_file_location('settlement_cash_platform',ROOT/'ledger/gpu/platform.py')
 platform_module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=platform_module
@@ -323,10 +324,12 @@ def main(source):
         scopes=tensor([[[0],[-1]]]);present=scopes>=0;applicable=tensor([[True,True]],torch.bool)
         cutoff=max(visible,after['projection'].get('available_through_utc_ms') or visible)
         frozen=run(lambda:state.freeze_account(intents,tensor([cutoff])))
-        economic_args=dict(economic_prefix_known=yes,success_prefix_known=yes,settlement_prefix_known=yes) if kind=='Cost' else {}
+        economic_args=dict(economic_prefix_known=yes,success_prefix_known=yes,settlement_prefix_known=yes)
         packed=run(lambda:frozen_account_inputs(frozen,tensor([[[],[]]],torch.bool),applicable,applicable,
             scope_conditions=scopes,scope_present=present,**economic_args))
         if kind=='Cost':check_economics(packed,m)
+        # 此实际冷切片未保留开户起全部Economic，不能宣称WCM已知；other由真实before连续推进。
+        check_portfolio(packed,after['portfolio_reference'],wcm_known=False)
         if kind=='Cost' and block_index==0:
             # 同一原已成熟市场的old消费布局；不声称重新选择了真实Root。
             old_scopes=tensor([[[-1],[0]]]);old_present=old_scopes>=0

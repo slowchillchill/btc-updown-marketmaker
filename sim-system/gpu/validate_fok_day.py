@@ -131,6 +131,42 @@ def main():
             rational([fact['quote_amount_pusd']]),torch.ones_like(zero),enabled,enabled,enabled)
         return replace(admission,trades=trades,trade_success=success)
     admission=Numbers.run_exact_batch(prepare_ledger)
+    # 同一原FOK的实际Contribution/Day在Trade/Economic之前独立公开，返佣不等待它们。
+    root=Path(__file__).resolve().parents[2]
+    sys.path[:0]=[str(root/p) for p in ('shared-run/gpu','data-pipeline/gpu','model-train/native-inputs/gpu')]
+    from projected_markets import ProjectedMarkets
+    from position_cost import PositionCosts
+    from settlement_accounting import SettlementCosts,ExternalCashIdentities
+    from validate_portfolio_economics import check_complete
+    opening=source['rebate_first_before'];opening_platform=opening['projection']['platform_confirmed_projection']
+    assert opening['projection']['platform_source_prefix']==0 and not opening['projection']['market_projections']
+    def prepare_rebate_first():
+        balances=module.PlatformBalances.open(rational([opening_platform[name] for name in names]),
+            rational(['0','0']),torch.tensor([0,0],device='cuda'),integers([0]))
+        pools=SuccessPools.open(torch.tensor([0,0],device='cuda'),torch.tensor([0,0],device='cuda'),
+            torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1)
+        population=ProjectedMarkets.open(torch.empty(0,dtype=torch.int64,device='cuda'),
+            torch.empty((1,0),dtype=torch.bool,device='cuda'),enabled)
+        return AdmissionLifecycle.open(balances,noe.normalizer.bank,admission.columns,
+            integers([opening['projection']['ledger_entry_seq']]),integers([opening['projection']['ledger_local_prefix']]),
+            pools,rebate_days=RebateDays.empty(torch.tensor([[0]],device='cuda'),1),projected_markets=population,
+            position_costs=PositionCosts.empty(1,7,'cuda'),settlement_costs=SettlementCosts.empty(1,1,'cuda',known=True),
+            external_cash=ExternalCashIdentities.empty(1,1,'cuda',known=True),other_cash=rational([opening['other_cash']]))
+    rebate_first=Numbers.run_exact_batch(prepare_rebate_first)
+    for schema in (9,12):
+        column=next(i for i,live in enumerate(rebate_first.lifecycle.emitted.cpu().tolist()[0])
+            if live and rebate_first.lifecycle.schemas[0,i].cpu().item()==schema)
+        rebate_first,used=Numbers.run_exact_batch(lambda:rebate_first.apply_record(torch.tensor([column],device='cuda'),
+            enabled,closed,enabled))
+        assert used.cpu().tolist()==[True]
+    assert values(rebate_first.platform.platform_source_prefix)==[0]
+    assert not rebate_first.projected_markets.present.any().cpu().item()
+    assert not rebate_first.trade_success.has_fact.any().cpu().item()
+    assert values(rebate_first.current_entry_sequence)==[source['rebate_first_after']['projection']['ledger_entry_seq']]
+    reference=check_complete(rebate_first,source['rebate_first_after'])
+    assert reference['worst_case_maker_nav_pusd']==Fraction('2001.4')
+    assert reference['worst_case_maker_nav_pusd']>sum((Fraction(opening['cash'][name]) for name in
+        ('maker_available_pusd','maker_reserved_pusd')),Fraction(0))
     cache=ClosedAdmission.empty(admission.columns)
     cache=Numbers.run_exact_batch(lambda:cache.accept(admission.columns,delivered))
     admission,cache=Numbers.run_exact_batch(lambda:cache.drain(admission,torch.ones_like(cache.received)))

@@ -1044,8 +1044,27 @@ old人口不完整时保留Unknown，没有current时为NA。
 
 有限费用切片从真实before净paired/orphan与原成功池安装已兑付量，原Request也是before输入；
 after仅作独立CPU预期。原双腿兑付另验证实际Pending→Redeemed、应收正值→零、
-同设备图重放及旧冻结稳定。该批不提供账户WCM、Conservative NAV、Directional residual，
+同设备图重放及旧冻结稳定。该市场经济批不提供账户WCM、Conservative NAV、Directional residual，
 也不证明完整连续宿主或活动根恢复。
+
+### 全账户WCM与other读面
+
+`shared-run/gpu/portfolio_economics.py` 按完整 `ProjectedMarkets` 人口读取全账户经济值，
+不使用模型current/old子集。两类确认未付返佣另覆盖真实RebateDays完整condition归属人口，
+Contribution/Day可早于Trade/Economic，不要求这些condition已进入窄ProjectedMarkets。
+WCM为Maker现金加全部市场的保证价值、配对应收及两类确认未付返佣，
+再减实际未付taker费用和Maker归属未付结算费。所有金额先精确求和；Native只作末端投影，
+写317:320与323:332。other residual来自原ExternalCash连续现金归约；other receivable/liability
+沿原AccountEconomicsRead明确为零，不据此填补其他未知输入。
+
+WCM要求完整经济市场人口以及实际经济、成功、结算、返佣和自开户负债历史。
+缺Cost目录或Cost历史、缺完整人口及缺负债历史均保持Unknown，即使模型没有current或old市场。
+中途冷余额不能证明负债历史为零。完整开户NOE工程场景与有限公共V2非零taker场景用于数值对照，
+包括真实冻结消费、没有模型市场时仍减全账户费用、旧冻结及同设备捕获；非零V2不称自然SIM producer。
+既有费用切片的other值对照原AccountEconomicsRead；该切片未保留全部经济历史，仍不提供已知WCM。
+原FOK成熟日的实际Contribution/Day先到代表另核平台经济前缀0、ProjectedMarkets空时仍为已知现金加非零返佣；
+该代表为合法独立NOE归约次序，不称自然receive调度。
+Conservative NAV与Directional residual尚须全市场同前缀估值报价；本批不交付完整宿主或活动恢复。
 
 ### 累计接纳本金
 

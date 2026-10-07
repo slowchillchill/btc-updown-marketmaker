@@ -29,6 +29,18 @@ def frozen_account_inputs(account, scope_members, scope_known, scope_applicable,
     slow = write_order_scope_fields(slow, orders, scope_applicable)
     provided[:, 382:412] = True
     fault = account.fault | orders.fault
+    if economic_prefix_known is not None:
+        from input_portfolio import portfolio_inputs,write_portfolio_fields
+        absent=torch.zeros((roots,),dtype=torch.bool,device=device)
+        portfolio=portfolio_inputs(account.ledger,economic_prefix_known=economic_prefix_known,
+            success_prefix_known=absent if success_prefix_known is None else success_prefix_known,
+            settlement_prefix_known=absent if settlement_prefix_known is None else settlement_prefix_known,
+            rebate_prefix_known=absent if rebate_prefix_known is None else rebate_prefix_known,
+            economic_liability_prefix_known=absent if economic_liability_prefix_known is None else economic_liability_prefix_known)
+        slow=write_portfolio_fields(slow,portfolio)
+        provided[:,317:320]=True
+        provided[:,323:332]=True
+        fault|=portfolio.fault
     if scope_conditions is not None:
         from input_reservations import reservation_inputs, write_reservation_fields
         reservations = reservation_inputs(account.ledger.reservations, scope_conditions, scope_present, scope_applicable)

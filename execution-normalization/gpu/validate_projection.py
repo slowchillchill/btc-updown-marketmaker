@@ -272,6 +272,13 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         torch.tensor([0,0],device='cuda'),torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1))
     from buy_cost import limit_buy_cost
     from projected_markets import ProjectedMarkets
+    from resolution import MarketResolutions,ResolutionSources
+    from settlement_accounting import SettlementCosts,ExternalCashIdentities
+    from types import SimpleNamespace
+    # 此真实开户场景没有Terminal/Cost/Cash材料，完整源NOE从经济seq0保留。
+    opening_markets=Numbers.run_exact_batch(lambda:open_markets(pools,source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id']))
+    opening_resolutions=Numbers.run_exact_batch(lambda:MarketResolutions.open(pools,opening_markets,
+        ResolutionSources.bind(SimpleNamespace(terminals=[],canonical_ids=[]),['1','2'])))
     assert not source['reservation_checkpoints'][0]['projection']['market_projections']
     initial_population=ProjectedMarkets.open(torch.empty(0,dtype=torch.int64,device='cuda'),
         torch.empty((1,0),dtype=torch.bool,device='cuda'),torch.ones(1,dtype=torch.bool,device='cuda'))
@@ -284,6 +291,9 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         unresolved_markets=open_markets(pools,source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id']),
         projected_markets=initial_population,lifecycle_capacity=capacity,
         accepted_principal=open_principal(pools,source['reservation_checkpoints'][0]),
+        resolutions=opening_resolutions,settlement_costs=SettlementCosts.empty(1,capacity,'cuda',known=True),
+        external_cash=ExternalCashIdentities.empty(1,capacity,'cuda',known=True),
+        other_cash=rational([source['reservation_checkpoints'][0]['other_cash']]),
         market_balance_origin=market_origin(source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id'])))
     admission=open_initial()
     cost=Numbers.run_exact_batch(lambda:limit_buy_cost(integers([500]),rational(['0.3']),rational([source['fee_rate']]),
@@ -490,6 +500,9 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     funds=Numbers.run_exact_batch(lambda:admission.funds())
     assert admission.projected_markets.present.cpu().tolist()==[[True]], 'Converted和归零不移除市场人口'
     expected_cash=source['reservation_checkpoints'][-1]['cash']
+    sys.path[:0]=[str(Path(__file__).resolve().parents[2]/'shared-run/gpu')]
+    from validate_portfolio_economics import check_complete
+    check_complete(admission,source['reservation_checkpoints'][-1])
     for actual,name in [(funds.actual_available,'actual_available_pusd'),(funds.maker_available,'maker_available_pusd'),
                         (funds.actual_reserved,'actual_reserved_pusd'),(funds.maker_reserved,'maker_reserved_pusd')]:
         assert [Fraction(n,d) for n,d in zip(values(actual.numerator),values(actual.denominator))]==[Fraction(expected_cash[name])]

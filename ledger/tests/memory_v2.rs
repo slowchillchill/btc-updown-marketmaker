@@ -172,6 +172,7 @@ fn gpu_public_v2_signed_taker_liability_matches_original_ledger() {
         writer.apply_noe_memory_v1(&record).unwrap();
     }
     let opening_entry = writer.projection_v2().unwrap().ledger_entry_seq;
+    let opening_other_cash=writer.economic_read().unwrap().residual_cash().other_cash_pusd.clone();
     for (seq, liability) in [(1, "0.125"), (2, "-0.025")] {
         source.accept(Kind::EconomicV2 { evidence: SourceNeutralEconomicEvidenceV2 {
             economic_key: SourceNeutralEconomicKeyV1::AccountTransition { account_transition_seq: seq },
@@ -199,7 +200,7 @@ fn gpu_public_v2_signed_taker_liability_matches_original_ledger() {
         assert_eq!(market.unpaid_taker_fee_pusd.0.parse::<rust_decimal::Decimal>().unwrap(),
             expected.parse::<rust_decimal::Decimal>().unwrap());
         let checkpoint = serde_json::json!({"projection":writer.projection_v2().unwrap(),
-            "market":market, "cash":read.cash()});
+            "market":market, "cash":read.cash(),"other_cash":read.residual_cash().other_cash_pusd});
         // 重复原领取位置走CPU正式AlreadyApplied；账户序及金额不改变。
         let before = writer.projection_v2().unwrap();
         assert!(matches!(writer.apply_noe_memory_v1(record).unwrap(),
@@ -210,7 +211,8 @@ fn gpu_public_v2_signed_taker_liability_matches_original_ledger() {
     }
     let artifact = std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
     let value = serde_json::json!({"source_contract":"finite_public_V2_NOE_not_natural_SIM",
-        "initial":initial,"opening_entry":opening_entry,"opening_available_pusd":"100", "records":exported});
+        "initial":initial,"opening_entry":opening_entry,"opening_available_pusd":"100",
+        "opening_other_cash_pusd":opening_other_cash,"records":exported});
     std::fs::write(artifact.join("original-public-v2-taker-liability.json"), serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     let status = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
         .arg(std::env::var("B_GPU_TAKER_LIABILITY_VALIDATOR").unwrap())
