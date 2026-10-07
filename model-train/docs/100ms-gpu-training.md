@@ -940,3 +940,10 @@ NOE消费者读取这些实际效果，不能用最后一轮活动成交详情�
 七消息Maker桶核对最终全状态及真实输出；它不代表七次WHILE迭代或跨市场reference支持。
 验证阶段保存在现证据目录的`runtime-progress.jsonl`，区分原参考、捕获和实际launch；
 物理源步骤数不冒充已应用业务步骤人口。
+整页消费者将段、fill、Maker fill和Maker day需求分别归约到持久设备列，包含未发射任何反馈的
+资源退出轮；冷协调不从`emitted=false`猜测是哪一个池不足。零迭代入口清空全部需求，旧反馈页
+保持不变。阶段日志间隔由`B_GPU_PROGRESS_INTERVAL_SECONDS`控制，默认10秒，0关闭；
+捕获日志中的processed/total只计冷物理源操作，不据此宣称实际业务完成比例。
+本例实际设备操作人口为14；9条PM对应23个排序索引项，后者不能直接当作14列operation人口。
+当前逐物理源operation展开整页捕获仍是工程切片；后续复用现tag/快照offset/精确字典列，
+以设备next_step gather及按类型固定图消费，不为每个大数据块重新展开全部步骤。

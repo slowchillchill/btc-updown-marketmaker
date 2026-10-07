@@ -28,14 +28,18 @@ from validate_base_execution import setup, integers, rational, values, units, as
 
 
 _progress_started=time.perf_counter()
+_progress_last={}
 
 
 def progress(stage, **population):
     """当前有限入口的阶段证据；不回读业务条件或记录逐微算子日志。"""
     directory=os.environ.get('B_GPU_ORDER_ARTIFACT_DIR')
-    if directory:
+    interval=float(os.environ.get('B_GPU_PROGRESS_INTERVAL_SECONDS','10'))
+    elapsed=time.perf_counter()-_progress_started
+    if directory and interval>0 and (stage not in _progress_last or elapsed-_progress_last[stage]>=interval):
+        _progress_last[stage]=elapsed
         with (Path(directory)/'runtime-progress.jsonl').open('a') as target:
-            target.write(json.dumps({'stage':stage,'elapsed_seconds':time.perf_counter()-_progress_started,
+            target.write(json.dumps({'stage':stage,'elapsed_seconds':elapsed,
                                      **population})+'\n')
 
 
@@ -536,17 +540,23 @@ def check_captured_hidden_bucket(runtime,source,tensor,fee_rate,fee_exponent,reb
     reference=reference.advance_role_time(choice,end).begin_hidden_bucket(choice)
     first=len(block.buckets[0]['steps'])
     frames=[]
+    before_positive=None
+    needs={}
     checkpoint_index=0
     checkpoints=[value for value in source['checkpoints'] if value['stage']=='hidden_step']
     saw_pending=False
     for index in range(first,len(block.operations)):
         choice=reference.choose(None,None,horizon,enabled)
         if block.operations[index]['tag']=='LevelChange' and checkpoint_index==len(checkpoints)-1:
+            before_positive=reference
             reference,effect=check_captured_hidden_step(reference,index,tensor,fee_rate,fee_exponent,rebate)
         else:
             reference,effect=reference.apply_hidden_step(choice,index,tensor([0,0]),
                 tensor([[0]*reference.hidden.queues.capacity]),fee_rate,fee_exponent,rebate)
         if block.operations[index]['tag']=='LevelChange':
+            for name in ('required_segments','required_records','required_maker_fills','required_maker_days'):
+                value=getattr(effect,name)
+                needs[name]=value if name not in needs else torch.maximum(needs[name],value)
             checkpoint=checkpoints[checkpoint_index]
             event=source['events'][checkpoint['ordinal']]['payload']['event']
             transition=block.operations[index]['fields']['transition']
@@ -571,7 +581,8 @@ def check_captured_hidden_bucket(runtime,source,tensor,fee_rate,fee_exponent,reb
     progress('capture_complete_hidden_page',physical_source_steps=len(block.operations))
     loop=CapturedHiddenBuckets(storage,horizon,enabled,tensor([0,0]),
         tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,fee_exponent,rebate,end,
-        word_capacity=4,feedback_capacity=1)
+        word_capacity=4,feedback_capacity=1,capture_progress=lambda n,total:progress(
+            'capture_hidden_source_types',processed_physical_steps=n,total_physical_steps=total))
     loop.replay()
     progress('native_complete_bucket_launched')
     torch.cuda.synchronize()
@@ -579,6 +590,8 @@ def check_captured_hidden_bucket(runtime,source,tensor,fee_rate,fee_exponent,reb
     assert loop.page.count.cpu().item()==1
     compare(storage.runtime,reference,'complete_original_Maker_bucket')
     compare(loop.page.read(0),frames[0],'whole_bucket_actual_positive_quote')
+    for name,expected in needs.items():
+        assert torch.equal(getattr(loop,name),expected),(name,getattr(loop,name).cpu().tolist(),expected.cpu().tolist())
     assert values(storage.runtime.hidden_frontier.index_position)==[block.buckets[-1]['bucket']['index_end']]
     assert storage.runtime.hidden_frontier.scheduled()[1].cpu().tolist()==[True]
     assert_checkpoint(checkpoints[-1]['state'],storage.runtime.orders.read(slot).quantity,storage.runtime.account)
@@ -588,7 +601,39 @@ def check_captured_hidden_bucket(runtime,source,tensor,fee_rate,fee_exponent,reb
     compare(storage.runtime,frozen,'closed_bucket_no_reapply')
     assert loop.resources_fit.cpu().item() and loop.required_words.cpu().item()==0
     assert loop.page.count.cpu().item()==1 and not loop.closed.cpu().item()
+    for name in needs:
+        assert not getattr(loop,name).any().cpu().item(),name
     compare(loop.page.read(0),frames[0],'whole_bucket_old_feedback')
+    # 原fill池1不足以创建fill2：新整页对象必须给出具体池需求，并保已成功步骤。
+    # runtime在冷容量准备前的原填满池人口由before_positive保留；目录仍为1槽。
+    assert before_positive.fills.capacity==1
+    blocked_runtime=replace(runtime,fills=before_positive.fills)
+    blocked_storage=BaseRuntimeStorage(blocked_runtime,blocked_runtime)
+    progress('capture_hidden_page_actual_fill_shortage')
+    blocked=CapturedHiddenBuckets(blocked_storage,horizon,enabled,tensor([0,0]),
+        tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,fee_exponent,rebate,end,
+        word_capacity=4,feedback_capacity=1,capture_progress=lambda n,total:progress(
+            'capture_shortage_source_types',processed_physical_steps=n,total_physical_steps=total))
+    blocked.replay()
+    torch.cuda.synchronize()
+    assert not blocked.resources_fit.cpu().item() and blocked.required_records.cpu().tolist()==[2]
+    assert blocked.page.count.cpu().item()==0 and not blocked.closed.cpu().item()
+    compare(blocked_storage.runtime,before_positive,'full_bucket_shortage_preserves_accepted_prefix')
+    # 按设备需求只增长fill目录，其余状态来自该对象已提交前缀。
+    expanded=replace(blocked_storage.snapshot(),fills=blocked_storage.runtime.fills.resized(
+        int(blocked.required_records.max().cpu().item())))
+    retry_storage=BaseRuntimeStorage(expanded,reference)
+    progress('capture_hidden_page_after_required_growth')
+    retry=CapturedHiddenBuckets(retry_storage,horizon,enabled,tensor([0,0]),
+        tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,fee_exponent,rebate,end,
+        word_capacity=4,feedback_capacity=1,capture_progress=lambda n,total:progress(
+            'capture_retry_source_types',processed_physical_steps=n,total_physical_steps=total))
+    retry.replay()
+    torch.cuda.synchronize()
+    assert retry.resources_fit.cpu().item() and retry.closed.cpu().item() and retry.page.count.cpu().item()==1
+    compare(retry_storage.runtime,reference,'required_growth_completes_same_bucket')
+    compare(retry.page.read(0),frames[0],'growth_retry_actual_feedback')
+    progress('hidden_page_pool_demand_and_retry_checked',required_fill_records=2)
     progress('complete_original_Maker_bucket_checked',original_messages=len(source['events']))
     return frozen,loop.page
 

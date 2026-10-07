@@ -212,13 +212,18 @@ class CapturedHiddenBuckets:
     不伪造reference完成。其它阶段或资源退出交还宿主，不代替完整driver。
     """
     def __init__(self, storage, horizon, enabled, conditions, selected_paths,
-                 fee_rate, fee_exponent, taker_rate, market_end, *, word_capacity, feedback_capacity):
+                 fee_rate, fee_exponent, taker_rate, market_end, *, word_capacity, feedback_capacity,
+                 capture_progress=None):
         self.storage = storage
         self._inputs = (horizon, enabled, conditions, selected_paths, fee_rate, taker_rate, market_end)
         self.ready = torch.zeros((), device=horizon.device, dtype=torch.bool)
         self.resources_fit = torch.ones((), device=horizon.device, dtype=torch.bool)
         self.required_words = torch.zeros((), device=horizon.device, dtype=torch.int64)
         self.required_feedback = torch.zeros((), device=horizon.device, dtype=torch.int64)
+        self.required_segments = torch.zeros(storage.runtime.hidden.queues.rows,device=horizon.device,dtype=torch.int64)
+        self.required_records = torch.zeros_like(enabled,dtype=torch.int64)
+        self.required_maker_fills = torch.zeros_like(enabled,dtype=torch.int64)
+        self.required_maker_days = torch.zeros_like(enabled,dtype=torch.int64)
         self.closed = torch.zeros_like(enabled)
         source = storage.runtime.hidden_frontier.columns.source
         level_indices = [index for index, operation in enumerate(source.operations) if operation['tag']=='LevelChange']
@@ -250,6 +255,9 @@ class CapturedHiddenBuckets:
             self.resources_fit.logical_and_(opening.fits)
             storage.commit(opening.value,self.resources_fit)
             for index, operation in enumerate(source.operations):
+                if capture_progress is not None:
+                    # 冷捕获物理人口，不读设备游标或已应用业务人口。
+                    capture_progress(index+1,len(source.operations))
                 same_bucket = storage.runtime.hidden_frontier.next_bucket == before_bucket
                 permit = self.resources_fit & same_bucket
                 value = Numbers.device_exact_batch(lambda:candidate(index,permit),
@@ -258,6 +266,9 @@ class CapturedHiddenBuckets:
                 self.required_words.copy_(torch.maximum(self.required_words,value.required_words))
                 fit = self.resources_fit & value.fits
                 if operation['tag']=='LevelChange':
+                    for name in ('required_segments','required_records','required_maker_fills','required_maker_days'):
+                        target=getattr(self,name)
+                        target.copy_(torch.maximum(target,getattr(effect,name)))
                     population = torch.stack([frame.event.emitted for frame in effect.fills]).any()
                     need = self.page.count+population.to(torch.int64)
                     self.required_feedback.copy_(torch.maximum(self.required_feedback,need))
@@ -288,6 +299,10 @@ class CapturedHiddenBuckets:
         with torch.cuda.graph(self.entry):
             self.required_words.zero_()
             self.required_feedback.zero_()
+            self.required_segments.zero_()
+            self.required_records.zero_()
+            self.required_maker_fills.zero_()
+            self.required_maker_days.zero_()
             self.resources_fit.fill_(True)
             self.closed.zero_()
             self.ready.copy_(ready())
