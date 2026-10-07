@@ -481,9 +481,17 @@ struct BinanceDepthBookState<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
 struct BinanceDepthEpochState<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     last_admission_sequence: Option<u64>,
     book: Option<BinanceDepthBookState<E>>,
-    awaiting_after_confirmed_gap: bool,
+    awaiting_after_continuity_reset: bool,
+    latest_snapshot_continuity: Option<BinanceDepthSnapshotContinuity>,
     epoch_switch_prior_book: Option<BinanceDepthBookState<E>>,
     epoch_switch_missing_emitted: bool,
+}
+
+#[derive(Clone, Debug)]
+struct BinanceDepthSnapshotContinuity {
+    received_utc_day: i64,
+    depth_ingress_sequence: u64,
+    connection_generation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -630,12 +638,18 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                 && same_reference_levels(&current.asks, &asks)
         });
         let resync =
-            if state.awaiting_after_confirmed_gap || state.epoch_switch_prior_book.is_some() {
+            if state.awaiting_after_continuity_reset || state.epoch_switch_prior_book.is_some() {
                 ResyncQuality::ResyncBoundary
             } else {
                 ResyncQuality::NotRequired
             };
 
+        // 同值快照也是真实连续性前态；不改变旧盘口的输出/去重证据。
+        state.latest_snapshot_continuity = Some(BinanceDepthSnapshotContinuity {
+            received_utc_day: row.timestamp_received.div_euclid(86_400_000),
+            depth_ingress_sequence: row.depth_ingress_sequence,
+            connection_generation: row.connection_generation,
+        });
         let scope = if quantity_only {
             String::new()
         } else {
@@ -712,6 +726,9 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
             row.collector_admission_sequence,
             "binance_depth_update.collector_admission_sequence",
         )?;
+        // 复用采集器 Ready 直收分支的日界；快照前已到的 pending 不重置。
+        // 判定独立于 stitch 声明，不用冲突/空坐标迎合输入。
+        let day_reset_book = state.invalidate_received_day(row);
         let expected = expected_depth_verdict(state.book.as_ref(), row)?;
         if expected != row.stitch_verdict {
             return Err(invalid(
@@ -730,6 +747,27 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
             BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable => {
                 if quantity_only {
                     return Ok(None);
+                }
+                if let Some(previous_book) = day_reset_book.as_ref() {
+                    let event = finalize_binance_depth_event(
+                        &self.canonical_rule_version,
+                        previous_book,
+                        MarketDataQuality::Missing,
+                        ResyncQuality::Required,
+                        vec![evidence.clone()],
+                    )?;
+                    let report = produced_report::<E>(
+                        &self.canonical_rule_version,
+                        scope,
+                        ReductionOperationKindV1::Reject,
+                        "BINANCE_DEPTH_UTC_DAY_SNAPSHOT_REQUIRED",
+                        None,
+                        event.event_id.clone(),
+                    )?;
+                    return Ok(Some(ReferenceReductionOutcomeV1 {
+                        event: Some(event),
+                        report,
+                    }));
                 }
                 if !state.epoch_switch_missing_emitted
                     && let Some(previous_book) = state.epoch_switch_prior_book.as_ref()
@@ -887,14 +925,14 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                 "a completed Binance depth epoch cannot resume after another epoch began",
             ));
         }
-        let (prior_book, prior_awaiting_after_confirmed_gap, prior_epoch_switch_missing_emitted) =
+        let (prior_book, prior_awaiting_after_continuity_reset, prior_epoch_switch_missing_emitted) =
             self.current_epoch
                 .as_ref()
                 .and_then(|current| self.epochs.remove(current))
                 .map(|state| {
                     (
                         state.book.or(state.epoch_switch_prior_book),
-                        state.awaiting_after_confirmed_gap,
+                        state.awaiting_after_continuity_reset,
                         state.epoch_switch_missing_emitted,
                     )
                 })
@@ -902,7 +940,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         self.current_epoch = Some(epoch.to_owned());
         self.seen_epochs.insert(epoch.to_owned());
         let state = self.epochs.entry(epoch.to_owned()).or_default();
-        state.awaiting_after_confirmed_gap = prior_awaiting_after_confirmed_gap;
+        state.awaiting_after_continuity_reset = prior_awaiting_after_continuity_reset;
         state.epoch_switch_prior_book = prior_book;
         state.epoch_switch_missing_emitted = prior_epoch_switch_missing_emitted;
         Ok(())
@@ -3419,15 +3457,31 @@ fn event_time_from_prepared_evidence<E: crate::pm_reduction::PmEvidenceV1>(
 }
 
 impl<E: ReductionEvidenceV1> BinanceDepthEpochState<E> {
+    fn invalidate_received_day(
+        &mut self,
+        row: &BinanceDepthUpdateRow,
+    ) -> Option<BinanceDepthBookState<E>> {
+        let snapshot = self.latest_snapshot_continuity.as_ref()?;
+        if row.connection_generation != snapshot.connection_generation
+            || row.depth_ingress_sequence <= snapshot.depth_ingress_sequence
+            || row.timestamp_received.div_euclid(86_400_000) == snapshot.received_utc_day
+        {
+            return None;
+        }
+        let book = self.book.take()?;
+        self.awaiting_after_continuity_reset = true;
+        Some(book)
+    }
+
     fn install_book(&mut self, book: BinanceDepthBookState<E>) {
         self.book = Some(book);
-        self.awaiting_after_confirmed_gap = false;
+        self.awaiting_after_continuity_reset = false;
         self.epoch_switch_prior_book = None;
         self.epoch_switch_missing_emitted = false;
     }
     fn confirm_gap(&mut self) {
         self.book = None;
-        self.awaiting_after_confirmed_gap = true;
+        self.awaiting_after_continuity_reset = true;
     }
 }
 
@@ -3436,7 +3490,8 @@ impl<E: ReductionEvidenceV1> Default for BinanceDepthEpochState<E> {
         Self {
             last_admission_sequence: None,
             book: None,
-            awaiting_after_confirmed_gap: false,
+            awaiting_after_continuity_reset: false,
+            latest_snapshot_continuity: None,
             epoch_switch_prior_book: None,
             epoch_switch_missing_emitted: false,
         }

@@ -1591,3 +1591,194 @@ fn quantity_sampling_preserves_valid_sum_beyond_decimal_capacity() {
     assert_eq!(bid.numerator, "158456325028528675187087900670");
     assert_eq!(bid.denominator, "1");
 }
+
+#[test]
+fn received_day_reset_and_snapshot_provenance_preserve_pending_and_strict_stitching() {
+    use data_pipeline_core::{source_evidence_from_typed_raw, typed_raw::TypedRawRow};
+    const DAY: i64 = 86_400_000;
+    let epoch = "day-continuity";
+    let mut full = BinanceDepthReducer::new(RULE_VERSION).unwrap();
+    let mut thin = BinanceDepthReducer::new(RULE_VERSION).unwrap();
+    let mut initial = snapshot(epoch, 100, 1);
+    initial.timestamp_received = DAY - 200;
+    initial.collector_admission_time_utc_ms = DAY - 190;
+    initial.depth_ingress_sequence = 10;
+    let mut applied = update(
+        epoch,
+        101,
+        101,
+        2,
+        Some(100),
+        None,
+        BinanceDepthStitchVerdict::Applied,
+        vec![level("64100", "0.7")],
+    );
+    applied.timestamp_received = DAY - 100;
+    applied.collector_admission_time_utc_ms = DAY - 90;
+    applied.depth_ingress_sequence = 11;
+    let mut unavailable = update(
+        epoch,
+        102,
+        102,
+        3,
+        None,
+        None,
+        BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable,
+        vec![level("64100", "0.7")],
+    );
+    unavailable.timestamp_received = DAY + 15;
+    unavailable.event_time = DAY - 5; // 日界取接收日，不能取交易所事件日。
+    unavailable.collector_admission_time_utc_ms = DAY + 3_369;
+    unavailable.depth_ingress_sequence = 12;
+    let mut restored = snapshot(epoch, 200, 4);
+    restored.timestamp_received = DAY + 3_609;
+    restored.collector_admission_time_utc_ms = DAY + 3_616;
+    restored.depth_ingress_sequence = 30;
+    let mut pending = update(
+        epoch,
+        201,
+        201,
+        5,
+        Some(200),
+        None,
+        BinanceDepthStitchVerdict::Applied,
+        vec![level("64100", "0.7")],
+    );
+    pending.timestamp_received = DAY - 10;
+    pending.collector_admission_time_utc_ms = DAY + 3_617;
+    pending.depth_ingress_sequence = 13; // 快照响应前已收到，新快照后才准入。
+    let mut settled = snapshot(epoch, 201, 6);
+    settled.timestamp_received = DAY + 4_000;
+    settled.collector_admission_time_utc_ms = DAY + 4_010;
+    settled.depth_ingress_sequence = 35;
+    let mut identical = settled.clone();
+    identical.timestamp_received = 2 * DAY + 10;
+    identical.collector_admission_time_utc_ms = 2 * DAY + 20;
+    identical.collector_admission_sequence = 7;
+    identical.depth_ingress_sequence = 40;
+    let mut drained_after_identical = update(
+        epoch,
+        190,
+        200,
+        8,
+        Some(201),
+        None,
+        BinanceDepthStitchVerdict::NotAppliedStaleDuplicate,
+        vec![level("64100", "0.7")],
+    );
+    drained_after_identical.timestamp_received = DAY + 4_100;
+    drained_after_identical.collector_admission_time_utc_ms = 2 * DAY + 25;
+    drained_after_identical.depth_ingress_sequence = 36;
+    let mut current = update(
+        epoch,
+        202,
+        202,
+        9,
+        Some(201),
+        None,
+        BinanceDepthStitchVerdict::Applied,
+        vec![level("64100", "0.7")],
+    );
+    current.timestamp_received = 2 * DAY + 30;
+    current.collector_admission_time_utc_ms = 2 * DAY + 40;
+    current.depth_ingress_sequence = 41;
+    let mut unproved = update(
+        epoch,
+        203,
+        203,
+        10,
+        None,
+        None,
+        BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable,
+        vec![level("64100", "0.7")],
+    );
+    unproved.timestamp_received = 2 * DAY + 50;
+    unproved.collector_admission_time_utc_ms = 2 * DAY + 60;
+    unproved.depth_ingress_sequence = 42;
+
+    let trajectory = [
+        TypedRawRow::BinanceDepthSnapshot(initial),
+        TypedRawRow::BinanceDepthUpdate(applied),
+        TypedRawRow::BinanceDepthUpdate(unavailable),
+        TypedRawRow::BinanceDepthSnapshot(restored),
+        TypedRawRow::BinanceDepthUpdate(pending),
+        TypedRawRow::BinanceDepthSnapshot(settled),
+        TypedRawRow::BinanceDepthSnapshot(identical),
+        TypedRawRow::BinanceDepthUpdate(drained_after_identical),
+        TypedRawRow::BinanceDepthUpdate(current),
+        TypedRawRow::BinanceDepthUpdate(unproved),
+    ];
+    let mut pre_boundary_totals = None;
+    for (step, row) in trajectory.iter().enumerate() {
+        let evidence = source_evidence_from_typed_raw(row, &sha('a'), &sha('b')).unwrap();
+        let (complete, quantity) = match row {
+            TypedRawRow::BinanceDepthSnapshot(row) => (
+                full.compute_snapshot(row, evidence.clone()),
+                thin.apply_quantity_snapshot(row, evidence),
+            ),
+            TypedRawRow::BinanceDepthUpdate(row) => (
+                full.compute_update(row, evidence.clone()),
+                thin.apply_quantity_update(row, evidence),
+            ),
+            _ => unreachable!(),
+        };
+        if step == 9 {
+            let error = complete.unwrap_err().to_string();
+            assert!(error.contains("binance_depth_update.stitch_coordinates"));
+            assert_eq!(error, quantity.unwrap_err().to_string());
+            assert!(thin.current_quantity_totals().unwrap().is_some());
+            continue;
+        }
+        let outcome = complete.unwrap();
+        quantity.unwrap();
+        assert_eq!(
+            full.current_quantity_totals().unwrap(),
+            thin.current_quantity_totals().unwrap()
+        );
+        if step == 1 {
+            // 前单元结束后，午夜采样仍读原book；后到可见行不能回填采样。
+            pre_boundary_totals = thin.current_quantity_totals().unwrap();
+            assert!(pre_boundary_totals.is_some());
+        } else if step == 2 {
+            assert!(thin.current_quantity_totals().unwrap().is_none());
+            let event = produced_event(&outcome);
+            assert_eq!(event.quality.availability, MarketDataQuality::Missing);
+            assert_eq!(event.quality.resync, ResyncQuality::Required);
+            assert_eq!(event.time.received_at_utc_ms, DAY + 15);
+            assert_eq!(
+                outcome.report.reason_code,
+                "BINANCE_DEPTH_UTC_DAY_SNAPSHOT_REQUIRED"
+            );
+            assert!(event.lineage.source_evidence.iter().any(|e| {
+                e.collector_admission.as_ref().is_some_and(|a| {
+                    a.collector_admission_sequence == 3 && a.admitted_at_utc_ms == DAY + 3_369
+                })
+            }));
+            assert!(pre_boundary_totals.is_some());
+        } else if step == 3 {
+            assert_eq!(
+                produced_event(&outcome).quality.resync,
+                ResyncQuality::ResyncBoundary
+            );
+            assert!(thin.current_quantity_totals().unwrap().is_some());
+        } else if step == 4 {
+            let event = produced_event(&outcome);
+            assert_eq!(event.time.received_at_utc_ms, DAY + 3_609);
+            assert!(matches!(&event.payload,
+                CanonicalReferenceEventPayloadV1::BinanceDepthState(v) if v.last_update_id == 201));
+        } else if step == 6 {
+            assert!(outcome.event.is_none());
+            assert_eq!(outcome.report.operation, ReductionOperationKindV1::Confirm);
+            assert_eq!(
+                outcome.report.reason_code,
+                "BINANCE_DEPTH_IDENTICAL_SNAPSHOT"
+            );
+        } else if step == 7 {
+            assert!(outcome.event.is_none());
+            assert_eq!(outcome.report.reason_code, "BINANCE_DEPTH_STALE_DUPLICATE");
+        } else if step == 8 {
+            assert!(matches!(&produced_event(&outcome).payload,
+                CanonicalReferenceEventPayloadV1::BinanceDepthState(v) if v.last_update_id == 202));
+        }
+    }
+}

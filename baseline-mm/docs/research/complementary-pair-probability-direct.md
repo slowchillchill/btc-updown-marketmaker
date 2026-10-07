@@ -1,6 +1,6 @@
 # 直接概率与跨来源校准：方法及配置
 
-本实现承接 [#185 当前任务3分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。代码和合成边界验证已交付候选计算能力。首次真实十八日prepare因缺身份前态失败；修复后的单次prepare又在TWAP跨单元价格保留SQL失败，study均未启动。[首次失败与身份修复](complementary-pair-probability-run-20261007.md)及[本次失败与SQL修复](complementary-pair-probability-run-20261007-repair1.md)分别保留运行身份和准确事实。正式参数仍未采用。本方法不完成经营参数、任务4连续账户、PAPER 或 LIVE 验收。
+本实现承接 [#185 当前任务3分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。代码和合成边界验证已交付候选计算能力。首次真实十八日prepare因缺身份前态失败；第二次prepare在TWAP跨单元价格保留SQL失败，第三次在公共深度拼接状态失败，study均未启动。[首次失败与身份修复](complementary-pair-probability-run-20261007.md)、[第二次失败与SQL修复](complementary-pair-probability-run-20261007-repair1.md)及[第三次深度失败与窄修复](complementary-pair-probability-run-20261007-repair2.md)分别保留运行身份和准确事实。正式参数仍未采用。本方法不完成经营参数、任务4连续账户、PAPER 或 LIVE 验收。
 
 ## 输入与准确查询
 
@@ -62,7 +62,7 @@ WHERE visible_at <= sample_at
 | depth_pressure | `(Σbid_qty−Σask_qty)/(Σbid_qty+Σask_qty)`；I为权重×sigma_fit×sqrt(1秒)×压力。总量为零时压力缺失。 |
 | trade_pressure | 最新合法聚合成交数量 q 除以 `q+当前两侧深度总量`，`buyer_is_maker` 为真取负，否则取正；相同价格尺度。不是累计成交、成交额或自身成交。 |
 
-深度薄入口与完整入口共享接纳、拼接判定、代际及价位覆盖/零删除。缺口或未恢复快照不输出旧有效总量，同步未恢复也保持缺失。总量只在实际采样时从同一权威映射读取，用已有 BigInt 精确有理数加总，不因跨层和超出 Decimal 容量新增拒绝。入口不输出完整 Canonical 事件/谱系；生产默认入口保持。
+深度薄入口与完整入口共享接纳、拼接判定、代际及价位覆盖/零删除。共享reducer保存最近一次真实snapshot的接收UTC日、depth_ingress_sequence和generation；同epoch/generation、update ingress晚于snapshot且接收日不同，才按采集器Ready直收路径使旧盘口失效。快照前已收到的pending保持原排空规则；同值snapshot也刷新连续性来源而不新增业务值事件。转换只在实际可见行生效，不回填午夜采样。Deferred后的同日ResetContinuity未持久化缺口仍未解决，无法证明的坐标冲突继续拒绝。缺口或未恢复快照不输出旧有效总量，同步未恢复也保持缺失。总量只在实际采样时从同一权威映射读取，用已有 BigInt 精确有理数加总，不因跨层和超出 Decimal 容量新增拒绝。入口不输出完整 Canonical 事件/谱系；生产默认入口保持。
 
 基线在全部可算样本评分。每个外部特征及其零权重项仅在该项共同可算交集比较，再另报全基线分母与覆盖代价。缺 Binance 不补零。不可拟合项保留真实原因；没有改善或精确并列保留零。全局来源历史和八次统计调用通常减少 fallback 使用，报告实际 fallback 分母；不构造冷启动或冒称每市场生产 initial_sigma 覆盖。
 
@@ -105,10 +105,14 @@ DuckDB语义依据：[ASOF连接](https://duckdb.org/docs/stable/sql/query_synta
 
 审查发现薄 applied 更新仍执行随后丢弃的 Decimal 数量报告与旧证据聚合。本轮修正在同一价位更新循环按实际报告消费者收集这些材料，薄入口跳过聚合；完整入口继续原报告规则。合法 applied 更新将两 bid 数量各覆写为 `79228162514264337593543950335` 后，公共薄入口及实际 helper 均精确采样为 `158456325028528675187087900670/1`。扩展原边界后 core192项、示例1项、概率Python11项再次通过；完整输出固定摘要及原报告溢出错误测试保持通过。
 
-## 本次失败修复验证
+## 首次身份失败修复验证
 
 真实执行、诊断、修复及新提案见[失败报告](complementary-pair-probability-run-20261007.md)。本轮Rust示例2项与Python12项通过，夹具由真实公共Rust输出生成并逐字核对。ReferenceFact、Terminal及市场QualityBoundary按实际serde读取。原始目录与合法身份分开；成功公共归并时才生效的pending终局不回填。未获身份的事后采样不更新创新记忆。新helper SHA-256为 `d77d6d2dbf5a252cd66ce171dc68a0c597733b0fc24014387b8188af773539ee`；原工程helper摘要和192项证据保持原身份，不重标为本次构建。
 
 ## 跨单元价格保留的 SQL 修复
 
 修复后的单次真实prepare在 `price_samples` 的非空carry分支失败，见[本次失败报告](complementary-pair-probability-run-20261007-repair1.md)。动态INSERT列列表现在按SQL标识符双引号引用既有字段，内部双引号双写；值仍使用绑定参数，原跨单元状态和采样选择保持。一个代表性合成入口测试在原代码中复现TWAP与成交的同一解析错误，修复后验证旧事实延续、可见时间及同毫秒原生顺序，概率Python回归13项通过。Rust及两个helper未修改或重建；旧证据按适用范围复用。真实研究未完成，不自动再次运行，也没有正式参数采用。
+
+## 第三次深度状态失败的窄修复
+
+共享reducer新增最近真实snapshot连续性来源，按前述同epoch／generation、ingress与接收日规则失效旧盘口，保持pending排空及同值业务去重。Core lib/tests193项、示例2项、使用本轮新helper的Python13项通过，普通Clippy与格式检查通过；准确运行、修复候选、helper身份及剩余Deferred／同日围栏输入缺口见[第三次失败报告](complementary-pair-probability-run-20261007-repair2.md)。没有再次实际prepare／study，旧运行和验证身份分别保留。
