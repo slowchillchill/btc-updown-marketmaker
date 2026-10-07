@@ -18,7 +18,7 @@ class FrozenAccountInputs:
     fault: torch.Tensor
 
 
-def frozen_account_inputs(account, scope_members, scope_known, scope_applicable, *, scope_conditions=None, scope_present=None):
+def frozen_account_inputs(account, scope_members, scope_known, scope_applicable, *, scope_conditions=None, scope_present=None, asset_outcomes=None):
     """消费一次真实冻结值；当前/旧scope由根权威选择器传入，不按订单猜scope。"""
     numbers = _numbers()
     roots = account.cutoff.numel()
@@ -35,7 +35,13 @@ def frozen_account_inputs(account, scope_members, scope_known, scope_applicable,
         slow = write_reservation_fields(slow, reservations)
         provided[:, :54] = True
         fault |= reservations.fault
-    elif scope_present is not None:
+        if asset_outcomes is not None:
+            from input_positions import position_inputs, write_position_fields
+            positions = position_inputs(account.ledger,scope_conditions,scope_present,scope_applicable,asset_outcomes)
+            slow = write_position_fields(slow,positions)
+            provided[:,54:78] = True
+            fault |= positions.fault
+    elif scope_present is not None or asset_outcomes is not None:
         raise ValueError('scope存在位不能脱离原condition人口')
     for start, value in [(110, account.funds.actual_available), (113, account.funds.actual_reserved),
                          (116, account.funds.maker_available), (119, account.funds.maker_reserved)]:

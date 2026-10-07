@@ -182,7 +182,10 @@ def validate_actual_cancel(source,delta):
     from input_account import frozen_account_inputs
     current_and_empty_old=torch.tensor([[[True],[False]]],device='cuda')
     scope_known=torch.ones((1,2),dtype=torch.bool,device='cuda')
-    native=Numbers.run_exact_batch(lambda:frozen_account_inputs(account_after,current_and_empty_old,scope_known,scope_known))
+    condition_scopes=torch.tensor([[[0],[-1]]],device='cuda')
+    condition_present=torch.tensor([[[True],[False]]],device='cuda')
+    native=Numbers.run_exact_batch(lambda:frozen_account_inputs(account_after,current_and_empty_old,scope_known,scope_known,
+        scope_conditions=condition_scopes,scope_present=condition_present,asset_outcomes=torch.tensor([0,1],device='cuda')))
     assert native.fault.cpu().tolist()==[0]
     def log(value):
         import math
@@ -191,6 +194,14 @@ def validate_actual_cancel(source,delta):
     for index,name in [(110,'actual_available_pusd'),(113,'actual_reserved_pusd'),(116,'maker_available_pusd'),(119,'maker_reserved_pusd')]:
         torch.testing.assert_close(native.slow[0,index:index+3].cpu(),
             torch.tensor([log(source['cancel_ledger_after']['cash'][name]),1.,1.]),rtol=1e-6,atol=1e-7)
+    after_projection=source['cancel_ledger_after']['projection']['platform_confirmed_projection']
+    original_assets={item['token_id']:item['balance_shares'] for item in after_projection['outcome_balances']}
+    for side,token in enumerate(['1','2']):
+        torch.testing.assert_close(native.slow[0,54+side*3:57+side*3].cpu(),
+            torch.tensor([log(original_assets.get(token,'0')),1.,1.]),rtol=1e-6,atol=1e-7)
+    assert native.slow[0,60:66].cpu().tolist()==[0.,0.,1.]*2, '未安装中途持仓成本不冒充已知零'
+    assert native.slow[0,66:78].cpu().tolist()==[0.,1.,1.]*4, '空旧scope是Known零'
+    assert native.provided[0,:78].all().cpu().item()
     assert native.slow[0,412:415].cpu().tolist()==[0.,1.,1.]
     assert native.slow[0,415:418].cpu().tolist()==[0.,1.,1.]
     for offset,count in [(418,1),(421,0),(424,0)]:
@@ -255,6 +266,7 @@ def validate_actual_cancel(source,delta):
         'source_private_batch_and_actual_release_checked':True,'Ledger_four_original_positions_and_sequences_checked':True,
         'same_cutoff_public_account_funds_waiting_and_cancel_request_freeze_checked':True,
         'Native_actual_frozen_account_fields_and_fault_checked':True,
+        'Native_frozen_asset_shares_and_cold_cost_Unknown_checked':True,
         'registered_request_identity_fault_before_any_completion_reaches_Native':True,
         'empty_completion_population_does_not_grow_and_preserves_source_fault':True,
         'each_actual_receive_prefix_order_condition_open_and_last_sequence_checked':True,
