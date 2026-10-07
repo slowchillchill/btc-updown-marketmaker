@@ -931,3 +931,12 @@ path ordinal)连续消费当前阶段。`FinalityFeedbackPage`在冷边界预分
 NOE消费者读取这些实际效果，不能用最后一轮活动成交详情覆盖此前ordinal的经济关联。
 当前工程验证入口选择原Taker的MINED→CONFIRMED作为多迭代代表；其它阶段到来时交还宿主。
 反馈页消费/NOE追加仍在图外冷边界，尚未形成统一多阶段设备循环或全部根/跨块恢复路径。
+
+`CapturedHiddenBuckets`从同一已验证页捕获原冷类型/步骤序列；它不读取设备游标回CPU择步。
+每轮固定进入时的原桶，按原顺序逐步骤生成并提交候选，最后仅在reference和steps都已完成时
+推进原闭桶前沿。未知或待处理reference保留等待；此消费者不签发reference完成。
+真实正quote输出借同一SIM反馈页保存，后续重放不覆盖已有输出。字/段/fill/Maker池和反馈页
+共同门控本次步骤，资源不足保留此前成功步骤和当前未消费游标。当前工程入口以一个同毫秒
+七消息Maker桶核对最终全状态及真实输出；它不代表七次WHILE迭代或跨市场reference支持。
+验证阶段保存在现证据目录的`runtime-progress.jsonl`，区分原参考、捕获和实际launch；
+物理源步骤数不冒充已应用业务步骤人口。

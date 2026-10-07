@@ -4,6 +4,7 @@
 """
 from dataclasses import fields,is_dataclass,replace
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -24,6 +25,18 @@ from rebate_coordinator import RebateCoordinator
 from scheduling import ScheduledTime,next_sim_drive
 from base_runtime import BaseSimRuntime
 from validate_base_execution import setup, integers, rational, values, units, assert_checkpoint
+
+
+_progress_started=time.perf_counter()
+
+
+def progress(stage, **population):
+    """当前有限入口的阶段证据；不回读业务条件或记录逐微算子日志。"""
+    directory=os.environ.get('B_GPU_ORDER_ARTIFACT_DIR')
+    if directory:
+        with (Path(directory)/'runtime-progress.jsonl').open('a') as target:
+            target.write(json.dumps({'stage':stage,'elapsed_seconds':time.perf_counter()-_progress_started,
+                                     **population})+'\n')
 
 
 def main():
@@ -170,6 +183,7 @@ def main():
         runtime,finality_page=check_captured_finalities(runtime,source,tensor,maker_rate,rebate,slot)
         fills,account,calendars=runtime.fills,runtime.account,runtime.calendars
     taker_index=0
+    hidden_page=None
     for checkpoint in source['checkpoints'][1:]:
         stage = checkpoint['stage']
         if stage in ('taker_finality', 'maker_finality'):
@@ -196,6 +210,28 @@ def main():
             batches.append(batch)
             assert transition.origin.roles.cpu().tolist() == [int(stage=='maker_finality')]
         elif stage == 'hidden_step':
+            if block is not None:
+                if hidden_page is None:
+                    runtime,hidden_page=check_captured_hidden_bucket(runtime,source,tensor,fee_rate,
+                        source['fee_exponent'],rebate,slot)
+                    hidden_state,orders,queue,account,fills,calendars=(runtime.hidden,runtime.orders,
+                        runtime.hidden.queues,runtime.account,runtime.fills,runtime.calendars)
+                    hidden_source=replace(hidden_source,present=tensor([False],torch.bool))
+                    hidden_eof=active
+                    observed_pending_zero_quote=True  # 原reference中间前缀已核零quote pending。
+                    checked_captured_maker=True
+                    for number in range(int(hidden_page.count.cpu().item())):
+                        feedback=hidden_page.read(number)
+                        for maker_transition in feedback.effects.fills:
+                            noe,batch=Numbers.run_exact_batch(lambda:noe.fill_from_origin(sampler,orders,fills,
+                                maker_transition,asset_tokens,calendars,rebate,feedback.at))
+                            batches.append(batch)
+                            if maker_transition.event.emitted.cpu().item():
+                                assert maker_record is None
+                                maker_record=maker_transition
+                                assert values(maker_record.fill_sequence)==[2]
+                                assert maker_record.origin.roles.cpu().tolist()==[1]
+                continue
             choice=choose()
             assert choice.enabled(4).cpu().tolist()==[True] and choice.at.cpu().tolist()==[source['maker_at']]
             event = source['events'][checkpoint['ordinal']]['payload']['event']
@@ -218,44 +254,8 @@ def main():
                 assert not any(frame.event.emitted.any().cpu().item() for frame in bad[-1].fills)
                 checked_bad_hidden_predecessor=True
             runtime=runtime.advance_role_time(choice,tensor([source['market_end']]*2))
-            if block is None:
-                runtime,hidden=runtime.hidden_base(choice,tensor([1 if bid else 0]),before,after,source_price,
-                    tensor([0]),active,tensor([[0]*queue.capacity]),row_roots,fee_rate,source['fee_exponent'],rebate)
-            else:
-                if checkpoint['ordinal']==0:
-                    runtime=runtime.begin_hidden_bucket(choice)
-                # 类型/原顺序在冷源页解码；执行与游标推进仍由设备门决定。
-                while block.operations[compact_index]['tag']!='LevelChange':
-                    runtime,effect=runtime.apply_hidden_step(choose(),compact_index,tensor([0,0]),
-                        tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,source['fee_exponent'],rebate)
-                    compact_index+=1
-                operation=block.operations[compact_index]
-                transition=operation['fields']['transition']
-                assert transition['quantity_before_shares']==event['quantity_before_shares']
-                assert transition['quantity_after_shares']==event['quantity_after_shares']
-                assert transition['price_pusd_per_share']==event['price_pusd_per_share']
-                if checkpoint['ordinal']==len(source['events'])-1:
-                    runtime,hidden=check_captured_hidden_step(runtime,compact_index,tensor,
-                        fee_rate,source['fee_exponent'],rebate)
-                    checked_captured_maker=True
-                else:
-                    runtime,hidden=runtime.apply_hidden_step(choose(),compact_index,tensor([0,0]),
-                        tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,source['fee_exponent'],rebate)
-                compact_index+=1
-                assert values(runtime.hidden_frontier.index_position)==[block.buckets[0]['bucket']['index_end']]
-                if checkpoint['ordinal']!=len(source['events'])-1:
-                    unchanged,closed=runtime.finish_hidden_bucket()
-                    assert not closed.any().cpu().item()
-                else:
-                    for index in range(compact_index,len(block.operations)):
-                        assert block.operations[index]['tag']!='LevelChange'
-                        runtime,_=runtime.apply_hidden_step(choose(),index,tensor([0,0]),
-                            tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,source['fee_exponent'],rebate)
-                    runtime,closed=runtime.finish_hidden_bucket()
-                    assert closed.cpu().tolist()==[True]
-                    assert values(runtime.hidden_frontier.index_position)==[block.buckets[-1]['bucket']['index_end']]
-                    _,eof=runtime.hidden_frontier.scheduled()
-                    assert eof.cpu().tolist()==[True]
+            runtime,hidden=runtime.hidden_base(choice,tensor([1 if bid else 0]),before,after,source_price,
+                tensor([0]),active,tensor([[0]*queue.capacity]),row_roots,fee_rate,source['fee_exponent'],rebate)
             hidden_state,orders,queue,account,fills,calendars=(runtime.hidden,runtime.orders,runtime.hidden.queues,
                 runtime.account,runtime.fills,runtime.calendars)
             if checkpoint['ordinal']==len(source['events'])-1:
@@ -433,6 +433,7 @@ def main():
         'native_CUDA_WHILE_pool_shortage_and_initial_zero_iteration_checked':checked_captured_maker,
         'actual_Taker_MINED_CONFIRMED_two_native_iterations_keep_both_feedbacks_checked':finality_page is not None,
         'actual_finality_feedback_page_full_preserves_MINED_prefix_and_retries_checked':finality_page is not None,
+        'actual_complete_Maker_bucket_native_source_cursor_and_feedback_page_checked':hidden_page is not None,
         'runtime_hidden_reference_handler_covered':False,
         'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
@@ -465,6 +466,7 @@ def check_captured_finalities(runtime,source,tensor,maker_rate,taker_rate,slot):
     """
     from base_runtime_storage import BaseRuntimeStorage,CapturedFinalitySteps,FinalityFeedback
     from fill_pool import _take_record
+    progress('capture_actual_Taker_finalities')
     horizon=tensor([source['market_end']])
     enabled=tensor([True],torch.bool)
     end=tensor([source['market_end']]*2)
@@ -516,6 +518,78 @@ def check_captured_finalities(runtime,source,tensor,maker_rate,taker_rate,slot):
     assert loop.page.count.cpu().item()==2 and loop.required_feedback.cpu().item()==0
     for index,frame in enumerate(frames):
         compare(loop.page.read(index),frame,'immutable_feedback_'+str(index))
+    progress('actual_Taker_finality_pages_checked',actual_iterations=2)
+    return frozen,loop.page
+
+
+def check_captured_hidden_bucket(runtime,source,tensor,fee_rate,fee_exponent,rebate,slot):
+    """原完整七消息桶；实际设备游标消费原冷类型序列，不以checkpoint择步。"""
+    from base_runtime_storage import BaseRuntimeStorage,CapturedHiddenBuckets,HiddenStepFeedback
+    block=runtime.hidden_frontier.columns.source
+    progress('original_Maker_bucket_reference',source_steps=len(block.operations))
+    horizon=tensor([source['market_end']])
+    enabled=tensor([True],torch.bool)
+    end=tensor([source['market_end']]*2)
+    reference=runtime
+    choice=reference.choose(None,None,horizon,enabled)
+    assert choice.enabled(4).cpu().tolist()==[True] and choice.at.cpu().tolist()==[source['maker_at']]
+    reference=reference.advance_role_time(choice,end).begin_hidden_bucket(choice)
+    first=len(block.buckets[0]['steps'])
+    frames=[]
+    checkpoint_index=0
+    checkpoints=[value for value in source['checkpoints'] if value['stage']=='hidden_step']
+    saw_pending=False
+    for index in range(first,len(block.operations)):
+        choice=reference.choose(None,None,horizon,enabled)
+        if block.operations[index]['tag']=='LevelChange' and checkpoint_index==len(checkpoints)-1:
+            reference,effect=check_captured_hidden_step(reference,index,tensor,fee_rate,fee_exponent,rebate)
+        else:
+            reference,effect=reference.apply_hidden_step(choice,index,tensor([0,0]),
+                tensor([[0]*reference.hidden.queues.capacity]),fee_rate,fee_exponent,rebate)
+        if block.operations[index]['tag']=='LevelChange':
+            checkpoint=checkpoints[checkpoint_index]
+            event=source['events'][checkpoint['ordinal']]['payload']['event']
+            transition=block.operations[index]['fields']['transition']
+            for name in ('quantity_before_shares','quantity_after_shares','price_pusd_per_share'):
+                assert transition[name]==event[name]
+            assert_checkpoint(checkpoint['state'],reference.orders.read(slot).quantity,reference.account)
+            checkpoint_index+=1
+            saw_pending |= values(reference.orders.read(slot).quantity.pending_maker_depletion_base_units)[0]>0
+            if any(frame.event.emitted.cpu().item() for frame in effect.fills):
+                frames.append(HiddenStepFeedback(choice.at,tensor([index]),effect))
+        if index<len(block.operations)-1:
+            _,closed=reference.finish_hidden_bucket()
+            assert not closed.cpu().item()
+    reference,closed=reference.finish_hidden_bucket()
+    assert closed.cpu().tolist()==[True] and saw_pending and len(frames)==1
+    # 仅安装参考所需物理容量，完整源/量/顺序仍交真实候选处理。
+    runtime=replace(runtime,hidden=replace(runtime.hidden,queues=runtime.hidden.queues.resized(
+        reference.hidden.queues.capacity)),fills=runtime.fills.resized(reference.fills.capacity),
+        calendars=replace(runtime.calendars,maker=runtime.calendars.maker.resized(
+            fills=reference.calendars.maker.fill_occupied.size(1),days=reference.calendars.maker.occupied.size(1))))
+    storage=BaseRuntimeStorage(runtime,reference)
+    progress('capture_complete_hidden_page',physical_source_steps=len(block.operations))
+    loop=CapturedHiddenBuckets(storage,horizon,enabled,tensor([0,0]),
+        tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,fee_exponent,rebate,end,
+        word_capacity=4,feedback_capacity=1)
+    loop.replay()
+    progress('native_complete_bucket_launched')
+    torch.cuda.synchronize()
+    assert loop.resources_fit.cpu().item() and loop.closed.cpu().tolist()==[True]
+    assert loop.page.count.cpu().item()==1
+    compare(storage.runtime,reference,'complete_original_Maker_bucket')
+    compare(loop.page.read(0),frames[0],'whole_bucket_actual_positive_quote')
+    assert values(storage.runtime.hidden_frontier.index_position)==[block.buckets[-1]['bucket']['index_end']]
+    assert storage.runtime.hidden_frontier.scheduled()[1].cpu().tolist()==[True]
+    assert_checkpoint(checkpoints[-1]['state'],storage.runtime.orders.read(slot).quantity,storage.runtime.account)
+    frozen=storage.snapshot()
+    loop.replay()
+    torch.cuda.synchronize()
+    compare(storage.runtime,frozen,'closed_bucket_no_reapply')
+    assert loop.resources_fit.cpu().item() and loop.required_words.cpu().item()==0
+    assert loop.page.count.cpu().item()==1 and not loop.closed.cpu().item()
+    compare(loop.page.read(0),frames[0],'whole_bucket_old_feedback')
+    progress('complete_original_Maker_bucket_checked',original_messages=len(source['events']))
     return frozen,loop.page
 
 

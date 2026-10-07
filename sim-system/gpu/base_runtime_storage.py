@@ -19,6 +19,13 @@ class FinalityFeedback:
     record: object  # 本次ordinal提交后的原成交详情，不能借后续迭代覆盖的活动列。
 
 
+@dataclass(frozen=True)
+class HiddenStepFeedback:
+    at: torch.Tensor
+    source_index: torch.Tensor
+    effects: object
+
+
 def _shared(value, name):
     return name == 'columns' or isinstance(value, FillRecord) and name in (
         'offsets', 'states', 'lengths', 'economic_ordinals')
@@ -141,6 +148,8 @@ class BaseRuntimeStorage:
                 account_delta=self.runtime.account.coordinate_delta(
                     delta, delta.emitted & resources_fit, delta.fault))
             return replace(output, transition=committed(output.transition), market=market)
+        if isinstance(output, HiddenStepFeedback):
+            return replace(output, effects=self._committed_output(output.effects, resources_fit))
         raise TypeError('固定地址输出提交只接已装配的hidden或最终性效果')
 
 
@@ -155,7 +164,7 @@ def _page_map(value, transform):
     return value
 
 
-class FinalityFeedbackPage:
+class SimFeedbackPage:
     """固定物理反馈页，设备写槽；每槽保留本轮各根原效果及真实身份。
 
     count是物理迭代人口，不是fill/private/经济序号。页满只请求冷消费/换页，
@@ -163,7 +172,7 @@ class FinalityFeedbackPage:
     """
     def __init__(self, template, capacity):
         if type(capacity) is not int or capacity < 1:
-            raise ValueError('最终性反馈页须有正物理容量')
+            raise ValueError('SIM反馈页须有正物理容量')
         self.capacity = capacity
         self.template = template
         self.buffers = []
@@ -173,9 +182,9 @@ class FinalityFeedbackPage:
         _page_map(template, allocate)
         self.count = torch.zeros((), dtype=torch.int64, device=template.at.device)
 
-    def append(self, value, committed):
+    def append(self, value, committed, population):
         slot = self.count.clamp(0, self.capacity-1).reshape(1)
-        population = committed & value.transition.event.emitted.any()
+        population = committed & population
         buffers = iter(self.buffers)
         def write(incoming):
             target = next(buffers)
@@ -189,6 +198,104 @@ class FinalityFeedbackPage:
         """冷消费已写物理槽；返回借同一不可变页的原类型视图。"""
         buffers = iter(self.buffers)
         return _page_map(self.template, lambda _: next(buffers)[index])
+
+
+class FinalityFeedbackPage(SimFeedbackPage):
+    def append(self, value, committed):
+        super().append(value, committed, value.transition.event.emitted.any())
+
+
+class CapturedHiddenBuckets:
+    """已验证页的冷类型序列固定捕获；原桶/步骤是否执行由设备游标决定。
+
+    每轮只消费进入时选中的桶，各原步骤仍逐条共同提交。参考未完成时暂停，
+    不伪造reference完成。其它阶段或资源退出交还宿主，不代替完整driver。
+    """
+    def __init__(self, storage, horizon, enabled, conditions, selected_paths,
+                 fee_rate, fee_exponent, taker_rate, market_end, *, word_capacity, feedback_capacity):
+        self.storage = storage
+        self._inputs = (horizon, enabled, conditions, selected_paths, fee_rate, taker_rate, market_end)
+        self.ready = torch.zeros((), device=horizon.device, dtype=torch.bool)
+        self.resources_fit = torch.ones((), device=horizon.device, dtype=torch.bool)
+        self.required_words = torch.zeros((), device=horizon.device, dtype=torch.int64)
+        self.required_feedback = torch.zeros((), device=horizon.device, dtype=torch.int64)
+        self.closed = torch.zeros_like(enabled)
+        source = storage.runtime.hidden_frontier.columns.source
+        level_indices = [index for index, operation in enumerate(source.operations) if operation['tag']=='LevelChange']
+        def candidate(index, permit):
+            runtime = storage.runtime
+            choice = runtime.choose(None, None, horizon, enabled & permit)
+            return runtime.apply_hidden_step(choice, index, conditions, selected_paths,
+                fee_rate, fee_exponent, taker_rate)
+        self.page = None
+        if level_indices:
+            layout = Numbers.device_exact_batch(lambda:candidate(level_indices[0],self.resources_fit),
+                word_capacity=word_capacity, device=horizon.device)
+            template = HiddenStepFeedback(horizon, torch.zeros_like(horizon), layout.value[1])
+            self.page = SimFeedbackPage(template, feedback_capacity)
+        def ready():
+            return storage.runtime.choose(None, None, horizon, enabled).enabled(4).any()
+        self.body = torch.cuda.CUDAGraph(keep_graph=True)
+        with torch.cuda.graph(self.body):
+            runtime = storage.runtime
+            before_bucket = runtime.hidden_frontier.next_bucket.clone()
+            before_step = runtime.hidden_frontier.next_step.clone()
+            before_applying = runtime.hidden_frontier.applying.clone()
+            def begin():
+                runtime = storage.runtime
+                choice = runtime.choose(None, None, horizon, enabled & self.resources_fit)
+                return runtime.advance_role_time(choice, market_end).begin_hidden_bucket(choice)
+            opening = Numbers.device_exact_batch(begin, word_capacity=word_capacity, device=horizon.device)
+            self.required_words.copy_(torch.maximum(self.required_words,opening.required_words))
+            self.resources_fit.logical_and_(opening.fits)
+            storage.commit(opening.value,self.resources_fit)
+            for index, operation in enumerate(source.operations):
+                same_bucket = storage.runtime.hidden_frontier.next_bucket == before_bucket
+                permit = self.resources_fit & same_bucket
+                value = Numbers.device_exact_batch(lambda:candidate(index,permit),
+                    word_capacity=word_capacity, device=horizon.device)
+                state, effect = value.value
+                self.required_words.copy_(torch.maximum(self.required_words,value.required_words))
+                fit = self.resources_fit & value.fits
+                if operation['tag']=='LevelChange':
+                    population = torch.stack([frame.event.emitted for frame in effect.fills]).any()
+                    need = self.page.count+population.to(torch.int64)
+                    self.required_feedback.copy_(torch.maximum(self.required_feedback,need))
+                    fit = fit & (need <= self.page.capacity)
+                    fit = fit & (effect.required_segments <= storage.runtime.hidden.queues.capacity).all()
+                    fit = fit & (effect.required_records <= storage.runtime.fills.capacity).all()
+                    fit = fit & (effect.required_maker_fills <= storage.runtime.calendars.maker.fill_occupied.size(1)).all()
+                    fit = fit & (effect.required_maker_days <= storage.runtime.calendars.maker.occupied.size(1)).all()
+                    at = storage.runtime.hidden_frontier.columns.at[
+                        before_bucket.clamp(0,storage.runtime.hidden_frontier.columns.at.numel()-1)]
+                    output = HiddenStepFeedback(at,torch.full_like(horizon,index),effect)
+                    output = storage.commit(state,fit,output)
+                    self.page.append(output,fit,population)
+                else:
+                    storage.commit(state,fit)
+                self.resources_fit.logical_and_(fit)
+            finishing = Numbers.device_exact_batch(lambda:storage.runtime.finish_hidden_bucket(),
+                word_capacity=word_capacity, device=horizon.device)
+            self.required_words.copy_(torch.maximum(self.required_words,finishing.required_words))
+            self.resources_fit.logical_and_(finishing.fits)
+            storage.commit(finishing.value[0],self.resources_fit)
+            self.closed.copy_(finishing.value[1] & self.resources_fit)
+            frontier = storage.runtime.hidden_frontier
+            progress = (frontier.next_bucket != before_bucket) | (frontier.next_step != before_step)
+            progress = progress | (frontier.applying != before_applying)
+            self.ready.copy_(ready() & self.resources_fit & progress.any())
+        self.entry = torch.cuda.CUDAGraph(keep_graph=True)
+        with torch.cuda.graph(self.entry):
+            self.required_words.zero_()
+            self.required_feedback.zero_()
+            self.resources_fit.fill_(True)
+            self.closed.zero_()
+            self.ready.copy_(ready())
+        self._loop = Numbers.public_extension().DeviceConditionalLoop(
+            self.entry.raw_cuda_graph(),self.body.raw_cuda_graph(),self.ready)
+
+    def replay(self):
+        self._loop.replay()
 
 
 class CapturedFinalitySteps:

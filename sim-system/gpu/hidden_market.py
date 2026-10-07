@@ -195,6 +195,8 @@ class HiddenAssetState:
 
 def run_hidden_asset_batch(state, compute):
     """纯候选扩池；未成功前不推进hidden/public前沿、订单、账户或随机数。"""
+    if Numbers.device_batch_active():
+        return compute(state)
     while True:
         result = Numbers.run_exact_batch(lambda: compute(state))
         output = result[-1]
