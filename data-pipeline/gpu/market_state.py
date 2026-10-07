@@ -14,13 +14,14 @@ class PublicMarketFrame:
 
 
 class PublicMarketState:
-    def __init__(self, pm_state, columns):
+    def __init__(self, pm_state, columns, *, prepared=None):
         self.shared = pm_state
         device = pm_state.slots.device
         self.market_count = len(columns['markets'])
         # 原NativeRoot的BTreeMap按condition字符串选择当前市场；物理字典槽序不替代它。
-        self.condition_order = torch.tensor(sorted(range(self.market_count),
+        self.condition_order = (torch.tensor(sorted(range(self.market_count),
             key=lambda index:columns['markets'][index]['condition_id']),dtype=torch.int64,device=device)
+            if prepared is None else prepared.tensor('condition_order'))
         self.lifecycle_states = columns['lifecycle_states']
         # 原Native只编码outcome 0/1；完整其他身份仍留在公共registry，不改变经济合法域。
         pairs = [[-1,-1] for _ in range(self.market_count)]
@@ -28,11 +29,13 @@ class PublicMarketState:
             if not (0 <= market < self.market_count and 0 <= asset < len(pm_state.assets) and outcome >= 0):
                 raise ValueError('公共市场原资产/outcome坐标错误')
             if outcome < 2 and pairs[market][outcome] == -1: pairs[market][outcome] = asset
-        self.asset_pairs = torch.tensor(pairs,dtype=torch.int64,device=device).reshape(-1,2)
-        self.times = torch.tensor([[m['window']['start_at_utc_ms'],m['window']['end_at_utc_ms']]
+        self.asset_pairs = (torch.tensor(pairs,dtype=torch.int64,device=device).reshape(-1,2)
+            if prepared is None else prepared.tensor('asset_pairs'))
+        self.times = (torch.tensor([[m['window']['start_at_utc_ms'],m['window']['end_at_utc_ms']]
                                    for m in columns['markets']],dtype=torch.int64,device=device).reshape(-1,2)
+            if prepared is None else prepared.tensor('market_times'))
         def load(name,width):
-            values = torch.tensor(columns[name],dtype=torch.int64,device=device).reshape(-1,width)
+            values = torch.tensor(columns[name],dtype=torch.int64,device=device).reshape(-1,width) if prepared is None else prepared.tensor(name)
             setattr(self,name,values)
             return values
         life = load('lifecycle_values',4)
@@ -50,13 +53,14 @@ class PublicMarketState:
                     or not 0 <= anchor < len(pm_state.anchor_sets) or not 0 <= q < 6):
                 raise ValueError('公开终态载荷坐标错误')
         maximum = max(1,max(map(len,columns['terminal_payouts']),default=0))
-        payouts = torch.zeros((len(columns['terminal_payouts']),maximum,2),dtype=torch.int64,device=device)
-        payouts[:,:,0] = -1
+        payouts = (torch.zeros((len(columns['terminal_payouts']),maximum,2),dtype=torch.int64,device=device)
+            if prepared is None else prepared.tensor('market_payouts'))
+        if prepared is None: payouts[:,:,0] = -1
         for index,rows in enumerate(columns['terminal_payouts']):
             for asset,decimal in rows:
                 if not (0 <= asset < len(pm_state.assets) and 0 <= decimal < pm_state.decimal_fault.numel()):
                     raise ValueError('公开终态payout身份/精确值错误')
-            if rows: payouts[index,:len(rows)] = torch.tensor(rows,dtype=torch.int64,device=device)
+            if len(rows) and prepared is None: payouts[index,:len(rows)] = torch.tensor(rows,dtype=torch.int64,device=device)
         self.payouts = payouts
         for name,value_count in (('market_admitted',2),('market_lifecycle',life.shape[0]),
                                  ('market_trading',trading.shape[0]),('market_terminal',terminal.shape[0])):
@@ -69,7 +73,7 @@ class PublicMarketState:
                 if sequence < prior[0] or group < prior[1]:
                     raise ValueError('公开市场字段原顺序倒退')
                 previous[target] = (sequence,group)
-            setattr(self,name,PrefixColumn(columns[name],self.market_count,device))
+            setattr(self,name,PrefixColumn(columns[name],self.market_count,device) if prepared is None else prepared.prefix(name))
 
     def frame(self,prefixes):
         invalid = ((prefixes < -1) | (prefixes >= self.shared.group_count)).to(torch.int32)

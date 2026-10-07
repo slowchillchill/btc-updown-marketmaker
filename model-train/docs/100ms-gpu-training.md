@@ -581,6 +581,28 @@ cargo run -p data-pipeline-training --bin dpt-public-compact --locked --offline 
 
 ### 当前独立 hidden 材料入口
 
+公共设备列的二次加载接口是 `data-pipeline/gpu/public_device_page.py`。
+`build_public_device_page` 只读已完成的原 compact，经原 reader 核验来源一次，
+调用现精确数字转换和 `PrefixColumn` 排序一次，再保存 little-endian 固定列、
+sentinel/offset、精确整数与有理数 bank。完整事实、组和来源身份保存在 UTF8
+bytes/offset bank，不合并不同来源或位置，不保存每事件全盘口；原 compact
+继续拥有原词法和输入旁证。页 manifest 绑定原 manifest 摘要、成员摘要及
+`AppliedIngressPrefixV1`。成员布局、offset、字典边界及原缺失/质量条件由加载接口
+和现公共消费者核验；不使用 pickle 或任意 Python class 恢复。
+
+`PreparedPublicPage.install` 直接安装 `PublicPmState`、市场、参考和 Binance
+预排列及精确 bank，不再解包原事件 JSON、解析十进制、GCD 或重排前缀。
+数字和 ragged 列保留只读数组视图，首次上传使用 pinned staging，同页设备列共享。
+人口级事实 bank 在加载和模型消费中保持不解码。市场、资产和锚点的完整身份由
+现 `SourceHistoryInputs` 等冷身份消费者按需解码并按页缓存；此冷绑定成本仍需计入。
+当前接口只发布一个已结束材料的完整组页，尚无连续 Builder flush、跨页前沿、
+hidden 列安装或十五天工作集结论。加载页本身不签发实际交付/public prefix。
+
+现 `gpu_public_state_validation.py --device-page <新目录>` 沿原首分钟入口一次构建，
+两次加载时禁止精确解析、GCD 与前缀排序调用，逐值核对固定列和原身份 bank 字节，
+再运行原盘口、窗口和 100ms 输入检查。一个实际身份成员损坏必须拒绝。
+通过前保持本节为候选实现；具体提交、运行与独审结果沿 #181 记录。
+
 `dpt-compact-hidden <公共compact目录> <新hidden目录> <config.json> <locked-python>
 <same-commit>/data-pipeline/gpu/sort_worker.py` 从完整原规范事实选择实际 PM 消息，
 按原 epoch 首现排名、真实来源时间、接纳序位与规范位置排序。它调用原独立 hidden

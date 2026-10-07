@@ -5,10 +5,10 @@ from prepare import _numbers
 
 
 class PublicBinanceState:
-    def __init__(self, shared, columns):
+    def __init__(self, shared, columns, *, prepared=None):
         self.shared = shared
         self.assets = columns['binance_symbols']  # 实际symbol身份，不是PM资产。
-        self.slots = torch.tensor(columns['binance_slots'],dtype=torch.int64,device=shared.slots.device).reshape(-1,3)
+        self.slots = torch.tensor(columns['binance_slots'],dtype=torch.int64,device=shared.slots.device).reshape(-1,3) if prepared is None else prepared.tensor('binance_slots')
         self.group_count = shared.group_count
         self.decimal_columns,self.decimals,self.decimal_fault = shared.decimal_columns,shared.decimals,shared.decimal_fault
         self.anchors,self.anchor_times = shared.anchors,shared.anchor_times
@@ -17,7 +17,7 @@ class PublicBinanceState:
             if not (0 <= symbol < len(self.assets) and side in (0,1) and 0 <= price < self.decimal_fault.numel()):
                 raise ValueError('Binance原slot坐标错误')
         for name,width in (('binance_depth_values',3),('binance_trade_values',5)):
-            setattr(self,name,torch.tensor(columns[name],dtype=torch.int64,device=self.slots.device).reshape(-1,width))
+            setattr(self,name,torch.tensor(columns[name],dtype=torch.int64,device=self.slots.device).reshape(-1,width) if prepared is None else prepared.tensor(name))
         for known,anchor,q in columns['binance_depth_values']:
             if not (known in (0,1) and 0 <= anchor < len(shared.anchor_sets) and 0 <= q < 6):
                 raise ValueError('Binance深度载荷错误')
@@ -37,7 +37,7 @@ class PublicBinanceState:
                 prior = previous.get(target,(-1,-1))
                 if sequence < prior[0] or group < prior[1]: raise ValueError('Binance原前缀顺序倒退')
                 previous[target] = (sequence,group)
-            setattr(self,name,PrefixColumn(columns[name],targets,self.slots.device))
+            setattr(self,name,PrefixColumn(columns[name],targets,self.slots.device) if prepared is None else prepared.prefix(name))
 
     def observation(self,prefixes):
         _,ids,present,fault = self.binance_trades.query(prefixes)

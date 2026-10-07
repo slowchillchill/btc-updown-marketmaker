@@ -18,6 +18,17 @@ class PrefixColumn:
         counts = torch.bincount(self.rows[:, 0], minlength=targets)
         self.offsets = torch.cat((counts.new_zeros(1), counts.cumsum(0))).contiguous()
 
+    @classmethod
+    def from_prepared(cls, padded, offsets):
+        """冷安装已经验收并预排的二进制列；不再次排序或计算offset。"""
+        if (padded.ndim!=2 or padded.size(1)!=4 or padded.size(0)<1
+                or padded.dtype!=torch.int64 or offsets.ndim!=1 or offsets.numel()<1
+                or offsets.dtype!=torch.int64 or padded.device!=offsets.device):
+            raise ValueError('预排公共列须同设备int64 sentinel行与offset列')
+        result=cls.__new__(cls)
+        result.padded,result.rows,result.offsets=padded,padded[1:],offsets
+        return result
+
     def query(self, prefixes):
         selected, fault = _numbers().public_extension().prefix_lookup(self.rows, self.offsets, prefixes)
         found = selected >= 0
@@ -65,7 +76,7 @@ class PublicPmState:
     当前正量档位才能进入模型，不能把这些共享槽位直接当模型padding。
     本入口包含PM盘口、直接BBA/trade/tick；生命周期/参考/Binance仍由后续公共后端衔接。
     """
-    def __init__(self, columns, *, device='cuda'):
+    def __init__(self, columns, *, device='cuda', prepared=None):
         if columns['version'] != 'public_pm_device_columns_v1':
             raise ValueError('设备列版本错误')
         self.input_stream_id = columns['input_stream_id']
@@ -77,24 +88,31 @@ class PublicPmState:
         for asset, side, price in columns['slots']:
             if not (0 <= asset < assets and side in (0, 1) and 0 <= price < len(columns['decimals'])):
                 raise ValueError('公共设备价位身份或精确值引用越界')
-        self.slots = torch.tensor(columns['slots'], dtype=torch.int64, device=device).reshape(-1, 3)
-        self.groups = torch.tensor(columns['groups'], dtype=torch.int64, device=device).reshape(-1, 3)
+        self.slots = (torch.tensor(columns['slots'], dtype=torch.int64, device=device).reshape(-1, 3)
+            if prepared is None else prepared.tensor('slots'))
+        self.groups = (torch.tensor(columns['groups'], dtype=torch.int64, device=device).reshape(-1, 3)
+            if prepared is None else prepared.tensor('groups'))
         # 原组时间可回退；宿主按原组顺序累计可见时间，不改变原事实或重排。
-        self.causal_visible_at = torch.cummax(self.groups[:,2],dim=0).values.contiguous()
-        raw, offsets = bytearray(), [0]
-        for text in columns['decimals']:
-            raw.extend(text.encode('ascii')); offsets.append(len(raw))
-        byte_column = torch.tensor(list(raw), dtype=torch.uint8).pin_memory().to(device, non_blocking=True)
-        offset_column = torch.tensor(offsets, dtype=torch.int64).pin_memory().to(device, non_blocking=True)
-        self.decimal_columns = decimal_columns(byte_column, offset_column,
-            torch.ones(len(offsets)-1, dtype=torch.bool, device=device))
-        self.decimals = self.decimal_columns.rational()
+        self.causal_visible_at = (torch.cummax(self.groups[:,2],dim=0).values.contiguous()
+            if prepared is None else prepared.tensor('causal_visible_at'))
+        if prepared is None:
+            raw, offsets = bytearray(), [0]
+            for text in columns['decimals']:
+                raw.extend(text.encode('ascii')); offsets.append(len(raw))
+            byte_column = torch.tensor(list(raw), dtype=torch.uint8).pin_memory().to(device, non_blocking=True)
+            offset_column = torch.tensor(offsets, dtype=torch.int64).pin_memory().to(device, non_blocking=True)
+            self.decimal_columns = decimal_columns(byte_column, offset_column,
+                torch.ones(len(offsets)-1, dtype=torch.bool, device=device))
+            self.decimals = self.decimal_columns.rational()
+        else:
+            self.decimal_columns,self.decimals=prepared.decimal_columns,prepared.decimals
         self.decimal_fault = self.decimals.fault  # 不可变字典的合并错误只冷计算一次。
         self.anchors = columns['anchors']
-        self.anchor_times = torch.tensor([[0, 0, 0]] + [
+        self.anchor_times = (torch.tensor([[0, 0, 0]] + [
             [int(a['direct']['source_event_at_utc_ms'] is not None),
              a['direct']['source_event_at_utc_ms'] or 0, a['direct']['received_at_utc_ms']]
             for a in self.anchors], dtype=torch.int64, device=device)
+            if prepared is None else prepared.tensor('anchor_times'))
         for name in ('quantities', 'selections', 'resets', 'initialized', 'ready', 'ticks',
                      'level_anchors', 'book_quality', 'book_anchors'):
             target_count = slots if name in ('quantities', 'selections', 'level_anchors') else assets
@@ -115,13 +133,14 @@ class PublicPmState:
                     raise ValueError('公共档位直接锚点引用越界')
                 if name == 'book_quality' and not 0 <= value < 6:
                     raise ValueError('公共盘口质量错误')
-            setattr(self, name, PrefixColumn(columns[name], target_count, device))
+            setattr(self, name, PrefixColumn(columns[name], target_count, device) if prepared is None else prepared.prefix(name))
         self.anchor_sets = columns['anchor_sets']
         for members in self.anchor_sets:
             if any(not 0 <= member < len(self.anchors) for member in members):
                 raise ValueError('观察字段直接来源集合引用越界')
-        self.unique_anchor_ids = torch.tensor([members[0] if len(members) == 1 else -1
+        self.unique_anchor_ids = (torch.tensor([members[0] if len(members) == 1 else -1
             for members in self.anchor_sets],dtype=torch.int64,device=device)
+            if prepared is None else prepared.tensor('unique_anchor_ids'))
         for name, table_name, width, decimal_indices, presence_indices, anchor_index in (
                 ('bba','bba_values',8,(1,3,5),(0,2,4),6),
                 ('trades','trade_values',7,(0,1,4),(3,),5),
@@ -147,8 +166,8 @@ class PublicPmState:
                 if sequence < prior[0] or group < prior[1]:
                     raise ValueError('公共观察字段原顺序倒退')
                 previous[target] = (sequence,group)
-            setattr(self,name,PrefixColumn(columns[name],assets,device))
-            setattr(self,table_name,torch.tensor(table,dtype=torch.int64,device=device).reshape(-1,width))
+            setattr(self,name,PrefixColumn(columns[name],assets,device) if prepared is None else prepared.prefix(name))
+            setattr(self,table_name,torch.tensor(table,dtype=torch.int64,device=device).reshape(-1,width) if prepared is None else prepared.tensor(table_name))
 
     def prefix_at(self, observation_ms):
         """UTC观察选择完整合法前缀；后组必须同时等到全部前组可见。"""

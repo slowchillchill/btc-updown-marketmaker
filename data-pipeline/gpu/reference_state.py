@@ -14,14 +14,14 @@ class PublicReferenceFrame:
 
 
 class PublicReferenceState:
-    def __init__(self, market_state, columns):
+    def __init__(self, market_state, columns, *, prepared=None):
         self.market = market_state
         self.shared = market_state.shared
         self.preparation_complete = columns['reference_preparation_complete']
         device = self.shared.slots.device
         for name,width in (('reference_values',4),('reference_rule_values',3),
                            ('reference_official_values',4),('reference_temporary_values',4)):
-            setattr(self,name,torch.tensor(columns[name],dtype=torch.int64,device=device).reshape(-1,width))
+            setattr(self,name,torch.tensor(columns[name],dtype=torch.int64,device=device).reshape(-1,width) if prepared is None else prepared.tensor(name))
         for name,targets,values in (('global_references',3,self.reference_values),
                 ('reference_rules',market_state.market_count,self.reference_rule_values),
                 ('reference_official',market_state.market_count,self.reference_official_values),
@@ -34,7 +34,7 @@ class PublicReferenceState:
                 prior = previous.get(target,(-1,-1))
                 if sequence < prior[0] or group < prior[1]: raise ValueError('公共参考原顺序倒退')
                 previous[target] = (sequence,group)
-            setattr(self,name,PrefixColumn(columns[name],targets,device))
+            setattr(self,name,PrefixColumn(columns[name],targets,device) if prepared is None else prepared.prefix(name))
         for price,anchor,q,window in columns['reference_values']:
             if not (0 <= price < self.shared.decimal_fault.numel() and 0 <= anchor < len(self.shared.anchor_sets)
                     and 0 <= q < 6 and window in (0,30,60)): raise ValueError('公共全局参考值错误')

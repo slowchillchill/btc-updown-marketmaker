@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--material',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--original-reference',type=Path)
+    parser.add_argument('--device-page',type=Path,help='原reader一次构建并两次直接加载固定二进制列')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     sys.path.insert(0,str(root/'data-pipeline/gpu'))
@@ -43,18 +44,97 @@ def main():
     native_freeze_reference = None
     started = time.perf_counter()
     print(json.dumps({'stage':'strict_compact_to_pm_device_columns'}),flush=True)
-    wire = subprocess.check_output([str(args.binary),'--pm-device-columns',str(args.material),'268435456'])
-    columns = json.loads(wire)
+    page_report=None
+    prepared=None
+    if args.device_page is None:
+        wire = subprocess.check_output([str(args.binary),'--pm-device-columns',str(args.material),'268435456'])
+        columns = json.loads(wire)
+        state = PublicPmState(columns)
+        market_state = PublicMarketState(state,columns)
+        reference_state = PublicReferenceState(market_state,columns)
+        binance_state = PublicBinanceState(state,columns)
+    else:
+        from public_device_page import PreparedPublicPage, build_public_device_page, PREFIXES, TABLES
+        import numpy as np
+        import public_state as public_module
+        def page_progress(stage,**fields):
+            print(json.dumps({'stage':stage,'elapsed_seconds':time.perf_counter()-started,**fields}),flush=True)
+        build_started=time.perf_counter()
+        built=build_public_device_page(args.binary,args.material,args.device_page,progress=page_progress)
+        build_seconds=time.perf_counter()-build_started
+        original_columns=built[-1]
+        # 第二次及后续冷安装禁止GPU数字解析/GCD入口与前缀排序/counts。
+        saved=(public_module.decimal_columns,torch.argsort,torch.bincount,public_module.PrefixColumn.__init__)
+        saved_ratio=vars(_numbers().ExactRational)['ratio']
+        def forbidden(*a,**kw): raise AssertionError('二进制页加载不得重新解析数字或排序offset')
+        loads=[]
+        try:
+            public_module.decimal_columns=torch.argsort=torch.bincount=public_module.PrefixColumn.__init__=forbidden
+            _numbers().ExactRational.ratio=classmethod(forbidden)
+            for attempt in range(2):
+                load_started=time.perf_counter()
+                page=PreparedPublicPage(args.device_page,args.material)
+                installed=page.install()
+                assert page.columns['fact_records'].decoded_records==0
+                assert set(page.columns)==set(original_columns)
+                for name in TABLES: assert np.array_equal(page.columns[name],np.asarray(original_columns[name]).reshape(page.columns[name].shape))
+                for name in ('anchor_sets','terminal_payouts'):
+                    assert len(page.columns[name])==len(original_columns[name])
+                    for current,original in zip(page.columns[name],original_columns[name]): assert np.array_equal(current,np.asarray(original).reshape(current.shape))
+                for name in set(original_columns)-set(TABLES)-{'anchor_sets','terminal_payouts'}:
+                    assert page.columns[name]==original_columns[name]
+                for old,new in zip(built[:4],installed):
+                    for name in PREFIXES:
+                        if hasattr(old,name):
+                            assert torch.equal(getattr(old,name).padded,getattr(new,name).padded)
+                            assert torch.equal(getattr(old,name).offsets,getattr(new,name).offsets)
+                for name in ('numerator','denominator'):
+                    for field in ('words','sign','fault'):
+                        assert torch.equal(getattr(getattr(built[0].decimals,name),field),
+                            getattr(getattr(installed[0].decimals,name),field))
+                torch.cuda.synchronize()
+                loads.append(time.perf_counter()-load_started)
+                page_progress('public_device_page_loaded',attempt=attempt+1,seconds=loads[-1])
+            prepared=page
+            state,market_state,reference_state,binance_state=installed
+            columns=prepared.columns
+        finally:
+            public_module.decimal_columns,torch.argsort,torch.bincount,public_module.PrefixColumn.__init__=saved
+            _numbers().ExactRational.ratio=saved_ratio
+        # 一个实际身份bank损坏边界；原页不改，复制仅该成员和manifest。
+        import tempfile, shutil
+        args.output.parent.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='page-corrupt-',dir=args.output.parent) as temporary:
+            broken=Path(temporary)
+            shutil.copyfile(args.device_page/'manifest.json',broken/'manifest.json')
+            manifest=json.loads((args.device_page/'manifest.json').read_text())
+            identity_name=manifest['members']['fact_records.utf8']['file']
+            identity=bytearray((args.device_page/identity_name).read_bytes()); identity[-1]^=1
+            (broken/identity_name).write_bytes(identity)
+            # 其余成员硬链接原只读页；仅独立复制的身份成员发生损坏。
+            for entry in manifest['members'].values():
+                if entry['file']!=identity_name: os.link(args.device_page/entry['file'],broken/entry['file'])
+            try: PreparedPublicPage(broken,args.material)
+            except ValueError as error:
+                assert '摘要' in str(error) and identity_name in str(error)
+            else: raise AssertionError('损坏原身份成员必须拒绝')
+        wire=b''
+        page_report={'build_seconds':build_seconds,'load_seconds':loads,
+            'bytes':sum(p.stat().st_size for p in args.device_page.iterdir()),
+            'complete_original_columns_and_full_identity_equal':True,
+            'fact_json_decodes_during_two_loads':prepared.columns['fact_records'].decoded_records,
+            'two_loads_without_decimal_gcd_or_prefix_sort_checked':True,
+            'corrupted_original_identity_member_rejected':True,
+            'whole_material_ended_page_only':True,'continuous_page_handoff_checked':False}
+        del built
     parsed = time.perf_counter()
     print(json.dumps({'stage':'shared_gpu_load','slots':len(columns['slots']),
                       'assets':len(columns['assets']),'decimals':len(columns['decimals']),
                       'cold_seconds':parsed-started}),flush=True)
-    state = PublicPmState(columns)
-    prefix_values = [-1,0,len(columns['groups'])-1] if columns['groups'] else [-1,-1,-1]
+    prefix_values = [-1,0,len(columns['groups'])-1] if len(columns['groups']) else [-1,-1,-1]
     prefixes = torch.tensor(prefix_values,device='cuda',dtype=torch.int64)
     frame = state.frame(prefixes)
     observation = state.observation(prefixes)
-    market_state = PublicMarketState(state,columns)
     market_frame = market_state.frame(prefixes)
     assert not observation.bba.fault.any().cpu().item()
     assert not observation.trade.fault.any().cpu().item()
@@ -91,11 +171,11 @@ def main():
     # 必须先按当前正量压紧再进入原BookEncoder；不让future槽位改变配对树。
     # 工程组件选择首次有真实档位事实的原市场；不签发交易资格或创建账户根。
     target_market = (next(entry[0] for entry in columns['market_assets']
-                         if entry[1] == columns['slots'][0][0]) if columns['slots'] else 0)
+                         if entry[1] == columns['slots'][0][0]) if len(columns['slots']) else 0)
     original_pair = [asset for _,asset,_ in sorted(
         [entry for entry in columns['market_assets'] if entry[0] == target_market],key=lambda entry:entry[2])]
     assets = torch.tensor([original_pair if original_pair else [0,1]]*3, dtype=torch.int64, device='cuda')
-    now = torch.tensor([columns['groups'][max(0,int(prefix))][2] if columns['groups'] else 0 for prefix in prefix_values],
+    now = torch.tensor([columns['groups'][max(0,int(prefix))][2] if len(columns['groups']) else 0 for prefix in prefix_values],
                        dtype=torch.int64,device='cuda')
     if args.original_reference is not None:
         now[-1] = json.loads(args.original_reference.read_text())['observation_ms']
@@ -106,13 +186,11 @@ def main():
     native_lifecycle = LifecycleInputs(market_state).encode(market_frame,market_indices,assets,now)
     side_inputs = SideInputs(state)
     native_sides = side_inputs.encode(frame,assets,now)
-    binance_state = PublicBinanceState(state,columns)
     binance_inputs = BinanceInputs(binance_state,initial_capacity=1)
     binance_frame = binance_state.frame(prefixes)
     symbols = torch.zeros_like(prefixes)
     native_binance = binance_inputs.encode(binance_frame,binance_state.observation(prefixes),symbols,now)
     assert not native_binance.fault.any().cpu().item()
-    reference_state = PublicReferenceState(market_state,columns)
     native_reference = ReferenceInputs(reference_state).encode(reference_state.frame(prefixes),market_frame,market_indices,now)
     if columns['reference_preparation_complete'] and columns['markets']:
         assert not native_reference.fault.any().cpu().item()
@@ -148,7 +226,7 @@ def main():
     assert torch.count_nonzero(invalid_trade_window.values) == 0
     assert trades.window.capacity == trade_capacity_before_invalid
     # 真正UTC 100ms网格的末10个窗口，GPU选择合法闭组前缀，区间不按source time筛选。
-    if columns['groups']:
+    if len(columns['groups']):
         last_grid = (columns['groups'][-1][2]//100)*100
         grid = torch.arange(last_grid-900,last_grid+1,100,dtype=torch.int64,device='cuda')
         end_prefix = state.prefix_at(grid)
@@ -159,7 +237,7 @@ def main():
     normal_window_peak = torch.cuda.max_memory_allocated()
 
     positive_rows = int(packed.mask.sum().cpu())
-    if columns['slots']:
+    if len(columns['slots']):
         assert positive_rows > 0, '真实来源盘口检查必须实际编码正数量档位，不能以空侧冒充'
     if len(columns['assets']) >= 2:
         assert not packed.fault.any().cpu().item()
@@ -777,7 +855,7 @@ def main():
               'i64_time_coordinate_exact_difference','fault_bit_union','pm_direct_observation_fields',
               'native_events104_legal_prefix_window','empty_and_invalid_window','utc_100ms_window_prefix',
               'native_window_trades77_exact_aggregation','public_market_identity_prefix','native_lifecycle103','native_pm_side38_endpoint_memory','binance_source_prefix_state','native_binance38_book9_trade15']
-    if columns['slots']:
+    if len(columns['slots']):
         passed += ['exact_price_sort_current_positive_compaction','native_pm_nine_fields',
                    'real_book_encoder_forward_backward','tail_padding_pairwise_tree','native_pm_bba28_trade18']
     else:
@@ -789,11 +867,12 @@ def main():
     if native_freeze_reference is not None:
         passed.append('native_fast626_rule30_freeze_original_closed_group_clock')
     report = {'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
-              'identity':('engineering_real_public_pm_book_inputs_only' if columns['slots']
+              'identity':('engineering_real_public_pm_book_inputs_only' if len(columns['slots'])
                           else 'engineering_missing_book_boundary'),'device':torch.cuda.get_device_name(),
               'groups':len(columns['groups']),'original_pm_steps':columns['original_pm_steps'],
               'assets':len(columns['assets']),'slots':len(columns['slots']),
               'decimal_dictionary':len(columns['decimals']),'derived_column_wire_bytes':len(wire),
+              'public_device_page':page_report,
               'encoded_positive_rows':positive_rows,'raw_trade_facts':len(columns['raw_trades']),'public_facts':len(columns['facts']),
               'binance_positive_rows':int(native_binance.packed.mask.sum().cpu()),
               'direct_sources':len(columns['fact_sources']),
@@ -809,6 +888,10 @@ def main():
               'native_100ms_freeze_reference':native_freeze_reference,
               'not_delivered':(['reference_preparation_for_this_material'] if not columns['reference_preparation_complete'] else [])+['hidden','sim_noe_ledger',
                                'whole_root_100ms_scheduler_cross_block','full_actor','ppo','active_root_restore']}
+    if prepared is not None:
+        assert prepared.columns['fact_records'].decoded_records==0
+        report['public_device_page']['cold_identity_records_decoded_by_existing_consumers']={
+            name:prepared.columns[name].decoded_records for name in ('assets','markets','anchors','lifecycle_states')}
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
     print(json.dumps(report,ensure_ascii=False),flush=True)
