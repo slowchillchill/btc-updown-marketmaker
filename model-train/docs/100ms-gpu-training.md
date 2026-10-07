@@ -600,6 +600,12 @@ sentinel/offset、精确整数与有理数 bank。公共 v2 页只保存预排 p
 另一份事实。合格原 compact 与旧页无需全部重做；新 v2 页不能交给仅支持 v1
 的旧程序。页引用及活动根恢复尚待所属步骤交付。
 
+主线首行元数据转换保留真实 Gamma 身份，并将元数据实际 collector admission
+纳入公共可见时间下界。若旧 compact/page 的元数据 admission 晚于其已存 visible 时间，
+须用保留的原输入沿新 Core 局部重归约，并更新依赖该时间的公共前缀；仅 repack compact
+或加载旧页不会重算旧语义。无此差异的材料继续复用，public/hidden 配对须核对实际时间
+关联，不新增发布凭据，也不要求全部旧材料重做。
+
 公共估值列使用 `public_pm_device_columns_v2` 与
 `public_device_page_v3`。原 compact 已保存的 epoch、Selection.version、
 AbsenceBaseline 和 PM 直接来源可转为共享版本表；完整 u64 准入序号保存为
@@ -1512,7 +1518,7 @@ Submission 的已收到 Accepted 也须有原 SubmissionItem 关联才应用 Led
 后置验证入口是 `model-train/scripts/run_order_query_validation.sh`，完整成功池路径复用
 原 `trade-records` 定向回归。`cf03345` 两个原 Ledger 场景均在 AutoDL 通过，
 `c510f64` 完整成功池非空 trade 回归适用；原导出和验证读面失败保留于 #181 实施记录。
-Registry 的 V2 Found 消费者沿下一组件接线；实际 SIM Query 生产者和发送端登记仍开放。Found 快照
+Registry 的 V2 Found 消费者见下一节；实际 SIM Query 生产者和发送端登记仍开放。Found 快照
 不能替代原 Submission 数量测量。此处不增加自动查询或重试政策，也不声称完整 Query 宿主、
 连续训练、PPO 或活动账户恢复已经交付。
 
@@ -1538,4 +1544,6 @@ open 减后续 Maker 的公式，Query 只提供终态覆盖，不改变账本�
 `run_query_registry_validation.sh` 导出完整原引用和独立 CPU Registry 读面，核数量、
 适用性、cancellable、原引用及同设备冻结捕获/旧冻结。Query 冷切片承接真实交付起点并
 核实际双时间门，非 Query 来源复用原冷引用适配；这不是完整首次领取流或 GPU SIM 生产者。
-完整取消对象人口、Quote Query 的 SIM 后端和发送/关联共同提交仍开放，本候选尚未后置运行。
+`dc412cf` 已在 AutoDL 通过原 Registry 六帧、两个 Ledger Query 场景以及非空交易和取消
+回归。原 CPU 终态引用独立验证 `known_query` 的完整位置、时间和保持性；附加重排不冒称
+实际收到顺序。完整取消对象人口、Quote Query 的 SIM 后端和发送/关联共同提交仍开放。
