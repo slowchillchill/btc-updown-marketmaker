@@ -38,7 +38,9 @@ class PublicLedgerState:
         registry = registry.receive(cancellation_order_events(targets, rank))
         # Registry只在首次领取路径更新。Ledger再试始终引用原waiting和首次visibility。
         waiting = self.waiting.accept(self.ledger.columns, closed)
-        ledger, waiting = waiting.drain(self.ledger, association_available, passes=passes)
+        # 原Registry接纳失败时不得继续提交同根Ledger；其它独立根仍能推进。
+        ledger_input=replace(self.ledger,fault=self.ledger.fault | registry.events.fault | targets.fault | completions.fault)
+        ledger, waiting = waiting.drain(ledger_input, association_available, passes=passes)
         fault = closed.fault | registry.events.fault | targets.fault | completions.fault | waiting.fault | ledger.fault
         return replace(self, pending_noe=pending, registry=registry, waiting=waiting, ledger=ledger), PublicDelivery(
             closed, bindings, targets, completions, fault)

@@ -136,6 +136,15 @@ def validate_actual_cancel(source,delta):
     # 同真实来源另算纯候选，作为统一生产入口的对照，不重复接纳手工分支。
     coordinated=PublicLedgerState(pending_initial,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),cache,ledger)
     # 缺经济关联只暂停Ledger释放；公开Control已领取，Registry仍先关闭。
+    # 原Registry已有故障不能继续提交该根Ledger。NOE实际领取引用仍在返回结果中。
+    broken=replace(coordinated,registry=PublicRegistryState(replace(coordinated.registry.events,
+        fault=torch.ones_like(coordinated.registry.events.fault))))
+    broken,failed_delivery=Numbers.run_exact_batch(lambda:broken.receive(state.normalizer.bank,gates,
+        torch.ones_like(ledger.columns.enabled),passes=1))
+    assert failed_delivery.fault.cpu().tolist()==[1]
+    assert values(broken.ledger.current_entry_sequence)==values(ledger.current_entry_sequence)
+    assert amounts(broken.ledger.platform.balances)==amounts(ledger.platform.balances)
+    assert not broken.ledger.applied.any().cpu().item()
     blocked_association=torch.zeros_like(ledger.columns.enabled)
     coordinated,delivery=Numbers.run_exact_batch(lambda:coordinated.receive(state.normalizer.bank,gates,blocked_association,passes=1))
     assert delivery.fault.cpu().tolist()==[0] and int(delivery.closed.emitted.sum().cpu())==4
@@ -188,7 +197,7 @@ def validate_actual_cancel(source,delta):
     assert amounts(repeated.platform.balances)==amounts(ledger.platform.balances)
     assert torch.equal(repeat_cache.available_at,cache.available_at)
     return {'actual_GPU_cancel_effects_to_NOE_records':4,'Control_Canceled_before_CallerCanceled_closed':True,
-        'actual_shared_NOE_first_receive_Registry_then_Ledger_checked':True,'Ledger_waiting_does_not_delay_public_cancel_close_checked':True,'real_CallerCanceled_device_decoder_checked':True,'NOE_unset_gates_no_delivery':True,'first_delivery_not_repeated':True,
+        'Registry_fault_does_not_commit_Ledger_checked':True,'actual_shared_NOE_first_receive_Registry_then_Ledger_checked':True,'Ledger_waiting_does_not_delay_public_cancel_close_checked':True,'real_CallerCanceled_device_decoder_checked':True,'NOE_unset_gates_no_delivery':True,'first_delivery_not_repeated':True,
         'source_private_batch_and_actual_release_checked':True,'Ledger_four_original_positions_and_sequences_checked':True,
         'each_actual_receive_prefix_order_condition_open_and_last_sequence_checked':True,
         'Ledger_control_closes_without_cash_and_economic_releases_once':True,
