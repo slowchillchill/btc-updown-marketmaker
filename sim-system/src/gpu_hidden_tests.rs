@@ -240,7 +240,8 @@ async fn gpu_hidden_terminal_source(with_order: bool) {
                         bucket.bucket.bucket_time_utc_ms,&[header],&[normalized],execution.actor._rule_snapshot.snapshot(),
                         execution.actor._finality_policy.as_ref()).unwrap_or_else(|_|panic!("真实canonical市场参考归约失败"));
                     state=next;
-                    let lifecycle=effects.execution.into_lifecycle_feedback().unwrap();
+                    let mut lifecycle=Vec::new();
+                    for effect in effects.execution {lifecycle.extend(effect.into_lifecycle_feedback().unwrap());}
                     if !lifecycle.is_empty() {
                         lifecycle_count+=lifecycle.len();
                         state=gpu_accept_projection_reference(&mut execution.actor,state,
@@ -266,8 +267,9 @@ async fn gpu_hidden_terminal_source(with_order: bool) {
                     bucket.bucket.bucket_time_utc_ms,&[header],&[normalized],execution.actor._rule_snapshot.snapshot(),
                     execution.actor._finality_policy.as_ref()).unwrap_or_else(|_|panic!("真实空Book隐藏归约失败"));
                 state=next;
-                let effects=effects.execution.into_lifecycle_feedback().unwrap();
-                assert!(effects.is_empty(),"原空Book不产生账户或成交反馈");
+                let mut lifecycle=Vec::new();
+                for effect in effects.execution {lifecycle.extend(effect.into_lifecycle_feedback().unwrap());}
+                assert!(lifecycle.is_empty(),"原空Book不产生账户或成交反馈");
             }
         }
         if with_order && bucket.bucket.bucket_time_utc_ms==22000 {
