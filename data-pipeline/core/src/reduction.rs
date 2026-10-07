@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::typed_raw::{
     self, BinanceAggTradeRecord, BinanceAggTradeRow, BinanceDepthSnapshotRow,
     BinanceDepthStitchVerdict, BinanceDepthUpdateRow, DepthLevel, PolymarketMarketMetadataRow,
-    PolymarketOrderbookEvent, PolymarketOrderbookRow, TypedRawRow,
+    PolymarketOrderbookEvent, PolymarketOrderbookRow, PolymarketTerminalMetadataFieldsV1,
+    TypedRawRow,
 };
 use crate::{
     ContractError, derive_execution_market_event_v3_id, derive_reference_event_v1_id,
@@ -578,6 +579,28 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
     ) -> Result<(), ContractError> {
         self.compute_update_projection(row, evidence, true)
             .map(|_| ())
+    }
+    /// 研究已定位的数量资格缺口：丢弃当前数量状态，delta不能重建。
+    /// 不改变生产compute入口的错误政策；下一真实snapshot沿原公共入口恢复。
+    pub fn invalidate_quantity_state(
+        &mut self,
+        row: &BinanceDepthUpdateRow,
+    ) -> Result<(), ContractError> {
+        self.begin_epoch(&row.source_sequence_epoch_id)?;
+        let state = self
+            .epochs
+            .entry(row.source_sequence_epoch_id.clone())
+            .or_default();
+        require_next_admission(
+            state.last_admission_sequence,
+            row.collector_admission_sequence,
+            "binance_depth_update.collector_admission_sequence",
+        )?;
+        state.book = None;
+        state.awaiting_after_continuity_reset = true;
+        state.epoch_switch_prior_book = None;
+        state.last_admission_sequence = Some(row.collector_admission_sequence);
+        Ok(())
     }
     /// 仅在实际采样时精确求和；缺口或新代际尚无快照时返回 None。
     pub fn current_quantity_totals(
@@ -1327,6 +1350,14 @@ pub struct PolymarketMarketContextV1<E = SourceEvidenceRefV2> {
     pub identity_source_evidence: Vec<E>,
 }
 
+/// 终局只依赖市场/资产映射与其证据，不依赖交易tick或盘口上下文。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolymarketTerminalContextV1<E = SourceEvidenceRefV2> {
+    pub market: MarketIdentityV2,
+    pub assets: Vec<AssetIdentityV1>,
+    pub identity_source_evidence: Vec<E>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolymarketOrderbookInputV1<E = SourceEvidenceRefV2> {
     pub row: PolymarketOrderbookRow,
@@ -1337,6 +1368,20 @@ pub struct PolymarketOrderbookInputV1<E = SourceEvidenceRefV2> {
 pub struct PolymarketMetadataInputV1<E = SourceEvidenceRefV2> {
     pub row: PolymarketMarketMetadataRow,
     pub evidence: E,
+}
+/// 窄终局输入；旧完整输入保留并委托，不改变生产校验。
+#[derive(Clone, Debug)]
+pub struct PolymarketTerminalMetadataInputV1<E> {
+    pub row: PolymarketTerminalMetadataFieldsV1,
+    pub evidence: E,
+}
+impl<E> From<PolymarketMetadataInputV1<E>> for PolymarketTerminalMetadataInputV1<E> {
+    fn from(input: PolymarketMetadataInputV1<E>) -> Self {
+        Self {
+            row: (&input.row).into(),
+            evidence: input.evidence,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1682,10 +1727,55 @@ impl<E: ReductionEvidenceV1> PolymarketTerminalMerger<E> {
     ) -> Result<Self, ContractError> {
         let (market, canonical_rule_version, contexts, identity_source_evidence) =
             prepare_polymarket_context(context, canonical_rule_version.into())?;
-        let mut assets = contexts
-            .into_iter()
-            .map(|context| context.asset)
-            .collect::<Vec<_>>();
+        Self::from_terminal_context(
+            PolymarketTerminalContextV1 {
+                market,
+                assets: contexts.into_iter().map(|context| context.asset).collect(),
+                identity_source_evidence,
+            },
+            canonical_rule_version,
+        )
+    }
+
+    pub fn from_terminal_context(
+        context: PolymarketTerminalContextV1<E>,
+        canonical_rule_version: impl Into<String>,
+    ) -> Result<Self, ContractError> {
+        let canonical_rule_version = canonical_rule_version.into();
+        if canonical_rule_version.trim().is_empty() {
+            return Err(invalid("canonical_rule_version", "must not be empty"));
+        }
+        validate_market(&context.market, "market")?;
+        let identity_source_evidence =
+            canonicalize_reduction_evidence::<E>(context.identity_source_evidence)?;
+        if identity_source_evidence
+            .iter()
+            .any(|source| !source.is_metadata_identity())
+        {
+            return Err(invalid(
+                "identity_source_evidence",
+                "terminal mapping requires real non-WS metadata evidence",
+            ));
+        }
+        if context.assets.len() != 2 {
+            return Err(invalid(
+                "assets",
+                "btc-updown terminal context requires exactly two assets",
+            ));
+        }
+        let mut tokens = BTreeSet::new();
+        let mut indices = BTreeSet::new();
+        for asset in &context.assets {
+            crate::validate_asset(asset, "assets.asset")?;
+            if !tokens.insert(asset.token_id.0.clone()) || !indices.insert(asset.outcome.index) {
+                return Err(invalid(
+                    "assets",
+                    "token IDs and outcome indices must be unique",
+                ));
+            }
+        }
+        let market = context.market;
+        let mut assets = context.assets;
         assets.sort_by(|left, right| compare_decimal_ids(&left.token_id.0, &right.token_id.0));
         Ok(Self {
             market,
@@ -1701,6 +1791,15 @@ impl<E: ReductionEvidenceV1> PolymarketTerminalMerger<E> {
     pub fn compute_ws_terminal(
         &mut self,
         metadata: PolymarketMetadataInputV1<E>,
+        metadata_outcomes: &[typed_raw::MetadataOutcomeEvidence],
+        orderbook: PolymarketOrderbookInputV1<E>,
+    ) -> Result<PolymarketReductionBatch<E, E::Identity>, ContractError> {
+        self.compute_ws_terminal_from_fields(metadata.into(), metadata_outcomes, orderbook)
+    }
+
+    pub fn compute_ws_terminal_from_fields(
+        &mut self,
+        metadata: PolymarketTerminalMetadataInputV1<E>,
         metadata_outcomes: &[typed_raw::MetadataOutcomeEvidence],
         orderbook: PolymarketOrderbookInputV1<E>,
     ) -> Result<PolymarketReductionBatch<E, E::Identity>, ContractError> {
@@ -1890,6 +1989,14 @@ impl<E: ReductionEvidenceV1> PolymarketTerminalMerger<E> {
         metadata: PolymarketMetadataInputV1<E>,
         metadata_outcomes: &[typed_raw::MetadataOutcomeEvidence],
     ) -> Result<PolymarketReductionBatch<E, E::Identity>, ContractError> {
+        self.compute_gamma_terminal_from_fields(metadata.into(), metadata_outcomes)
+    }
+
+    pub fn compute_gamma_terminal_from_fields(
+        &mut self,
+        metadata: PolymarketTerminalMetadataInputV1<E>,
+        metadata_outcomes: &[typed_raw::MetadataOutcomeEvidence],
+    ) -> Result<PolymarketReductionBatch<E, E::Identity>, ContractError> {
         let terminal_evidence = vec![metadata.evidence.clone()];
         let mut evidence = self.identity_source_evidence.clone();
         evidence.extend(terminal_evidence.clone());
@@ -2065,8 +2172,12 @@ impl<E: ReductionEvidenceV1> PolymarketTerminalMerger<E> {
             None,
             lifecycle_event.event_id.clone(),
         )?;
-        let trading_state = metadata_trading_state(&metadata.row)
-            .expect("qualified Gamma terminal carries independent trading state fields");
+        let trading_state = metadata_trading_state_fields(
+            metadata.row.active,
+            metadata.row.closed,
+            metadata.row.accepting_orders,
+        )
+        .expect("qualified Gamma terminal carries independent trading state fields");
         let trading_event = finalize_execution_event(
             self.market.clone(),
             &self.canonical_rule_version,
@@ -2885,11 +2996,18 @@ const fn mapped_metadata_transition(
 }
 
 fn metadata_trading_state(row: &PolymarketMarketMetadataRow) -> Option<MarketTradingStateV2> {
-    (row.active.is_some() || row.closed.is_some() || row.accepting_orders.is_some()).then_some(
+    metadata_trading_state_fields(row.active, row.closed, row.accepting_orders)
+}
+fn metadata_trading_state_fields(
+    active: Option<bool>,
+    closed: Option<bool>,
+    accepting_orders: Option<bool>,
+) -> Option<MarketTradingStateV2> {
+    (active.is_some() || closed.is_some() || accepting_orders.is_some()).then_some(
         MarketTradingStateV2 {
-            active: row.active,
-            closed: row.closed,
-            accepting_orders: row.accepting_orders,
+            active,
+            closed,
+            accepting_orders,
         },
     )
 }
@@ -2949,7 +3067,7 @@ fn validate_polymarket_orderbook_evidence(
 fn terminal_conflict_reason(
     market: &MarketIdentityV2,
     assets: &[AssetIdentityV1],
-    metadata: &PolymarketMarketMetadataRow,
+    metadata: &PolymarketTerminalMetadataFieldsV1,
     orderbook: &PolymarketOrderbookRow,
     metadata_outcomes: &[typed_raw::MetadataOutcomeEvidence],
 ) -> Result<Option<&'static str>, ContractError> {
@@ -3121,7 +3239,7 @@ fn terminal_conflict_reason(
 fn gamma_terminal_conflict_reason<E: ReductionEvidenceV1>(
     market: &MarketIdentityV2,
     assets: &[AssetIdentityV1],
-    metadata: &PolymarketMetadataInputV1<E>,
+    metadata: &PolymarketTerminalMetadataInputV1<E>,
     metadata_outcomes: &[typed_raw::MetadataOutcomeEvidence],
 ) -> Result<Option<&'static str>, ContractError> {
     use typed_raw::{

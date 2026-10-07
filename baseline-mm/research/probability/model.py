@@ -28,8 +28,6 @@ def baseline_candidates():
 
 def predict(row, candidate, sigma_fit):
     """返回预测或明确缺失原因；零方差保留为已知值。"""
-    if row.get('identity_known') is False:
-        return None, 'missing_market_identity'
     if row['remaining_s'] <= 0:
         return None, 'market_ended'
     if row.get('rule_window_s') is None:
@@ -77,9 +75,6 @@ def innovation_steps(rows):
     """每次采样先按旧基差计算，再刷新基差。"""
     basis = None
     for row in rows:
-        if row.get('identity_known') is False:
-            row['innovation'] = None
-            continue
         price, trade, received = row.get('spot_price',row.get('price')), row.get('trade_price'), row.get('spot_received',row.get('price_received'))
         if price is None or trade is None or received is None:
             row['innovation'] = None

@@ -1,6 +1,6 @@
 # 直接概率与跨来源校准：方法及配置
 
-本实现承接 [#185 当前任务3分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。代码和合成边界验证已交付候选计算能力。首次真实十八日prepare因缺身份前态失败；第二次prepare在TWAP跨单元价格保留SQL失败，第三次在公共深度拼接状态失败，study均未启动。[首次失败与身份修复](complementary-pair-probability-run-20261007.md)、[第二次失败与SQL修复](complementary-pair-probability-run-20261007-repair1.md)及[第三次深度失败与窄修复](complementary-pair-probability-run-20261007-repair2.md)分别保留运行身份和准确事实。正式参数仍未采用。本方法不完成经营参数、任务4连续账户、PAPER 或 LIVE 验收。
+本实现承接 [#185 当前任务3分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。代码和合成边界验证已交付候选计算能力。当前按[研究入口纠正](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6039719531)及[D-0306](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6039845828)，取消生产身份总前置、隔离可定位深度缺失并及时保存紧凑查询成果。首次真实十八日prepare因缺身份前态失败；第二次prepare在TWAP跨单元价格保留SQL失败，第三次在公共深度拼接状态失败，study均未启动。[首次失败与身份修复](complementary-pair-probability-run-20261007.md)、[第二次失败与SQL修复](complementary-pair-probability-run-20261007-repair1.md)及[第三次深度失败与窄修复](complementary-pair-probability-run-20261007-repair2.md)分别保留运行身份和准确事实。正式参数仍未采用。本方法不完成经营参数、任务4连续账户、PAPER 或 LIVE 验收。
 
 ## 输入与准确查询
 
@@ -14,15 +14,19 @@
 | TWAP | v1 的 `full_accuracy_value` e18、`window_s`、接收/事件/准入时间、epoch 和 sequence；公共 `normalize_e18_price_decimal_v1`，不使用展示价格。30/60秒共用原生前沿。 |
 | Binance成交 | v7 的有效性、接收/成交/准入时间、epoch/generation/sequence、价格、数量及 `buyer_is_maker`；原生/业务重复冲突沿既有公共窄投影。 |
 | Binance深度 | snapshot v3/update v4 的当前价量 JSON、接收/事件/准入时间、epoch/generation/sequence、快照与更新ID及拼接判定；公共类型解析和 `BinanceDepthReducer` 维护权威数量映射。 |
-| 市场和标签 | metadata v6 的身份、正式锚点、结算规则及可信终局字段沿原完整类型构造。PM v3 先仅读事件类型和接收/准入原生坐标；仅 `market_resolved` 声明的必要语义行再由原类型读取器交公共终局 merger。 |
+| 市场和标签 | SQL从metadata共同字段取得condition、窗口和原始asset目录；真实Up/Down映射来自原outcome证据。参考沿公共参考原语，可信WS/Gamma标签沿公共终局merger的无tick窄构造。映射、参考和Gamma终局仅用SQL投影实际语义字段，调用公共窄输入；不执行完整metadata交易验证，不建立生产观察Core。PM v3先仅读事件类型与接收/准入坐标，只有 `market_resolved` 进入终局merger。 |
 
-PM 的全来源前沿在筛终局前形成。仅读元数据非空结果不能证明可信终局：本实现同时归并 PM 相反声明及公共质量变化。原生索引读取 PM 约7.28亿行的少数坐标/时钟列；终局投影随后仍要扫描必要列。它不展开全期 PM 盘口，但不能把列数比例当作物理读取比例或成本保证。元数据先沿公共类型边界提取紧凑的时钟/准入序号/公共来源身份坐标，再按公共 MetadataOrder 排序计算连续前沿；随后每物理文件保留当前类型子集并立即归约。该必要元数据边界解码两遍，不常驻十八日完整类型行，也不排序全期宽行。
+PM 的全来源前沿在筛终局前形成。仅读元数据非空结果不能证明可信终局：本实现同时归并 PM 相反声明及公共质量变化。原生索引读取 PM 约7.28亿行的少数坐标/时钟列；终局投影随后仍要扫描必要列。它不展开全期 PM 盘口，但不能把列数比例当作物理读取比例或成本保证。元数据时钟仅投影公共来源ID所需标量，已有原始摘要直接复用；无摘要时沿同一个公共SemanticLocator函数计算，不在Python复制hash。V6 Existing保持原物理读取器的V5来源版本规范化，AnchorRule保持自身规则。这样保留原MetadataOrder，却不为全部时钟行验证outcome、tick或宽响应。随后目录仅查询condition、窗口、asset与坐标；metadata语义投影不读取fixed_identity_verified_at_utc或解析initial_tick，token顺序和标签仍使用同一公共算法。WS终局仅保留必要原协议子集，不常驻十八日宽行。
 
 元数据没有连接epoch，排序键直接复用 `metadata_admission_order_v1(admitted,sequence,source_message_id)`，与原初始化唯一排序一致。种子和普通元数据共同排序及归约，后到种子不会先污染更早普通行；不以清单文件顺序替代元数据原生顺序。PM、Binance及TWAP继续使用各自epoch/admission顺序。来源可见时刻为原生序列上 `max(received, admitted, prior_frontier)`；spot 没有 admission，使用旧文件/行顺序及接收前沿。跨文件、午夜、折不重置。原生重叠文件组成一个查询单元，不用 TTL 截断重复身份。临时重复候选只沿既有类型身份边界核对，不建立全期身份 JSON 库。
 
-目标为原始目录中唯一可定位的窗口与合法公共窗口的并集 × 剩余300/240/180/120/60/30/10/1秒。原始事后目录不是FixedIdentity；缺公共身份的普通Metadata仅记缺前态摘要，不缓存重放、不伪造Snapshot。AnchorRule、WS暂存及成功Snapshot继续原公共路径。原始字段冲突保存两侧来源，多值窗口的原始目标数为null。先形成分母，再按可见时刻左连接；市场身份尚不可见、缺规则、缺锚点、缺价格或标签都留在分母。正式锚点仅在真实可见后使用。初始 TWAP 规则沿公共 OpeningWindow，可以选择市场窗内、规则后到前已接收的首个合法 TWAP；真实规则变化从变化可见时开始适用。首个已固定临时锚点保持，后续规则变化不重置；正式锚点可见后优先。候选半开窗口和有效性复用公共 `temporary_twap_candidate_matches_v1`，SQL 聚合首条，不遍历每市场全期消息。
+目标为原始事后目录中唯一可定位的窗口 × 剩余300/240/180/120/60/30/10/1秒。目录只组织研究样本，不证明生产FixedIdentity合法。多值窗口保留未知目标数，不能任选窗口。概率按真实规则、参考、价格及历史逐字段判断；innovation只依赖采样窗口、两来源价格和时间。没有production Snapshot或initial_tick不统一排除拟合或Brier；缺可信标签仍不可评分。后到参考、规则或标签不回填早期特征。
 
-此时间轴是来源级因果直接查询。它不具有完整多来源组身份，也不是生产策略逐次调用的冻结回放。终局保存必要状态变化；拟合取严格截止前最后公共状态，后到冲突不能回写早期状态。评价取原十八日范围内最后状态；不读范围外尾部，末日未观察终局按右删失处理。
+正式锚点仅在真实可见后使用。初始TWAP规则沿公共OpeningWindow，可选择窗内、规则后到前已收到的首个合法TWAP，但只有窗口字段与规则都可见后才使用。真实规则变化从可见时开始。首个临时锚点保持，正式锚点可见后优先。候选半开窗口和有效性复用 `temporary_twap_candidate_matches_v1`，SQL先聚合首条。
+
+本入口不重新计算生产公共身份资格。`market-coverage.json`将该分母及identity_at标为null，明确注明未重算；研究映射时间另记为mapping_at。未变原始输入上的既有合法身份分母，引用已审计的[第三次失败证据](complementary-pair-probability-run-20261007-repair2.failure.json)，不把研究共同字段重新命名为合法身份。原始目标、各字段可算样本和可信标签分母由本次研究事实分别统计。
+
+此时间轴是来源级因果直接查询。它不具有完整多来源组身份，也不是生产策略逐次调用的冻结回放。首次Up/Down映射建立与后续终局消费分开。已有映射后的Gamma声明即使改为Yes/No，也交给公共merger产生真实可见的Invalid，不能静默保留旧可信标签。终局保存必要状态变化；拟合取严格截止前最后公共状态，后到冲突不能回写早期状态。评价取原十八日范围内最后状态；不读范围外尾部，末日未观察终局按右删失处理。
 
 ## 方差、积分与有限概率候选
 
@@ -62,7 +66,9 @@ WHERE visible_at <= sample_at
 | depth_pressure | `(Σbid_qty−Σask_qty)/(Σbid_qty+Σask_qty)`；I为权重×sigma_fit×sqrt(1秒)×压力。总量为零时压力缺失。 |
 | trade_pressure | 最新合法聚合成交数量 q 除以 `q+当前两侧深度总量`，`buyer_is_maker` 为真取负，否则取正；相同价格尺度。不是累计成交、成交额或自身成交。 |
 
-深度薄入口与完整入口共享接纳、拼接判定、代际及价位覆盖/零删除。共享reducer保存最近一次真实snapshot的接收UTC日、depth_ingress_sequence和generation；同epoch/generation、update ingress晚于snapshot且接收日不同，才按采集器Ready直收路径使旧盘口失效。快照前已收到的pending保持原排空规则；同值snapshot也刷新连续性来源而不新增业务值事件。转换只在实际可见行生效，不回填午夜采样。Deferred后的同日ResetContinuity未持久化缺口仍未解决，无法证明的坐标冲突继续拒绝。缺口或未恢复快照不输出旧有效总量，同步未恢复也保持缺失。总量只在实际采样时从同一权威映射读取，用已有 BigInt 精确有理数加总，不因跨层和超出 Decimal 容量新增拒绝。入口不输出完整 Canonical 事件/谱系；生产默认入口保持。
+深度仍复用公共数量状态、价位覆盖和零删除。已声明snapshot不可用时，研究直接丢弃数量状态，不先使用旧book制造有效值。明确可定位的stitch_coordinates/stitch_verdict拒绝也丢弃数量状态，记录原错误、真实epoch/generation/admission/ingress坐标及可见起点；既有原生排序、去重和前沿保持。已消费的admission仍严格递增。之后delta不能恢复，必须等真实snapshot经公共数量入口成功重建。缺失区间按恢复行真实可见时刻关闭；无恢复保留右删失，不回填之前采样。
+
+缺口期间depth_total、depth_pressure及trade_pressure缺失，基线和innovation继续。结构化局部缺失不退出helper。SQL、程序、协议、写入错误及无法界定的关联或原生顺序损坏仍明确失败，不能广泛捕获ContractError后继续。生产compute入口及PR #260已交付的日界规则不变；研究不承诺恢复采集器所有隐藏控制转换。总量只在采样时从权威映射读取，沿BigInt精确有理数加总，不输出完整Canonical事件或谱系。
 
 基线在全部可算样本评分。每个外部特征及其零权重项仅在该项共同可算交集比较，再另报全基线分母与覆盖代价。缺 Binance 不补零。不可拟合项保留真实原因；没有改善或精确并列保留零。全局来源历史和八次统计调用通常减少 fallback 使用，报告实际 fallback 分母；不构造冷启动或冒称每市场生产 initial_sigma 覆盖。
 
@@ -70,11 +76,15 @@ WHERE visible_at <= sample_at
 
 ## 输出、资源和执行边界
 
-只保留原始/公共两层市场分母及缺身份区间的 `material/market-coverage.json`、`material/samples.json`、五个价对充分统计、查询单元与材料身份；评价保留全候选评分、冻结参数、必要预测、覆盖、Brier及共同交集差值。临时语义子集、规范化映射及深度传输文件在消费后删除；失败保留原边界以便诊断。
+查询沿现有顺序保存六个完整阶段：原生窄索引、市场标量、spot采样与五组价对充分统计、TWAP采样与临时参考候选、trade采样、depth采样及缺失原因。每个阶段的紧凑JSON关闭后才原子写入complete标记，标记绑定输出SHA-256。阶段内中断不标完成，不序列化或恢复任意单元状态。最后按固定样本键连接并执行既定公式，完整material.json仅在全部阶段成功后保存。
+
+`prepare CONFIG --reuse-material MATERIAL`只复用完整且身份匹配的阶段。身份包括该来源的已审计文件摘要/格式/行数、研究范围、固定样本键与必要规则字段、相关算法版本；spot另绑五个波动窗口和拟合截止。改变输出root、引擎资源或无关depth实现，不作废spot/TWAP/trade。源码提交和helper总摘要另作provenance，不能单独决定不相关阶段失效。外部复用逐字保留原complete记录的实际产出提交/helper，不改写为当前复用者身份。修改相关算法时须更新对应阶段版本，不可将改变后的代码冒充旧版本。输入清单的物理归属仍由准确配置绑定；此复用不另签发原始数据准入。
+
+程序错误保留已完成阶段并明确失败，未完成来源重算连续状态。旧三次归档没有价格采样数值，不能恢复其丢失结果；其coverage目录仍是既有分母证据。最终保留samples、fit-pairs、query-units和材料身份；评价保留全候选、冻结、Brier和交集。临时语义子集与传输文件消费后删除，失败边界保留。完整运行的新成本尚未知，本次仅合成验证，没有第四次实际执行授权。
 
 校准固定十桶 `[0,.1)…[.9,1]`，空桶的均值/真实率/Brier为 null。生成独立 SVG 和中文 report.md。分层包含剩余时间、标准化距离、参考类别、接收/事件年龄、来源缺失、日与市场；日/市场分别报告等块均值、标准差、最小/最大值，不把八次采样当成独立样本。创新报告正/负/零/缺失、相邻可算对及反号对。未套用健康最终阈值筛早期数据。
 
-配置提案为一个独立作业，共享24 DuckDB查询线程、8GiB引擎内存预算、64GiB spill额度。每次只消费一个物理文件或原生重叠文件组，原生索引桶为1,048,576，类型读取批次1024行/64MiB，公共待归并终局上限65536。24为共享查询并行度，不是总OS线程数。前台Python、监督器、30秒日志线程及串行Rust helper也同属该作业；查询与helper归约分阶段执行，元数据/终局的小语义子集显式以 PyArrow `use_threads=False` 串行读取，不启用默认列线程池；BLAS/OpenMP另限1线程。不并发启动多个各64GiB服务。prepare临时目录为 `RUN_ROOT/projection/spill`，study为 `RUN_ROOT/statistics/spill`，其余临时文件亦在本轮专用根下。8GiB不是RSS上限；整个进程组沿批准保护 `MemoryHigh=48G / MemoryMax=64G / MemorySwapMax=0 / OOMPolicy=stop`，Codex在组外。一次失败墙钟及峰值见失败报告；完整成功成本仍未知，不从旧健康统计外推。
+配置提案为一个独立作业，共享24 DuckDB查询线程、8GiB引擎内存预算、64GiB spill额度。每次只消费一个物理文件或原生重叠文件组，原生索引桶为1,048,576，类型读取批次1024行/64MiB，公共待归并终局上限65536。24为共享查询并行度，不是总OS线程数。前台Python、监督器、30秒日志线程及串行Rust helper也同属该作业；查询与helper归约分阶段执行，WS终局的小协议子集显式以 PyArrow `use_threads=False` 串行读取，不启用默认列线程池；BLAS/OpenMP另限1线程。不并发启动多个各64GiB服务。prepare临时目录为 `RUN_ROOT/projection/spill`，study为 `RUN_ROOT/statistics/spill`，其余临时文件亦在本轮专用根下。8GiB不是RSS上限；整个进程组沿批准保护 `MemoryHigh=48G / MemoryMax=64G / MemorySwapMax=0 / OOMPolicy=stop`，Codex在组外。一次失败墙钟及峰值见失败报告；完整成功成本仍未知，不从旧健康统计外推。
 
 `RUN_ROOT`、`INPUT_ROOT`、辅助产物和归档根仅由私有绑定提供；公开命令不含本机绑定。新 helper 必须绑定本轮准确提交及SHA-256。旧 `source_health_boundary` 只复用已验证产物，核对原源码适用性；不重编未修改辅助。DuckDB/PyArrow沿 `requirements-source-health.lock`，绘图复用已有matplotlib（本机已核对3.10.7+dfsg1），运行证据记录实际版本。
 
