@@ -151,7 +151,7 @@ def main():
     assert runtime.resolution_obligations.pending.sum().cpu().item()==int(with_pending)
     if with_pending:
         assert values(runtime.resolution_obligations.sequences)[0]==1
-        assert runtime.calendars.maker.market_result.cpu().tolist()==[[0]]
+        assert runtime.calendars.maker.market_result.cpu().tolist()==[[-1]]
     sys.path.insert(0,str(root/'ledger/gpu'));sys.path.insert(0,str(root/'shared-run/gpu'))
     from fields import decode_fields
     from memory import EconomicColumns
@@ -247,7 +247,7 @@ def main():
             runtime,transition,market=runtime.finality(choice,maker_rate,rebate,end)
             confirmed=original['at']==33000
             assert runtime.resolution_obligations.pending.sum().cpu().item()==int(not confirmed)
-            assert bool(runtime.calendars.maker.market_result.cpu().item())==confirmed
+            assert (runtime.calendars.maker.market_result.cpu().item()>=0)==confirmed
             assert transition.event.emitted.cpu().tolist()==[True]
             projection,batch=Numbers.run_exact_batch(lambda:projection.fill_from_origin(sampler,runtime.orders,
                 runtime.fills,transition,tensor([0,1]),runtime.calendars,rebate,choice.at,maker_results=(market,)))
@@ -262,7 +262,7 @@ def main():
             balances=public.ledger.platform.balances
             assert [Fraction(n,d) for n,d in zip(values(balances.numerator),values(balances.denominator))]==[Fraction(expected['platform_confirmed_projection'][key]) for key in names]
             result=Numbers.run_exact_batch(lambda:public.ledger.resolutions.read(public.ledger.success_pools))
-            assert [Fraction(n,d) for n,d in zip(values(result.winner_orphan_receivable.numerator),values(result.winner_orphan_receivable.denominator))]==[Fraction(original['resolutions'][0]['orphan_receivable']['Known'])]
+            assert [Fraction(n,d) for n,d in zip(values(result.winner_orphan_receivable.numerator),values(result.winner_orphan_receivable.denominator))]==[Fraction(original['resolutions'][0]['orphan_receivable'])]
             assert public.ledger.rebate_days.maker_accrual_finalized.cpu().tolist()==[[confirmed]]
     print(json.dumps({'actual_empty_source_Books_to_outer_GTC_new_runtime_bid_checked':True,
         'actual_Terminal_order_close_tag5_release_and_Resolved_same_public_Ledger_checked':True,
