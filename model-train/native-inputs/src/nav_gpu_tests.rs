@@ -29,7 +29,9 @@ pub(super) fn checkpoint(shared:&SharedExecutionV2,before:&ActionBeforeReadV2,
             "visibility":record.visibility(),"record":record.record()}))
     }).collect::<Vec<_>>();
     serde_json::json!({"cutoff":before.cutoff().decision_time().logical_time_utc_ms(),
-        "projection":read.base(),"cash":read.cash(),"residual":read.residual_cash(),
+        "projection":read.base(),"cash":read.cash(),"residual":{
+            "directional_cash_pusd":read.residual_cash().directional_cash_pusd,
+            "other_cash_pusd":read.residual_cash().other_cash_pusd},
         "successful_trades":read.successful_trades().map(|v|serde_json::json!({
             "trade_identity":v.trade_identity,"fact":v.terminal})).collect::<Vec<_>>(),
         "costs":read.settlement_costs().map(|v|serde_json::json!({
