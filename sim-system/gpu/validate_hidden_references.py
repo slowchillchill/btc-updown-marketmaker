@@ -131,8 +131,10 @@ def main():
     assert effect.fault.cpu().tolist()==[0] and effect.resolved.cpu().tolist()==[True]
     # 通用producer的空订单物理padding不属于原NOE人口。
     from transport import select_batch_columns
-    batch=select_batch_columns(batch,tensor([[0]]))
+    assert batch.emitted.sum(1).cpu().tolist()==[1]
     assert all(not event.effect.closed.any().cpu().item() for event in effect.orders.events)
+    emitted_columns=batch.emitted.to(torch.int64).argmax(1,keepdim=True)
+    batch=select_batch_columns(batch,emitted_columns)
     denied=storage.commit(candidate,tensor(False,torch.bool),TerminalFeedback(effect,batch))
     compare(storage.runtime,terminal_before,'Terminal_resource_exit_preserves_whole_prefix')
     assert not denied.effect.resolved.any().cpu().item() and not denied.batch.emitted.any().cpu().item()
