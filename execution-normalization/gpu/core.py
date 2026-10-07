@@ -30,7 +30,9 @@ class EvidenceBank:
         """首条真实反馈前的空共享bank；append仍使用完整原身份与正文。"""
         scalar=torch.empty(0,dtype=torch.int64,device=device)
         fields=torch.empty((0,0),dtype=torch.int64,device=device)
-        return cls(fields,fields.clone(),fields.clone(),fields.clone(),scalar,
+        # 正文编码即使零行也保留长度列，供同一个schema解码器的零人口路径。
+        semantic=torch.empty((0,1),dtype=torch.int64,device=device)
+        return cls(fields,fields.clone(),semantic,fields.clone(),scalar,
             torch.empty((0,4),dtype=torch.int64,device=device),scalar.clone(),
             torch.empty(0,dtype=torch.int32,device=device),scalar.clone(),frozenset())
 
