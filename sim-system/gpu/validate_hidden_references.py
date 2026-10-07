@@ -162,8 +162,14 @@ def main():
     assert identity==reference['event_id'] and original_result['payout_vector']==reference['terminal']
     actual_row=batch.rows.flatten()
     assert projection.normalizer.bank.payload_schemas[actual_row].cpu().tolist()==[17]
+    sys.path.insert(0,str(root/'ledger/gpu'))
     sys.path.insert(0,str(root/'shared-run/gpu'))
     from cancel_projection import cancellation_rows_from_closed
+    from memory import EconomicColumns
+    from admission_lifecycle import LifecycleColumns
+    unsupported=Numbers.run_exact_batch(lambda:LifecycleColumns.from_projection(
+        projection.normalizer.bank,EconomicColumns.from_projection_batches([batch])))
+    assert unsupported.fault.cpu().tolist()==[[1]]
     decoded,error=Numbers.run_exact_batch(lambda:decode_fields(projection.normalizer.bank.semantic[actual_row],
         ['scalar']*4,batch.emitted.flatten()))
     assert error.cpu().tolist()==[0] and [value.cpu().item() for value in decoded]==[0,0,column[3],column[2]]
@@ -218,6 +224,7 @@ def main():
         'Terminal_resource_exit_withholds_state_and_Resolved_feedback_checked':True,
         'Terminal_private_sequence_overflow_reverts_candidate_and_withholds_Resolved_checked':True,
         'Resolved_schema_is_distinct_from_CancelCompleted_at_actual_consumer_checked':True,
+        'unsupported_Resolved_Ledger_consumer_explicit_fault_checked':True,
         'no_orders_or_pending_fills_in_original_Terminal_population':True,
         'cold_projection_prefix_initialization':True,
         'Resolved_Ledger_consumer_and_request_settlement_complete':False,
