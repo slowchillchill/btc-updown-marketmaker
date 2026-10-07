@@ -358,13 +358,33 @@ pub fn public_group_visible_at_utc_ms(
 ) -> i64 {
     let input_available = match ingress {
         DptIngressV1::Message {
-            source_evidence, ..
-        } => source_evidence
-            .collector_admission
-            .as_ref()
-            .map_or(source_evidence.received_at_utc_ms, |c| {
-                c.admitted_at_utc_ms.max(source_evidence.received_at_utc_ms)
-            }),
+            row,
+            source_evidence,
+        } => {
+            let available = source_evidence
+                .collector_admission
+                .as_ref()
+                .map_or(source_evidence.received_at_utc_ms, |c| {
+                    c.admitted_at_utc_ms.max(source_evidence.received_at_utc_ms)
+                });
+            // 元数据证据不伪造采集坐标；原元数据行保存独立的真实准入时间。
+            // 历史AnchorRepair不属于此分支，保持其既有历史生效例外。
+            let metadata_admitted = match row {
+                TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(row)) => {
+                    Some(row.collector_admission_time_utc_ms)
+                }
+                TypedRawRowV2::PolymarketMarketMetadataV6(value) => Some(match value.as_ref() {
+                    PolymarketMarketMetadataV6Input::Existing(row) => {
+                        row.collector_admission_time_utc_ms
+                    }
+                    PolymarketMarketMetadataV6Input::AnchorRule(row) => {
+                        row.collector_admission_time_utc_ms
+                    }
+                }),
+                _ => None,
+            };
+            metadata_admitted.map_or(available, |admitted| available.max(admitted))
+        }
         _ => i64::MIN,
     };
     records
@@ -859,7 +879,11 @@ impl PublicObservationCoreV1 {
                         position: self.next_input_position,
                     });
                 } else if !self.markets.contains_key(&row.condition_id) {
-                    if row.metadata_row_kind != PolymarketMetadataRowKind::MetadataSnapshot {
+                    if !matches!(
+                        row.metadata_row_kind,
+                        PolymarketMetadataRowKind::MetadataSnapshot
+                            | PolymarketMetadataRowKind::MarketStateTransition
+                    ) {
                         return Err(DptCoreErrorV1::MetadataBeforeIdentitySnapshot);
                     }
                     let (metadata_reducer, market_context, initial) =

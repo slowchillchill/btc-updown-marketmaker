@@ -200,7 +200,7 @@ fn raw_fixture(root: &Path, file: &Path, day: &str, start: i64, hour: &str, rows
     p
 }
 #[test]
-fn real_two_market_boundary_keeps_complete_existing_segment_and_original_missing_errors() {
+fn real_two_market_boundary_keeps_complete_existing_segment_and_required_evidence_errors() {
     let temp = tempfile::tempdir().unwrap();
     let (mut config, _) = setup(temp.path());
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -280,7 +280,7 @@ fn real_two_market_boundary_keeps_complete_existing_segment_and_original_missing
     let prepared = prepare_historical_run_v1(&config.preparation).unwrap();
     assert_eq!(prepared.initialization.input_positions.len(), 3);
     assert_eq!(prepared.markets.len(), 2);
-    // 不通过selector绕过原归约：缺少真实前态应保留原确切错误。
+    // 不通过selector绕过原归约：缺少Gamma载荷或真实转换前态仍拒绝。
     let range = data_pipeline_training::freeze_public_source_input_set_v1(
         &config.preparation.scope.manifest_paths,
     )
@@ -293,9 +293,9 @@ fn real_two_market_boundary_keeps_complete_existing_segment_and_original_missing
         current_rows.extend(batch.unwrap());
     }
     for (omit, expected) in [
-        (6601, "MetadataBeforeIdentitySnapshot"),
+        (6601, "market context requires a complete Gamma"),
         (6665, "changed without an explicit lifecycle transition"),
-        (6667, "MetadataBeforeIdentitySnapshot"),
+        (6667, "market context requires a complete Gamma"),
     ] {
         let rows = selected
             .iter()
@@ -323,7 +323,10 @@ fn real_two_market_boundary_keeps_complete_existing_segment_and_original_missing
                 break;
             }
         }
-        assert!(error.unwrap().contains(expected));
+        assert!(
+            error.as_ref().unwrap().contains(expected),
+            "omit {omit}: {error:?}"
+        );
     }
     let mut wrong = initial.clone();
     let mut absent = wrong.markets[0].clone();
@@ -496,7 +499,7 @@ async fn prestart_hidden_time_and_late_initialization_do_not_backdate_or_add_hid
         assert!(probe.callbacks.iter().all(|at| *at >= BASE + 2000));
         assert_eq!(
             probe.callbacks[0],
-            if late { BASE + 2100 } else { BASE + 2301 }
+            if late { BASE + 2101 } else { BASE + 2301 }
         );
         assert!(!probe.callbacks.contains(&(BASE + 1701)));
     }
@@ -722,4 +725,249 @@ fn direct_hidden_read_still_fails_original_bad_eof_count_before_success() {
     );
     assert!(root.join("messages").is_dir()); // 已批准的错误阶段允许保留未完成目录。
     assert!(!root.join("derived").exists());
+}
+
+#[test]
+fn first_real_gamma_transition_prepares_current_state_at_admission_and_shared_hidden_identity() {
+    use data_collect::polymarket_orderbook_v3::*;
+    use data_pipeline_core::pm_reduction::PmStepChangeV1;
+    use data_pipeline_training::hidden_preparation::*;
+    const RECEIVED: i64 = 1_789_240_506_938;
+    const ADMITTED: i64 = RECEIVED + 2;
+    const DAY_START: i64 = 1_789_171_200_000;
+    struct VisibleTime;
+    impl sim_system::public_consumption::PublicConsumptionTimeSourceV1 for VisibleTime {
+        fn execution_time_for_group(
+            &mut self,
+            _: &PublicGroupReferenceV1,
+        ) -> std::result::Result<i64, sim_system::execution::SimRunActorErrorV2> {
+            panic!("需要真实可见前沿")
+        }
+        fn execution_time_for_visible_group(
+            &mut self,
+            _: &PublicGroupReferenceV1,
+            at: i64,
+        ) -> std::result::Result<i64, sim_system::execution::SimRunActorErrorV2> {
+            Ok(at)
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, _) = setup(temp.path());
+    let input_root = temp.path().join("gamma-first");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/metadata-gamma-initial-transition-v6.parquet");
+    let manifest = raw_fixture(
+        &input_root,
+        &fixture,
+        "2026-09-12",
+        DAY_START,
+        "2026-09-12T19",
+        1,
+    );
+    let facts = PublicFiniteFileV1 {
+        path: input_root.join("metadata.parquet"),
+        source_kind: "polymarket_market_metadata".into(),
+        schema_version: POLYMARKET_MARKET_METADATA_SCHEMA_V6.into(),
+        bytes: std::fs::metadata(&fixture).unwrap().len(),
+        rows: 1,
+        sha256: format!("{:x}", Sha256::digest(std::fs::read(&fixture).unwrap())),
+    };
+    let original = open_finite_public_input_v1(&facts, 1, 1 << 20)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .remove(0);
+    let TypedRawRowV2::PolymarketMarketMetadataV6(metadata) = &original else {
+        panic!("V6 metadata")
+    };
+    let PolymarketMarketMetadataV6Input::Existing(row) = metadata.as_ref() else {
+        panic!("Existing metadata")
+    };
+    assert_eq!(row.clob_market_id, "4475338");
+    assert_eq!(
+        row.metadata_row_kind,
+        PolymarketMetadataRowKind::MarketStateTransition
+    );
+    assert_eq!(
+        row.metadata_origin,
+        PolymarketMetadataOrigin::LocalMarketStateTimer
+    );
+    assert_eq!(
+        row.source_evidence_origin,
+        Some(MetadataSourceEvidenceOrigin::GammaMarketsDiscovery)
+    );
+    assert_eq!(row.source_evidence_received_at_utc, Some(RECEIVED - 211));
+    assert_eq!(row.timestamp_received, RECEIVED);
+    assert_eq!(row.collector_admission_time_utc_ms, ADMITTED);
+    let outcomes = row.outcome_evidence().unwrap();
+    let expected = outcomes
+        .iter()
+        .map(|o| (o.asset_id.clone(), o.outcome.clone().unwrap()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        expected
+            .values()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["Down".to_owned(), "Up".to_owned()].into_iter().collect()
+    );
+    let condition = row.condition_id.clone();
+    let mut writer = data_collect::writer::TypedParquetSegmentWriter::create_for_typed_source(
+        &input_root,
+        "books",
+        POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+        "polymarket_market",
+    )
+    .unwrap();
+    let books = outcomes
+        .iter()
+        .enumerate()
+        .map(|(index, o)| PolymarketOrderbookV3Message {
+            envelope: PolymarketOrderbookV3Envelope {
+                timestamp_received: ADMITTED + 10,
+                timestamp: Some(ADMITTED + 9),
+                market: condition.clone(),
+                slug: Some(row.slug.clone()),
+                collector_host_id: "synthetic-collector".into(),
+                collector_region: "test".into(),
+                source_endpoint: "wss://ws-subscriptions-clob.polymarket.com/ws/market".into(),
+                schema_version: POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION.into(),
+                source_sequence_epoch_id: "gamma-first-books".into(),
+                collector_admission_sequence: index as u64 + 1,
+                collector_admission_time_utc_ms: ADMITTED + 11,
+            },
+            event: PolymarketOrderbookV3Event::Book(PolymarketBookV3 {
+                asset_id: o.asset_id.clone(),
+                bids: vec![PolymarketPriceLevelV3 {
+                    price: "0.4".into(),
+                    size: "10".into(),
+                }],
+                asks: vec![PolymarketPriceLevelV3 {
+                    price: "0.6".into(),
+                    size: "10".into(),
+                }],
+                last_trade_price: None,
+            }),
+        })
+        .collect::<Vec<_>>();
+    writer
+        .write_polymarket_orderbook_v3_messages(
+            &books,
+            &mut data_collect::writer::PolymarketOrderbookV3WriteSequenceState::default(),
+        )
+        .unwrap();
+    writer.append_key_value_metadata("data_collect_daily_file_fact_v1", json!({"source_kind":"polymarket_market","schema_version":POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,"utc_hour":"2026-09-12T19","part":0,"rows":2}).to_string()).unwrap();
+    let book_file = writer.finalize().unwrap();
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    value["files"].as_array_mut().unwrap().push(json!({"path":book_file.final_path.file_name().unwrap().to_str().unwrap(),"source_kind":"polymarket_market","schema_version":POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,"utc_hour":"2026-09-12T19","part":0,"rows":2,"bytes":std::fs::metadata(&book_file.final_path).unwrap().len(),"sha256":book_file.sha256}));
+    std::fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+    config.preparation.scope.manifest_paths = vec![manifest];
+    config.preparation.scope.received_start_utc_ms = row.market_start_utc;
+    config.preparation.scope.received_end_utc_ms = row.market_end_utc;
+    let direct = prepare_historical_run_v1(&config.preparation).unwrap();
+    assert!(direct.initialization.input_positions.is_empty());
+    assert!(direct.hidden.prefix.normal_end);
+    let mut delivered = sim_system::public_consumption::RecordedPublicGroupSourceV1::open(
+        &direct.public_root,
+        1,
+        1 << 20,
+        VisibleTime,
+    )
+    .unwrap();
+    assert_eq!(
+        delivered.next().unwrap().unwrap().delivered_at_utc_ms,
+        ADMITTED
+    );
+    let mut replay = PublicReplayV1::open(&direct.public_root, 1, 1 << 20).unwrap();
+    assert_eq!(replay.core.fixed_markets().count(), 0);
+    let (first_input, first_applied) = replay.next_applied().unwrap().unwrap();
+    assert_eq!(
+        first_input.ingress,
+        DptIngressV1::Message {
+            source_evidence: source_evidence_v3_from_typed_raw_v2(&original).unwrap(),
+            row: original
+        }
+    );
+    assert_eq!(first_applied.applied.closed_groups.len(), 1);
+    let first_group = &first_applied.applied.closed_groups[0];
+    assert_eq!(
+        data_pipeline_core::public_observation_core::public_group_visible_at_utc_ms(
+            &first_input.ingress,
+            &first_group.records
+        ),
+        ADMITTED
+    );
+    assert!(
+        first_group
+            .records
+            .iter()
+            .all(|fact| fact.direct_time.received_at_utc_ms == RECEIVED)
+    );
+    assert!(first_group.records.iter().any(|fact| matches!(
+        &fact.payload,
+        PublicBusinessPayloadV1::MarketFact {
+            payload: CanonicalMarketFactPayloadV1::MarketLifecycleSnapshot {
+                current_state: MappedMarketLifecycleStateV1::Known {
+                    value: KnownMarketLifecycleState::Active
+                },
+                ..
+            },
+            ..
+        }
+    )));
+    assert!(!first_group.records.iter().any(|fact| matches!(
+        &fact.payload,
+        PublicBusinessPayloadV1::MarketFact {
+            payload: CanonicalMarketFactPayloadV1::LifecycleTransition(_),
+            ..
+        }
+    )));
+    while replay.next_applied().unwrap().is_some() {}
+    let core = replay.into_core();
+    let context = core.pm_context(&condition).unwrap();
+    let actual = context
+        .assets
+        .iter()
+        .map(|a| {
+            assert_eq!(a.initial_tick_size_pusd_per_share.0, "0.01");
+            (a.asset.token_id.0.clone(), a.asset.outcome.label.clone())
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(actual, expected);
+    assert_eq!(
+        direct.markets[&condition]
+            .assets()
+            .iter()
+            .map(|a| (a.token_id.0.clone(), a.outcome.label.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>(),
+        expected
+    );
+    let rebuilt = prepare_hidden_v1(
+        core,
+        PublicRecordingReaderV1::recover(&direct.public_root, 1, 1 << 20).unwrap(),
+        &temp.path().join("hidden-independent"),
+        &config.preparation.recording,
+        config.preparation.hidden_stream_id.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        complete_hidden_projection(&direct.hidden),
+        complete_hidden_projection(&rebuilt)
+    );
+    let mut steps = HiddenStepReaderV1::open(&direct.hidden, 1, 1 << 20).unwrap();
+    let mut snapshots = std::collections::BTreeMap::new();
+    while let Some(value) = steps.next_row().unwrap() {
+        if let HiddenStoredRowV1::Step(value) = value
+            && let PmStepChangeV1::InitialSnapshot {
+                asset,
+                initial_tick_size_pusd_per_share,
+                ..
+            } = value.step.change
+        {
+            assert_eq!(initial_tick_size_pusd_per_share.0, "0.01");
+            snapshots.insert(asset.token_id.0, asset.outcome.label);
+        }
+    }
+    assert_eq!(snapshots, expected);
 }
