@@ -63,6 +63,8 @@ def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=
             entity=json.loads(identity.split(':',1)[1])[-1]
             sequence=int(next(iter(next(iter(entity.values())).values())).removeprefix('sim-'))
         balance=value['balance_delta']
+        settlement_liability=balance.get('settlement_fee_liability_pusd_delta','0')
+        taker_liability=balance.get('actual_taker_fee_liability_pusd_delta','0')
         if 'existing' in balance:
             balance=balance['existing']
         names=['cash_pusd_delta','available_pusd_delta','principal_encumbrance_pusd_delta','immediate_taker_fee_encumbrance_pusd_delta',
@@ -71,7 +73,7 @@ def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=
         semantic=[zero,torch.full_like(zero,-1) if value['condition_id'] is None else zero,torch.tensor([value['economic_effective_at_utc_ms']],device='cuda'),
             torch.full_like(zero,tag),integers([sequence]),torch.full_like(zero,fields.get('path_ordinal',0)),
             *[rational([balance[name]]) for name in names],torch.tensor([bool(outcomes)],device='cuda'),torch.full_like(zero,token_index if outcomes else 0),
-            rational([outcomes[0]['balance_shares_delta'] if outcomes else '0']),rational(['0']),rational(['0'])]
+            rational([outcomes[0]['balance_shares_delta'] if outcomes else '0']),rational([settlement_liability]),rational([taker_liability])]
         if tag==5:
             semantic.append(torch.full_like(zero,resolution_index))
         return encode_fields(semantic)

@@ -11,7 +11,8 @@
 
 本文是 #181 任务1的具体设计，按[D-0303](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6015941793)
 给出紧凑共享数据、CPU/GPU准备、公共GPU状态、数值、PPO及活动根恢复接口。
-这是设计交付，生产调度器、GPU后端、100ms schema、PPO与完整恢复尚未实现或验收。
+这是设计合同。已交付公共GPU和100ms输入组件的范围及证据见 #181 当前执行记录；
+完整连续生产宿主、PPO与活动根完整恢复仍开放，组件验证不代表整根验收。
 字段语义及物理布局见[输入设计](100ms-window-inputs.md)。本轮开发授权沿 #181 当前正文，
 正式训练保留数据、参数、种子、预算和实际投入条件。全部B计算在训练服务器。
 
@@ -980,6 +981,21 @@ Native `input_success` 只按同冻结 scope 精确归约这个公共读面，�
 承诺对照沿同一真实请求和receipt进入原共享逐腿冻结入口，另核同设备图的成交更新、
 旧冻结、缺typed结算与无current边界。实际双腿兑付冻结入口核已判定市场NA。
 完整账户、连续宿主及活动根恢复仍未交付。
+
+### 公共V2未付taker费用的冻结输入
+
+`LifecycleColumns` 保留原schema11/18/21的两项精确额外负债delta。
+`ledger/gpu/liability_read.py` 只归约同一已提交经济前缀的实际条件成员，
+不把即时已付taker费或预留费用算作未付负债。完整读面须从实际开户保留全部经济转移；
+保留的applied经济人口与原平台经济prefix一致，且开户来源完整时才可Known。
+中途冷前缀缺历史为Unknown，即使已经安装市场余额起点也不能推断负债为零；真正空scope为Known0。
+当前实现不新增负债缓存。后续若退役经济历史，须先接实际冷负债起点，不能借此读面丢弃历史。
+
+Native同冻结账户消费current293:296、old308:311，精确求和后才投影；
+未接经济历史来源时provided=False，缺历史时提供适用Unknown，old人口不完整也保持Unknown。
+有限公共V2场景经原NOE构造、接纳和CPU Ledger归约核增额、减额、重复、失败事务及旧冻结，
+它不是自然SIM非零费用producer。现有自然SIM和V1升V2的额外负债仍是零。
+经济settlement liability不是市场Cost Evidence的recognized−paid；该读面、费用归属和完整NAV仍继续开发。
 
 ### 累计接纳本金
 

@@ -22,7 +22,8 @@ class EconomicEvidence:
 
 
 def map_economic(delta,account_slots,condition_slots,token_slots,asset_indices,asset_roots,private_sequence,
-                 source_ordinal,effective_at,transition_tag,entity_sequence,path_ordinal,*,resolution_identity=None):
+                 source_ordinal,effective_at,transition_tag,entity_sequence,path_ordinal,*,resolution_identity=None,
+                 settlement_fee_liability=None,actual_taker_fee_liability=None):
     """覆盖当前SIM接纳、逐fill应用/失败/返佣及单订单释放的原Existing转移。
 
     0=OrderAccepted，2=CallerCanceled，6=EconomicApplied，7=UnappliedFailure，
@@ -84,10 +85,18 @@ def map_economic(delta,account_slots,condition_slots,token_slots,asset_indices,a
     tag=torch.full_like(account_slots,11)  # 原AccountTransition逻辑键
     logical=encode_fields([account_slots,tag,delta.sequence])
     economic=encode_fields([account_slots,torch.ones_like(tag),delta.sequence])
-    # V1/V2统一：原Existing转移及两项精确零liability均入同一schema。
+    # 原自然SIM/V1来源的liability为精确0；公共V2入口显式保留其真实额外delta。
+    liabilities=[]
+    for value in (settlement_fee_liability,actual_taker_fee_liability):
+        value=zero if value is None else value
+        if (value.numerator.sign.shape!=(count,) or value.denominator.sign.shape!=(count,)
+                or value.numerator.words.device!=device or value.denominator.words.device!=device):
+            raise TypeError('公共V2 liability须同设备精确pUSD[row]')
+        fault |= value.fault
+        liabilities.append(value)
     payload=[account_slots,condition_slots,effective_at,transition_tag,entity_sequence,
         torch.where(path_used,path_ordinal,0),*balances,has_outcome,
-        torch.where(has_outcome,token_slots,0),outcome,zero,zero]
+        torch.where(has_outcome,token_slots,0),outcome,*liabilities]
     if resolution_identity is not None:
         payload.append(resolution_identity)
     semantic=encode_fields(payload)

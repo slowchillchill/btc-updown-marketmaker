@@ -53,6 +53,8 @@ class LifecycleColumns:
     settlement_policies: torch.Tensor
     settlement_outcomes: torch.Tensor
     settlement_observations: torch.Tensor
+    settlement_fee_liability: object  # 原Economic V2 delta，不是Cost Evidence recognized−paid。
+    actual_taker_fee_liability: object
     emitted: torch.Tensor
     fault: torch.Tensor
 
@@ -214,6 +216,8 @@ class LifecycleColumns:
             decoded[12][3],decoded[12][4],decoded[12][5],decoded[13][7],decoded[12][6],decoded[14][3],decoded[14][2].reshape(roots,width),
             resolution_identities.reshape(roots,width),decoded[17][3].reshape(roots,width),
             torch.where(enabled[21],decoded[21][4],decoded[20][3]).reshape(roots,width),decoded[20][6].reshape(roots,width),decoded[20][7].reshape(roots,width),
+            merge(decoded[11][17],decoded[21][14],enabled[21]),
+            merge(decoded[11][18],decoded[21][15],enabled[21]),
             active.reshape(roots,width),
             torch.where(active,fault,0).reshape(roots,width))
 

@@ -101,8 +101,16 @@ impl Source {
                         .map(|(ordinal, kind)| SourceNeutralEvidence {
                             source_record: record.clone(),
                             source_ordinal: ordinal as u32,
-                            logical_key: SourceNeutralLogicalKeyV1::EconomicEvidence {
-                                evidence_identity: format!("effect-{n}-{ordinal}"),
+                            logical_key: match &kind {
+                                Kind::EconomicV2 { evidence } => match &evidence.economic_key {
+                                    SourceNeutralEconomicKeyV1::AccountTransition { account_transition_seq } =>
+                                        SourceNeutralLogicalKeyV1::AccountTransition { account_transition_seq: *account_transition_seq },
+                                    SourceNeutralEconomicKeyV1::AccountOpening { opening_evidence_identity } =>
+                                        SourceNeutralLogicalKeyV1::AccountOpening { opening_evidence_identity: opening_evidence_identity.clone() },
+                                },
+                                _ => SourceNeutralLogicalKeyV1::EconomicEvidence {
+                                    evidence_identity: format!("effect-{n}-{ordinal}"),
+                                },
                             },
                             kind,
                         })
@@ -132,6 +140,87 @@ impl Source {
             )
             .unwrap();
     }
+}
+
+/// 公共V2允许非零taker负债；当前自然SIM/V1 producer仍为0。
+/// 仅用有限公共NOE构造及原Ledger归约验通用字段，不新增经营费用政策。
+#[test]
+#[ignore = "AutoDL有限公共V2→GPU读面，需锁定CUDA环境"]
+fn gpu_public_v2_signed_taker_liability_matches_original_ledger() {
+    use contracts::economics::{SourceNeutralAccountBalanceDeltaV2, SourceNeutralAccountTransitionKindV2,
+        SourceNeutralEconomicDispositionV2, SourceNeutralInitialMarketV1};
+    let temp = tempfile::tempdir().unwrap();
+    let mut source = Source::new(&temp.path().join("noe"), "public-v2-taker-liability");
+    let initial = SourceNeutralInitialMarketV1 {
+        market: MarketIdentityV2 { condition_id: ConditionId("condition".into()),
+            clob_market_id: ClobMarketId("clob".into()),
+            window: MarketWindowV2 { start_at_utc_ms: 0, end_at_utc_ms: 300_000 } },
+        assets: [AssetIdentityV1 { token_id: TokenId("up".into()),
+            outcome: OutcomeIdentityV1 { index: 0, label: "Up".into() } },
+            AssetIdentityV1 { token_id: TokenId("down".into()),
+            outcome: OutcomeIdentityV1 { index: 1, label: "Down".into() } }],
+    };
+    source.accept_many(vec![Kind::Economic { evidence: SourceNeutralEconomicEvidenceV1::AccountOpening {
+        opening_evidence_identity: "opening".into(), available_pusd: number("100") } },
+        Kind::InitialMarket { result: initial.clone() }]);
+    let mut writer = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
+        per_market_all_in_commitment_limit_pusd: number("1000"),
+    });
+    let opening = source.source.opening_record().unwrap();
+    writer.apply_noe_memory_v1(&opening).unwrap();
+    for record in source.source.take_admitted_records() {
+        writer.apply_noe_memory_v1(&record).unwrap();
+    }
+    let opening_entry = writer.projection_v2().unwrap().ledger_entry_seq;
+    for (seq, liability) in [(1, "0.125"), (2, "-0.025")] {
+        source.accept(Kind::EconomicV2 { evidence: SourceNeutralEconomicEvidenceV2 {
+            economic_key: SourceNeutralEconomicKeyV1::AccountTransition { account_transition_seq: seq },
+            disposition: SourceNeutralEconomicDispositionV2::AccountTransition {
+                economic_effective_at_utc_ms: 100 + seq as i64,
+                condition_id: Some(initial.market.condition_id.clone()),
+                transition: SourceNeutralAccountTransitionKindV2::Existing(
+                    SourceNeutralAccountTransitionKindV1::MakerRebateAccrualFinalized),
+                balance_delta: Box::new(SourceNeutralAccountBalanceDeltaV2 {
+                    existing: delta("0", "0", "0"), settlement_fee_liability_pusd_delta: number("0"),
+                    actual_taker_fee_liability_pusd_delta: number(liability),
+                }),
+            },
+        }});
+    }
+    source.stable();
+    let mut records = source.source.take_closed(201, 201);
+    records.extend(source.source.take_closed(202, 202));
+    assert_eq!(records.len(), 2);
+    let mut exported = Vec::new();
+    for (record, expected) in records.iter().zip(["0.125", "0.100"]) {
+        writer.apply_noe_memory_v1(record).unwrap();
+        let read = writer.economic_read().unwrap();
+        let market = read.market_totals().find(|m| m.condition_id == initial.market.condition_id).unwrap();
+        assert_eq!(market.unpaid_taker_fee_pusd.0.parse::<rust_decimal::Decimal>().unwrap(),
+            expected.parse::<rust_decimal::Decimal>().unwrap());
+        let checkpoint = serde_json::json!({"projection":writer.projection_v2().unwrap(),
+            "market":market, "cash":read.cash()});
+        // 重复原领取位置走CPU正式AlreadyApplied；账户序及金额不改变。
+        let before = writer.projection_v2().unwrap();
+        assert!(matches!(writer.apply_noe_memory_v1(record).unwrap(),
+            LedgerMemoryApplyOutcomeV1::Applied(LedgerApplyOutcomeV1::AlreadyApplied { .. })));
+        assert_eq!(writer.projection_v2().unwrap(), before);
+        exported.push(serde_json::json!({"record":record.record(), "position":record.position(),
+            "visibility":record.visibility(), "checkpoint":checkpoint}));
+    }
+    let artifact = std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
+    let value = serde_json::json!({"source_contract":"finite_public_V2_NOE_not_natural_SIM",
+        "initial":initial,"opening_entry":opening_entry,"opening_available_pusd":"100", "records":exported});
+    std::fs::write(artifact.join("original-public-v2-taker-liability.json"), serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let status = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+        .arg(std::env::var("B_GPU_TAKER_LIABILITY_VALIDATOR").unwrap())
+        .arg(artifact.join("original-public-v2-taker-liability.json"))
+        .stdout(std::fs::File::create(artifact.join("GPU.stdout")).unwrap())
+        .stderr(std::fs::File::create(artifact.join("GPU.stderr")).unwrap())
+        .status().unwrap();
+    assert!(status.success(), "GPU exit={:?} stderr={}", status.code(),
+        std::fs::read_to_string(artifact.join("GPU.stderr")).unwrap());
+    println!("{}", std::fs::read_to_string(artifact.join("GPU.stdout")).unwrap());
 }
 fn number(s: &str) -> ExactDecimal {
     ExactDecimal(s.into())
