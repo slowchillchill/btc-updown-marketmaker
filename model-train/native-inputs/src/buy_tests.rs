@@ -299,10 +299,23 @@ fn ready(h: &mut Harness) -> NativeInputGroup {
 #[tokio::test(flavor = "current_thread")]
 async fn accepted_only_zero_gap_keeps_original_actor_support() {
     use crate::public_input_tests::{nav_gpu,account_registry_sources_for_tests};
+    use sim_system::latency_profile::{load_embedded_proxy_latency_profile,DelaySampleDomainV1};
     let policy=br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10000},{"state":"CONFIRMED","offset_ms":20000}],"economic_application_ordinal":1},"failure_overrides":[]}"#;
+    let latency=load_embedded_proxy_latency_profile().unwrap();
+    const CANDIDATE_LIMIT:u64=65_536;
+    // 仅选择有限工程seed，仍由同一真实SIM的NOE证明时序；预测不作为支持集预期。
+    // 当前首单无成交，后来单的初始成交预计占private4；下面的完整来源断言保持独立。
+    let seed=(0..CANDIDATE_LIMIT).map(|value|format!("{value:064x}")).find(|seed| {
+        let sample=|identity,domain|latency.sample_delay_ms(seed.as_bytes(),identity,domain);
+        sample("4",DelaySampleDomainV1::LifecycleFeedbackInbound)>=1000
+            && ["1","3"].iter().all(|identity|sample(identity,DelaySampleDomainV1::LifecycleFeedbackInbound)<100)
+            && ["first-a","later-b"].iter().all(|identity|
+                sample(identity,DelaySampleDomainV1::RequestOutbound)<100
+                    && sample(identity,DelaySampleDomainV1::DirectResponseInbound)<100)
+    }).expect("有限工程seed候选中未建立来源，不能签发Accepted-only能力");
+    eprintln!("accepted_only engineering_seed={seed} candidate_limit={CANDIDATE_LIMIT} latency_profile={}",latency.file_sha256().0);
     let (mut h,materials,observation)=fixture_with_execution("2000",["0.01","0.01"],24_999,
-        &[55_000],["100","100"],"5",&[],Some((policy,
-        "00000000000000000000000000000000000000000000000000000000000023c8".into())));
+        &[55_000],["100","100"],"5",&[],Some((policy,seed.clone())));
     let artifact=std::env::var_os("B_GPU_ACTOR_CANCEL_REFERENCE").map(|directory| {
         let path=std::path::Path::new(&directory).join("accepted-only");std::fs::create_dir(&path).unwrap();
         assert!(h._temp.path().starts_with("/root/autodl-tmp"));
@@ -343,7 +356,9 @@ async fn accepted_only_zero_gap_keeps_original_actor_support() {
     }).collect::<Vec<_>>();
     if let Some(path)=artifact.as_ref() {
         std::fs::write(path.join("actual-published-noe.json"),serde_json::to_vec_pretty(&serde_json::json!({
-            "references":result_references,"records":raw,"receipts":receipts})).unwrap()).unwrap();
+            "references":result_references,"records":raw,"receipts":receipts,
+            "engineering_seed":seed,"candidate_limit":CANDIDATE_LIMIT,
+            "latency_profile":latency.file_sha256()})).unwrap()).unwrap();
     }
     let accepted=raw.iter().find_map(|record| {
         let body=record.get("Evidence")?;
@@ -382,6 +397,7 @@ async fn accepted_only_zero_gap_keeps_original_actor_support() {
         let report=serde_json::json!({"compact":compact,"checkpoint":checkpoint,
             "public_order_sources":account_registry_sources_for_tests(h.shared.registry()),"receipts":receipts,
             "accepted_received":accepted,"first_trade_received":first_trade,"cutoff":cutoff,
+            "engineering_seed":seed,"candidate_limit":CANDIDATE_LIMIT,"latency_profile":latency.file_sha256(),
             "actor_context":actor.gpu_context_reference(),"actor_paths":gpu_actor_paths(group.clone(),&[0,1,2,3,4,5])});
         std::fs::write(artifact.join("reference.json"),serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
