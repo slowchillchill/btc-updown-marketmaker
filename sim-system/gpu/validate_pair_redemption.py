@@ -96,7 +96,7 @@ def main():
         pools=SuccessPools.open(tensor([0,0]),tensor([0,0]),tensor([0,1]),tensor([1,0]),1)
         for trade in before['successful_trades']:
             amount=trade['remaining_principal']
-            pools=pools.add(zero,tensor([token_slots[trade['fact']['token_id']]]),rational([trade['remaining_shares']]),
+            pools,_=pools.add(zero,tensor([token_slots[trade['fact']['token_id']]]),rational([trade['remaining_shares']]),
                 rational([Fraction(amount['numerator'])/Fraction(amount['denominator'])]),enabled)
         market=UnresolvedMarkets.open(pools,zero)
         public_source=SimpleNamespace(terminals=[before['resolved']['payout_vector']],canonical_ids=[before['resolved']['resolution_identity']])
