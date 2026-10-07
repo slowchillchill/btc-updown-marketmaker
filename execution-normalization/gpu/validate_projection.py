@@ -453,6 +453,17 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     executed=Numbers.run_exact_batch(lambda:admission.trade_success.executed(zero[:,None],torch.ones_like(zero[:,None],dtype=torch.bool)))
     assert executed.known.cpu().tolist()==[[True,True]] and executed.fault.cpu().tolist()==[0]
     expected_executed=source['reservation_checkpoints'][-1]['markets'][0]['executed']
+    from input_executed import executed_inputs,write_executed_fields
+    native_executed = Numbers.run_exact_batch(lambda:executed_inputs(admission.trade_success,
+        torch.tensor([[[0],[-1]]],device='cuda'),torch.tensor([[[True],[False]]],device='cuda'),
+        torch.ones((1,2),dtype=torch.bool,device='cuda'),prefix_known=torch.ones(1,dtype=torch.bool,device='cuda')))
+    native_slow = write_executed_fields(torch.zeros((1,433),device='cuda'),native_executed)
+    import math
+    expected_native = [element for row in expected_executed for key in ['shares','principal_pusd','actual_fee_pusd']
+        for element in [math.copysign(math.log1p(abs(float(Fraction(row[key])))),float(Fraction(row[key]))),1.,1.]]
+    torch.testing.assert_close(native_slow[0,176:194].cpu(),torch.tensor(expected_native),rtol=1e-6,atol=1e-7)
+    assert native_slow[0,194:212].cpu().tolist()==[0.,1.,1.]*6
+    assert native_executed.fault.cpu().tolist()==[0]
     for name,key in [('quantity','shares'),('principal','principal_pusd'),('actual_fee','actual_fee_pusd')]:
         value=getattr(executed,name)
         actual=[Fraction(n,d) for n,d in zip(values(value.numerator),values(value.denominator))]
@@ -492,4 +503,4 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
         'actual_reserved_market_population_persists_after_conversion_and_directory_retry':True,
         'device_closed_cache_waiting_then_new_records_retry_checked':True,
-        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_original_six_rebate_read_fields_checked':True,'actual_per_Ledger_record_unresolved_Pi_and_maximum_loss_checked':True,'actual_economic_before_Trade_OrderFunds_Unknown_and_binding_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'actual_trade_role_and_net_fee_executed_read_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'full_clock_Ledger_reservation_delivered':False}
+        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_original_six_rebate_read_fields_checked':True,'actual_per_Ledger_record_unresolved_Pi_and_maximum_loss_checked':True,'actual_economic_before_Trade_OrderFunds_Unknown_and_binding_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'actual_trade_role_and_net_fee_executed_read_checked':True,'Native_actual_executed_quantity_principal_net_fee_176_to_211_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'full_clock_Ledger_reservation_delivered':False}

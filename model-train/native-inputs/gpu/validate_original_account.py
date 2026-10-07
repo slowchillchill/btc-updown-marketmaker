@@ -19,6 +19,7 @@ from projected_markets import ProjectedMarkets
 from input_positions import position_inputs, write_position_fields
 from input_account import account_inputs_at_prefix
 from reservation import ReservationBook
+from trade_success import TradeSuccess
 from registry import PublicRegistryState, PublicRegistryEvents, FrozenIntentOrders
 
 
@@ -80,6 +81,7 @@ def validate(groups):
         cash = original['economics']['cash']
         cutoff = torch.tensor([g['cutoff']['decision_time']['logical_time_utc_ms']],device='cuda')
         ledger.reservations = ReservationBook.empty(1)
+        ledger.trade_success = TradeSuccess.open(1,1,'cuda')
         frozen = SimpleNamespace(ledger=ledger,cutoff=cutoff,fault=ledger.fault,
             orders=registry.freeze_orders(intents,cutoff),order_sources=registry.freeze_order_sources(intents,cutoff),
             funds=SimpleNamespace(**{name:rational([cash[source]]) for name,source in [
