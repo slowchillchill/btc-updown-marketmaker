@@ -75,6 +75,7 @@ def main():
     assert any(point['maker'] == [{'order': 'account-order', 'base': '2000000'}] for point in original['expected'])
     assert all(not any(isinstance(value, torch.Tensor) for value in entry.values()) for entry in block.operations)
     assert block.event_indices.shape == (len(block.operations), 14)
+    check_runtime_buckets(block, original)
     import copy
     damaged = copy.deepcopy(original['buckets'])
     initial = next(step for bucket in damaged for _, step in bucket['steps'] if 'InitialSnapshot' in step['change'] and step['change']['InitialSnapshot']['bids'])
@@ -92,7 +93,87 @@ def main():
         'maker_depletion_returned_to_consumer','payload_bound_to_actual_material','shared_event_indices_without_N_times_L'],
         'buckets': len(block.buckets), 'steps': len(block.operations), 'elapsed_seconds': time.perf_counter()-started,
         'device_peak_allocated_bytes': torch.cuda.max_memory_allocated(),
+        'verified_full_bucket_drives_SIM_runtime_and_only_complete_bucket_closes_frontier_checked': True,
+        'prefetch_does_not_close_runtime_and_last_real_closure_controls_EOF_checked': True,
+        'runtime_bucket_maker_order_or_reference_handler_covered': False,
         'full_request_noe_ledger_clock_delivered': False}))
+
+
+def check_runtime_buckets(block, original):
+    """相同已验收原桶驱动持续SIM；无订单，逐资产/前量对照原独立归约。
+
+    上面的原A3/FIFO effects检查保持；这里不把未登记的测试A段冒充Base订单。
+    固定源步骤发射和工程上界由冷夹具提供，不声称全根设备循环已交付。
+    """
+    from account_state import PlatformAccountState
+    from order_quantity import BaseOrderQuantity
+    from base_orders import BaseOrders
+    from fill_finality import FillRecord
+    from fill_pool import FillPool
+    from mutation_requests import MutationRequests
+    from taker_days import TakerDays
+    from maker_days import MakerDays
+    from rebate_coordinator import RebateCoordinator
+    from base_runtime import BaseSimRuntime
+    from hidden_frontier import HiddenBucketColumns, HiddenBucketFrontier
+    from validate_base_execution import integers, rational
+    tensor=lambda value,dtype=torch.int64:torch.tensor(value,dtype=dtype,device='cuda')
+    one=tensor([True],torch.bool)
+    end=block.operations[0]['market']['window']['end_at_utc_ms']
+    end_assets=tensor([end]*len(block.assets))
+    columns=HiddenBucketColumns.from_block(block)
+    def open_runtime():
+        zero=integers([0])
+        quantity=BaseOrderQuantity.from_taker_plan(integers([1]),integers([1]),zero,zero)
+        template=FillRecord.create(integers([1]),integers([1]),zero,tensor([0]),tensor([0]),
+            tensor([False],torch.bool),{'steps':[{'state':'MATCHED','offset_ms':0},
+                {'state':'MINED','offset_ms':10},{'state':'CONFIRMED','offset_ms':20}],
+                'economic_application_ordinal':1})
+        return BaseSimRuntime(block.empty_state(segment_capacity=1),MutationRequests.empty(zero),
+            BaseOrders.empty(quantity),PlatformAccountState.open(integers([10_000_000]),tensor([0]*len(block.assets))),
+            FillPool.empty(template),RebateCoordinator(
+                MakerDays.empty(tensor([[0]]),tensor([[end]]),tensor([[True]],torch.bool)),TakerDays.empty(1,'cuda')),
+            HiddenBucketFrontier.open(columns,1))
+    runtime=Numbers.run_exact_batch(open_runtime)
+    assert runtime.hidden_frontier.has_closed.cpu().tolist()==[False]
+    assert values(runtime.hidden_frontier.index_position)==[0]
+    step_index=0
+    for bucket_index,bucket in enumerate(block.buckets):
+        frontier=runtime.hidden_frontier
+        source,eof=frontier.scheduled()
+        choice=runtime.choose(source,eof,tensor([bucket['bucket']['bucket_time_utc_ms']]),one)
+        # 本源原市场end钟在最后同刻hidden桶前真实消费；非Rebate阶段调用不消费。
+        runtime,_=runtime.rebate_clock(choice,end_assets)
+        source,eof=runtime.hidden_frontier.scheduled()
+        choice=runtime.choose(source,eof,tensor([bucket['bucket']['bucket_time_utc_ms']]),one)
+        assert choice.enabled(4).cpu().tolist()==[True]
+        runtime=runtime.advance_role_time(choice,end_assets).begin_hidden_bucket(choice)
+        probe,closed=runtime.finish_hidden_bucket()
+        assert closed.cpu().tolist()==[False]
+        assert torch.equal(probe.hidden_frontier.next_bucket,runtime.hidden_frontier.next_bucket)
+        for _ in bucket['steps']:
+            source,eof=runtime.hidden_frontier.scheduled()
+            choice=runtime.choose(source,eof,tensor([bucket['bucket']['bucket_time_utc_ms']]),one)
+            paths=torch.zeros((1,runtime.hidden.queues.capacity),dtype=torch.int64,device='cuda')
+            runtime,_=runtime.apply_hidden_step(choice,step_index,tensor([0]*len(block.assets)),paths,
+                rational(['0.07']),1,rational(['0.08']))
+            expected=original['expected'][step_index]
+            assert not runtime.hidden.fault.any().cpu().item(),(step_index,runtime.hidden.fault)
+            assert runtime.hidden.initialized.cpu().tolist()==[v['initialized'] for v in expected['assets']]
+            assert runtime.hidden.quality.cpu().tolist()==[QUALITY[v['quality']] for v in expected['assets']]
+            from fractions import Fraction
+            assert shares(runtime.hidden.external_shares)==[Fraction(v) for v in expected['shares']]
+            assert runtime.hidden_frontier.next_bucket.cpu().tolist()==[bucket_index]
+            assert values(runtime.hidden_frontier.index_position)==[bucket['bucket']['index_start']]
+            step_index+=1
+        runtime,closed=runtime.finish_hidden_bucket()
+        assert closed.cpu().tolist()==[True]
+        assert runtime.hidden_frontier.closed_at.cpu().tolist()==[bucket['bucket']['bucket_time_utc_ms']]
+        assert values(runtime.hidden_frontier.index_position)==[bucket['bucket']['index_end']]
+        source,eof=runtime.hidden_frontier.scheduled()
+        assert eof.cpu().tolist()==[bucket_index+1==len(block.buckets)]
+    assert step_index==len(block.operations)
+    assert runtime.hidden.matching_closed.cpu().tolist()==[True]*len(block.assets)
 
 
 if __name__ == '__main__':

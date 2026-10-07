@@ -21,18 +21,82 @@ class BaseSimRuntime:
     account: object
     fills: object
     calendars: object
+    hidden_frontier: object = None
 
     def choose(self, hidden_source, hidden_eof, advance_until, enabled, *, settlement=None,gtd=None):
         from account_state import grouped_fault
         fault=self.account.fault | self.orders.fault | grouped_fault(
             self.hidden.fault,self.account.asset_roots,self.orders.roots)
+        if self.hidden_frontier is not None:
+            hidden_source,hidden_eof=self.hidden_frontier.scheduled()
         source=replace(hidden_source,fault=hidden_source.fault | fault)
-        return next_sim_drive(self.requests,self.fills,self.calendars,source,hidden_eof,
+        choice=next_sim_drive(self.requests,self.fills,self.calendars,source,hidden_eof,
             advance_until,enabled,settlement=settlement,gtd=gtd)
+        return replace(choice,hidden_frontier=self.hidden_frontier)
+
+    def begin_hidden_bucket(self, choice):
+        self._source(choice)
+        return replace(self,hidden_frontier=self.hidden_frontier.begin(choice))
+
+    def apply_hidden_step(self, choice, index, condition_by_asset, selected_paths,
+                          fee_rate, fee_exponent, taker_rate):
+        """固定原源step发射，根是否执行由完整桶设备游标决定。
+
+        当前列与运行资产/价位同一绑定。参考仍交原参考处理器；本方法不能
+        给未处理参考签发完成，也不把LevelChange另送一次资产FIFO入口。
+        """
+        from account_state import grouped_fault
+        self._source(choice)
+        block=self.hidden_frontier.columns.source
+        if (condition_by_asset.shape != self.hidden.initialized.shape or
+            condition_by_asset.dtype != torch.int64 or condition_by_asset.device != self.account.asset_roots.device):
+            raise TypeError('原condition绑定须为同设备完整资产int64列')
+        enabled=choice.enabled(4) & self.hidden_frontier.step_enabled(index)
+        row=block.event_indices[index]
+        owner=self.account.asset_roots
+        source_fault=grouped_fault((block.level_assets != self.hidden.level_assets).to(torch.int32),
+                                  owner[self.hidden.level_assets],self.orders.roots)
+        enabled=enabled & (source_fault == 0)
+        if block.operations[index]['tag'] == 'LevelChange':
+            target=block._level_mask(row[0],row[1],row[2])
+            source_fault=source_fault | grouped_fault(self.hidden._asset_fault(block.price_fault),owner,self.orders.roots)
+            level_roots=owner[self.hidden.level_assets]
+            counts=torch.zeros_like(enabled,dtype=torch.int64).scatter_add(0,level_roots,target.to(torch.int64))
+            rows=torch.full_like(counts,-1).scatter_reduce(0,level_roots,
+                torch.where(target,torch.arange(target.numel(),device=owner.device),-1),reduce='amax')
+            source_fault=source_fault | torch.where(enabled,(counts != 1).to(torch.int32),0)
+            choice=replace(choice,present=enabled & (source_fault == 0))
+            condition=condition_by_asset[row[0]].expand(self.orders.roots)
+            candidate,effect=self.hidden_base(choice,rows,block._broadcast(row[3],self.orders.roots),
+                block._broadcast(row[4],self.orders.roots),block._broadcast(row[2],self.orders.roots),
+                condition,(row[9] != 0).expand(self.orders.roots),selected_paths,level_roots,
+                fee_rate,fee_exponent,taker_rate)
+            fault=effect.fault | source_fault
+        else:
+            hidden,effect=block.apply(self.hidden,index,enabled_assets=enabled[owner])
+            candidate=replace(self,hidden=hidden)
+            fault=grouped_fault(hidden.fault,owner,self.orders.roots) | source_fault
+        return candidate.hidden_step_applied(index,enabled & (fault == 0),fault),effect
+
+    def hidden_step_applied(self, index, committed, fault):
+        # 原处理器完整提交的step才记进度；不能拿材料预读或公开前沿作committed。
+        return replace(self,hidden_frontier=self.hidden_frontier.step_applied(index,committed,fault))
+
+    def hidden_reference_applied(self, index, committed, fault):
+        return replace(self,hidden_frontier=self.hidden_frontier.reference_applied(index,committed,fault))
+
+    def finish_hidden_bucket(self):
+        from account_state import grouped_fault
+        fault=self.account.fault | self.orders.fault | self.fills.fault | self.requests.fault
+        fault=fault | self.calendars.maker.fault | self.calendars.taker.fault
+        fault=fault | grouped_fault(self.hidden.fault,self.account.asset_roots,self.orders.roots)
+        frontier,closed=self.hidden_frontier.finish(fault)
+        return replace(self,hidden_frontier=frontier),closed
 
     def _source(self, choice):
         # 对象绑定只确认纯候选来源；不读设备phase或业务值回CPU选择执行分支。
-        if choice.requests is not self.requests or choice.fills is not self.fills or choice.calendars is not self.calendars:
+        if (choice.requests is not self.requests or choice.fills is not self.fills or
+            choice.calendars is not self.calendars or choice.hidden_frontier is not self.hidden_frontier):
             raise ValueError('SIM阶段候选只能应用于选择时的同一活动状态')
 
     def accept_base(self, choice, terms, ask_rows, fee_rate, fee_exponent, selected_paths,

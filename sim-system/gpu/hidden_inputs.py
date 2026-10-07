@@ -162,7 +162,7 @@ class HiddenPmBlock:
         decimal_fault = Numbers.combine_fault_rows(self.decimal_fault.reshape(1, -1))[0]
         return replace(state, fault=state.fault | cold_fault | decimal_fault)
 
-    def apply(self, state, index):
+    def apply(self, state, index, *, enabled_assets=None):
         """原源类型在冷边界已解码；这里不读任何设备条件回CPU决定业务。
 
         协调器仍须先应用同桶references/到期义务，并在整桶成功后才推进运行前沿。
@@ -173,6 +173,8 @@ class HiddenPmBlock:
         tag = entry['tag']
         row = self.event_indices[index]
         enabled = self.asset_axis == row[0]
+        if enabled_assets is not None:
+            enabled = enabled & state._mask(enabled_assets)
         if tag == 'InitialSnapshot':
             active = enabled & ~state.book_closed
             quantities = zeros(self.prices)
@@ -192,6 +194,8 @@ class HiddenPmBlock:
         if tag == 'LevelChange':
             active = enabled & ~state.book_closed
             level_enabled = self._level_mask(row[0], row[1], row[2])
+            if enabled_assets is not None:
+                level_enabled = level_enabled & enabled_assets[state.level_assets]
             state, effects = run_hidden_asset_batch(state, lambda value: value.level_transition(
                 level_enabled, self._broadcast(row[3], len(self.slots)), self._broadcast(row[4], len(self.slots)),
                 (row[9] != 0).expand_as(level_enabled)))

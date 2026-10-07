@@ -28,6 +28,7 @@ class SimDriveChoice:
     requests: object
     fills: object
     calendars: object
+    hidden_frontier: object = None
 
     def enabled(self, phase):
         return self.present & (self.phase==phase) & (self.fault==0)
