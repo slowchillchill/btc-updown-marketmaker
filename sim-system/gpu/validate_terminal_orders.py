@@ -133,6 +133,7 @@ def main():
     from fields import decode_fields
     from memory import EconomicColumns
     from admission import AdmissionLifecycle
+    from order_funds import OrderFunds
     from closed import ClosedAdmission
     from success_pool import SuccessPools
     from position_cost import PositionCosts
@@ -143,6 +144,7 @@ def main():
     spec=importlib.util.spec_from_file_location('terminal_order_platform',root/'ledger/gpu/platform.py')
     module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
     names=['cash_pusd','available_pusd','principal_encumbrance_pusd','immediate_taker_fee_encumbrance_pusd','maker_rebate_receivable_pusd','taker_rebate_receivable_pusd','maker_rebate_locked_remainder_pusd','taker_rebate_locked_remainder_pusd']
+    assert source["ledger_before"]["order_funds"]==[] and source["ledger_before"]["trades"]==[]
     def assemble():
         balances=module.PlatformBalances.open(rational([opening[key] for key in names]),rational(['0','0']),tensor([0,0]),integers([before['platform_source_prefix']]))
         pools=SuccessPools.open(tensor([0,0]),tensor([0,0]),tensor([0,1]),tensor([1,0]),1)
@@ -150,7 +152,9 @@ def main():
         resolutions=MarketResolutions.open(pools,markets,ResolutionSources.bind(block.terminal_columns,[a['token_id'] for a in block.assets]))
         columns=EconomicColumns.from_projection_batches([accepted_batch])
         ledger=AdmissionLifecycle.open(balances,projection.normalizer.bank,columns,integers([before['ledger_entry_seq']]),
-            integers([before['ledger_local_prefix']]),pools,position_costs=PositionCosts.empty(1,1,'cuda'),unresolved_markets=markets,resolutions=resolutions)
+            integers([before['ledger_local_prefix']]),pools,position_costs=PositionCosts.empty(1,1,'cuda'),
+            order_funds=OrderFunds.empty(1,columns.row_refs.size(1),columns.row_refs.size(1),columns.row_refs.size(1),'cuda'),
+            unresolved_markets=markets,resolutions=resolutions)
         ordinal=integers(projection.normalizer.bank.source_order[accepted_batch.rows.flatten(),3].cpu().tolist())
         pending=PendingRecords.from_columns(accepted_batch.emitted,accepted_batch.received_at,accepted_batch.private_sequences,ordinal,accepted_batch.rows,integers([0]))
         return PublicLedgerState(pending,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),ClosedAdmission.empty(columns),ledger)
@@ -178,6 +182,12 @@ def main():
     from validate_order_funds import check as check_order_funds
     assert check_order_funds(public.ledger,source['ledger_after'])
     assert check_order_funds(old_public.ledger,source['ledger_accepted'])
+    from registry import FrozenIntentOrders
+    intents=Numbers.run_exact_batch(lambda:FrozenIntentOrders(enabled[:,None],integers([1]),enabled[:,None],rational([kind['size_shares']]),
+        tensor([[False]],torch.bool),enabled[:,None]))
+    public_orders=Numbers.run_exact_batch(lambda:public.registry.freeze_orders(intents,tensor([41000])))
+    assert public_orders.active_known.cpu().tolist()==[[True]] and public_orders.cancellable.cpu().tolist()==[[False]]
+    assert not public_orders.commitment_present.any().cpu().item()
     assert not old_public.ledger.resolutions.present.any().cpu().item() and old_public.ledger.orders.flags.any().cpu().item()
     # 原正文/位置/序号逐记录对照；原数据只作oracle，不驱动设备消费。
     for batch,records in [(accepted_batch,source['accepted_records']),(terminal_batch,source['resolved_records'])]:
@@ -191,7 +201,7 @@ def main():
             assert torch.equal(semantic[:expected.size(1)],expected[0]) and not semantic[expected.size(1):].any().cpu().item()
             assert values(batch.batch_sequences)[column]==original['position']['source_watermark']['projection_batch_sequence']
             body=next(iter(original['record'].values()))
-            private=body['source_order']['sequence']['PrivateFeedback']
+            private=body['source_order']['sequence']['PrivateFeedback']['private_feedback_sequence']
             assert values(batch.private_sequences)[column]==private
     held=public
     public,repeat=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,torch.ones_like(public.waiting.received)))
