@@ -4,11 +4,19 @@
 BaseSimRuntime生成。本层只提交已经共同协调的候选，不选择阶段或扩容量。
 冻结观察必须取snapshot，不能借可原位提交的活动张量。
 """
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 import torch
 from queues import ExactInt, ExactRational, Numbers
 from fill_finality import FillRecord
 from hidden_base_execution import HiddenBaseEffects
+
+
+@dataclass(frozen=True)
+class FinalityFeedback:
+    at: torch.Tensor
+    transition: object
+    market: object
+    record: object  # 本次ordinal提交后的原成交详情，不能借后续迭代覆盖的活动列。
 
 
 def _shared(value, name):
@@ -114,8 +122,6 @@ class BaseRuntimeStorage:
         return saved_output
 
     def _committed_output(self, output, resources_fit):
-        if not isinstance(output, HiddenBaseEffects):
-            raise TypeError('固定地址输出提交当前只接原hidden Base effects')
         def committed(frame):
             event = frame.event
             updates = {}
@@ -126,7 +132,111 @@ class BaseRuntimeStorage:
             return replace(frame, event=replace(event, emitted=event.emitted & resources_fit,
                 terminal=event.terminal & resources_fit, **updates))
         # 容量需求/fault仍归冷退出协调，不把未提交候选当成成功反馈。
-        return replace(output, fills=tuple(committed(frame) for frame in output.fills))
+        if isinstance(output, HiddenBaseEffects):
+            return replace(output, fills=tuple(committed(frame) for frame in output.fills))
+        if isinstance(output, FinalityFeedback):
+            market = output.market
+            delta = market.account_delta
+            market = replace(market, emitted=market.emitted & resources_fit,
+                account_delta=self.runtime.account.coordinate_delta(
+                    delta, delta.emitted & resources_fit, delta.fault))
+            return replace(output, transition=committed(output.transition), market=market)
+        raise TypeError('固定地址输出提交只接已装配的hidden或最终性效果')
+
+
+def _page_map(value, transform):
+    if isinstance(value, torch.Tensor):
+        return transform(value)
+    if is_dataclass(value):
+        return replace(value, **{field.name: getattr(value, field.name) if _shared(value, field.name)
+            else _page_map(getattr(value, field.name), transform) for field in fields(value)})
+    if isinstance(value, tuple):
+        return tuple(_page_map(item, transform) for item in value)
+    return value
+
+
+class FinalityFeedbackPage:
+    """固定物理反馈页，设备写槽；每槽保留本轮各根原效果及真实身份。
+
+    count是物理迭代人口，不是fill/private/经济序号。页满只请求冷消费/换页，
+    不丢义务；已写页在消费者与冻结引用解除前保持不变。
+    """
+    def __init__(self, template, capacity):
+        if type(capacity) is not int or capacity < 1:
+            raise ValueError('最终性反馈页须有正物理容量')
+        self.capacity = capacity
+        self.template = template
+        self.buffers = []
+        def allocate(value):
+            self.buffers.append(torch.zeros((capacity, *value.shape), dtype=value.dtype, device=value.device))
+            return value
+        _page_map(template, allocate)
+        self.count = torch.zeros((), dtype=torch.int64, device=template.at.device)
+
+    def append(self, value, committed):
+        slot = self.count.clamp(0, self.capacity-1).reshape(1)
+        population = committed & value.transition.event.emitted.any()
+        buffers = iter(self.buffers)
+        def write(incoming):
+            target = next(buffers)
+            target.index_copy_(0, slot, torch.where(population,
+                incoming.unsqueeze(0), target.index_select(0, slot)))
+            return incoming
+        _page_map(value, write)
+        self.count.add_(population.to(torch.int64))
+
+    def read(self, index):
+        """冷消费已写物理槽；返回借同一不可变页的原类型视图。"""
+        buffers = iter(self.buffers)
+        return _page_map(self.template, lambda _: next(buffers)[index])
+
+
+class CapturedFinalitySteps:
+    """设备选择并连续消费当前最终性阶段，输出页与活动状态共同提交。
+
+    其它阶段到来即交还宿主；尚不宣称统一多阶段driver或NOE页在图内追加。
+    """
+    def __init__(self, storage, horizon, enabled, maker_rate, taker_rate, market_end,
+                 *, word_capacity, feedback_capacity):
+        from fill_pool import _take_record
+        self.storage = storage
+        self._inputs = (horizon, enabled, maker_rate, taker_rate, market_end)
+        self.ready = torch.zeros((), device=horizon.device, dtype=torch.bool)
+        self.required_feedback = torch.zeros((), device=horizon.device, dtype=torch.int64)
+        def ready():
+            return storage.runtime.choose(None, None, horizon, enabled).enabled(2).any()
+        # 页布局来自原纯候选，冷准备只安装资源，不提交业务。
+        def compute():
+            runtime = storage.runtime
+            choice = runtime.choose(None, None, horizon, enabled)
+            state, transition, market = runtime.finality(choice, maker_rate, taker_rate, market_end)
+            index = torch.arange(state.fills.roots, device=horizon.device)*state.fills.capacity
+            index = index + transition.slot.clamp(0, state.fills.capacity-1)
+            return state, FinalityFeedback(choice.at, transition, market, _take_record(state.fills.records, index))
+        layout = Numbers.device_exact_batch(compute, word_capacity=word_capacity, device=horizon.device)
+        self.page = FinalityFeedbackPage(layout.value[1], feedback_capacity)
+        self.body = torch.cuda.CUDAGraph(keep_graph=True)
+        with torch.cuda.graph(self.body):
+            self.candidate = Numbers.device_exact_batch(compute, word_capacity=word_capacity, device=horizon.device)
+            self.required_feedback.copy_(self.page.count+1)
+            self.resources_fit = self.candidate.fits & (self.required_feedback <= self.page.capacity)
+            self.output = storage.commit(self.candidate.value[0], self.resources_fit, self.candidate.value[1])
+            self.page.append(self.output, self.resources_fit)
+            fault = self.output.transition.event.fault | self.output.market.fault
+            self.ready.copy_(ready() & self.resources_fit & (fault == 0).all())
+        self.entry = torch.cuda.CUDAGraph(keep_graph=True)
+        with torch.cuda.graph(self.entry):
+            _clear_output(self.output)
+            self.candidate.required_words.zero_()
+            self.candidate.fits.fill_(True)
+            self.resources_fit.fill_(True)
+            self.required_feedback.zero_()
+            self.ready.copy_(ready())
+        self._loop = Numbers.public_extension().DeviceConditionalLoop(
+            self.entry.raw_cuda_graph(), self.body.raw_cuda_graph(), self.ready)
+
+    def replay(self):
+        self._loop.replay()
 
 
 class CapturedHiddenBaseStep:

@@ -922,3 +922,12 @@ end清撮合段与订单释放仍分开。这个装配没有复制SIM业务或Le
 [CUDA12.8条件节点](https://docs.nvidia.com/cuda/archive/12.8.0/cuda-c-programming-guide/index.html#conditional-graph-nodes)。
 这个消费者当前只绑定单一原源步，实际运行限零/一次迭代，没有策略随机数；不能作为多步WHILE、
 其它阶段、跨源步图分派、完整资源退出/重捕获、不可变反馈页追加或整个持续宿主的交付证据。
+
+`CapturedFinalitySteps`另从同一活动状态设备选择下一最终性义务，并按原(time,fill sequence,
+path ordinal)连续消费当前阶段。`FinalityFeedbackPage`在冷边界预分配固定容量，每个物理槽保留
+该轮各根的实际时点、完整成交详情、原最终性效果和Maker结果；槽号不是任何业务序号。
+字需求和反馈页需求共同控制状态提交及效果发布。页满时保留先前成功前缀，本次候选不提交，
+待冷消费/换页后从未消费义务继续。已写槽不在后续launch重置，消费和冻结引用解除前不得复用。
+NOE消费者读取这些实际效果，不能用最后一轮活动成交详情覆盖此前ordinal的经济关联。
+当前工程验证入口选择原Taker的MINED→CONFIRMED作为多迭代代表；其它阶段到来时交还宿主。
+反馈页消费/NOE追加仍在图外冷边界，尚未形成统一多阶段设备循环或全部根/跨块恢复路径。

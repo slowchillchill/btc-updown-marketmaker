@@ -2,7 +2,7 @@
 
 工程源仍提供行情步骤和密封路径；未交全根调度、SDK动态准入或完整响应正文。
 """
-from dataclasses import replace
+from dataclasses import fields,is_dataclass,replace
 import json
 from pathlib import Path
 import sys
@@ -165,9 +165,27 @@ def main():
     observed_pending_zero_quote = False
     checked_bad_hidden_predecessor=False
     checked_captured_maker=False
+    finality_page=None
+    if block is not None:
+        runtime,finality_page=check_captured_finalities(runtime,source,tensor,maker_rate,rebate,slot)
+        fills,account,calendars=runtime.fills,runtime.account,runtime.calendars
+    taker_index=0
     for checkpoint in source['checkpoints'][1:]:
         stage = checkpoint['stage']
         if stage in ('taker_finality', 'maker_finality'):
+            if stage=='taker_finality' and finality_page is not None:
+                feedback=finality_page.read(taker_index)
+                taker_index+=1
+                transition,market,at=feedback.transition,feedback.market,feedback.at
+                assert at.cpu().tolist()==[checkpoint['at']]
+                bound=noe.bind_base_order(runtime.orders.read(transition.origin.order_slots),asset_tokens,
+                    transition.event.emitted)
+                noe,batch=Numbers.run_exact_batch(lambda:bound.finality(sampler,feedback.record,transition,
+                    transition.origin.prices,rebate,at,maker_results=(market,),
+                    liquidity_role=transition.origin.roles))
+                batches.append(batch)
+                # 页中两次实际效果已逐项对照；单槽退出另核MINED账户，完整循环核CONFIRMED账户。
+                continue
             choice=choose()
             at=choice.at
             assert choice.enabled(2).cpu().tolist()==[True] and at.cpu().tolist()==[checkpoint['at']]
@@ -413,12 +431,92 @@ def main():
         'controlled_global_resource_gate_blocks_successful_Maker_candidate_and_feedback_checked':checked_captured_maker,
         'actual_Maker_native_CUDA_WHILE_uses_device_cursor_and_skips_consumed_step_checked':checked_captured_maker,
         'native_CUDA_WHILE_pool_shortage_and_initial_zero_iteration_checked':checked_captured_maker,
+        'actual_Taker_MINED_CONFIRMED_two_native_iterations_keep_both_feedbacks_checked':finality_page is not None,
+        'actual_finality_feedback_page_full_preserves_MINED_prefix_and_retries_checked':finality_page is not None,
         'runtime_hidden_reference_handler_covered':False,
         'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
         'elapsed_seconds_with_reference_reads': time.perf_counter()-started,
         'device_peak_allocated_bytes': torch.cuda.max_memory_allocated(),
         'global_clock_SDK_admission_and_full_response_body_delivered': False}))
+
+
+def compare(a,b,path="candidate"):
+    if isinstance(a,torch.Tensor):
+        assert torch.equal(a,b),(path,a.cpu().tolist(),b.cpu().tolist())
+    elif isinstance(a,ExactInt):
+        assert values(a)==values(b) and torch.equal(a.fault,b.fault),(path,values(a),values(b),a.fault.cpu().tolist(),b.fault.cpu().tolist())
+    elif is_dataclass(a):
+        for field in fields(a):
+            # 真实源引用为同一个冻结对象；不把Python对象绑定当设备业务状态。
+            if field.name not in ('source','columns'):
+                compare(getattr(a,field.name),getattr(b,field.name),path+"."+field.name)
+    elif isinstance(a,(tuple,list)):
+        assert len(a)==len(b)
+        for number,(left,right) in enumerate(zip(a,b)):compare(left,right,path+"["+str(number)+"]")
+    elif a is None or isinstance(a,(str,int,bool)):
+        assert a==b
+
+def check_captured_finalities(runtime,source,tensor,maker_rate,taker_rate,slot):
+    """真实MINED/CONFIRMED：图内由设备选择两次，反馈页保留两个原人口。
+
+    原逐步纯候选仅用于同源差分；实际执行不以Rust checkpoint决定每次body。
+    一槽页用同源MINED前缀验证物理退出，再以新页继续未消费义务。
+    """
+    from base_runtime_storage import BaseRuntimeStorage,CapturedFinalitySteps,FinalityFeedback
+    from fill_pool import _take_record
+    horizon=tensor([source['market_end']])
+    enabled=tensor([True],torch.bool)
+    end=tensor([source['market_end']]*2)
+    reference=runtime
+    frames=[]
+    prefixes=[]
+    checkpoints=[value for value in source['checkpoints'] if value['stage']=='taker_finality']
+    assert len(checkpoints)==2
+    for checkpoint in checkpoints:
+        choice=reference.choose(None,None,horizon,enabled)
+        assert choice.enabled(2).cpu().tolist()==[True] and choice.at.cpu().tolist()==[checkpoint['at']]
+        reference,transition,market=reference.finality(choice,maker_rate,taker_rate,end)
+        index=transition.slot.clamp(0,reference.fills.capacity-1)
+        frames.append(FinalityFeedback(choice.at,transition,market,_take_record(reference.fills.records,index)))
+        prefixes.append(reference)
+    storage=BaseRuntimeStorage(runtime,reference)
+    loop=CapturedFinalitySteps(storage,horizon,enabled,maker_rate,taker_rate,end,
+        word_capacity=4,feedback_capacity=2)
+    loop.replay()
+    torch.cuda.synchronize()
+    assert loop.resources_fit.cpu().item() and loop.page.count.cpu().item()==2
+    compare(storage.runtime,reference,'two_finality_iterations')
+    for index,frame in enumerate(frames):
+        compare(loop.page.read(index),frame,'finality_page_'+str(index))
+    assert_checkpoint(checkpoints[-1]['state'],storage.runtime.orders.read(slot).quantity,storage.runtime.account)
+    # 新资源页仅一槽：第一笔真实提交保留，第二笔只报页需求，不能发布候选效果。
+    short_storage=BaseRuntimeStorage(runtime,reference)
+    short=CapturedFinalitySteps(short_storage,horizon,enabled,maker_rate,taker_rate,end,
+        word_capacity=4,feedback_capacity=1)
+    short.replay()
+    torch.cuda.synchronize()
+    assert not short.resources_fit.cpu().item() and short.required_feedback.cpu().item()==2
+    assert short.page.count.cpu().item()==1 and not short.output.transition.event.emitted.cpu().item()
+    compare(short_storage.runtime,prefixes[0],'page_full_preserves_MINED')
+    compare(short.page.read(0),frames[0],'first_feedback_preserved')
+    assert_checkpoint(checkpoints[0]['state'],short_storage.runtime.orders.read(slot).quantity,short_storage.runtime.account)
+    # 冷消费/换页后从同一已提交MINED状态继续；不重发第一笔、不回滚先前成功。
+    retry=CapturedFinalitySteps(short_storage,horizon,enabled,maker_rate,taker_rate,end,
+        word_capacity=4,feedback_capacity=2)
+    retry.replay()
+    torch.cuda.synchronize()
+    assert retry.resources_fit.cpu().item() and retry.page.count.cpu().item()==1
+    compare(short_storage.runtime,reference,'new_page_continues_CONFIRMED')
+    compare(retry.page.read(0),frames[1],'retry_feedback')
+    frozen=storage.snapshot()
+    loop.replay()
+    torch.cuda.synchronize()
+    compare(storage.runtime,frozen,'finished_finality_no_reapply')
+    assert loop.page.count.cpu().item()==2 and loop.required_feedback.cpu().item()==0
+    for index,frame in enumerate(frames):
+        compare(loop.page.read(index),frame,'immutable_feedback_'+str(index))
+    return frozen,loop.page
 
 
 def check_captured_hidden_step(runtime,index,tensor,fee_rate,fee_exponent,rebate):
@@ -456,21 +554,6 @@ def check_captured_hidden_step(runtime,index,tensor,fee_rate,fee_exponent,rebate
     torch.cuda.synchronize()
     assert captured.fits.cpu().item(), '仅资源退出边界可读此需求，不提交不足容量候选'
     actual,actual_effect=captured.value
-    def compare(a,b,path="candidate"):
-        if isinstance(a,torch.Tensor):
-            assert torch.equal(a,b),(path,a.cpu().tolist(),b.cpu().tolist())
-        elif isinstance(a,ExactInt):
-            assert values(a)==values(b) and torch.equal(a.fault,b.fault),(path,values(a),values(b),a.fault.cpu().tolist(),b.fault.cpu().tolist())
-        elif is_dataclass(a):
-            for field in fields(a):
-                # 真实源引用为同一个冻结对象；不把Python对象绑定当设备业务状态。
-                if field.name not in ('source','columns'):
-                    compare(getattr(a,field.name),getattr(b,field.name),path+"."+field.name)
-        elif isinstance(a,(tuple,list)):
-            assert len(a)==len(b)
-            for number,(left,right) in enumerate(zip(a,b)):compare(left,right,path+"["+str(number)+"]")
-        elif a is None or isinstance(a,(str,int,bool)):
-            assert a==b
     compare(warm.value[0],expected,"warm")
     compare(actual,expected,"captured")
     compare(actual_effect,effect,"effects")
