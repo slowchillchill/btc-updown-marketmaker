@@ -1,0 +1,493 @@
+{
+  "format": "business-book-statistics-result-v1",
+  "status": "completed",
+  "formal_adoption": false,
+  "economic_runs_executed": 0,
+  "source_commit": "de98cb31ec0a7ce1493410ebcf81bfffc294c6fc",
+  "source_tree": "2f6436f31a238a21b7b05b7f850982a61621609a",
+  "config_sha256": "ca0db88183a6c6367c83a468529ccc63aa10f62d77e58027e86646c3a1821679",
+  "initializer_sha256": "45bab72dca21884eb4ee418f6952b629720b78b00b8d593cfe3c9dcfbf48f4b0",
+  "source_files": {
+    "baseline-mm/research/business_book_statistics.sql": "b919f6a65e20ac0e5894c563436ebe9d0df6ba1af5b78e4afa1d0d64b8004f0a",
+    "baseline-mm/research/research_business_book_statistics.py": "104521d25154587d5a12f4a1e4016ea8a688702d53c7e275675097270b048d4f"
+  },
+  "material_inputs": [
+    {
+      "logical_file": "stages/index.json",
+      "bytes": 1533692,
+      "sha256": "8fa76106a4e6ed056f1cbe0acd08895a23154e8b1bb0ffed6a86dbbb6b848e48"
+    },
+    {
+      "logical_file": "stages/index.complete.json",
+      "bytes": 377,
+      "sha256": "ca8764ba302257f33607d5b6018f4dafe17a4c6c1e9c791eb81c821be4f8cf5f"
+    },
+    {
+      "logical_file": "stages/market.json",
+      "bytes": 27601771,
+      "sha256": "d9528ab7354e76e957a21eb1a3bb43a090af62cf5ce6486ae74926a121603fac"
+    },
+    {
+      "logical_file": "stages/market.complete.json",
+      "bytes": 393,
+      "sha256": "b89ee888f49df91496f4abf43b22b0ff0d40a72692092d7c4810d0a2cf77da88"
+    }
+  ],
+  "input": {
+    "start_utc": "2026-09-09T00:00:00Z",
+    "end_utc": "2026-09-24T00:00:00Z",
+    "files": 395,
+    "physical_rows": 606440015,
+    "physical_file_bytes": 35336803420,
+    "native_units": 395
+  },
+  "denominators_by_scope": {
+    "in_window": {
+      "book_events": 12209233,
+      "spread_events": 11943391,
+      "ask_quantity_events": 12076312,
+      "missing_bid": 132921,
+      "missing_ask": 132921,
+      "crossed": 0
+    },
+    "outside_market_window": {
+      "book_events": 777082,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    }
+  },
+  "denominators_by_day_scope": [
+    {
+      "day_utc": "2026-09-09",
+      "scope": "in_window",
+      "book_events": 882148,
+      "spread_events": 864864,
+      "ask_quantity_events": 873506,
+      "missing_bid": 8642,
+      "missing_ask": 8642,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-09",
+      "scope": "outside_market_window",
+      "book_events": 59638,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-10",
+      "scope": "in_window",
+      "book_events": 808734,
+      "spread_events": 792464,
+      "ask_quantity_events": 800599,
+      "missing_bid": 8135,
+      "missing_ask": 8135,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-10",
+      "scope": "outside_market_window",
+      "book_events": 56806,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-11",
+      "scope": "in_window",
+      "book_events": 828555,
+      "spread_events": 811773,
+      "ask_quantity_events": 820164,
+      "missing_bid": 8391,
+      "missing_ask": 8391,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-11",
+      "scope": "outside_market_window",
+      "book_events": 50895,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-12",
+      "scope": "in_window",
+      "book_events": 739516,
+      "spread_events": 727476,
+      "ask_quantity_events": 733496,
+      "missing_bid": 6020,
+      "missing_ask": 6020,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-12",
+      "scope": "outside_market_window",
+      "book_events": 37166,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-13",
+      "scope": "in_window",
+      "book_events": 633674,
+      "spread_events": 621172,
+      "ask_quantity_events": 627423,
+      "missing_bid": 6251,
+      "missing_ask": 6251,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-13",
+      "scope": "outside_market_window",
+      "book_events": 44757,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-14",
+      "scope": "in_window",
+      "book_events": 779453,
+      "spread_events": 757285,
+      "ask_quantity_events": 768369,
+      "missing_bid": 11084,
+      "missing_ask": 11084,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-14",
+      "scope": "outside_market_window",
+      "book_events": 57380,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-15",
+      "scope": "in_window",
+      "book_events": 845604,
+      "spread_events": 827718,
+      "ask_quantity_events": 836661,
+      "missing_bid": 8943,
+      "missing_ask": 8943,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-15",
+      "scope": "outside_market_window",
+      "book_events": 57574,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-16",
+      "scope": "in_window",
+      "book_events": 871517,
+      "spread_events": 852243,
+      "ask_quantity_events": 861880,
+      "missing_bid": 9637,
+      "missing_ask": 9637,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-16",
+      "scope": "outside_market_window",
+      "book_events": 60145,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-17",
+      "scope": "in_window",
+      "book_events": 774020,
+      "spread_events": 755184,
+      "ask_quantity_events": 764602,
+      "missing_bid": 9418,
+      "missing_ask": 9418,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-17",
+      "scope": "outside_market_window",
+      "book_events": 50280,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-18",
+      "scope": "in_window",
+      "book_events": 868232,
+      "spread_events": 848768,
+      "ask_quantity_events": 858500,
+      "missing_bid": 9732,
+      "missing_ask": 9732,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-18",
+      "scope": "outside_market_window",
+      "book_events": 54378,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-19",
+      "scope": "in_window",
+      "book_events": 650529,
+      "spread_events": 636225,
+      "ask_quantity_events": 643377,
+      "missing_bid": 7152,
+      "missing_ask": 7152,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-19",
+      "scope": "outside_market_window",
+      "book_events": 41776,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-20",
+      "scope": "in_window",
+      "book_events": 787428,
+      "spread_events": 770200,
+      "ask_quantity_events": 778814,
+      "missing_bid": 8614,
+      "missing_ask": 8614,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-20",
+      "scope": "outside_market_window",
+      "book_events": 43856,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-21",
+      "scope": "in_window",
+      "book_events": 946859,
+      "spread_events": 925269,
+      "ask_quantity_events": 936064,
+      "missing_bid": 10795,
+      "missing_ask": 10795,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-21",
+      "scope": "outside_market_window",
+      "book_events": 52480,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-22",
+      "scope": "in_window",
+      "book_events": 930637,
+      "spread_events": 908531,
+      "ask_quantity_events": 919584,
+      "missing_bid": 11053,
+      "missing_ask": 11053,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-22",
+      "scope": "outside_market_window",
+      "book_events": 54729,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-23",
+      "scope": "in_window",
+      "book_events": 862327,
+      "spread_events": 844219,
+      "ask_quantity_events": 853273,
+      "missing_bid": 9054,
+      "missing_ask": 9054,
+      "crossed": 0
+    },
+    {
+      "day_utc": "2026-09-23",
+      "scope": "outside_market_window",
+      "book_events": 55222,
+      "spread_events": 0,
+      "ask_quantity_events": 0,
+      "missing_bid": 0,
+      "missing_ask": 0,
+      "crossed": 0
+    }
+  ],
+  "folds": [
+    {
+      "fit_cutoff": 1789171200000,
+      "statistics": {
+        "best_ask_shares": {
+          "events": 2494269,
+          "q25": 75.0,
+          "q50": 210.33,
+          "q75": 475.74
+        },
+        "spread": {
+          "events": 2469101,
+          "q25": 0.010000000000000009,
+          "q50": 0.010000000000000009,
+          "q75": 0.010000000000000009
+        }
+      }
+    },
+    {
+      "fit_cutoff": 1789430400000,
+      "statistics": {
+        "best_ask_shares": {
+          "events": 4623557,
+          "q25": 70.0,
+          "q50": 198.0,
+          "q75": 448.17
+        },
+        "spread": {
+          "events": 4575034,
+          "q25": 0.010000000000000009,
+          "q50": 0.010000000000000009,
+          "q75": 0.010000000000000009
+        }
+      }
+    },
+    {
+      "fit_cutoff": 1789689600000,
+      "statistics": {
+        "best_ask_shares": {
+          "events": 7086700,
+          "q25": 73.91,
+          "q50": 214.0,
+          "q75": 499.38
+        },
+        "spread": {
+          "events": 7010179,
+          "q25": 0.010000000000000009,
+          "q50": 0.010000000000000009,
+          "q75": 0.010000000000000009
+        }
+      }
+    },
+    {
+      "fit_cutoff": 1789948800000,
+      "statistics": {
+        "best_ask_shares": {
+          "events": 9367391,
+          "q25": 72.54,
+          "q50": 212.7,
+          "q75": 501.66
+        },
+        "spread": {
+          "events": 9265372,
+          "q25": 0.010000000000000009,
+          "q50": 0.010000000000000009,
+          "q75": 0.010000000000000009
+        }
+      }
+    },
+    {
+      "fit_cutoff": 1790208000000,
+      "statistics": {
+        "best_ask_shares": {
+          "events": 12076312,
+          "q25": 74.0,
+          "q50": 220.0,
+          "q75": 528.67
+        },
+        "spread": {
+          "events": 11943391,
+          "q25": 0.010000000000000009,
+          "q50": 0.010000000000000009,
+          "q75": 0.010000000000000009
+        }
+      }
+    }
+  ],
+  "sample_unit": "complete book event; not duration weighted or own fill",
+  "numeric_representation": "DuckDB DOUBLE descriptive values; discrete ranks from integer counts",
+  "execution": {
+    "start_utc": "2026-10-07T18:51:27.117423+00:00",
+    "end_utc": "2026-10-07T19:03:25.405348+00:00",
+    "exit_code": 0,
+    "signals_delivered": 0,
+    "gnu_wall_seconds": 718.25,
+    "systemd_runtime_seconds": 718.28,
+    "gnu_user_seconds": 2295.31,
+    "gnu_system_seconds": 521.82,
+    "gnu_maximum_rss_kib": 31255244,
+    "systemd_cpu_seconds": 2817.149,
+    "last_observed_cgroup_memory_peak_bytes": 32005480448,
+    "final_systemd_memory_peak_display": "30.9G",
+    "final_cgroup_memory_peak_bytes": null,
+    "swap_final_display": "0B",
+    "temporary_peak_observed_bytes": 0,
+    "temporary_peak_exact_bytes": null,
+    "histogram_files": 395,
+    "count_files": 395,
+    "histogram_and_count_logical_bytes": 28031982,
+    "cost_limits": "末次有效kernel峰值为观测值；最终systemd显示为舍入值。作业退出后ControlGroup为空，不读取根cgroup；未取得精确全程临时盘峰值。"
+  },
+  "resources": {
+    "memory_high_bytes": 51539607552,
+    "memory_max_bytes": 68719476736,
+    "memory_swap_max_bytes": 0,
+    "oom_policy": "stop",
+    "duckdb_threads": 24,
+    "duckdb_memory_limit": "8GiB",
+    "spill_limit": "64GiB",
+    "arrow_cpu_io_threads": 1,
+    "blas_omp_threads": 1
+  },
+  "archive_relative": "issue-185/business-book-statistics-actual-20261008",
+  "limits": [
+    "完整book事件分母，不是时间加权盘口",
+    "最佳卖档数量不是自身成交可执行量或联合成交概率",
+    "Double尾差不是更细合法价格步长",
+    "尚未经营回测/路径测量/正式参数采用"
+  ]
+}
