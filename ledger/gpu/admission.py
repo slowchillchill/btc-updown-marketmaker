@@ -228,7 +228,7 @@ class AdmissionLifecycle:
         maker_cash=self.maker_cash+cash_delta
         fault=fault | torch.where(result.applied,maker_cash.fault,0)
         applicable=((outcome_kind==OUT_EVIDENCE)&((tag==3)|(tag==7)|(tag==8)|(tag==9)|
-            (tag==12)|(tag==13)|(tag==14)|(tag==15)|(tag==16)|(tag==17)|(tag==19))) | (outcome_kind==OUT_PENDING)
+            (tag==12)|(tag==13)|(tag==14)|(tag==15)|(tag==16)|(tag==17)|(tag==19)|(tag==20))) | (outcome_kind==OUT_PENDING)
         use=(requested&applicable)|result.applied
         fault=fault | result.fault
         use=use&(fault==0)
@@ -372,13 +372,19 @@ class AdmissionLifecycle:
         use=use & funds_ready
         resolutions=self.resolutions
         resolved_event=lifecycle_use & (tag==17)
+        request_event=lifecycle_use & (tag==20)
         if resolutions is None:
             # 缺完整Terminal/资产绑定仍显式故障，不能消费后冒充零应收。
-            fault |= resolved_event.to(torch.int32)
+            fault |= (resolved_event|request_event).to(torch.int32)
         else:
             resolutions=resolutions.observe(self.lifecycle.conditions[root,local],
                 self.lifecycle.resolution_identities[root,local],self.lifecycle.resolution_terminals[root,local],
                 success_pools,resolved_event & use & (fault==0))
+            resolutions,request_ready=resolutions.observe_request(self.lifecycle.conditions[root,local],
+                self.lifecycle.resolution_identities[root,local],self.lifecycle.settlement_policies[root,local],
+                self.lifecycle.settlement_outcomes[root,local],self.lifecycle.settlement_observations[root,local],
+                request_event & use & (fault==0))
+            use &= ~request_event | request_ready
             fault |= resolutions.root_fault
         markets=self.unresolved_markets
         if markets is not None:

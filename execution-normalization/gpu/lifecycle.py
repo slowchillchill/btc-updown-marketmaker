@@ -73,6 +73,17 @@ def map_resolved_position(account,condition,resolution_identity,terminal_identit
     return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,17)
 
 
+def map_settlement_request(account,condition,resolution,policy,outcome,observation,private,ordinal,active):
+    """原SettlementLifecycleV2::Request，固定SDK U256[1,2]完整保留。"""
+    fault=input_fault([private],[account,condition,resolution,policy,outcome,observation],ordinal)
+    fault |= ((account<0)|(condition<0)|(resolution<0)|(policy<0)|(outcome<0)|(outcome>3)|
+        (observation<0)|(observation>10)).to(torch.int32)
+    logical=encode_fields([account,torch.full_like(account,9),private])
+    semantic=encode_fields([account,condition,resolution,policy,torch.ones_like(account),
+        torch.full_like(account,2),outcome,observation])
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,20)
+
+
 def map_market_resolved_order(order_sequence,resolution,private,ordinal,account,condition,token,active):
     """原MarketResolvedCanceled；关闭订单与释放金额为两个独立人口。"""
     fault=input_fault([order_sequence,private],[account,condition,token,resolution],ordinal)

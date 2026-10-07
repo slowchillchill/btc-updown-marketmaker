@@ -218,9 +218,11 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
                 opened.clone(),reference.clone(),reference,"create-public".into(),"gpu-hidden-terminal".into());
             Box::new(GpuNoeReferencePort {memory,durable,normalization_reference:normalization_capture,normalization_core:None})
         })),finality).await;
-    // 此无订单/零持仓工程例不执行请求脚本；显式安装已定请求式模式，禁止自动兑付。
-    execution.configure_resolution_redeem_v1(crate::ResolutionRedeemScenarioV1 {
-        steps:Vec::new(),costs:Vec::new()}).unwrap();
+    // 有pending成交例只安装一个显式Registered步骤，非正式训练scenario。
+    let settlement_scenario=crate::ResolutionRedeemScenarioV1 {
+        steps:if with_pending {vec![crate::ResolutionRedeemScenarioStepV1 {offset_ms:1,
+            event:crate::ResolutionRedeemScenarioEventV1::SubmissionReceipt(crate::SettlementSubmissionReceiptV1::Registered)}]} else {Vec::new()},costs:Vec::new()};
+    execution.configure_resolution_redeem_v1(settlement_scenario.clone()).unwrap();
     let observation=saved.borrow_mut().take().unwrap();
     // 开户/初始市场已由同一原端口接纳；唯一消费者先领取初始化人口。
     let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
@@ -394,7 +396,38 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
                     "paired_receivable":r.paired_receivable_pusd,"orphan_receivable":r.winner_orphan_receivable_pusd})).collect::<Vec<_>>()}));
         }
     }
+    let mut settlement_reference=None;
+    if with_pending {
+        use contracts::economics::{SettlementRequestV1,SettlementRequestIdV1};
+        use crate::matching::settlement::SettlementOperationV1;
+        let request=SettlementRequestV1 {identity:SettlementRequestIdV1 {
+            account:state.session.as_ref().unwrap().opening_fact.account_instance_key.clone(),
+            condition_id:ConditionId(CONDITION_ID.into()),resolution_identity:qualified_sources[0]["event_id"].as_str().unwrap().into(),
+            policy_version:"RESOLUTION_REDEEM_ONLY".into()},index_sets:["1".parse().unwrap(),"2".parse().unwrap()]};
+        let sent_at=50000;
+        let operation=BusinessInputV2::Settlement(SettlementOperationV1::Request {request:request.clone(),requested_at_utc_ms:sent_at});
+        let (next,output)=reduce_actor_input_v2(&execution.actor.opened,scenario.initial_market_directory(),state,&operation,12,
+            execution.actor._latency_profile.as_ref(),execution.actor._rule_snapshot.snapshot(),execution.actor._finality_policy.as_ref()).unwrap();
+        state=gpu_accept_projection_reference(&mut execution.actor,next,output,&mut batches);
+        let at=state.session.as_ref().unwrap().execution_state.next_settlement_clock_at_utc_ms().unwrap();
+        let mut output=LogicalDriveOutputV2::default();
+        state=drain_scheduled_obligations_at_v2(state,at,execution.actor._rule_snapshot.snapshot(),
+            execution.actor._finality_policy.as_ref(),&mut output).unwrap();
+        assert_eq!(output.lifecycle.len(),1,"单Registered scenario只有一条原请求反馈，没有账户delta");
+        state=gpu_accept_projection_reference(&mut execution.actor,state,BusinessReducerOutputV2::LogicalDrive(output),&mut batches);
+        execution.actor.projection_port.close_receive_prefix(60000);
+        execution.actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
+            crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:1,logical_time_utc_ms:60000}));
+        let received=observation.take_closed_records();
+        assert_eq!(received.len(),1,"真实Request证据是独立NOE，不增加平台经济人口");
+        let rows=received.iter().map(|r|serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
+        for record in &received {ledger.apply_noe_memory_v2(record).unwrap();}
+        settlement_reference=Some(serde_json::json!({"request":request,"sent_at":sent_at,"at":at,"scenario":settlement_scenario,
+            "records":rows,"ledger":gpu_ledger_reservation_checkpoint(&ledger,"Registered_request"),
+            "public_request":ledger.economic_read().unwrap().resolutions().next().unwrap().request}));
+    }
     let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,"with_pending":with_pending,
+        "settlement_reference":settlement_reference,
         "engineering_finality_path":finality_path,"maker_checkpoints":maker_checkpoints,"finality_reference":finality_reference,
         "original_controls":controls,"qualified_sources":qualified_sources,"resolved_records":records,
         "ledger_before":ledger_before,"ledger_after":ledger_after,"ledger_resolutions":resolutions,

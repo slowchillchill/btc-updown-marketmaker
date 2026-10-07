@@ -50,6 +50,9 @@ class LifecycleColumns:
     maker_statuses: torch.Tensor
     resolution_identities: torch.Tensor
     resolution_terminals: torch.Tensor
+    settlement_policies: torch.Tensor
+    settlement_outcomes: torch.Tensor
+    settlement_observations: torch.Tensor
     emitted: torch.Tensor
     fault: torch.Tensor
 
@@ -105,7 +108,7 @@ class LifecycleColumns:
         active=torch.cat([batch.emitted for batch in columns.projection_batches],dim=1).flatten()
         outcomes=torch.cat([batch.normalized.outcomes for batch in columns.projection_batches],dim=1).flatten()
         material=active & ((outcomes==OUT_EVIDENCE)|(outcomes==OUT_FACT))
-        enabled={tag:material&(schemas==tag) for tag in [3,7,8,9,11,12,13,14,15,16,17,18,19]}
+        enabled={tag:material&(schemas==tag) for tag in [3,7,8,9,11,12,13,14,15,16,17,18,19,20]}
         layouts={
             3:['scalar']*4+['integer','scalar','integer','integer','scalar'],
             7:['scalar']*3+['integer','scalar','scalar'],
@@ -120,6 +123,7 @@ class LifecycleColumns:
             17:['scalar']*4,
             18:['scalar']*4+['integer','scalar']+['rational']*8+['scalar','scalar']+['rational']*3+['scalar'],
             19:['scalar']*3+['integer','scalar','scalar','scalar'],
+            20:['scalar']*8,
         }
         decoded={}
         fault=torch.where(material,bank.fault[rows],0)
@@ -150,6 +154,9 @@ class LifecycleColumns:
         # 两个判定专用schema保完整Resolution身份，原共同字段仍复用同一归约。
         resolution_identities=torch.where(enabled[18],decoded[18][-1],decoded[17][2])
         resolution_identities=torch.where(enabled[19],decoded[19][-1],resolution_identities)
+        resolution_identities=torch.where(enabled[20],decoded[20][2],resolution_identities)
+        fault |= (enabled[20] & ((decoded[20][4]!=1)|(decoded[20][5]!=2)|
+            (decoded[20][3]<0)|(decoded[20][6]<0)|(decoded[20][6]>3)|(decoded[20][7]<0)|(decoded[20][7]>10))).to(torch.int32)
         def merge(left,right,mask):
             if isinstance(left,torch.Tensor):return torch.where(mask,right,left)
             if isinstance(left,ExactRational):
@@ -171,7 +178,7 @@ class LifecycleColumns:
         economic_fill=economic & (decoded[11][3]>=6)&(decoded[11][3]<=10)
         fills=decoded[11][4].select(economic_fill,fills)
         conditions=torch.zeros_like(schemas)
-        for tag in [3,7,8,9,11,17]:
+        for tag in [3,7,8,9,11,17,20]:
             condition_at=2 if tag==3 else 1
             conditions=torch.where(enabled[tag],decoded[tag][condition_at],conditions)
         conditions=torch.where(enabled[14],decoded[14][1],conditions)
@@ -196,6 +203,7 @@ class LifecycleColumns:
             torch.where(payment,decoded[13][2],decoded[12][2]).reshape(roots,width),
             decoded[12][3],decoded[12][4],decoded[12][5],decoded[13][7],decoded[12][6],decoded[14][3],decoded[14][2].reshape(roots,width),
             resolution_identities.reshape(roots,width),decoded[17][3].reshape(roots,width),
+            decoded[20][3].reshape(roots,width),decoded[20][6].reshape(roots,width),decoded[20][7].reshape(roots,width),
             active.reshape(roots,width),
             torch.where(active,fault,0).reshape(roots,width))
 

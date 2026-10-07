@@ -58,6 +58,19 @@ class ResolutionPredecessors:
 
 
 @dataclass(frozen=True)
+class PublicSettlementRequests:
+    present: torch.Tensor
+    policies: torch.Tensor
+    outcomes: torch.Tensor
+    observations: torch.Tensor
+
+    @classmethod
+    def empty(cls, conditions):
+        return cls(torch.zeros_like(conditions,dtype=torch.bool),torch.full_like(conditions,-1),
+            torch.full_like(conditions,-1),torch.full_like(conditions,-1))
+
+
+@dataclass(frozen=True)
 class MarketResolutions:
     sources: object
     roots: torch.Tensor
@@ -71,6 +84,7 @@ class MarketResolutions:
     known: torch.Tensor
     fault: torch.Tensor
     root_fault: torch.Tensor
+    requests: PublicSettlementRequests
 
     @classmethod
     def open(cls, pools, markets, sources, *, known=True):
@@ -81,7 +95,7 @@ class MarketResolutions:
             torch.zeros(count, dtype=torch.bool, device=assets.device), torch.full_like(markets.conditions, -1),
             torch.full_like(markets.conditions, -1), torch.zeros(count, dtype=torch.bool, device=assets.device),
             ExactRational(zero, zero.constant(1)), markets.known & torch.full((count,), known, dtype=torch.bool, device=assets.device),
-            markets.fault.clone(), pools.fault.clone())
+            markets.fault.clone(), pools.fault.clone(), PublicSettlementRequests.empty(markets.conditions))
 
     def observe(self, condition, identity, terminal, pools, enabled):
         roots = pools.fault.numel()
@@ -121,7 +135,23 @@ class MarketResolutions:
         use = valid_roots[self.roots]
         return replace(self, **{name:torch.where(use, getattr(self, name), getattr(original, name))
             for name in ('present', 'identities', 'terminals', 'maker_category', 'known')},
-            payouts=select(self.payouts, use.repeat_interleave(2), original.payouts))
+            payouts=select(self.payouts, use.repeat_interleave(2), original.payouts),
+            requests=PublicSettlementRequests(**{name:torch.where(use,getattr(self.requests,name),getattr(original.requests,name))
+                for name in ('present','policies','outcomes','observations')}))
+
+    def observe_request(self,condition,identity,policy,outcome,observation,enabled):
+        """原Request须Resolution关联；终局sticky，不改应收/余额/平台前缀。"""
+        members=(self.conditions==condition[self.roots]) & self.present & (self.identities==identity[self.roots])
+        ready=torch.zeros_like(enabled,dtype=torch.int32).scatter_reduce(0,self.roots,members.to(torch.int32),reduce='amax',include_self=False).bool()
+        invalid=(policy<0)|(outcome<0)|(outcome>3)|(observation<0)|(observation>10)
+        root_fault=self.root_fault | torch.where(enabled,invalid.to(torch.int32),0)
+        terminal=self.requests.present & ((self.requests.outcomes==2)|(self.requests.outcomes==3))
+        use=members & enabled[self.roots] & ~terminal & (root_fault[self.roots]==0)
+        requests=PublicSettlementRequests(self.requests.present|use,
+            torch.where(use,policy[self.roots],self.requests.policies),
+            torch.where(use,outcome[self.roots],self.requests.outcomes),
+            torch.where(use,observation[self.roots],self.requests.observations))
+        return replace(self,requests=requests,root_fault=root_fault),ready
 
     def orphan_value(self, pools):
         quantities = take_ratio(pools.quantity, self.assets.flatten())
