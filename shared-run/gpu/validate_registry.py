@@ -9,10 +9,13 @@ from fractions import Fraction
 import json
 import sys
 import time
+import math
 import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT/'sim-system/gpu'), str(ROOT/'ledger/gpu'), str(ROOT/'execution-normalization/gpu'), str(Path(__file__).resolve().parent)]
+sys.path.append(str(ROOT/'model-train/native-inputs/gpu'))
+sys.path.append(str(ROOT/'data-pipeline/gpu'))
 from registry import (PublicRegistryEvents, FrozenIntentOrders, PublicRegistryState,
     BASE_ACCEPTED, QUOTE_ACCEPTED, ORDER_LIFECYCLE, TRADE, CANCEL_TARGET,
     PublicCancellationState, CancellationCompletions)
@@ -22,6 +25,7 @@ from cancel_objects import OrderFormation,CancelObjectDirectory,freeze_cancel_ob
 from cancel_requests import CancellationScopes,CancellationTargets,freeze_scoped_cancel_requests,freeze_cancel_snapshot
 from registry import identity_matches
 from queues import Numbers
+from input_orders import order_inputs
 
 
 def amounts(value):
@@ -315,6 +319,54 @@ def compare_order_sources(frame,sources,orders,catalog):
             assert column.run_slots.cpu().tolist()[0][index]==catalog['runs'][position['source_watermark']['run_id']]
 
 
+def compare_native_order_times(frame, view, sources, catalog):
+    # 只解码原condition目录；原unfinished/formed仅作为投影后的对照依据。
+    raw = {order['identity']:order for order in frame['raw_orders']}
+    conditions = [market['condition_id'] for market in frame['public_market_sources']]
+    scopes = [conditions, *[[condition] for condition in conditions]]
+    members = torch.tensor([[[raw.get(identity, {}).get('condition') in scope for identity in catalog]
+                             for scope in scopes]], dtype=torch.bool, device='cuda')
+    unknown = any(order['condition'] is None for order in frame['orders'])
+    known = torch.tensor([[not (unknown and scope) for scope in scopes]], dtype=torch.bool, device='cuda')
+    result = Numbers.run_exact_batch(lambda: order_inputs(view, sources,
+        torch.tensor([frame['logical_at']], dtype=torch.int64, device='cuda'), members, known))
+    assert result.fault.cpu().tolist() == [0]
+    def projected(milliseconds):
+        return math.copysign(math.log1p(abs(milliseconds)/1000), milliseconds)
+    now = frame['logical_at']
+    for name, kind, features in [('formed','OrderLifecycle',result.formed_time),
+                                ('latest_direct','DirectResponse',result.latest_direct_time)]:
+        expected = []
+        for identity in catalog:
+            order = raw.get(identity)
+            reference = None if order is None else order[name]
+            row = [0.0]*6
+            if order is not None:
+                row[5] = 1.0
+            if reference is not None:
+                times = reference['record']['Evidence']['source_reference']['record'][kind]
+                at = times['platform_event_at_utc_ms' if kind=='OrderLifecycle' else 'platform_responded_at_utc_ms']
+                received = times['feedback_received_at_utc_ms' if kind=='OrderLifecycle' else 'response_received_at_utc_ms']
+                row = [projected(now-at), projected(now-received), projected(received-at), 1., 1., 1.]
+            expected.append(row)
+        torch.testing.assert_close(features.cpu(), torch.tensor([expected], dtype=torch.float32), rtol=1e-6, atol=1e-7)
+    expected = []
+    for scope in scopes:
+        selected = [order for order in frame['orders'] if order['condition'] in scope]
+        if unknown and scope:
+            expected.append([[0.,0.,1.]]*2)
+        elif not selected:
+            expected.append([[0.,0.,0.]]*2)
+        elif any(order['formed'] is None for order in selected):
+            expected.append([[0.,0.,1.]]*2)
+        else:
+            ages = [now-order['formed']['record']['Evidence']['source_reference']['record']['OrderLifecycle']['platform_event_at_utc_ms']
+                    for order in selected]
+            expected.append([[projected(max(ages)),1.,1.], [projected(min(ages)),1.,1.]])
+    torch.testing.assert_close(result.ages.cpu(), torch.tensor([expected], dtype=torch.float32), rtol=1e-6, atol=1e-7)
+    return result
+
+
 def check_family(source):
     # 冷共享引用目录保存原完整正文；设备slot仅定位，不替代原context/run/业务position。
     catalog_refs={"references":{},"contexts":{},"runs":{}}
@@ -387,6 +439,7 @@ def check_family(source):
     rank=0
     saved=[]
     objects_saved=[]
+    native_time_saved=[]
     for frame in source:
         incoming=[]
         for order in frame['raw_orders']:
@@ -423,6 +476,8 @@ def check_family(source):
         maximum_retained=max(maximum_retained,state.events.received.size(1))
         sources=Numbers.run_exact_batch(lambda:state.freeze_order_sources(directory(frame),torch.tensor([frame['logical_at']],device='cuda')))
         compare_order_sources(frame,sources,catalog,catalog_refs)
+        native_times=compare_native_order_times(frame,view,sources,catalog)
+        native_time_saved.append((native_times,native_times.formed_time.clone(),native_times.latest_direct_time.clone(),native_times.ages.clone()))
         assert view.fault.cpu().tolist()==[0]
         indexes={key:index for index,key in enumerate(catalog)}
         unfinished=view.unfinished.cpu().tolist()[0]
@@ -509,6 +564,8 @@ def check_family(source):
         assert amounts(view.remaining)==remaining,'旧逐腿冻结不可倒灌'
     for view,pending,counts in cancel_saved:
         assert values(view.pending_count)==pending and values(view.response_counts)==counts,'旧撤单冻结不可倒灌'
+    for frozen,formed,direct,ages in native_time_saved:
+        assert torch.equal(frozen.formed_time,formed) and torch.equal(frozen.latest_direct_time,direct) and torch.equal(frozen.ages,ages),'旧Native订单时间冻结不可倒灌'
     return len(source),len(seen),maximum_retained
 
 
@@ -519,6 +576,8 @@ def main():
     print(json.dumps({'frozen_prefixes':sum(n for n,_,_ in counts),'distinct_original_order_records':sum(n for _,n,_ in counts),
         'receipt_without_order_keeps_original_leg_target':True,'continuous_received_state':True,'maximum_retained_order_records_per_family':[width for _,_,width in counts],'derived_oracle_initialization':False,'old_freeze_unchanged':True,
         'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'single_paired_market_cancel_objects':True,'scoped_cancel_request_results':True,'original_action_snapshot_needed_cancel_projection':True,'latest_response_full_source_position_checked':True,'Order_formed_and_latest_direct_original_times_and_full_reference_checked':True,'cancel_noe_mapper_core_and_closed_decoder':True,'cancel_first_delivery_filtered_original_references':True,'scoped_unknown_order_location_preserved':True,'device_sim_identity_tie_order':True,
+        'native_order_age_and_cancel_time_fields_from_frozen_original_sources':True,
+        'original_native_encoder_invoked':False,
         'full_registry_or_root':False,'seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 
 

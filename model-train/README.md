@@ -647,3 +647,9 @@ B路线路径 `native-inputs/gpu/input_100ms.py` 已把共享公共状态和窗�
 与六侧盘口9，并接入SIM原历史封存规则30。显式交付时钟控制合法前缀，成功冻结返回候选端点，
 保持ContextOnly和DecisionRequired的原资格。原公共短链连续64个100ms观察已在AutoDL定向通过；
 完整账户slow433、公共执行与完整根协调仍待接齐。工程封存规则夹具不签发正式训练profile。
+
+`native-inputs/gpu/input_orders.py` 消费同一公开冻结订单人口与原来源引用，提供撤单每腿
+formed/latestDirect的T6，以及按公开condition作用域的最大/最小订单age三元组。
+age只计action_snapshot未闭合订单；缺形成反馈保留Unknown，空集合为NotApplicable。
+原i64时点先转精确整数再作差，旧冻结结果不随后续反馈改写。当前接口尚未装成完整
+slow433/cancel184，也不负责选择current/old市场或推进根时钟。
