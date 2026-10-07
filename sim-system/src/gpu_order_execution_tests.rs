@@ -23,7 +23,10 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         },
     ).await;
     let observation = saved.borrow_mut().take().unwrap();
-    let _initial_records = observation.take_closed_records();
+    let mut ledger = ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
+    for record in observation.take_closed_records() { ledger.apply_noe_memory_v2(&record).unwrap(); }
+    let mut prior_batches = Vec::new();
     let initial = decoded_maker_initial_events();
     let condition = initial[0].market.condition_id.clone();
     let token = TokenId("1".to_owned());
@@ -56,13 +59,17 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     let MutationActionBusinessEffectV3::Post(posts) = &accepted.business else { panic!("应返回提交结果"); };
     let PostOrderItemOutcomeV2::Accepted(post) = &posts.outcome else { panic!("真实5份订单未接受: {:?}", posts.outcome); };
     assert_eq!(post.platform_order_id, "sim-1");
+    let post = post.clone();
+    state = gpu_accept_projection_reference(&mut actor, state,
+        BusinessReducerOutputV2::MutationAction(Some(accepted)), &mut prior_batches);
     let snapshot = |state: &BusinessReducerStateV2| state.session.as_ref().unwrap()
         .execution_state.gpu_order_checkpoint_for_tests("sim-1");
     let mut checkpoints = vec![serde_json::json!({"stage":"accepted", "state":snapshot(&state)})];
     // 逐条原最终性时点，不把接受或MATCHED当成经济应用。
     while let Some(at) = state.session.as_ref().unwrap().execution_state.next_scheduled_finality_at_utc_ms() {
-        let (next, _) = advance_finality_to_candidate(state, at, actor._rule_snapshot.snapshot(), actor._finality_policy.as_ref());
-        state = next;
+        let (next, effect) = advance_finality_to_candidate(state, at, actor._rule_snapshot.snapshot(), actor._finality_policy.as_ref());
+        state = gpu_accept_projection_reference(&mut actor, next, BusinessReducerOutputV2::LogicalDrive(
+            LogicalDriveOutputV2 { lifecycle: effect.into_lifecycle_feedback().unwrap(), ..Default::default() }), &mut prior_batches);
         checkpoints.push(serde_json::json!({"stage":"taker_finality", "at":at, "state":snapshot(&state)}));
     }
     let maker_at = processing_at + 50;
@@ -72,16 +79,22 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         events.push(decoded_maker_level_event(BookSide::Bid, "0.3", "0.000001", "0", maker_at, maker_at+3+cycle as i64*2, 12+cycle*2));
     }
     for (ordinal, event) in events.iter().enumerate() {
-        let (next, _) = reduce_market_event_slice_v2(state, MarketEventPathV1::HiddenPlatform, maker_at,
+        let (next, effect) = reduce_market_event_slice_v2(state, MarketEventPathV1::HiddenPlatform, maker_at,
             std::slice::from_ref(event), actor._rule_snapshot.snapshot(), actor._finality_policy.as_ref())
             .unwrap_or_else(|_| panic!("真实maker步骤失败"));
         state = next;
+        let lifecycle = effect.execution.into_iter().flat_map(|value| value.into_lifecycle_feedback().unwrap()).collect::<Vec<_>>();
+        if !lifecycle.is_empty() {
+            state = gpu_accept_projection_reference(&mut actor, state, BusinessReducerOutputV2::LogicalDrive(
+                LogicalDriveOutputV2 { lifecycle, ..Default::default() }), &mut prior_batches);
+        }
         checkpoints.push(serde_json::json!({"stage":"hidden_step", "ordinal":ordinal, "state":snapshot(&state)}));
     }
     assert_eq!(state.session.as_ref().unwrap().execution_state.fill_shape_for_tests().0, 2);
     while let Some(at) = state.session.as_ref().unwrap().execution_state.next_scheduled_finality_at_utc_ms() {
-        let (next, _) = advance_finality_to_candidate(state, at, actor._rule_snapshot.snapshot(), actor._finality_policy.as_ref());
-        state = next;
+        let (next, effect) = advance_finality_to_candidate(state, at, actor._rule_snapshot.snapshot(), actor._finality_policy.as_ref());
+        state = gpu_accept_projection_reference(&mut actor, next, BusinessReducerOutputV2::LogicalDrive(
+            LogicalDriveOutputV2 { lifecycle: effect.into_lifecycle_feedback().unwrap(), ..Default::default() }), &mut prior_batches);
         checkpoints.push(serde_json::json!({"stage":"maker_finality", "at":at, "state":snapshot(&state)}));
     }
     let cancel = BusinessRequestV2::CancelOrders(CancelOrdersRequestV2 {
@@ -93,6 +106,32 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     let (next, cancel_receipt) = register_request_candidate(&actor.opened, actor.scenario.initial_market_directory(),
         state, &request_cutoff(maker_at+30), &cancel, 12, actor._latency_profile.as_ref(), actor._rule_snapshot.snapshot());
     state = next;
+    // 取消前公开账本来自真实V4唯一领取；不以SIM内部余额补写Ledger前缀。
+    let prefix_at = prior_batches.iter().flat_map(|batch| {
+        let order = batch["orders"].as_array().unwrap().iter().map(|value| value["metadata"]["feedback_received_at_utc_ms"].as_i64().unwrap());
+        let trade = batch["trades"].as_array().unwrap().iter().map(|value| value["metadata"]["feedback_received_at_utc_ms"].as_i64().unwrap());
+        let settlement = batch["settlements"].as_array().unwrap().iter().map(|value| value["metadata"]["feedback_received_at_utc_ms"].as_i64().unwrap());
+        let direct = batch["direct"].as_array().unwrap().iter().map(|value| value["metadata"]["response_received_at_utc_ms"].as_i64().unwrap());
+        order.chain(trade).chain(settlement).chain(direct)
+    }).max().unwrap();
+    actor.projection_port.close_receive_prefix(prefix_at);
+    actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
+        crate::public_consumption::ActorTimeRecordV1 { run_id: actor.opened.run_id.clone(), drive_position: 1, logical_time_utc_ms: prefix_at }));
+    let mut previous = observation.take_closed_records();
+    while !previous.is_empty() {
+        let count = previous.len();
+        let mut waiting = Vec::new();
+        for record in previous {
+            match ledger.apply_noe_memory_v2(&record).unwrap() {
+                ledger::LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation |
+                ledger::LedgerMemoryApplyOutcomeV1::Applied(ledger::LedgerApplyOutcomeV1::MissingPlatformPredecessor {..}) => waiting.push(record),
+                _ => (),
+            }
+        }
+        assert!(waiting.len() < count, "真实取消前账本可以闭合");
+        previous = waiting;
+    }
+    let cancel_ledger_before = gpu_ledger_reservation_checkpoint(&ledger, "cancel_before");
     let next_private = state.session.as_ref().unwrap().next_private_feedback_sequence;
     let next_batch = state.session.as_ref().unwrap().next_projection_batch_sequence;
     let (state, canceled) = advance_mutation_candidate_with_outputs(&actor.opened, actor.scenario.initial_market_directory(),
@@ -105,9 +144,24 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     actor.projection_port.close_receive_prefix(closed_at);
     actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
         crate::public_consumption::ActorTimeRecordV1 { run_id: actor.opened.run_id.clone(), drive_position: 1, logical_time_utc_ms: closed_at }));
-    let cancel_records = observation.take_closed_records().into_iter().map(|record|serde_json::json!({
-        "record":record.record(),"position":record.position(),"visibility":record.visibility(),
+    let received = observation.take_closed_records();
+    let cancel_records = received.iter().map(|record| serde_json::json!({
+        "record":record.record(), "position":record.position(), "visibility":record.visibility(),
     })).collect::<Vec<_>>();
+    let mut cancel_ledger_attempts = Vec::new();
+    for record in &received {
+        let before = gpu_ledger_reservation_checkpoint(&ledger, "before");
+        let result = ledger.apply_noe_memory_v2(record).unwrap();
+        assert!(!matches!(result, ledger::LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation |
+            ledger::LedgerMemoryApplyOutcomeV1::Applied(ledger::LedgerApplyOutcomeV1::MissingPlatformPredecessor {..})));
+        cancel_ledger_attempts.push(serde_json::json!({"position":record.position(), "before":before,
+            "after":gpu_ledger_reservation_checkpoint(&ledger, "after")}));
+    }
+    let cancel_ledger_after = gpu_ledger_reservation_checkpoint(&ledger, "cancel_after");
+    for record in &received {
+        assert!(matches!(ledger.apply_noe_memory_v2(record).unwrap(), ledger::LedgerMemoryApplyOutcomeV1::Applied(ledger::LedgerApplyOutcomeV1::AlreadyApplied {..})));
+    }
+    assert_eq!(gpu_ledger_reservation_checkpoint(&ledger, "cancel_after"), cancel_ledger_after);
     assert_eq!(cancel_records.len(), 4, "CallerCanceled、真实释放、Target与Completed");
     assert!(observation.take_closed_records().is_empty());
     checkpoints.push(serde_json::json!({"stage":"canceled", "state":snapshot(&state)}));
@@ -125,6 +179,7 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         "taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
         "post":post, "cancel_arrived_at":cancel_receipt.platform_arrived_at_utc_ms,
         "cancel_records":cancel_records,"cancel_batches":cancel_batches,"cancel_closed_at":closed_at,
+        "cancel_ledger_before":cancel_ledger_before,"cancel_ledger_after":cancel_ledger_after,"cancel_ledger_attempts":cancel_ledger_attempts,
         "next_private":next_private,"next_batch":next_batch,"session_seed":state.session.as_ref().unwrap().session_seed.0});
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
         .arg(std::env::var("B_GPU_ORDER_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())

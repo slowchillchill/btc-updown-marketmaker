@@ -60,6 +60,7 @@ def main():
     assert units(ask['quantity_shares']) == 1_000_001
     started = time.perf_counter()
     operators = {}
+    cancel_noe = None
     # 同一次真实调用记录CUDA调度；profile开销包含在下面的墙钟口径。
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,torch.profiler.ProfilerActivity.CUDA]) as profile:
         queue,account,prepared = Numbers.run_exact_batch(lambda:setup(ask,reference))
@@ -123,7 +124,7 @@ def main():
                     torch.tensor([-1,7],device='cuda'),torch.tensor([0,0],device='cuda'),torch.tensor([False],device='cuda'),torch.tensor([True],device='cuda')))
                 assert found.cpu().tolist() == [False,True]
                 from validate_cancel_execution import validate_actual_cancel
-                validate_actual_cancel(reference,cancel_delta)
+                cancel_noe = validate_actual_cancel(reference,cancel_delta)
             try:
                 assert_checkpoint(checkpoint['state'],quantity,account)
             except AssertionError as error:
@@ -182,7 +183,7 @@ def main():
     artifact = Path(os.environ['B_GPU_ORDER_ARTIFACT_DIR'])
     artifact.mkdir(parents=True,exist_ok=True)
     (artifact/'cuda-device-events.json').write_text(json.dumps(operators,indent=2)+'\n')
-    print(json.dumps({'checkpoints':len(reference['checkpoints']),'original_external_5share_request':True,
+    print(json.dumps({'cancel_NOE_Registry':cancel_noe,'checkpoints':len(reference['checkpoints']),'original_external_5share_request':True,
         'error_boundaries':['confirmed_two_transfers_atomic','missing_A_cancel_no_release','closed_matching_cancel_allowed','append_row_fault_reaches_root'],
         'elapsed_seconds_with_profile_and_reference_reads':elapsed,'cuda_device_events':len(cuda),'cuda_kernel_launches':len(kernels),
         'cuda_memcpy_events':sum(event.name.startswith('Memcpy') for event in cuda),

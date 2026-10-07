@@ -5,6 +5,9 @@
 """
 from pathlib import Path
 from dataclasses import replace
+from fractions import Fraction
+import importlib.util
+import json
 import sys
 import torch
 from queues import Numbers
@@ -84,4 +87,66 @@ def validate_actual_cancel(source,delta):
     assert final.cancellable.cpu().tolist()==[[False]]
     frozen=Numbers.run_exact_batch(lambda:PublicCancellationState(integers([0]),active[:,None],completions).freeze_global(closed_at))
     assert values(frozen.pending_count)==[0] and values(frozen.response_counts)==[1,0,0]
-    print('stage=actual_GPU_cancel_to_NOE_Registry records=4 Control_before_CallerCanceled=true full_root=false',file=sys.stderr)
+    # Ledger只在开头安装原V4已公开取消前缀；四记录应用次序由设备领取缓存决定。
+    from memory import EconomicColumns
+    from admission import AdmissionLifecycle
+    from closed import ClosedAdmission
+    from success_pool import SuccessPools
+    from queues import ExactRational
+    before=source['cancel_ledger_before']
+    original_projection=before['projection']
+    names=['cash_pusd','available_pusd','principal_encumbrance_pusd','immediate_taker_fee_encumbrance_pusd',
+        'maker_rebate_receivable_pusd','taker_rebate_receivable_pusd','maker_rebate_locked_remainder_pusd','taker_rebate_locked_remainder_pusd']
+    platform=original_projection['platform_confirmed_projection']
+    spec=importlib.util.spec_from_file_location('gpu_cancel_platform',root/'ledger/gpu/platform.py')
+    module=importlib.util.module_from_spec(spec)
+    sys.modules[spec.name]=module
+    spec.loader.exec_module(module)
+    amounts=lambda value:[Fraction(n,d) for n,d in zip(values(value.numerator),values(value.denominator))]
+    def prepare_ledger():
+        outcomes={item['token_id']:item['balance_shares'] for item in platform['outcome_balances']}
+        balances=module.PlatformBalances.open(rational([platform[name] for name in names]),
+            rational([outcomes.get(token,'0') for token in ['1','2']]),torch.tensor([0,0],device='cuda'),
+            integers([original_projection['platform_source_prefix']]))
+        columns=EconomicColumns.from_projection_batches([batch])
+        pools=SuccessPools.open(torch.tensor([0,0],device='cuda'),torch.tensor([0,0],device='cuda'),
+            torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1)
+        ledger=AdmissionLifecycle.open(balances,state.normalizer.bank,columns,
+            integers([original_projection['ledger_entry_seq']]),integers([original_projection['ledger_local_prefix']]),pools)
+        ledger=replace(ledger,maker_cash=rational([str(Fraction(before['cash']['maker_available_pusd'])+
+            Fraction(before['cash']['maker_reserved_pusd']))]))
+        # 原目录当前只有这一真实已接纳订单；保存原公开open/经济接纳标志。
+        assert platform['open_order_count']==1
+        orders,error=ledger.orders.set(integers([1]),zero,active,
+            integers([original_projection['ledger_entry_seq']]),active,economic=active)
+        return replace(ledger,orders=orders,fault=ledger.fault|error)
+    ledger=Numbers.run_exact_batch(prepare_ledger)
+    cache=Numbers.run_exact_batch(lambda:ClosedAdmission.empty(ledger.columns).accept(ledger.columns,closed))
+    ledger,cache=Numbers.run_exact_batch(lambda:cache.drain(ledger,torch.ones_like(cache.received)))
+    assert ledger.fault.cpu().tolist()==[0] and cache.fault.cpu().tolist()==[0]
+    assert not (cache.received & ~cache.consumed).any().cpu().item()
+    after=source['cancel_ledger_after']['projection']
+    assert values(ledger.current_entry_sequence)==[after['ledger_entry_seq']]
+    assert values(ledger.current_local_prefix)==[after['ledger_local_prefix']]
+    assert values(ledger.platform.platform_source_prefix)==[after['platform_source_prefix']]
+    assert amounts(ledger.platform.balances)==[Fraction(after['platform_confirmed_projection'][name]) for name in names]
+    assert ledger.orders.flags.cpu().tolist()[0][0] is False
+    assert after['platform_confirmed_projection']['open_order_count']==0
+    # 每条空控制条目和经济条目均保存原position的实际Ledger序，只有经济推进platform。
+    by_position={json.dumps(item['position'],sort_keys=True):item['after']['projection']['ledger_entry_seq']
+        for item in source['cancel_ledger_attempts']}
+    applied_sequences=values(ledger.applied_sequences)
+    for column,present in enumerate(batch.emitted.cpu().tolist()[0]):
+        if present:
+            ordinal=values(batch.record_ordinals)[column]
+            assert applied_sequences[column]==by_position[json.dumps(originals[ordinal]['position'],sort_keys=True)]
+    repeat_cache=Numbers.run_exact_batch(lambda:cache.accept(ledger.columns,replace(closed,available_at=closed.available_at+1)))
+    repeated,repeat_cache=Numbers.run_exact_batch(lambda:repeat_cache.drain(ledger,torch.ones_like(cache.received),passes=1))
+    assert values(repeated.current_entry_sequence)==values(ledger.current_entry_sequence)
+    assert amounts(repeated.platform.balances)==amounts(ledger.platform.balances)
+    assert torch.equal(repeat_cache.available_at,cache.available_at)
+    return {'actual_GPU_cancel_effects_to_NOE_records':4,'Control_Canceled_before_CallerCanceled_closed':True,
+        'real_CallerCanceled_device_decoder_checked':True,'NOE_unset_gates_no_delivery':True,'first_delivery_not_repeated':True,
+        'source_private_batch_and_actual_release_checked':True,'Ledger_four_original_positions_and_sequences_checked':True,
+        'Ledger_control_closes_without_cash_and_economic_releases_once':True,
+        'cold_original_cancel_prefix_initialized_once':True,'full_root':False}

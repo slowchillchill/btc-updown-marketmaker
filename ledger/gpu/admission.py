@@ -163,14 +163,15 @@ class AdmissionLifecycle:
         maker_cash=self.maker_cash+cash_delta
         fault=fault | torch.where(result.applied,maker_cash.fault,0)
         applicable=((outcome_kind==OUT_EVIDENCE)&((tag==3)|(tag==7)|(tag==8)|(tag==9)|
-            (tag==12)|(tag==13)|(tag==14))) | (outcome_kind==OUT_PENDING)
+            (tag==12)|(tag==13)|(tag==14)|(tag==15)|(tag==16))) | (outcome_kind==OUT_PENDING)
         use=(requested&applicable)|result.applied
         fault=fault | result.fault
         use=use&(fault==0)
         order=_take(self.lifecycle.orders,index)
         fill=_take(self.lifecycle.fills,index)
+        canceled=(tag==15)&self.lifecycle.canceled_orders[root,local]
         order_at,found,lookup_fault=self.orders.lookup(order)
-        fault=fault | torch.where(use&((tag==3)|(tag==7)|(economic&(self.lifecycle.economic_tags[root,local]==0))),
+        fault=fault | torch.where(use&((tag==3)|(tag==7)|canceled|(economic&(self.lifecycle.economic_tags[root,local]==0))),
             Numbers.combine_fault_rows(lookup_fault),0)
         old_open=self.orders.flags[root,order_at]
         old_applied=self.orders.economic_applied[root,order_at]
@@ -193,10 +194,14 @@ class AdmissionLifecycle:
         book=self.reservations.definitive(request,accepted | is_order_economic,old_applied | is_order_economic,
             next_entry,confirm|convert)
         fault=fault | book.fault
-        order_event=(lifecycle_use&((tag==7)|accepted))|(use&is_order_economic)
+        order_event=(lifecycle_use&((tag==7)|accepted|canceled))|(use&is_order_economic)
         open_flag=torch.where((tag==7)|accepted,self.lifecycle.open_orders[root,local],old_open)
+        open_flag=open_flag & ~canceled
         request=torch.where(accepted&bound,binding,old_request)
-        orders,error=self.orders.set(order,self.lifecycle.conditions[root,local],open_flag,next_entry,order_event,
+        # Target控制没有condition字段；沿原set_order_open保留已有关联，未知不猜。
+        condition=torch.where(canceled,torch.where(found,self.orders.conditions[root,order_at],-1),
+            self.lifecycle.conditions[root,local])
+        orders,error=self.orders.set(order,condition,open_flag,next_entry,order_event,
             request=request,economic=old_applied | is_order_economic)
         fault=fault | torch.where(order_event,error,0)
         trade_event=lifecycle_use&(tag==8)

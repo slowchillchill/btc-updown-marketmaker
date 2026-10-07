@@ -19,6 +19,7 @@ class LifecycleColumns:
     fills: object
     conditions: torch.Tensor
     open_orders: torch.Tensor
+    canceled_orders: torch.Tensor
     pending_trades: torch.Tensor
     accepted: torch.Tensor
     economic_tags: torch.Tensor
@@ -58,7 +59,7 @@ class LifecycleColumns:
         active=torch.cat([batch.emitted for batch in columns.projection_batches],dim=1).flatten()
         outcomes=torch.cat([batch.normalized.outcomes for batch in columns.projection_batches],dim=1).flatten()
         material=active & ((outcomes==OUT_EVIDENCE)|(outcomes==OUT_FACT))
-        enabled={tag:material&(schemas==tag) for tag in [3,7,8,9,11,12,13,14]}
+        enabled={tag:material&(schemas==tag) for tag in [3,7,8,9,11,12,13,14,15,16]}
         layouts={
             3:['scalar']*4+['integer','scalar','integer','integer','scalar'],
             7:['scalar']*3+['integer','scalar','scalar'],
@@ -68,6 +69,8 @@ class LifecycleColumns:
             12:['scalar']*3+['rational']*3+['integer_list'],
             13:['scalar']*7+['rational'],
             14:['scalar']*3+[('record_list',('integer','scalar','scalar','scalar','rational'))],
+            15:['scalar','integer','scalar'],
+            16:['scalar']+['integer']*3,
         }
         decoded={}
         fault=torch.where(material,bank.fault[rows],0)
@@ -78,7 +81,7 @@ class LifecycleColumns:
         absent=ExactInt.from_i64_tensor(torch.empty(0,dtype=torch.int64,device=rows.device))
         absent_ratio=ExactRational(absent,absent.constant(1))
         for tag,layout in layouts.items():
-            if tag>=12 and bank.declared_schemas is not None and tag not in bank.declared_schemas:
+            if tag in [12,13,14] and bank.declared_schemas is not None and tag not in bank.declared_schemas:
                 if tag==12:
                     decoded[tag]=[torch.zeros_like(schemas)]*3+[ratio]*3+[
                         IntegerList(absent,torch.zeros((rows.numel(),0),dtype=torch.bool,device=rows.device))]
@@ -98,6 +101,7 @@ class LifecycleColumns:
         orders=decoded[3][4].select(enabled[3],zero)
         orders=decoded[7][3].select(enabled[7],orders)
         orders=decoded[8][4].select(enabled[8],orders)
+        orders=decoded[15][1].select(enabled[15],orders)
         economic=enabled[11]
         economic_order=economic & ((decoded[11][3]==0)|(decoded[11][3]==2))
         orders=decoded[11][4].select(economic_order,orders)
@@ -113,13 +117,14 @@ class LifecycleColumns:
         payment=enabled[13]
         fault=fault | (payment & ((decoded[13][0]!=decoded[13][3]) | (decoded[13][4]!=12) |
             (decoded[13][1]!=decoded[13][5]) | (decoded[13][2]!=decoded[13][6]))).to(torch.int32)
-        open_orders=(enabled[3]&(decoded[3][5]==0))|(enabled[7]&(decoded[7][5]==0))
+        open_orders=(enabled[3]&(decoded[3][5]==0))|(enabled[7]&(decoded[7][4]==0)&(decoded[7][5]==0))
+        canceled_orders=enabled[15]&(decoded[15][2]==0)
         pending=enabled[8]&((decoded[8][6]==0)|(decoded[8][6]==1))
         accepted=enabled[3]&(decoded[3][1]==0)
         request=torch.cat([batch.request_slots for batch in columns.projection_batches],dim=1)
         item=torch.cat([batch.item_ordinals for batch in columns.projection_batches],dim=1)
         return cls(schemas.reshape(roots,width),outcomes.reshape(roots,width),orders,fills,conditions.reshape(roots,width),
-            open_orders.reshape(roots,width),pending.reshape(roots,width),accepted.reshape(roots,width),
+            open_orders.reshape(roots,width),canceled_orders.reshape(roots,width),pending.reshape(roots,width),accepted.reshape(roots,width),
             torch.where(economic,decoded[11][3],-1).reshape(roots,width),decoded[11][5].reshape(roots,width),
             decoded[11][14].reshape(roots,width)!=0,request,item,
             decoded[8][2].reshape(roots,width),decoded[8][10],decoded[8][11],decoded[8][6].reshape(roots,width),
