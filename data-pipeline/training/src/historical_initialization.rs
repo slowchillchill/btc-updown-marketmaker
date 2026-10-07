@@ -68,11 +68,19 @@ fn existing(row: &TypedRawRowV2) -> Option<&PolymarketMarketMetadataRow> {
         _ => None,
     }
 }
+/// 元数据无连接 epoch；初始化与直接研究共用准入时刻、序号、公共来源身份排序。
+pub fn metadata_admission_order_v1(
+    admitted: i64,
+    sequence: u64,
+    id: &Sha256Hex,
+) -> (i64, u64, String) {
+    (admitted, sequence, id.0.clone())
+}
 fn order(row: &PolymarketMarketMetadataRow, id: &Sha256Hex) -> MetadataOrder {
-    (
+    metadata_admission_order_v1(
         row.collector_admission_time_utc_ms,
         row.collector_admission_sequence,
-        id.0.clone(),
+        id,
     )
 }
 /// 只保存文件事实及目标Snapshot坐标，不缓存元数据载荷或市场状态。

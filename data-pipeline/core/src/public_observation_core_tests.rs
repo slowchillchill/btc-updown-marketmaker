@@ -2901,3 +2901,26 @@ fn facts_sink_preserves_complete_causal_groups_without_observation_expansion() {
     }
     assert_eq!(facts.applied_prefix(), observed.applied_prefix());
 }
+
+#[test]
+fn thin_reference_facts_match_full_actual_reductions() {
+    let mut full = core();
+    let mut thin = core();
+    for input in [meta(0), twap_record(1, 60, 22001, "100000000000000000000")] {
+        let ids = BTreeMap::new();
+        let prepared = prepare_public_ingress_v1(&full, &input, &ids, &[]).unwrap();
+        let expected = full.push(&prepared).unwrap().reductions;
+        let prepared = prepare_public_ingress_v1(&thin, &input, &ids, &[]).unwrap();
+        let actual = thin.push_reference_facts(&prepared).unwrap();
+        let facts = |batches: Vec<PublicReductionBatchV1>| {
+            batches
+                .into_iter()
+                .flat_map(|b| b.facts.iter().cloned().collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            serde_json::to_value(facts(expected)).unwrap(),
+            serde_json::to_value(facts(actual)).unwrap()
+        );
+    }
+}

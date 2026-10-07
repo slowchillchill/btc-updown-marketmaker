@@ -739,6 +739,14 @@ impl PublicObservationCoreV1 {
             closed_groups: result.compact_groups.unwrap(),
         })
     }
+    /// 直接统计消费者读取实际归约事实，不生成市场观察。
+    /// 此入口共用完整准备/归约步骤，不提供录制或 SIM 组流。
+    pub fn push_reference_facts(
+        &mut self,
+        input: &PreparedIngressV1<'_>,
+    ) -> Result<Vec<PublicReductionBatchV1>, DptCoreErrorV1> {
+        Ok(self.push_application(input, true)?.reductions)
+    }
     fn push_application<'a>(
         &mut self,
         input: &'a PreparedIngressV1<'_>,

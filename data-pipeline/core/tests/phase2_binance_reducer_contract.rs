@@ -1435,3 +1435,159 @@ fn consecutive_snapshotless_epochs_move_one_book_and_preserve_evidence() {
     assert_eq!(retained, vec![6, 6, 6, 7, 8, 6]);
     println!("semantic_sha256={digest}; retained={retained:?}");
 }
+
+#[test]
+fn quantity_only_path_reuses_depth_admission_gap_and_maps() {
+    use data_pipeline_core::{source_evidence_from_typed_raw, typed_raw::TypedRawRow};
+    let mut full = BinanceDepthReducer::new(RULE_VERSION).unwrap();
+    let mut thin = BinanceDepthReducer::new(RULE_VERSION).unwrap();
+    let initial = snapshot("quantity-1", 100, 1);
+    let evidence = source_evidence_from_typed_raw(
+        &TypedRawRow::BinanceDepthSnapshot(initial.clone()),
+        &sha('a'),
+        &sha('b'),
+    )
+    .unwrap();
+    full.compute_snapshot(&initial, evidence.clone()).unwrap();
+    thin.apply_quantity_snapshot(&initial, evidence).unwrap();
+    assert_eq!(
+        thin.current_quantity_totals().unwrap(),
+        full.current_quantity_totals().unwrap()
+    );
+    let overwrite = update(
+        "quantity-1",
+        101,
+        101,
+        2,
+        Some(100),
+        None,
+        BinanceDepthStitchVerdict::Applied,
+        vec![level("64000", "0"), level("64100", "2")],
+    );
+    let hole = update(
+        "quantity-1",
+        105,
+        105,
+        3,
+        Some(100),
+        Some(101),
+        BinanceDepthStitchVerdict::NotAppliedConfirmedHole,
+        vec![level("64100", "1")],
+    );
+    let switched = update(
+        "quantity-2",
+        106,
+        106,
+        4,
+        None,
+        None,
+        BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable,
+        vec![level("64100", "1")],
+    );
+    for row in [&overwrite, &hole, &switched] {
+        let evidence = source_evidence_from_typed_raw(
+            &TypedRawRow::BinanceDepthUpdate(row.clone()),
+            &sha('a'),
+            &sha('b'),
+        )
+        .unwrap();
+        full.compute_update(row, evidence.clone()).unwrap();
+        thin.apply_quantity_update(row, evidence).unwrap();
+        assert_eq!(
+            thin.current_quantity_totals().unwrap(),
+            full.current_quantity_totals().unwrap()
+        );
+        if row.collector_admission_sequence == 2 {
+            let (bid, ask) = thin.current_quantity_totals().unwrap().unwrap();
+            assert_eq!(
+                (bid.numerator.as_str(), bid.denominator.as_str()),
+                ("2", "1")
+            );
+            assert_eq!(
+                (ask.numerator.as_str(), ask.denominator.as_str()),
+                ("7", "10")
+            );
+        } else {
+            assert!(thin.current_quantity_totals().unwrap().is_none());
+        }
+    }
+    let restore = snapshot("quantity-2", 200, 5);
+    let evidence = source_evidence_from_typed_raw(
+        &TypedRawRow::BinanceDepthSnapshot(restore.clone()),
+        &sha('a'),
+        &sha('b'),
+    )
+    .unwrap();
+    full.compute_snapshot(&restore, evidence.clone()).unwrap();
+    thin.apply_quantity_snapshot(&restore, evidence.clone())
+        .unwrap();
+    assert_eq!(
+        thin.current_quantity_totals().unwrap(),
+        full.current_quantity_totals().unwrap()
+    );
+    assert_eq!(
+        full.compute_snapshot(&restore, evidence.clone())
+            .unwrap_err()
+            .to_string(),
+        thin.apply_quantity_snapshot(&restore, evidence)
+            .unwrap_err()
+            .to_string()
+    );
+}
+
+#[test]
+fn quantity_sampling_preserves_valid_sum_beyond_decimal_capacity() {
+    use data_pipeline_core::{source_evidence_from_typed_raw, typed_raw::TypedRawRow};
+    let mut row = snapshot("quantity-large", 100, 1);
+    row.bids = data_pipeline_core::typed_raw::parse_depth_levels_json(
+        r#"[["100","79228162514264337593543950335"],["99","79228162514264337593543950335"]]"#,
+        "bids",
+        true,
+    )
+    .unwrap();
+    let evidence = source_evidence_from_typed_raw(
+        &TypedRawRow::BinanceDepthSnapshot(row.clone()),
+        &sha('a'),
+        &sha('b'),
+    )
+    .unwrap();
+    let mut thin = BinanceDepthReducer::new("rule-v1").unwrap();
+    thin.apply_quantity_snapshot(&row, evidence).unwrap();
+    let (bid, _) = thin.current_quantity_totals().unwrap().unwrap();
+    assert_eq!(bid.numerator, "158456325028528675187087900670");
+    assert_eq!(bid.denominator, "1");
+
+    // 同样合法数量来自 applied 更新时，也不能触发无消费者的报告溢出。
+    let initial = snapshot("quantity-large-update", 100, 1);
+    let mut thin = BinanceDepthReducer::new("rule-v1").unwrap();
+    let evidence = source_evidence_from_typed_raw(
+        &TypedRawRow::BinanceDepthSnapshot(initial.clone()),
+        &sha('a'),
+        &sha('b'),
+    )
+    .unwrap();
+    thin.apply_quantity_snapshot(&initial, evidence).unwrap();
+    let applied = update(
+        "quantity-large-update",
+        101,
+        101,
+        2,
+        Some(100),
+        None,
+        BinanceDepthStitchVerdict::Applied,
+        vec![
+            level("64000", "79228162514264337593543950335"),
+            level("64100", "79228162514264337593543950335"),
+        ],
+    );
+    let evidence = source_evidence_from_typed_raw(
+        &TypedRawRow::BinanceDepthUpdate(applied.clone()),
+        &sha('a'),
+        &sha('b'),
+    )
+    .unwrap();
+    thin.apply_quantity_update(&applied, evidence).unwrap();
+    let (bid, _) = thin.current_quantity_totals().unwrap().unwrap();
+    assert_eq!(bid.numerator, "158456325028528675187087900670");
+    assert_eq!(bid.denominator, "1");
+}
