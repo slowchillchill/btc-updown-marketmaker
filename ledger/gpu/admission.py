@@ -85,9 +85,10 @@ class AdmissionLifecycle:
     settlement_costs: object | None = None  # 实际Cost累计/SourceOrder；未安装冷历史为None。
     external_cash: object | None = None
     other_cash: object | None = None  # 原ExternalCash非Maker余额，不混入Maker可用资金。
+    query_associations: object | None = None  # 完整本地Query关联历史；None不当Known空目录。
 
     @classmethod
-    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None,projected_markets=None,resolutions=None,lifecycle_capacity=None,accepted_principal=None,market_balance_origin=None,settlement_costs=None,external_cash=None,other_cash=None):
+    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None,projected_markets=None,resolutions=None,lifecycle_capacity=None,accepted_principal=None,market_balance_origin=None,settlement_costs=None,external_cash=None,other_cash=None,query_associations=None):
         roots,width=columns.row_refs.shape
         if market_balance_origin is not None and (market_balance_origin.known.shape!=(roots,)
                 or market_balance_origin.conditions.device!=columns.row_refs.device):
@@ -98,6 +99,8 @@ class AdmissionLifecycle:
         if projected_markets is not None and (projected_markets.present.size(0) != roots or projected_markets.present.device != columns.row_refs.device):
             raise ValueError('市场投影人口须同根同设备')
         life=LifecycleColumns.from_projection(bank,columns)
+        if success_pools is None and (unresolved_markets is not None or resolutions is not None):
+            raise ValueError('市场成功/结算派生须安装实际成功池，不能借订单消费者省略')
         book=ReservationBook.empty(roots,capacity=max(1,width),device=columns.row_refs.device)
         empty=torch.full_like(book.request_slots,-1)
         opening_cash=take_ratio(platform.balances,torch.arange(roots,device=empty.device)*8)
@@ -107,6 +110,7 @@ class AdmissionLifecycle:
         if order_funds is None:
             order_funds=OrderFunds.empty(roots,capacity,capacity,width,empty.device,known=False)
         if accepted_principal is None:
+            if success_pools is None:raise ValueError('订单消费者须显式安装实际累计本金冷目录')
             accepted_principal=AcceptedPrincipal.open(roots,torch.unique(success_pools.condition_slots),known=False)
         return cls(platform,success_pools,TradeSuccess.open(roots,capacity,empty.device),position_costs,unresolved_markets,
             RebateContributions.empty(roots,max(1,width),empty.device),rebate_days,opening_cash,book,LifecycleDirectory.empty(roots,capacity,device=empty.device),order_funds,
@@ -115,7 +119,7 @@ class AdmissionLifecycle:
             ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=empty.device)),
             torch.zeros(roots,dtype=torch.int64,device=empty.device),torch.zeros(roots,dtype=torch.bool,device=empty.device),
             torch.zeros_like(columns.row_refs),platform.fault | accepted_principal.fault | (0 if projected_markets is None else projected_markets.fault),projected_markets,resolutions,accepted_principal,market_balance_origin,
-            settlement_costs,external_cash,other_cash)
+            settlement_costs,external_cash,other_cash,query_associations)
 
     def funds(self):
         roots=self.fault.numel()
@@ -191,6 +195,34 @@ class AdmissionLifecycle:
         """缺condition物理目录时增长；保留旧累计，原未提交NOE位置续跑。"""
         return replace(self,accepted_principal=self.accepted_principal.extended(conditions))
 
+    def resized_query_associations(self,capacity):
+        if self.query_associations is None:raise ValueError('增长不能替代未安装的本地Query关联历史')
+        return replace(self,query_associations=self.query_associations.resized(capacity))
+
+    def record_order_query_association(self,event,query,request,enabled):
+        """显式发送Query的本地登记；本批消费者不自行发送或重试查询。"""
+        if self.query_associations is None:raise ValueError('须先安装实际本地Query关联历史')
+        sequence=self.current_entry_sequence+self.current_entry_sequence.constant(1)
+        local=self.current_local_prefix+self.current_local_prefix.constant(1)
+        # 已应用事件先命中原幂等域；重复不再依赖本次传入的预留存在。
+        repeated=(self.query_associations.events==event[:,None]).any(1)
+        foreign=(self.reservations.event_slots==event[:,None])&(self.reservations.event_slots>=0)
+        foreign_found=foreign.any(1)
+        reservation=(self.reservations.request_slots==request[:,None])&(self.reservations.outcomes==RESERVED)
+        fault=self.fault|torch.where(enabled&~repeated&~foreign_found,sequence_fault(local,positive=True)|
+            (~reservation.any(1)).to(torch.int32),0)
+        directory,decision=self.query_associations.register(event,query,request,sequence,enabled&~foreign_found&(fault==0))
+        foreign_at=foreign.to(torch.int64).argmax(1)
+        old_sequence=_take(self.reservations.event_sequences,
+            torch.arange(event.numel(),device=event.device)*self.reservations.capacity+foreign_at)
+        decision=replace(decision,ledger_sequences=old_sequence.select(enabled&foreign_found,decision.ledger_sequences))
+        fault|=decision.fault
+        use=decision.changed&(fault==0)
+        return replace(self,query_associations=replace(coordinate(directory,self.query_associations,use),
+            capacity_required=directory.capacity_required),
+            current_entry_sequence=sequence.select(use,self.current_entry_sequence),
+            current_local_prefix=local.select(use,self.current_local_prefix),fault=fault),replace(decision,fault=fault)
+
     def reserve_action(self,requests,conditions,principal,fee,enabled):
         funds=self.funds()
         actual,maker=funds.actual_available,funds.maker_available
@@ -228,6 +260,8 @@ class AdmissionLifecycle:
             fault=self.fault | funds.fault | event.fault | (0 if population is None else population.fault)),event
 
     def submission_started(self,request,event,global_request,item,enabled):
+        if self.query_associations is not None:
+            enabled=enabled&~((self.query_associations.events==event[:,None])&(self.query_associations.events>=0)).any(1)
         sequence=self.current_entry_sequence+self.current_entry_sequence.constant(1)
         local=self.current_local_prefix+self.current_local_prefix.constant(1)
         fault=self.fault | torch.where(enabled,sequence_fault(sequence)|sequence_fault(local)|
@@ -317,7 +351,17 @@ class AdmissionLifecycle:
             fault |= torch.where(cash_economic & result.applied,other_cash.fault,0)
         fault=fault | torch.where(result.applied,maker_cash.fault,0)
         applicable=((outcome_kind==OUT_EVIDENCE)&((tag==3)|(tag==7)|(tag==8)|(tag==9)|
-            (tag==12)|(tag==13)|(tag==14)|(tag==15)|(tag==16)|(tag==17)|(tag==19)|(tag==20)|(tag==22)|(tag==23))) | (outcome_kind==OUT_PENDING)
+            (tag==12)|(tag==13)|(tag==14)|(tag==15)|(tag==16)|(tag==17)|(tag==19)|(tag==20)|(tag==22)|(tag==23)|(tag==25)|(tag==26))) | (outcome_kind==OUT_PENDING)
+        query_control=requested&(outcome_kind==OUT_EVIDENCE)&(tag==25)
+        query_request=torch.full_like(local,-1)
+        query_bound=torch.zeros_like(enabled)
+        if self.query_associations is None:
+            fault|=query_control.to(torch.int32)
+        else:
+            query_request,query_bound=self.query_associations.lookup(self.lifecycle.request_slots[root,local])
+            fault|=torch.where(query_control,self.query_associations.fault,0)
+        query_definitive=query_control&query_bound&(self.lifecycle.query_outcomes[root,local]==0)&(
+            (self.lifecycle.query_states[root,local]==0)|(self.lifecycle.query_states[root,local]==1))
         use=(requested&applicable)|result.applied
         fault=fault | result.fault
         use=use&(fault==0)&settlement_ready
@@ -326,7 +370,8 @@ class AdmissionLifecycle:
         canceled=(tag==15)&self.lifecycle.canceled_orders[root,local]
         is_order_release=economic&(((self.lifecycle.economic_tags[root,local]==2)|(self.lifecycle.economic_tags[root,local]==5)))&result.applied
         order_at,found,lookup_fault=self.orders.lookup(order)
-        fault=fault | torch.where(use&((tag==3)|(tag==7)|(tag==19)|canceled|is_order_release|(economic&(self.lifecycle.economic_tags[root,local]==0))),
+        submission=(tag==3)|(tag==26)
+        fault=fault | torch.where(use&(submission|(tag==7)|(tag==19)|query_definitive|canceled|is_order_release|(economic&(self.lifecycle.economic_tags[root,local]==0))),
             Numbers.combine_fault_rows(lookup_fault),0)
         old_open=self.orders.flags[root,order_at]
         old_applied=self.orders.economic_applied[root,order_at]
@@ -339,13 +384,17 @@ class AdmissionLifecycle:
         bound=association.any(dim=1)
         reservation_at=association.to(torch.int32).argmax(dim=1)
         binding=self.reservations.request_slots[root,reservation_at]
-        accepted=(tag==3)&self.lifecycle.accepted[root,local]
+        bound=torch.where(query_control,query_bound,bound)
+        binding=torch.where(query_control,query_request,binding)
+        # 收到Accepted不等于Ledger有原SubmissionItem→reservation关联。
+        # CPU未关联Submission立即返回，不创建或改写订单生命周期。
+        accepted=(submission&bound&self.lifecycle.accepted[root,local])|query_definitive
         is_order_economic=economic&(self.lifecycle.economic_tags[root,local]==0)&result.applied
         # Economic来源可能没有DirectResponse关联；只用原显式绑定或已有订单绑定。
-        request=torch.where((tag==3)&bound,binding,torch.where(bound,binding,old_request))
+        request=torch.where(submission&bound,binding,torch.where(bound,binding,old_request))
         has_request=bound | (found & (old_request>=0))
         lifecycle_use=use&(outcome_kind==OUT_EVIDENCE)
-        confirm=lifecycle_use&(tag==3)&bound
+        confirm=lifecycle_use&((submission&bound)|query_definitive)
         convert=use&is_order_economic&has_request
         # CPU definitive只在实际预留转态时返回本金；终态/重复pending不重新计数。
         reservation_match=(self.reservations.request_slots==request[:,None])&(self.reservations.outcomes==RESERVED)
@@ -407,8 +456,14 @@ class AdmissionLifecycle:
         cost_asset=torch.where(self.lifecycle.economic_has_outcome[root,local],assets,-1)
         position_costs=self.position_costs.transition(trade_at,self.lifecycle.conditions[root,local],cost_asset,
             applied_cost,applied_fee,applied_fill,compensated)
-        trade_success,success_pools=trade_success.apply_success(self.success_pools,trades,trade_at,(trade_event|economic_trade)&(fault==0))
-        fault=fault | success_pools.fault
+        success_pools=self.success_pools
+        if success_pools is None:
+            # 单资产订单/Query不要求伪造二元对腿；依赖组件未安装时停止本次
+            # 候选提交，保留原NOE及全部业务状态，不把合法成交归为业务拒绝。
+            fault|=(trade_event|economic_trade|((lifecycle_use&use)&((tag==9)|(tag==14)))).to(torch.int32)
+        else:
+            trade_success,success_pools=trade_success.apply_success(success_pools,trades,trade_at,(trade_event|economic_trade)&(fault==0))
+            fault|=success_pools.fault
         contribution_event=lifecycle_use & (tag==9)
         contributions,required,_=self.rebate_contributions.add(fill,self.lifecycle.contribution_kinds[root,local],
             self.lifecycle.contribution_days[root,local],self.lifecycle.conditions[root,local],
@@ -470,7 +525,7 @@ class AdmissionLifecycle:
             # 原空经济delta也创建account.market；仅保存终态订单/成交索引不会创建lifecycle.market。
             actual_condition = self.lifecycle.conditions[root,local]
             creates_market = (result.applied & (actual_condition >= 0)) | (
-                order_event & ((tag != 3) | bound) & (actual_condition >= 0) & (old_open | open_flag)) | (
+                order_event & (~submission | bound) & (actual_condition >= 0) & (old_open | open_flag)) | (
                 trade_event & (actual_condition >= 0) & (self.trades.flags[root,trade_at] | pending))
             population, population_ready = population.admit(actual_condition, creates_market & use & (fault == 0))
             fault |= population.fault
@@ -533,7 +588,7 @@ class AdmissionLifecycle:
             other_cash=None if other_cash is None else select(other_cash,success & economic,self.other_cash),
             accepted_principal=accepted_principal.coordinated(self.accepted_principal,valid),
             projected_markets=None if population is None else population.coordinated(self.projected_markets,valid),
-            success_pools=success_pools.coordinated(self.success_pools,valid),
+            success_pools=None if success_pools is None else success_pools.coordinated(self.success_pools,valid),
             trade_success=coordinate(trade_success,self.trade_success,valid),
             position_costs=coordinate(position_costs,self.position_costs,valid),
             unresolved_markets=None if markets is None else markets.coordinated(self.unresolved_markets,valid),

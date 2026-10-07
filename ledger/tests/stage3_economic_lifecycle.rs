@@ -24,6 +24,9 @@ use ledger::{
 };
 use tempfile::TempDir;
 
+#[path = "common/query_gpu.rs"]
+mod query_gpu;
+
 const MARKET: &str = "condition-stage-3";
 const TOKEN: &str = "token-stage-3-up";
 
@@ -515,8 +518,11 @@ fn submission_results_convert_release_or_retain_once() {
 #[test]
 fn registered_query_found_converts_while_not_found_and_out_of_retention_retain() {
     let (mut fixture, mut writer) = opened("query-results", "100");
+    let mut gpu=query_gpu::Export::begin("query-results",&writer);
     for name in ["found", "not-found", "retained", "missing-association"] {
         reserve_and_submit(&mut writer, name, "5", "0");
+        query_gpu::Export::local(&mut gpu,&writer,serde_json::json!({"ReserveSubmit":{
+            "request":name,"condition":MARKET,"principal":"5","fee":"0","event":format!("event-{name}")}}));
     }
     for name in ["found", "not-found", "retained"] {
         writer
@@ -526,6 +532,8 @@ fn registered_query_found_converts_while_not_found_and_out_of_retention_retain()
                 &request(name),
             )
             .unwrap();
+        query_gpu::Export::local(&mut gpu,&writer,serde_json::json!({"Associate":{
+            "event":format!("query-event-{name}"),"query":format!("query-{name}"),"request":name}}));
     }
 
     let not_found =
@@ -552,6 +560,7 @@ fn registered_query_found_converts_while_not_found_and_out_of_retention_retain()
     );
     for reference in [&not_found, &out_of_retention, &missing_association, &found] {
         writer.apply_noe_result(reference).unwrap();
+        query_gpu::Export::record(&mut gpu,&writer,reference);
     }
 
     let projection = writer.projection().unwrap();
@@ -574,15 +583,61 @@ fn registered_query_found_converts_while_not_found_and_out_of_retention_retain()
         decimal("5")
     );
     assert_eq!(projection.platform_confirmed_projection.open_order_count, 0);
+    // 未登记global_request的合法Accepted不能把已Found(Matched)订单重开。
+    let unassociated_accepted=fixture.commit_submission("unassociated-request",
+        SourceNeutralSubmissionOutcomeV1::Accepted {
+            order:order("order-found",SourceNeutralOrderStateV1::Open)});
+    writer.apply_noe_result(&unassociated_accepted).unwrap();
+    query_gpu::Export::record(&mut gpu,&writer,&unassociated_accepted);
+    assert_eq!(writer.projection().unwrap().platform_confirmed_projection.open_order_count,0);
+    // 已消费的无关联Found不会在迟到本地绑定后自动重放。
+    writer.record_order_query_association(&event("late-query-missing"),"query-missing",&request("missing-association")).unwrap();
+    query_gpu::Export::local(&mut gpu,&writer,serde_json::json!({"Associate":{
+        "event":"late-query-missing","query":"query-missing","request":"missing-association"}}));
+    writer.apply_noe_result(&missing_association).unwrap();
+    query_gpu::Export::record(&mut gpu,&writer,&missing_association);
+    writer.record_order_query_association(&event("terminal-query"),"query-terminal",&request("not-found")).unwrap();
+    query_gpu::Export::local(&mut gpu,&writer,serde_json::json!({"Associate":{
+        "event":"terminal-query","query":"query-terminal","request":"not-found"}}));
+    let terminal=fixture.commit_query("query-terminal",SourceNeutralOrderQueryResultV1::Found {
+        order:order("order-terminal",SourceNeutralOrderStateV1::Canceled)});
+    writer.apply_noe_result(&terminal).unwrap();
+    query_gpu::Export::record(&mut gpu,&writer,&terminal);
+    assert_eq!(writer.projection().unwrap().local_pending_reservation_projection.principal_pusd,decimal("15"));
+    // Query先确认后真实经济到达，只转换pending，不重复累计接纳本金。
+    let economic=fixture.commit_transition(1,Some("found"),
+        SourceNeutralAccountTransitionKindV1::OrderAcceptedEncumbranceApplied {
+            order_identity:identity("order-found")},money_delta("0","-5","5","0",None));
+    writer.apply_noe_result(&economic).unwrap();
+    query_gpu::Export::record(&mut gpu,&writer,&economic);
+    let final_projection=writer.projection().unwrap();
+    assert_eq!(final_projection.platform_confirmed_projection.cumulative_accepted_principal_pusd,decimal("5"));
+    assert_eq!(final_projection.platform_confirmed_projection.platform_confirmation_pending_economic_principal_pusd,decimal("0"));
+    // 原预留的另一真实Query可先确认；不依赖已满的无关订单资金目录。
+    writer.record_order_query_association(&event("query-funds-independent"),"query-funds-independent",&request("retained")).unwrap();
+    query_gpu::Export::local(&mut gpu,&writer,serde_json::json!({"Associate":{
+        "event":"query-funds-independent","query":"query-funds-independent","request":"retained"}}));
+    let query_only=fixture.commit_query("query-funds-independent",SourceNeutralOrderQueryResultV1::Found {
+        order:order("order-query-only",SourceNeutralOrderStateV1::Open)});
+    writer.apply_noe_result(&query_only).unwrap();
+    query_gpu::Export::record(&mut gpu,&writer,&query_only);
+    assert_eq!(writer.projection().unwrap().platform_confirmed_projection.cumulative_accepted_principal_pusd,decimal("10"));
+    assert_eq!(writer.projection().unwrap().platform_confirmed_projection.open_order_count,1);
+    query_gpu::Export::finish(gpu);
 }
 
 #[test]
 fn same_reservation_is_consumed_by_only_one_definitive_result() {
     let (mut fixture, mut writer) = opened("single-definitive", "50");
+    let mut gpu=query_gpu::Export::begin("single-definitive",&writer);
     reserve_and_submit(&mut writer, "single", "10", "1");
+    query_gpu::Export::local(&mut gpu,&writer,serde_json::json!({"ReserveSubmit":{
+        "request":"single","condition":MARKET,"principal":"10","fee":"1","event":"event-single"}}));
     writer
         .record_order_query_association(&event("query-single"), "query-single", &request("single"))
         .unwrap();
+    query_gpu::Export::local(&mut gpu,&writer,serde_json::json!({"Associate":{
+        "event":"query-single","query":"query-single","request":"single"}}));
     let accepted = fixture.commit_submission(
         "single",
         SourceNeutralSubmissionOutcomeV1::Accepted {
@@ -604,9 +659,12 @@ fn same_reservation_is_consumed_by_only_one_definitive_result() {
         },
     );
     writer.apply_noe_result(&accepted_economic).unwrap();
+    query_gpu::Export::record(&mut gpu,&writer,&accepted_economic);
     let once = writer.projection().unwrap();
     writer.apply_noe_result(&accepted).unwrap();
+    query_gpu::Export::record(&mut gpu,&writer,&accepted);
     writer.apply_noe_result(&also_found).unwrap();
+    query_gpu::Export::record(&mut gpu,&writer,&also_found);
     let twice = writer.projection().unwrap();
     assert_eq!(
         twice
@@ -632,6 +690,7 @@ fn same_reservation_is_consumed_by_only_one_definitive_result() {
         decimal("10")
     );
     assert_eq!(twice.platform_confirmed_projection.open_order_count, 1);
+    query_gpu::Export::finish(gpu);
 }
 
 #[test]

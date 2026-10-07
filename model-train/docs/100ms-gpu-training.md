@@ -1477,3 +1477,40 @@ Timeout+30001、QueryFinalSuccess+40001、TerminalSuccess+50001和空费用表�
 原入口使用实际Query BusinessInput，真实V4首次领取及原Ledger只作结果对照。
 这些偏移和可信公开截点只服务有限工程验证，不是正式profile。
 当前后端还不是完整scenario解释器；费用、受控Retry、重复原回执和统一宿主未交付。
+
+### 普通订单 Query 的公开账本消费者
+
+普通 `Control::OrderQuery` 与上述结算请求的 `QueryFinalSuccess` 是不同事实。
+设备 `schema25` 保留原 `DirectResponse Request` 逻辑身份、Found/NotFound/OutOfRetention、
+完整订单身份和状态、Unknown 原字符串、精确数量及保留水位。原 V1 没有数量时明确保存
+数量缺失；`schema26` 同样保留原 V1 Submission 正文，不构造 V2 数量基准。
+完整 u64 private 序、source ordinal、context/run/batch/record position 保持原来源坐标。
+
+Ledger 的 `QueryAssociations` 只保存实际发送方显式登记的 Query 请求与原预留关联。
+登记使用原本地事件幂等域，增加本地前缀和 Ledger 条目，不改变资金、平台经济前缀或
+公开可用前沿。唯一登记入口分配下一个 Ledger 序并按首次空槽追加，增长只尾补空槽，
+快照保原序；读取选最后匹配的占用槽，不重排目录。资源不足保留原状态，冷增长后重试
+同一操作；普通 NOE 候选、冻结快照和
+目录增长沿原公共 Ledger 存储处理。已关联 Found(Open/Matched) 复用原预留确定结果和
+订单累计本金 once-only 归约。NotFound、OutOfRetention、无关联及终态 Found 均不确认或
+释放未知预留；已消费无关联 Query 不在迟到关联后重新应用。Query 先确认再接经济事实，
+以及经济先到再接 Submission/Query，均保留累计接纳本金，不用当前净占款代替。
+Submission 的已收到 Accepted 也须有原 SubmissionItem 关联才应用 Ledger 订单生命周期；
+未关联 Accepted 不能重开已 Matched 的订单。Query 不属于原订单资金归属来源，不新增或
+改写 `OrderFunds`，也不因无关资金目录容量已满而等待；原 Submission 资金观察保持独立。
+
+订单接纳不依赖二元成功份额派生。仅订单/Query 消费者可显式安装实际累计本金目录并
+省略成功池；依赖成功池的成交或贡献进入该配置时停止候选提交，保留原记录与全部状态。
+完整成功池路径继续承担原成交、贡献和结算归约，这种局部配置不代表完整连续账户。
+
+有限验证沿 `ledger/tests/stage3_economic_lifecycle.rs` 两个原实际 V1 NOE 构造和 CPU Ledger
+检查点，导出原记录及本地事件；GPU 冷装一次实际来源后逐步消费，独立核金额、预留状态、
+三种前缀、累计本金、开放订单与公开可用前沿，并核同图候选、容量重试和旧冻结。
+原合法入口另构造未登记请求的 Accepted(Open) 指向已 Found(Matched) 的订单，CPU/GPU
+均保持关闭；真实经济建立的单槽资金目录满后，另一实际预留的 Query 确认仍不改变资金目录。
+进度按实际步骤数输出，可由 `B_GPU_QUERY_PROGRESS_EVERY` 调节，0 关闭。
+后置验证入口是 `model-train/scripts/run_order_query_validation.sh`，完整成功池路径复用
+原 `trade-records` 定向回归。提交前尚未运行本批验证。
+Registry 的 V2 Found 快照、实际 SIM Query 生产者和发送端登记接线仍开放；Found 快照
+不能替代原 Submission 数量测量。此处不增加自动查询或重试政策，也不声称完整 Query 宿主、
+连续训练、PPO 或活动账户恢复已经交付。

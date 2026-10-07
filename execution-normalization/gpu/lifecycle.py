@@ -14,6 +14,74 @@ class LifecycleEvidence:
     payload_schema: int = 0
 
 
+@dataclass(frozen=True)
+class OrderQueryResult:
+    outcome: torch.Tensor  # Found/NotFound/OutOfRetention=0/1/2。
+    order: object
+    condition: torch.Tensor
+    token: torch.Tensor
+    state: torch.Tensor  # 原Open..Unmatched=0..7，Unknown=8。
+    raw_state: torch.Tensor  # Unknown原字符串字典；已知状态为-1。
+    quantity_kind: torch.Tensor  # Base/QuoteBudget/原V1无数量=0/1/2。
+    matched: object
+    open_quantity: object
+    retention_kind: torch.Tensor  # OrderHistory/TradeHistory/RootSnapshot=0/1/2。
+    retained_from: torch.Tensor
+    requested_root: object
+    earliest_root: object
+
+
+def map_order_query(result,private,ordinal,account,request,active):
+    """普通Control::OrderQuery沿原DirectResponseRequest逻辑身份，不伪装Submission。
+
+    原V1无数量显式保留；Base/Quote数量是精确份额，不截为micro单位。
+    Unknown状态及OutOfRetention原成员沿实际共享字典/完整u64保留。
+    """
+    from queues import ExactRational
+    found=result.outcome==0
+    retained=result.outcome==2
+    scalar=[account,request,result.outcome,result.condition,result.token,result.state,result.raw_state,
+        result.quantity_kind,result.retention_kind,result.retained_from]
+    fault=input_fault([private,result.order,result.requested_root,result.earliest_root],scalar,ordinal)
+    fault|=((account<0)|(request<0)|(result.outcome<0)|(result.outcome>2)).to(torch.int32)
+    fault|=(found&((result.condition<0)|(result.token<0)|(result.state<0)|(result.state>8)|
+        ((result.state==8)&(result.raw_state<0))|((result.state!=8)&(result.raw_state!=-1))|
+        (result.quantity_kind<0)|(result.quantity_kind>2))).to(torch.int32)
+    fault|=(retained&((result.retention_kind<0)|(result.retention_kind>2))).to(torch.int32)
+    for value in (result.matched,result.open_quantity):
+        if value.numerator.sign.shape!=account.shape or value.numerator.words.device!=account.device:
+            raise TypeError('查询数量须同设备原精确份额[roots]')
+        fault|=torch.where(found,value.fault|(value.numerator.sign<0).to(torch.int32),0)
+    zero=result.order.constant(0)
+    ratio=ExactRational(zero,zero.constant(1))
+    select_ratio=lambda v,use:ExactRational(v.numerator.select(use,ratio.numerator),v.denominator.select(use,ratio.denominator))
+    semantic=encode_fields([account,result.outcome,
+        torch.where(found,result.condition,0),torch.where(found,result.token,0),result.order.select(found,zero),
+        torch.where(found,result.state,0),torch.where(found,result.raw_state,-1),
+        torch.where(found,result.quantity_kind,2),select_ratio(result.matched,found&(result.quantity_kind!=2)),
+        select_ratio(result.open_quantity,found&(result.quantity_kind==0)),
+        torch.where(retained,result.retention_kind,-1),torch.where(retained&(result.retention_kind<2),result.retained_from,0),
+        result.requested_root.select(retained&(result.retention_kind==2),zero),
+        result.earliest_root.select(retained&(result.retention_kind==2),zero)])
+    logical=encode_fields([account,torch.full_like(account,5),request])
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active&(fault==0),fault,25)
+
+
+def map_legacy_submission(result,private,ordinal,account,request,item,active):
+    """正式原V1 Submission正文，不为无measurement来源构造V2数量。"""
+    accepted=result.outcome==0
+    fault=input_fault([private,result.order],[account,request,item,result.outcome,
+        result.condition,result.token,result.state,result.raw_state],ordinal)
+    fault|=((account<0)|(request<0)|(item<0)|(item>65535)|(result.outcome<0)|(result.outcome>2)).to(torch.int32)
+    fault|=(accepted&((result.condition<0)|(result.token<0)|(result.state<0)|(result.state>8)|
+        ((result.state==8)&(result.raw_state<0))|((result.state!=8)&(result.raw_state!=-1)))).to(torch.int32)
+    semantic=encode_fields([account,result.outcome,torch.where(accepted,result.condition,0),
+        torch.where(accepted,result.token,0),result.order.select(accepted,result.order.constant(0)),
+        torch.where(accepted,result.state,0),torch.where(accepted,result.raw_state,-1)])
+    logical=encode_fields([account,torch.full_like(account,3),request,item])
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active&(fault==0),fault,26)
+
+
 def source_order(private,ordinal):
     words=private.words.to(torch.int64)&0xffffffff
     high=words[:,1] if words.size(1)>1 else torch.zeros_like(words[:,0])

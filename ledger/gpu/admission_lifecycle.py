@@ -22,6 +22,8 @@ class LifecycleColumns:
     canceled_orders: torch.Tensor
     pending_trades: torch.Tensor
     accepted: torch.Tensor
+    query_outcomes: torch.Tensor
+    query_states: torch.Tensor
     economic_tags: torch.Tensor
     economic_path_ordinals: torch.Tensor
     economic_has_outcome: torch.Tensor
@@ -123,7 +125,7 @@ class LifecycleColumns:
         outcomes=(torch.cat([batch.normalized.outcomes for batch in columns.projection_batches],dim=1).flatten()
             if columns.projection_batches else torch.zeros_like(rows))
         material=active & ((outcomes==OUT_EVIDENCE)|(outcomes==OUT_FACT))
-        enabled={tag:material&(schemas==tag) for tag in [3,7,8,9,11,12,13,14,15,16,17,18,19,20,21,22,23,24]}
+        enabled={tag:material&(schemas==tag) for tag in [3,7,8,9,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26]}
         layouts={
             3:['scalar']*4+['integer','scalar','integer','integer','scalar'],
             7:['scalar']*3+['integer','scalar','scalar'],
@@ -143,6 +145,8 @@ class LifecycleColumns:
             22:['scalar']*5+['rational']*2+['scalar']*2,
             23:['scalar']*2+['rational']+['scalar']*3,
             24:['scalar']*7+['rational']*8+[('record_list',('scalar','rational'))]+['rational']*2,
+            25:['scalar']*4+['integer']+['scalar']*3+['rational']*2+['scalar']*2+['integer']*2,
+            26:['scalar']*4+['integer','scalar','scalar'],  # 原V1无数量；Unknown raw保原字典。
         }
         decoded={}
         fault=torch.where(material,bank.fault[rows],0)
@@ -192,12 +196,26 @@ class LifecycleColumns:
             ((fee_kind==2)&((decoded[24][1]!=-1)|(decoded[24][4]!=-1)|(decoded[24][5]!=-1))))).to(torch.int32)
         fault |= (enabled[20] & ((decoded[20][4]!=1)|(decoded[20][5]!=2)|
             (decoded[20][3]<0)|(decoded[20][6]<0)|(decoded[20][6]>3)|(decoded[20][7]<0)|(decoded[20][7]>10))).to(torch.int32)
+        query=decoded[25]
+        query_found=enabled[25]&(query[1]==0)
+        fault|=(enabled[25]&((query[0]<0)|(query[1]<0)|(query[1]>2))).to(torch.int32)
+        fault|=(query_found&((query[2]<0)|(query[3]<0)|(query[5]<0)|(query[5]>8)|
+            ((query[5]==8)&(query[6]<0))|((query[5]!=8)&(query[6]!=-1))|(query[7]<0)|(query[7]>2))).to(torch.int32)
+        fault|=(enabled[25]&(query[1]==2)&((query[10]<0)|(query[10]>2))).to(torch.int32)
+        for value in (query[8],query[9]):
+            fault|=torch.where(query_found,value.fault|(value.numerator.sign<0).to(torch.int32),0)
+        legacy=decoded[26];legacy_accepted=enabled[26]&(legacy[1]==0)
+        fault|=(enabled[26]&((legacy[0]<0)|(legacy[1]<0)|(legacy[1]>2))).to(torch.int32)
+        fault|=(legacy_accepted&((legacy[2]<0)|(legacy[3]<0)|(legacy[5]<0)|(legacy[5]>8)|
+            ((legacy[5]==8)&(legacy[6]<0))|((legacy[5]!=8)&(legacy[6]!=-1)))).to(torch.int32)
         def merge(left,right,mask):
             if isinstance(left,torch.Tensor):return torch.where(mask,right,left)
             if isinstance(left,ExactRational):
                 return ExactRational(right.numerator.select(mask,left.numerator),right.denominator.select(mask,left.denominator))
             return right.select(mask,left)
         decoded[11]=[merge(a,b,enabled[18]) for a,b in zip(decoded[11],decoded[18])]
+        for at in range(6):decoded[3][at]=merge(decoded[3][at],decoded[26][at],enabled[26])
+        enabled[3]|=enabled[26]
         decoded[7]=[merge(a,b,enabled[19]) for a,b in zip(decoded[7],decoded[19])]
         enabled[11] |= enabled[18]
         enabled[7] |= enabled[19]
@@ -205,6 +223,7 @@ class LifecycleColumns:
         orders=decoded[7][3].select(enabled[7],orders)
         orders=decoded[8][4].select(enabled[8],orders)
         orders=decoded[15][1].select(enabled[15],orders)
+        orders=decoded[25][4].select(query_found,orders)
         economic=enabled[11]
         economic_order=economic & ((decoded[11][3]==0)|(decoded[11][3]==2)|(decoded[11][3]==5))
         orders=decoded[11][4].select(economic_order,orders)
@@ -217,10 +236,12 @@ class LifecycleColumns:
             condition_at=2 if tag==3 else 1
             conditions=torch.where(enabled[tag],decoded[tag][condition_at],conditions)
         conditions=torch.where(enabled[14],decoded[14][1],conditions)
+        conditions=torch.where(query_found,decoded[25][2],conditions)
         payment=enabled[13]
         fault=fault | (payment & ((decoded[13][0]!=decoded[13][3]) | (decoded[13][4]!=12) |
             (decoded[13][1]!=decoded[13][5]) | (decoded[13][2]!=decoded[13][6]))).to(torch.int32)
-        open_orders=(enabled[3]&(decoded[3][5]==0))|(enabled[7]&(decoded[7][4]==0)&(decoded[7][5]==0))
+        open_orders=(enabled[3]&(decoded[3][5]==0))|(enabled[7]&(decoded[7][4]==0)&(decoded[7][5]==0))|(
+            query_found&(decoded[25][5]==0))
         canceled_orders=enabled[15]&(decoded[15][2]==0)
         pending=enabled[8]&((decoded[8][6]==0)|(decoded[8][6]==1))
         accepted=enabled[3]&(decoded[3][1]==0)
@@ -230,6 +251,7 @@ class LifecycleColumns:
             if columns.projection_batches else torch.full_like(columns.row_refs,-1))
         return cls(schemas.reshape(roots,width),outcomes.reshape(roots,width),orders,fills,conditions.reshape(roots,width),
             open_orders.reshape(roots,width),canceled_orders.reshape(roots,width),pending.reshape(roots,width),accepted.reshape(roots,width),
+            torch.where(enabled[25],decoded[25][1],-1).reshape(roots,width),decoded[25][5].reshape(roots,width),
             torch.where(enabled[24],decoded[24][3]+15,torch.where(economic,decoded[11][3],-1)).reshape(roots,width),decoded[11][5].reshape(roots,width),
             torch.where(enabled[24],decoded[24][15].present.any(1),
                 torch.where(enabled[21],decoded[21][13].present.any(1),decoded[11][14]!=0)).reshape(roots,width),request,item,
