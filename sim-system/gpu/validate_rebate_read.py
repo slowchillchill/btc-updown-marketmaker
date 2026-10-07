@@ -28,7 +28,8 @@ def check(admission,checkpoint,condition):
             amount=expected['Known']
             n,d=values(read.estimated.numerator),values(read.estimated.denominator)
             assert Fraction(n[role],d[role])==Fraction(int(amount['numerator']),int(amount['denominator']))
-    sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'model-train/native-inputs/gpu'))
+    root=Path(__file__).resolve().parents[2]
+    sys.path[:0]=[str(root/'model-train/native-inputs/gpu'),str(root/'data-pipeline/gpu')]
     from input_rebates import rebate_inputs,write_rebate_fields
     # 原oracle的condition0显式装入old输入布局，current为NA；不证明根old选择器。
     conditions=torch.tensor([[[-1],[0]]],device='cuda')
