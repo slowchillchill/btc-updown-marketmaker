@@ -23,7 +23,7 @@ def prepare_cancel_source(references,requests,universe,catalog):
         control=evidence['evidence']['Control']['result']
         source=evidence['source_reference']['record']['DirectResponse']
         private=evidence['source_order']['sequence']['PrivateFeedback']['private_feedback_sequence']
-        source_ordinal=evidence['source_order']['source_ordinal']
+        source_ordinal=evidence['source_order']['ordinal']
         row=dict(reference=reference,source=source,private=private,ordinal=source_ordinal)
         if 'Cancellation' in control:
             association=source['association']['CancellationTarget']
