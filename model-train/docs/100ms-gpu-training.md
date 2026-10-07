@@ -366,6 +366,16 @@ GAE使用TorchRL `generalized_advantage_estimate` 基础函数，输入各根有
 时间轴仅含真实决定，ContextOnly仍在循环重算序列中；没有状态行的时间计入dt，不填造转移。
 截断令done切断后续GAE但terminated为假保留bootstrap，真正经济终止terminated才为真。
 优势按完整更新有效决定一次总体标准化，minibatch不重新标准化；补齐不参加均值。
+`model_train/dt_advantages.py` 提供本节的生产数学函数，显式消费真实奖励区间
+`dt_seconds` 与必传 `tau_gamma_seconds/tau_lambda_seconds`，没有正式取值默认。
+`present` 只区分真实决定与补齐；`reward_known` 和所需 `bootstrap_known` 不缩小
+真实决定人口。任何真实区间未知、原来源故障或时间倒退都令整次更新设备 `ready`
+为假；未知/补齐可用计算占位，但不能取得学习资格。合法零间隔折扣为1。真正终止
+不要求未使用的bootstrap已知；非经济终止的截断仍需bootstrap。优势与价值目标不带
+采集图，标准化使用整批真实决定的总体方差，minibatch仅索引这份结果。
+本组件尚未提供奖励known的生产者、完整轨迹绑定或optimizer门。后继更新入口必须
+在协调边界阻止not-ready批次的 `optimizer.step()`；零loss不是该门，优化器仍可能
+改变momentum、权重衰减与step计数。有限GPU数学样本不代表联合PPO或活动恢复。
 组件用法依据[TorchRL PPO说明](https://docs.pytorch.org/rl/0.13/reference/generated/torchrl.objectives.PPOLoss.html)
 及[GAE说明](https://docs.pytorch.org/rl/0.13/reference/generated/torchrl.objectives.value.GAE.html)，
 本项目需核对循环和全域条件分布的适配，不由普通连续动作教程证明已兼容。
