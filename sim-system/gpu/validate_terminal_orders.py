@@ -172,8 +172,9 @@ def main():
     assert public.ledger.orders.flags.flatten()[occupied].cpu().tolist()==[False]
     assert public.ledger.orders.conditions.flatten()[occupied].cpu().tolist()==[0]
     assert [v for v,p in zip(values(public.ledger.orders.last_sequences),occupied.cpu().tolist()) if p]==[source['ledger_after']['order_lifecycle'][0]['last_ledger_entry_seq']]
-    funds=public.ledger.order_funds
-    assert [Fraction(n,d) for n,d,p in zip(values(funds.principal.numerator),values(funds.principal.denominator),funds.occupied.flatten().cpu().tolist()) if p]==[Fraction(source['ledger_after']['order_funds'][0]['principal'])]
+    from validate_order_funds import check as check_order_funds
+    assert check_order_funds(public.ledger,source['ledger_after'])
+    assert check_order_funds(old_public.ledger,source['ledger_accepted'])
     assert not old_public.ledger.resolutions.present.any().cpu().item() and old_public.ledger.orders.flags.any().cpu().item()
     # 原正文/位置/序号逐记录对照；原数据只作oracle，不驱动设备消费。
     for batch,records in [(accepted_batch,source['accepted_records']),(terminal_batch,source['resolved_records'])]:
@@ -187,8 +188,7 @@ def main():
             assert torch.equal(semantic[:expected.size(1)],expected[0]) and not semantic[expected.size(1):].any().cpu().item()
             assert values(batch.batch_sequences)[column]==original['position']['source_watermark']['projection_batch_sequence']
             body=next(iter(original['record'].values()))
-            meta=next(iter(body['source_reference']['record'].values()))
-            private=meta.get('private_feedback_sequence',meta.get('private_response_sequence'))
+            private=body['source_order']['sequence']['PrivateFeedback']
             assert values(batch.private_sequences)[column]==private
     held=public
     public,repeat=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,torch.ones_like(public.waiting.received)))
