@@ -144,7 +144,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
         inputs.insert(6,pm(6,3,26000,delta("3")));
         inputs.insert(7,pm(7,4,27000,delta("0")));
     }
-    inputs.push(end(10));
+    inputs.push(end(if with_pending {10} else {8}));
     for input in inputs {
         let prepared = prepare_public_ingress_v1(&public, &input, &BTreeMap::new(), &[]).unwrap();
         let applied = public.push_facts(&prepared).unwrap();
