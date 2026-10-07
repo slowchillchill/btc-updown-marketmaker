@@ -59,6 +59,20 @@ def map_order_accepted(quantity,order_sequence,private,ordinal,account,condition
     return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,7)
 
 
+def map_resolved_position(account,condition,resolution_identity,terminal_identity,private,ordinal,active):
+    """原Resolved：完整Resolution/Terminal借同一不可变字典，不发经济delta。
+
+    resolution_identity绑定原canonical字符串，terminal_identity绑定完整原Terminal
+    （含原序资产/payout向量、winner与mapping rule）。字典页必须随记录存活，
+    不能用相邻页的局部索引解释它们，也不能拿资产槽替代原实体身份。
+    """
+    fault=input_fault([private],[account,condition,resolution_identity,terminal_identity],ordinal)
+    fault |= ((account<0)|(condition<0)|(resolution_identity<0)|(terminal_identity<0)).to(torch.int32)
+    logical=encode_fields([account,torch.full_like(account,9),private])
+    semantic=encode_fields([account,condition,resolution_identity,terminal_identity])
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,16)
+
+
 def map_taker_contribution(record,frame,rebate_rate,private,ordinal,account,condition):
     """贡献不再改平台应收；实际应收变动仍是独立经济delta。"""
     from queues import ExactRational

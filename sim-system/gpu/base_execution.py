@@ -129,6 +129,37 @@ def append_base_remainder(queue, quantity, bid_rows, order_ids, row_roots, accep
 
 
 def cancel_base_order(queue, quantity, account, row_order_ids, row_roots, matching_closed, requested):
+    return _close_base_order(queue, quantity, account, row_order_ids, row_roots,
+                             matching_closed, requested, resolution=False)
+
+
+@dataclass(frozen=True)
+class MarketResolutionOrderEffects:
+    pending_before: object
+    open_before: object
+    released_open_quote: object
+    canceled: object
+    closed: torch.Tensor
+    delta: object
+    fault: torch.Tensor
+
+
+def resolve_base_order(queue, quantity, account, row_order_ids, row_roots, matching_closed, requested):
+    """市场判定关闭与普通撤单分别记量；关闭不要求正额账户释放。"""
+    original = quantity
+    queue, quantity, account, canceled, _, _, delta = _close_base_order(
+        queue, quantity, account, row_order_ids, row_roots, matching_closed, requested, resolution=True)
+    fault = quantity.fault | account.fault | delta.fault
+    closed = requested & (canceled.sign > 0) & (fault == 0)
+    zero = canceled.constant(0)
+    return queue, quantity, account, MarketResolutionOrderEffects(
+        original.pending_maker_depletion_base_units.select(closed, zero),
+        original.open_base_units.select(closed, zero),
+        original.open_encumbered_quote_units.select(closed, zero),
+        canceled.select(closed, zero), closed, delta, fault)
+
+
+def _close_base_order(queue, quantity, account, row_order_ids, row_roots, matching_closed, requested, *, resolution):
     """原撤单候选：移目标账户段，pending+open关单，本金释放独立发delta。"""
     if row_roots.shape != (queue.rows,) or row_roots.dtype != torch.int64:
         raise ValueError('撤单队列行须有冷根映射')
@@ -152,7 +183,8 @@ def cancel_base_order(queue, quantity, account, row_order_ids, row_roots, matchi
     error = error | (need_segment & (~root_found | (relation.order != 0))).to(torch.int32)
     quantity = replace(quantity,fault=error)
     original = quantity
-    quantity, canceled, released, valid = quantity.cancel(requested & (error == 0))
+    quantity, canceled, released, valid = (quantity.market_resolution(requested & (error == 0)) if resolution
+                                          else quantity.cancel(requested & (error == 0)))
     account = replace(account,fault=account.fault | error)
     account, delta = account.release_principal(released,valid)
     committed = valid & (account.fault == 0)

@@ -18,6 +18,7 @@ from prepare import decimal_columns
 QUALITY = {'fresh': 0, 'stale': 1, 'missing': 2, 'unknown_not_observed': 3, 'confirmed_gap': 4, 'invalid': 5}
 STEP_TAG = {'InitialSnapshot': 1, 'LevelChange': 2, 'Tick': 3, 'Quality': 4}
 from hidden_reference import reference_columns
+from hidden_resolution import TerminalColumns
 
 
 class HiddenPmBlock:
@@ -71,6 +72,7 @@ class HiddenPmBlock:
 
         self.reference_rows, self.lifecycle_values = reference_columns(
             buckets, scene, assets, intern, QUALITY, device)
+        self.terminal_columns = TerminalColumns.from_buckets(buckets, intern, QUALITY, device)
         self.reference_tags = self.reference_rows[:, 0]
         price_ids = [intern(price) for _, _, price in slots]
         pending = []

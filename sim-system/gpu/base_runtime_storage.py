@@ -26,6 +26,12 @@ class HiddenStepFeedback:
     effects: object
 
 
+@dataclass(frozen=True)
+class TerminalFeedback:
+    effect: object
+    batch: object
+
+
 def _shared(value, name):
     return name == 'columns' or isinstance(value, FillRecord) and name in (
         'offsets', 'states', 'lengths', 'economic_ordinals')
@@ -150,6 +156,20 @@ class BaseRuntimeStorage:
             return replace(output, transition=committed(output.transition), market=market)
         if isinstance(output, HiddenStepFeedback):
             return replace(output, effects=self._committed_output(output.effects, resources_fit))
+        if isinstance(output, TerminalFeedback):
+            effect = output.effect
+            events = tuple(replace(event,effect=replace(event.effect,
+                closed=event.effect.closed & resources_fit,
+                delta=self.runtime.account.coordinate_delta(event.effect.delta,
+                    event.effect.delta.emitted & resources_fit,event.effect.delta.fault)))
+                for event in effect.orders.events)
+            effect = replace(effect,resolved=effect.resolved & resources_fit,
+                orders=replace(effect.orders,events=events))
+            batch = output.batch
+            batch = replace(batch,emitted=batch.emitted & resources_fit,
+                economic_enabled=batch.economic_enabled & resources_fit,
+                normalized=replace(batch.normalized,emitted=batch.normalized.emitted & resources_fit))
+            return replace(output,effect=effect,batch=batch)
         raise TypeError('固定地址输出提交只接已装配的hidden或最终性效果')
 
 

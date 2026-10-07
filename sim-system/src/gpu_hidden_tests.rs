@@ -85,9 +85,9 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     eprintln!("gpu_hidden_asset_reference={}",String::from_utf8(output.stdout).unwrap());
 }
-#[test]
-#[ignore="AutoDL真实紧凑TWAP引用→设备循环；市场事实保持等待"]
-fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_effects() {
+#[tokio::test(flavor="current_thread")]
+#[ignore="AutoDL真实紧凑TWAP/空Book/Terminal→一次原Resolved与后继Lifecycle"]
+async fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_effects() {
     use data_pipeline_training::{compact_public::{PublicCompactWriterV1, CompactFactPayloadV1},
         compact_hidden_material::{prepare_compact_hidden_material_v1, CompactHiddenMaterialReaderV1},
         compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1, gpu_initial_sort::GpuInitialRunOrderV1};
@@ -167,22 +167,71 @@ fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_eff
         CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact { .. }))));
     let scenario = sealed_scenario_for_markets(vec![crate::scenario::PlatformMarketV1::try_new(
         market(), assets.clone().try_into().unwrap()).unwrap()]);
+    let saved=Rc::new(RefCell::new(None));
+    let capture=Rc::clone(&saved);
+    let normalization=Rc::new(RefCell::new(Vec::new()));
+    let normalization_capture=Rc::clone(&normalization);
+    let (mut execution,_)=public_execution_with_scenario_capacity_and_projection(
+        &temp.path().join("sim.jsonl"),scenario.clone(),SimCallerRoleV1::ModelTrain,32,None,
+        Some(Box::new(move |path,opened| {
+            opened.projection_version=crate::runtime_v2::BusinessProjectionVersionV1::V4;
+            let reference=contracts::execution_normalization::DurableSourceReferenceV1 {
+                source:contracts::execution_normalization::ImmutableSourceReferenceV1::Location(path.display().to_string())};
+            let memory=noe_projection::MemoryNoeProjectionPortV4::new(path.parent().unwrap().join("noe-memory"),
+                opened.clone(),reference.clone(),reference.clone(),"create-public".into(),"gpu-hidden-terminal".into());
+            *capture.borrow_mut()=Some(memory.observation());
+            let durable=noe_projection::SimV2NoeProjectionPortV4::new(path.parent().unwrap().join("noe-durable"),
+                opened.clone(),reference.clone(),reference,"create-public".into(),"gpu-hidden-terminal".into());
+            Box::new(GpuNoeReferencePort {memory,durable,normalization_reference:normalization_capture,normalization_core:None})
+        }))).await;
+    // 此无订单/零持仓工程例不执行请求脚本；显式安装已定请求式模式，禁止自动兑付。
+    execution.configure_resolution_redeem_v1(crate::ResolutionRedeemScenarioV1 {
+        steps:Vec::new(),costs:Vec::new()}).unwrap();
+    let observation=saved.borrow_mut().take().unwrap();
+    // 开户/初始市场已由同一原端口接纳；唯一消费者先领取初始化人口。
+    let _initial_records=observation.take_closed_records();
+    let mut state=execution.actor.state.take().unwrap();
+    let next_private=state.session.as_ref().unwrap().next_private_feedback_sequence;
+    let next_batch=state.session.as_ref().unwrap().next_projection_batch_sequence;
+    let session_seed=state.session.as_ref().unwrap().session_seed.0.clone();
     let mut original = crate::market::MarketStateStoreV2::new(scenario.initial_market_directory());
     let mut controls = Vec::new();
+    let mut qualified_sources=Vec::new();
+    let mut batches=Vec::new();
+    let mut lifecycle_count=0;
     let mut reference_index = 0;
     let mut terminal_index = None;
     for bucket in &buckets {
         for reference in &bucket.references {
             if let CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact { payload, .. }) = &reference.payload {
                 if matches!(payload, CanonicalMarketFactPayloadV1::Terminal(_)) {
-                    terminal_index = Some(reference_index);
-                    break;
+                    terminal_index.get_or_insert(reference_index);
                 }
                 let fact = &market_facts[&reference.position];
                 if let Some(normalized) = crate::market::normalize_public_market_fact_v1(payload, &fact.quality).unwrap() {
                     let header = crate::market::MarketEventHeaderV1 {identity:&fact.event_id.0, market:&fact.market,
                         time:&fact.dependency_time, quality:&fact.quality};
-                    original.apply_admitted_header(&header, &normalized, bucket.bucket.bucket_time_utc_ms, MARKET_END_AT).unwrap();
+                    let applied=original.apply_admitted_header(&header,&normalized,bucket.bucket.bucket_time_utc_ms,MARKET_END_AT).unwrap();
+                    let mut effects=state.session.as_mut().unwrap().execution_state.apply_market_event(CONDITION_ID,
+                        &normalized,bucket.bucket.bucket_time_utc_ms,MARKET_END_AT,
+                        execution.actor._rule_snapshot.snapshot(),execution.actor._finality_policy.as_ref()).unwrap();
+                    if let Some(qualified)=applied.qualified_resolution {
+                        qualified_sources.push(serde_json::json!({"reference_index":reference_index,
+                            "event_id":qualified.resolution_event_id,"source_at":qualified.resolution_source_event_at_utc_ms,
+                            "terminal":qualified.terminal,"parsed_payouts":qualified.parsed_payouts.map(|p|p.to_string())}));
+                        effects.merge(state.session.as_mut().unwrap().execution_state.apply_qualified_resolution(CONDITION_ID,
+                            &qualified,bucket.bucket.bucket_time_utc_ms,execution.actor._finality_policy.as_ref()).unwrap());
+                    }
+                    let lifecycle=effects.into_lifecycle_feedback().unwrap();
+                    if !lifecycle.is_empty() {
+                        lifecycle_count+=lifecycle.len();
+                        state=gpu_accept_projection_reference(&mut execution.actor,state,
+                            BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2 {lifecycle,..Default::default()}),&mut batches);
+                    }
+                }
+                if matches!(payload,CanonicalMarketFactPayloadV1::Terminal(_)) {
+                    reference_index+=1;
+                    continue;
                 }
                 let (mapped, trading, quality) = original.control_state_for_gpu_tests(CONDITION_ID);
                 controls.push(serde_json::json!({"reference_index":reference_index, "mapped":mapped,
@@ -190,25 +239,41 @@ fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_eff
             }
             reference_index += 1;
         }
-        if terminal_index.is_some() { break; }
         for (market, step) in &bucket.steps {
             if let Some(normalized) = crate::market::normalize_pm_step_v1(step).unwrap() {
                 let header = crate::market::MarketEventHeaderV1 {identity:&step.derived_id.0, market,
                     time:&step.dependency_time, quality:&step.quality};
                 original.apply_admitted_header(&header, &normalized, bucket.bucket.bucket_time_utc_ms, MARKET_END_AT).unwrap();
+                let effects=state.session.as_mut().unwrap().execution_state.apply_market_event(CONDITION_ID,&normalized,
+                    bucket.bucket.bucket_time_utc_ms,MARKET_END_AT,execution.actor._rule_snapshot.snapshot(),
+                    execution.actor._finality_policy.as_ref()).unwrap().into_lifecycle_feedback().unwrap();
+                assert!(effects.is_empty(),"原空Book不产生账户或成交反馈");
             }
         }
     }
     assert!(terminal_index.is_some());
     // 非WS元数据无source time，不进hidden；真实终态组先Terminal再Lifecycle。
-    assert!(controls.is_empty());
+    assert_eq!(controls.len(),1,"只有Terminal之后的真实Lifecycle");
+    assert_eq!(qualified_sources.len(),2,"Terminal与后继Lifecycle均给同一原qualified源");
+    assert_eq!(lifecycle_count,1,"首次Resolved一次，后继qualified不重复，不自动兑付");
+    assert_eq!(qualified_sources[0]["event_id"],qualified_sources[1]["event_id"]);
     assert!(canonical_market_facts_checked > 0);
     assert!(matches!(buckets[2].references[0].payload,
         CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact {payload:CanonicalMarketFactPayloadV1::Terminal(_),..})));
     assert!(matches!(buckets[2].references[1].payload,
         CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact {payload:CanonicalMarketFactPayloadV1::LifecycleTransition(_),..})));
+    let close_at=41000;
+    execution.actor.projection_port.close_receive_prefix(close_at);
+    execution.actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
+        crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:1,logical_time_utc_ms:close_at}));
+    let records=observation.take_closed_records().into_iter()
+        .map(|r|serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
+    assert_eq!(records.len(),1,"真实唯一Memory消费者只有一条Resolved，无经济delta");
+    assert!(observation.take_closed_records().is_empty());
     let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,
-        "original_controls":controls,"terminal_reference_index":terminal_index.unwrap(),
+        "original_controls":controls,"qualified_sources":qualified_sources,"resolved_records":records,
+        "next_private":next_private,"next_batch":next_batch,"session_seed":session_seed,"resolved_close_at":close_at,
+        "original_batches":batches,"terminal_reference_index":terminal_index.unwrap(),
         "canonical_market_facts_checked":canonical_market_facts_checked,
         "source_binding":{"binary":std::env::var("B_GPU_HIDDEN_CLI").unwrap(),"hidden":hidden,"public":source,
             "rows":1,"bytes":1048576,"max_batch_bytes":1048576}});

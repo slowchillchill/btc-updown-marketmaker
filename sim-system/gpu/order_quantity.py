@@ -90,11 +90,19 @@ class BaseOrderQuantity:
 
     def cancel(self, enabled):
         """原可撤量含pending+open；释放只取原open_encumbered，不伪造pending成交。"""
+        return self._close(enabled, 'canceled_base_units', 'canceled_released_quote_units')
+
+    def market_resolution(self, enabled):
+        """原判定关闭写market_resolved计量；零释放仍可关闭pending-only订单。"""
+        return self._close(enabled, 'market_resolved_canceled_base_units',
+                           'market_resolved_released_quote_units')
+
+    def _close(self, enabled, base_field, quote_field):
         enabled = self._enabled(enabled)
         canceled = self.pending_maker_depletion_base_units+self.open_base_units
         released = self.open_encumbered_quote_units
-        next_canceled = self.canceled_base_units+canceled
-        next_released = self.canceled_released_quote_units+released
+        next_canceled = getattr(self, base_field)+canceled
+        next_released = getattr(self, quote_field)+released
         error = canceled.fault | released.fault | next_canceled.fault | next_released.fault
         fault = self.fault | error*enabled.to(self.fault.dtype)
         valid = enabled & (fault == 0) & (canceled.sign > 0)
@@ -103,6 +111,6 @@ class BaseOrderQuantity:
             pending_maker_depletion_base_units=zero.select(valid,self.pending_maker_depletion_base_units),
             open_base_units=zero.select(valid,self.open_base_units),
             open_encumbered_quote_units=zero.select(valid,self.open_encumbered_quote_units),
-            canceled_base_units=next_canceled.select(valid,self.canceled_base_units),
-            canceled_released_quote_units=next_released.select(valid,self.canceled_released_quote_units),fault=fault)
+            fault=fault, **{base_field:next_canceled.select(valid,getattr(self,base_field)),
+                           quote_field:next_released.select(valid,getattr(self,quote_field))})
         return candidate,canceled.select(valid,zero),released.select(valid,zero),valid

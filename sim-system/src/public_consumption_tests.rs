@@ -413,6 +413,16 @@ async fn public_execution_with_scenario_capacity(
     capacity: usize,
     rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
 ) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
+    public_execution_with_scenario_capacity_and_projection(path,scenario,role,capacity,rules,None).await
+}
+async fn public_execution_with_scenario_capacity_and_projection(
+    path: &Path,
+    scenario: Arc<SealedPlatformScenarioV1>,
+    role: SimCallerRoleV1,
+    capacity: usize,
+    rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
+    make_projection: Option<Box<dyn FnOnce(&Path,&mut PublicRunOpenedV1)->Box<dyn BusinessProjectionPortV2>>>,
+) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
     let rules = match rules {
         Some(rules) => rules,
         None => successful_snapshot_v3_for_sim_tests().await,
@@ -426,7 +436,7 @@ async fn public_execution_with_scenario_capacity(
         &scenario,
         &latency,
     );
-    let spec_opened = PublicRunOpenedV1 {
+    let mut spec_opened = PublicRunOpenedV1 {
         projection_version: opened.projection_version,
         run_id: opened.run_id,
         platform_rule_snapshot_file_sha256: opened.platform_rule_snapshot_file_sha256,
@@ -437,6 +447,10 @@ async fn public_execution_with_scenario_capacity(
         market_event_source_identity_sha256: opened.market_event_source_identity_sha256,
     };
     let delivered = Rc::new(DeliveredFeedbackState::default());
+    let projection = match make_projection {
+        Some(make) => make(path,&mut spec_opened),
+        None => Box::new(DeliveredProjection {accepted:0,delivered:delivered.clone()}) as Box<dyn BusinessProjectionPortV2>,
+    };
     let mut execution = PublicSimExecutionV1::create_new(
         path,
         spec_opened,
@@ -444,10 +458,7 @@ async fn public_execution_with_scenario_capacity(
         finality,
         scenario,
         latency,
-        Box::new(DeliveredProjection {
-            accepted: 0,
-            delivered: delivered.clone(),
-        }),
+        projection,
         MAX_GROUP_BYTES,
         capacity,
     )

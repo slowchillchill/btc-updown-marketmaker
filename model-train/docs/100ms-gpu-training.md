@@ -966,7 +966,7 @@ hidden纯引用消费沿原`reduce_hidden_step_bucket_v1`：七类`ReferenceFact
 同轮已选择引用的根不额外消费step。全部引用完成后才进入PM步骤，纯引用桶也必须沿
 原到期义务、role时间和完整桶闭合。MarketFact须由其所属市场处理器消费，不能统一作noop。
 引用游标推进是device loop的实际进展；无处理进展时退出并保持原前沿。预读/分类不更新NOE公开门。
-当前Terminal经济消费者及完整多阶段宿主仍未交付，控制字段接线如下。
+当前完整Terminal经济消费者及多阶段宿主仍在实施，控制字段接线如下。
 
 `BaseSimRuntime.install_hidden_market_controls`在冷边界安装SIM原默认None/未知控制状态，
 不读未来参考或公开市场状态来初始化。`hidden_reference.py`保留完整mapped生命周期值字典，
@@ -985,4 +985,19 @@ hidden reader 只对已验证的引用索引恢复 canonical MarketFact，不重
 GPU 桶保留与引用同人口的原市场事实 `event_id`，不以位置字符串代替 canonical ID。
 当前 TWAP／双空 Book／终态短源的真实顺序是 Terminal 后接生命周期。
 非 WS 元数据的 source time 为 None，不能用 received 构造 hidden 桶；Terminal 前控制事实人口为零。
-该短源验证冷身份与原同次物化逐字段一致，并保留 Terminal 等待，不证明控制分支或 Terminal 经济处理已经执行。
+原冷身份切片与同次物化逐字段一致，保留了 Terminal 等待；该历史证据不证明控制或经济处理。
+
+现增量入口 `apply_hidden_terminal_without_orders` 沿同一真实短源消费 Terminal、首次
+Resolved 和后继 Lifecycle。源判定保留第一次 canonical ID、真实 source time、完整
+Terminal／payout 只读字典，执行义务与公开反馈独立。Resolved 是非现金证据，不等于赎回到账。
+SIM 候选、反馈与引用游标共用提交门，资源退出不公开未提交的 Resolved。
+当前反馈装配位于已有条件图外；图随后才消费同桶真实 Lifecycle。原 V4 端口在创建会话前安装，
+有限零请求场景显式启用已批准的请求式结算模式。验证器一次冷安装原反馈序前缀，不以此声称完整根反馈连续。
+无订单／无待终局 fill 的真实人口用于本切片对照，不能证明非零关闭或待前驱集合行为。
+
+有待关闭 Base 订单的运行仍等待完整订单反馈映射，不省略它们而只发 Resolved。
+判定计量候选已独立于普通撤单：取消量是 pending＋open，释放金额仅为 open 占款；
+零金额仍可以关单，写原 market-resolved 计量。整市场候选复用完整 u64 的 sim-N 字节序，
+保留原订单字符串顺序与整次回退。当前新增非零订单／待 fill 分支仅静态，不作为本例运行覆盖。
+请求发送、清偿、质量失效、Resolution Ledger 消费、跨页身份承接、图内 Terminal 输出和完整宿主继续实现。
+判定／完整 Terminal 字典必须随 NOE、冻结与恢复引用存活；当前字段索引不能脱离绑定重新解释。

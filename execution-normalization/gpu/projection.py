@@ -80,6 +80,7 @@ class Projection:
     item_ordinals: torch.Tensor
     context_slots: torch.Tensor
     run_slots: torch.Tensor
+    resolution_columns: object = None  # 原canonical/完整Terminal共享字典，记录与冻结引用存活时保持绑定。
 
     @classmethod
     def open(cls,emitter,account,condition,token,assets,asset_roots,order_sequence,request,item,context,run):
@@ -118,6 +119,35 @@ class Projection:
         return replace(self,emitter=replace(self.emitter,fault=fault),
             condition_slots=order.conditions,token_slots=token,asset_indices=order.assets,
             order_sequence=order.sequence,request_slots=order.request_keys,item_ordinals=order.item_ordinals)
+
+    def resolved_position(self,sampler,effect,condition,columns):
+        """原首次Resolved生命周期；订单关闭反馈由其完整producer另行映射。
+
+        本方法仅映射这条非现金证据，不能据此忽略同次的MarketResolvedCanceled。
+        """
+        from lifecycle import map_resolved_position
+        from queues import _take
+        roots=self.account_slots.numel()
+        if condition.shape!=(roots,) or condition.dtype!=torch.int64 or condition.device!=self.account_slots.device:
+            raise TypeError('判定市场须为同设备完整int64目录')
+        if self.resolution_columns is not None and self.resolution_columns is not columns:
+            raise ValueError('连续Resolved记录须保留同一完整源身份字典绑定')
+        working=replace(self,resolution_columns=columns,condition_slots=condition)
+        active=effect.resolved[:,None]
+        platforms=effect.at[:,None]
+        emitter,emission=working.emitter.emit(sampler,active,torch.zeros_like(active),
+            platforms,platforms,torch.zeros_like(platforms),effect.fault[:,None])
+        categories=torch.full_like(platforms,3)
+        ordinals=map_source_ordinals(emission.emitted,categories,torch.ones_like(platforms),effect.fault[:,None])
+        positions=torch.arange(roots,device=condition.device)
+        private=_take(emission.private_sequences,positions)
+        batch=_take(emission.batch_sequences,positions)
+        row=columns.fields[effect.reference.clamp(0,columns.fields.size(0)-1)]
+        mapped=map_resolved_position(self.account_slots,condition,row[:,3],row[:,2],private,
+            ordinals.first_ordinals[:,0],emission.emitted[:,0])
+        records=[(mapped,EVIDENCE,private,batch,emission.received_at[:,0],categories[:,0],
+            effect.at,emission.emitted[:,0])]
+        return working._finish(emitter,records,emission.root_fault | ordinals.fault)
 
     def pending_base_acceptance(self,sampler,orders,pool,effects,asset_tokens):
         """已完成的单项Base接单来源；完整Pair响应仍须原请求封口协调。

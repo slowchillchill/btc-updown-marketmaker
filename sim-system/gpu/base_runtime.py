@@ -23,6 +23,131 @@ class BaseSimRuntime:
     calendars: object
     hidden_frontier: object = None
     market_controls: object = None  # MarketFact映射/交易/质量；不冒充Terminal经济状态。
+    source_resolutions: object = None
+    resolution_obligations: object = None
+
+    def install_hidden_resolutions(self):
+        """冷安装判定存储；不把未来Terminal、订单或成交当已应用事实。"""
+        from hidden_resolution import SourceQualifiedResolutions,ResolutionObligations
+        if self.source_resolutions is not None:
+            return self
+        source = self.hidden_frontier.columns.source
+        roots = self.orders.roots
+        return replace(self,source_resolutions=SourceQualifiedResolutions.empty(
+            source.terminal_columns,roots,source.market_count,self.account.asset_roots.device),
+            resolution_obligations=ResolutionObligations.empty(roots,source.market_count,self.fills))
+
+    def prepare_hidden_terminal(self, choice, indices, condition_by_market, market_end,
+                                source_assets=None):
+        """原Terminal的市场/整订单/账户/执行义务共同候选及实际反馈。
+
+        本方法不签发引用完成。调用方须把返回的完整反馈与候选、引用游标放在
+        同一资源提交门；没有反馈存储或后继失败时保留整个进入前缀。
+        请求式兑付不在此处自动到账，首次Resolved也不等请求发送屏障。
+        """
+        from account_state import grouped_fault
+        from hidden_resolution import HiddenTerminalEffects
+        from market_resolution_orders import resolve_market_base_orders
+        self._source(choice)
+        if self.source_resolutions is None or self.resolution_obligations is None or self.market_controls is None:
+            raise ValueError('Terminal候选须先安装原市场/源判定/执行义务的冷容量')
+        block = self.hidden_frontier.columns.source
+        roots, markets = self.source_resolutions.present.shape
+        owner = self.account.asset_roots
+        if any(value.shape != (roots,markets) or value.dtype != torch.int64 or value.device != owner.device
+               for value in (condition_by_market,market_end)):
+            raise TypeError('原condition与end须为同设备完整root×market冷目录')
+        source_assets = block.asset_axis if source_assets is None else source_assets
+        if source_assets.shape != owner.shape or source_assets.dtype != torch.int64 or source_assets.device != owner.device:
+            raise TypeError('判定源资产绑定须为同设备完整资产int64列')
+        rows = block.reference_rows[indices.clamp(0,block.reference_rows.size(0)-1)]
+        enabled = choice.enabled(4) & self.hidden_frontier.reference_enabled(indices) & (rows[:,0] == 9)
+        axis = torch.arange(roots,device=owner.device)
+        market = rows[:,1]
+        if markets == 0:
+            raise ValueError('Terminal来源必须属于已安装的原市场目录')
+        safe_market = market.clamp(0,markets-1)
+        end = market_end[axis,safe_market]
+        condition = condition_by_market[axis,safe_market]
+        source_invalid = (source_assets<0)|(source_assets>=len(block.assets))
+        source_market = block.asset_markets[source_assets.clamp(0,len(block.assets)-1)]
+        members = source_market == market[owner]
+        population = torch.zeros(roots,dtype=torch.int64,device=owner.device).scatter_add(0,owner,members.to(torch.int64))
+        uninitialized = torch.zeros(roots,dtype=torch.int32,device=owner.device).scatter_reduce(
+            0,owner,(members & ~self.hidden.initialized).to(torch.int32),reduce='amax') != 0
+        initialized = (population == block.asset_markets.eq(market[:,None]).sum(1)) & ~uninitialized
+        initialized &= population > 0
+        original_fault = grouped_fault(self.hidden.fault,owner,roots) | self.orders.fault | self.account.fault
+        fault = original_fault | self.market_controls.fault | self.resolution_obligations.fault
+        fault |= torch.where(enabled,grouped_fault(source_invalid.to(torch.int32),owner,roots),0)
+        source, transition = self.source_resolutions.observe(indices,market,end,initialized,
+            enabled & (fault == 0),torch.zeros_like(enabled))
+        fault |= transition.fault
+        obligations, resolved = self.resolution_obligations.register(transition,self.fills,condition,
+            enabled & (fault == 0))
+        matching_open = torch.zeros(roots,dtype=torch.int32,device=owner.device).scatter_reduce(
+            0,owner,(members & ~self.hidden.matching_closed).to(torch.int32),reduce='amax') != 0
+        orders, queue, account, effects = resolve_market_base_orders(self.orders,self.hidden.queues,
+            self.account,condition,owner[self.hidden.level_assets],~matching_open,resolved)
+        fault |= obligations.fault | effects.fault
+        committed = enabled & (fault == 0)
+        selected = (torch.arange(markets,device=owner.device)[None,:] == market[:,None]) & committed[:,None]
+        quality = block.terminal_columns.fields[indices.clamp(0,block.terminal_columns.fields.size(0)-1),4]
+        controls = replace(self.market_controls,quality=torch.where(selected,quality[:,None],self.market_controls.quality))
+        from pending_base_execution import _coordinate_orders
+        from base_acceptance import _coordinate_queue
+        orders = _coordinate_orders(orders,self.orders,fault)
+        queue = _coordinate_queue(queue,self.hidden.queues,owner[self.hidden.level_assets],fault)
+        account = account.coordinate_result(self.account,fault)
+        source = source.coordinate_result(self.source_resolutions,fault)
+        obligations = obligations.coordinate_result(self.resolution_obligations,fault)
+        controls = controls.coordinate_result(self.market_controls,fault)
+        # 最后一个协调错误也不能让早先order effects在整市场回退后公开。
+        events = tuple(replace(event,effect=replace(event.effect,closed=event.effect.closed & committed,
+            delta=account.coordinate_delta(event.effect.delta,committed,fault),fault=fault)) for event in effects.events)
+        effect = HiddenTerminalEffects(market,transition.reference,source.source_times[axis,safe_market],
+            choice.at,replace(effects,events=events,fault=fault),resolved & committed,fault)
+        candidate = replace(self,hidden=replace(self.hidden,queues=queue),orders=orders,account=account,
+            market_controls=controls,source_resolutions=source,resolution_obligations=obligations)
+        return candidate,effect
+
+    def apply_hidden_terminal_without_orders(self,choice,indices,condition_by_market,market_end,
+                                            projection,sampler,source_assets=None):
+        """首次无待关闭Base订单的真实Terminal→Resolved→引用完成共同候选。
+
+        有待关闭订单时保留等待，不能仅生成Resolved而省略订单生命周期。
+        返回的Projection批与SIM候选须共用同一精确资源提交门。本接口仍在
+        已有固定图外装配反馈，不声称已捕获完整Terminal/NOE循环。
+        """
+        block = self.hidden_frontier.columns.source
+        rows = block.reference_rows[indices.clamp(0,block.reference_rows.size(0)-1)]
+        roots = torch.arange(self.orders.roots,device=indices.device)
+        markets = condition_by_market.size(1)
+        if markets == 0:
+            raise ValueError('Terminal消费须有原市场目录')
+        condition = condition_by_market[roots,rows[:,1].clamp(0,markets-1)]
+        quantities = self.orders.quantities
+        active = (quantities.pending_maker_depletion_base_units.sign>0)|(quantities.open_base_units.sign>0)
+        unfinished = (self.orders.occupied & (self.orders.conditions==condition[:,None]) &
+            active.reshape_as(self.orders.occupied)).any(1)
+        permitted = choice.enabled(4) & ~unfinished
+        choice = replace(choice,present=permitted)
+        candidate,effect = self.prepare_hidden_terminal(choice,indices,condition_by_market,market_end,source_assets)
+        projected,batch = projection.resolved_position(sampler,effect,condition,block.terminal_columns)
+        fault = effect.fault | batch.fault
+        from pending_base_execution import _coordinate_orders
+        from base_acceptance import _coordinate_queue
+        owner = self.account.asset_roots
+        candidate = replace(candidate,
+            hidden=replace(candidate.hidden,queues=_coordinate_queue(candidate.hidden.queues,self.hidden.queues,
+                owner[self.hidden.level_assets],fault)),
+            orders=_coordinate_orders(candidate.orders,self.orders,fault),
+            account=candidate.account.coordinate_result(self.account,fault),
+            market_controls=candidate.market_controls.coordinate_result(self.market_controls,fault),
+            source_resolutions=candidate.source_resolutions.coordinate_result(self.source_resolutions,fault),
+            resolution_obligations=candidate.resolution_obligations.coordinate_result(self.resolution_obligations,fault))
+        committed = permitted & self.hidden_frontier.reference_enabled(indices) & (rows[:,0]==9) & (fault==0)
+        return candidate.hidden_reference_applied(indices,committed,fault),projected,batch,effect
 
     def install_hidden_market_controls(self):
         """冷安装原市场默认状态，不从未来参考或公开市场读面初始化业务字段。"""
@@ -39,6 +164,8 @@ class BaseSimRuntime:
             self.hidden.fault,self.account.asset_roots,self.orders.roots)
         if self.market_controls is not None:
             fault = fault | self.market_controls.fault
+        if self.source_resolutions is not None:
+            fault |= self.source_resolutions.fault | self.resolution_obligations.fault
         if self.hidden_frontier is not None:
             hidden_source,hidden_eof=self.hidden_frontier.scheduled()
         source=replace(hidden_source,fault=hidden_source.fault | fault)
@@ -173,6 +300,17 @@ class BaseSimRuntime:
             raise TypeError('hidden参考源资产须为同设备完整int64绑定')
         supported = enabled & (tags >= 1) & (tags <= 8)
         control = self.market_controls.apply(rows, supported)
+        if self.source_resolutions is not None:
+            # 非Fresh Terminal后首次转Fresh会产生Resolution效果。该效果尚未
+            # 接入此控制入口时继续等待，不能只改quality并消费掉原事实。
+            markets = self.source_resolutions.present.size(1)
+            if markets:
+                axis = torch.arange(self.orders.roots,device=indices.device)
+                safe = rows[:,1].clamp(0,markets-1)
+                needs_resolution = self.source_resolutions.present[axis,safe] & (
+                    self.resolution_obligations.reference_indices[axis,safe]<0) & (control.quality[axis,safe]==0)
+                supported &= ~needs_resolution
+                control = self.market_controls.apply(rows,supported)
         asset_event = supported & ((tags == 3) | (tags == 8))
         selected = asset_event[owner] & (source_assets == rows[owner,2])
         counts = torch.zeros_like(indices).scatter_add(0, owner, selected.to(torch.int64))
@@ -193,6 +331,8 @@ class BaseSimRuntime:
         fault=fault | grouped_fault(self.hidden.fault,self.account.asset_roots,self.orders.roots)
         if self.market_controls is not None:
             fault = fault | self.market_controls.fault
+        if self.source_resolutions is not None:
+            fault |= self.source_resolutions.fault | self.resolution_obligations.fault
         frontier,closed=self.hidden_frontier.finish(fault)
         return replace(self,hidden_frontier=frontier),closed
 
