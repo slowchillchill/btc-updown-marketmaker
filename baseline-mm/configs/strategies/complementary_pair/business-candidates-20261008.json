@@ -1,0 +1,2502 @@
+{
+  "format": "complementary-pair-business-candidates-v1",
+  "status": "research_candidates_not_adopted",
+  "strategy_type": "ComplementaryPairConfigV1",
+  "strategy_fields": 43,
+  "formal_adoption": false,
+  "economic_runs_executed": 0,
+  "nominal_configuration_count": 50,
+  "independent_configuration_count": 36,
+  "host_configuration_complete": false,
+  "usage": "每个candidates[].strategy是完整现有43字段策略值；公共CLI宿主run/rules/request_namespace及四项时序不在本包内，尚未经营回放。",
+  "sources": {
+    "book": "../../../docs/research/complementary-pair-business-book-statistics-20261008.json",
+    "probability": "../../../docs/research/complementary-pair-probability-results-20261007.json",
+    "health": "../../../docs/research/complementary-pair-source-health-18d-20260909-20260926.json"
+  },
+  "formation": {
+    "book_value_decimal_places": 8,
+    "book_value_rounding": "ROUND_HALF_UP；研究表示，不是平台tick",
+    "quantity": "floor(Q/4)，夹取5—50；整数粒度、缩放和范围均为研究机制假设，非平台约束",
+    "half_spread": "Q/2，四位小数ROUND_HALF_UP；合法报价仍由现有tick处理",
+    "single_factor": "报价量和半价差对照保持其他同折中心字段不变；健康2/8倍沿原完整16字段候选",
+    "unmeasured": "联合成交权重、亏损容忍、等待/修复、孤腿预算和三个策略路径时延均未由自身成交/路径测量估得，来源与用途见中文报告"
+  },
+  "funding_contract": {
+    "initial_account_pusd": "2000",
+    "per_market_input_including_fees_pusd": "1000",
+    "high_water_drawdown_fraction": "0.30",
+    "formal_risk_parameters_adopted": false
+  },
+  "folds": [
+    {
+      "fold": 0,
+      "fit_start_utc": "2026-09-09T00:00:00Z",
+      "fit_cutoff_utc": "2026-09-12T00:00:00Z",
+      "validation_start_utc": "2026-09-12T00:00:00Z",
+      "validation_end_utc": "2026-09-15T00:00:00Z",
+      "development": false,
+      "sigma_fit": 3.9683668474523306,
+      "statistics": {
+        "best_ask_shares": {
+          "events": 2494269,
+          "q25": 75.0,
+          "q50": 210.33,
+          "q75": 475.74
+        },
+        "spread": {
+          "events": 2469101,
+          "q25": 0.010000000000000009,
+          "q50": 0.010000000000000009,
+          "q75": 0.010000000000000009
+        }
+      },
+      "nominal_candidates": 10,
+      "independent_candidates": 7,
+      "omitted_identical_candidates": [
+        {
+          "identifier": "large-size",
+          "same_as": "center"
+        },
+        {
+          "identifier": "narrow-spread",
+          "same_as": "center"
+        },
+        {
+          "identifier": "wide-spread",
+          "same_as": "center"
+        }
+      ],
+      "candidates": [
+        {
+          "identifier": "center",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2800,
+              "chainlink_event_delay_ms": 11200,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.936733694904661,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "no-innovation",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2800,
+              "chainlink_event_delay_ms": 11200,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.936733694904661,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.0,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "health2",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 200,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 200,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 2400,
+              "chainlink_event_delay_normal_ms": 2800,
+              "chainlink_event_delay_ms": 5600,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 2000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 2200,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 200,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 400
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.936733694904661,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "health8",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 800,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 800,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 9600,
+              "chainlink_event_delay_normal_ms": 2800,
+              "chainlink_event_delay_ms": 22400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 8000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 8800,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 800,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 1600
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.936733694904661,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "small-size",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2800,
+              "chainlink_event_delay_ms": 11200,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.936733694904661,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "18",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "no-inventory",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2800,
+              "chainlink_event_delay_ms": 11200,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.936733694904661,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "passive-repair",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2800,
+              "chainlink_event_delay_ms": 11200,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.936733694904661,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": false
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "fold": 1,
+      "fit_start_utc": "2026-09-09T00:00:00Z",
+      "fit_cutoff_utc": "2026-09-15T00:00:00Z",
+      "validation_start_utc": "2026-09-15T00:00:00Z",
+      "validation_end_utc": "2026-09-18T00:00:00Z",
+      "development": false,
+      "sigma_fit": 3.290753197722282,
+      "statistics": {
+        "best_ask_shares": {
+          "events": 4623557,
+          "q25": 70.0,
+          "q50": 198.0,
+          "q75": 448.17
+        },
+        "spread": {
+          "events": 4575034,
+          "q25": 0.010000000000000009,
+          "q50": 0.010000000000000009,
+          "q75": 0.010000000000000009
+        }
+      },
+      "nominal_candidates": 10,
+      "independent_candidates": 8,
+      "omitted_identical_candidates": [
+        {
+          "identifier": "narrow-spread",
+          "same_as": "center"
+        },
+        {
+          "identifier": "wide-spread",
+          "same_as": "center"
+        }
+      ],
+      "candidates": [
+        {
+          "identifier": "center",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 10800,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.581506395444564,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "49",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "4.9",
+              "maximum_overfill_pusd": "4.9",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "no-innovation",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 10800,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.581506395444564,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.0,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "49",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "4.9",
+              "maximum_overfill_pusd": "4.9",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "health2",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 200,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 200,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 2400,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 5400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 2000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 2200,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 200,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 400
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.581506395444564,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "49",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "4.9",
+              "maximum_overfill_pusd": "4.9",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "health8",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 800,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 800,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 9600,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 21600,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 8000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 8800,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 800,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 1600
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.581506395444564,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "49",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "4.9",
+              "maximum_overfill_pusd": "4.9",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "small-size",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 10800,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.581506395444564,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "17",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "4.9",
+              "maximum_overfill_pusd": "4.9",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "large-size",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 10800,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.581506395444564,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "4.9",
+              "maximum_overfill_pusd": "4.9",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "no-inventory",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 10800,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.581506395444564,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "49",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "4.9",
+              "maximum_overfill_pusd": "4.9",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "passive-repair",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 10800,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.581506395444564,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "49",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "4.9",
+              "maximum_overfill_pusd": "4.9",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": false
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "fold": 2,
+      "fit_start_utc": "2026-09-09T00:00:00Z",
+      "fit_cutoff_utc": "2026-09-18T00:00:00Z",
+      "validation_start_utc": "2026-09-18T00:00:00Z",
+      "validation_end_utc": "2026-09-21T00:00:00Z",
+      "development": false,
+      "sigma_fit": 3.53030160001224,
+      "statistics": {
+        "best_ask_shares": {
+          "events": 7086700,
+          "q25": 73.91,
+          "q50": 214.0,
+          "q75": 499.38
+        },
+        "spread": {
+          "events": 7010179,
+          "q25": 0.010000000000000009,
+          "q50": 0.010000000000000009,
+          "q75": 0.010000000000000009
+        }
+      },
+      "nominal_candidates": 10,
+      "independent_candidates": 7,
+      "omitted_identical_candidates": [
+        {
+          "identifier": "large-size",
+          "same_as": "center"
+        },
+        {
+          "identifier": "narrow-spread",
+          "same_as": "center"
+        },
+        {
+          "identifier": "wide-spread",
+          "same_as": "center"
+        }
+      ],
+      "candidates": [
+        {
+          "identifier": "center",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 10800,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.06060320002448,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "no-innovation",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 10800,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.06060320002448,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.0,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "health2",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 200,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 200,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 2400,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 5400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 2000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 2200,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 200,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 400
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.06060320002448,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "health8",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 800,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 800,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 9600,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 21600,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 8000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 8800,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 800,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 1600
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.06060320002448,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "small-size",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 10800,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.06060320002448,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "18",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "no-inventory",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 10800,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.06060320002448,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "passive-repair",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2700,
+              "chainlink_event_delay_ms": 10800,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.06060320002448,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": false
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "fold": 3,
+      "fit_start_utc": "2026-09-09T00:00:00Z",
+      "fit_cutoff_utc": "2026-09-21T00:00:00Z",
+      "validation_start_utc": "2026-09-21T00:00:00Z",
+      "validation_end_utc": "2026-09-24T00:00:00Z",
+      "development": false,
+      "sigma_fit": 3.4240169775157034,
+      "statistics": {
+        "best_ask_shares": {
+          "events": 9367391,
+          "q25": 72.54,
+          "q50": 212.7,
+          "q75": 501.66
+        },
+        "spread": {
+          "events": 9265372,
+          "q25": 0.010000000000000009,
+          "q50": 0.010000000000000009,
+          "q75": 0.010000000000000009
+        }
+      },
+      "nominal_candidates": 10,
+      "independent_candidates": 7,
+      "omitted_identical_candidates": [
+        {
+          "identifier": "large-size",
+          "same_as": "center"
+        },
+        {
+          "identifier": "narrow-spread",
+          "same_as": "center"
+        },
+        {
+          "identifier": "wide-spread",
+          "same_as": "center"
+        }
+      ],
+      "candidates": [
+        {
+          "identifier": "center",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 10400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.848033955031407,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "no-innovation",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 10400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.848033955031407,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.0,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "health2",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 200,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 200,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 2400,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 5200,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 2000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 2200,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 200,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 400
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.848033955031407,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "health8",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 800,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 800,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 9600,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 20800,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 8000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 8800,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 800,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 1600
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.848033955031407,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "small-size",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 10400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.848033955031407,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "18",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "no-inventory",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 10400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.848033955031407,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "passive-repair",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1200,
+              "chainlink_silence_ms": 4800,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 10400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 6.848033955031407,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": false
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "fold": 4,
+      "fit_start_utc": "2026-09-09T00:00:00Z",
+      "fit_cutoff_utc": "2026-09-24T00:00:00Z",
+      "validation_start_utc": "2026-09-24T00:00:00Z",
+      "validation_end_utc": "2026-09-27T00:00:00Z",
+      "development": true,
+      "sigma_fit": 3.66744631159796,
+      "statistics": {
+        "best_ask_shares": {
+          "events": 12076312,
+          "q25": 74.0,
+          "q50": 220.0,
+          "q75": 528.67
+        },
+        "spread": {
+          "events": 11943391,
+          "q25": 0.010000000000000009,
+          "q50": 0.010000000000000009,
+          "q75": 0.010000000000000009
+        }
+      },
+      "nominal_candidates": 10,
+      "independent_candidates": 7,
+      "omitted_identical_candidates": [
+        {
+          "identifier": "large-size",
+          "same_as": "center"
+        },
+        {
+          "identifier": "narrow-spread",
+          "same_as": "center"
+        },
+        {
+          "identifier": "wide-spread",
+          "same_as": "center"
+        }
+      ],
+      "candidates": [
+        {
+          "identifier": "center",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1100,
+              "chainlink_silence_ms": 4400,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 10400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.33489262319592,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "no-innovation",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1100,
+              "chainlink_silence_ms": 4400,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 10400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.33489262319592,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.0,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "health2",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 200,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 200,
+              "chainlink_silence_normal_ms": 1100,
+              "chainlink_silence_ms": 2200,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 5200,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 2000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 2200,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 200,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 400
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.33489262319592,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "health8",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 800,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 800,
+              "chainlink_silence_normal_ms": 1100,
+              "chainlink_silence_ms": 8800,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 20800,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 8000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 8800,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 800,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 1600
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.33489262319592,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "small-size",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1100,
+              "chainlink_silence_ms": 4400,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 10400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.33489262319592,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "18",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "no-inventory",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1100,
+              "chainlink_silence_ms": 4400,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 10400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.33489262319592,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        },
+        {
+          "identifier": "passive-repair",
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1100,
+              "chainlink_silence_ms": 4400,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 10400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.33489262319592,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maximum_overfill_shares": "5",
+              "maximum_overfill_pusd": "5",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": false
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
