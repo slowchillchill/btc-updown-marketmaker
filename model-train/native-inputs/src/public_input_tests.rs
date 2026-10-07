@@ -186,7 +186,13 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
             assert_eq!(group.rows[0].slow[110], projection("100"));
             assert!(group.pre_frame_hidden_ops.is_empty());
         }
-        exported.push(exported_group(&group));
+        let mut output = exported_group(&group);
+        if std::env::var_os("NATIVE_ACCOUNT_SOURCE_OUTPUT").is_some() {
+            output["bound_markets"] = serde_json::Value::Array(native.markets.values().map(|binding| {
+                serde_json::json!({"market": binding.market, "assets": binding.assets})
+            }).collect());
+        }
+        exported.push(output);
         if index == 1 {
             frozen = Some(group);
         }
@@ -276,7 +282,13 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
             assert_eq!(group.cancel[3][142], projection("1"));
             assert_eq!(group.cancel[3][145], projection("1"));
         }
-        exported.push(exported_group(&group));
+        let mut output = exported_group(&group);
+        if std::env::var_os("NATIVE_ACCOUNT_SOURCE_OUTPUT").is_some() {
+            output["bound_markets"] = serde_json::Value::Array(native.markets.values().map(|binding| {
+                serde_json::json!({"market": binding.market, "assets": binding.assets})
+            }).collect());
+        }
+        exported.push(output);
     }
     assert!(saw_orders);
     assert_eq!(retired, 1);

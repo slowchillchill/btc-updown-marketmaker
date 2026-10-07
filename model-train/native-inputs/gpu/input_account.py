@@ -79,3 +79,47 @@ def frozen_account_inputs(account, scope_members, scope_known, scope_applicable,
         # 原Known(None)请求最新响应为NA六项，而订单模板无来源仍有适用位。
         provided[:, 415:433] = True
     return FrozenAccountInputs(slow, provided, orders, account.cutoff.clone(), fault)
+
+
+@dataclass(frozen=True)
+class NativeAccountAtPrefix:
+    inputs: FrozenAccountInputs
+    scopes: object
+
+
+def account_inputs_at_prefix(account, market, condition_slots, prefixes, root_started_at,
+                             order_conditions, order_condition_known, asset_outcomes):
+    """同一实际cutoff：设备选原current/old，再装配已交付账户字段。
+
+    market只含当前完整公共前缀；order_conditions沿已冻结原意图/订单关联，
+    不能读取SIM内部状态。尚未实现的字段仍以provided=False明确保留缺口。
+    """
+    from input_scopes import account_scopes
+    projected = account.ledger.projected_markets
+    if projected is None:
+        raise ValueError('当前根未安装原Ledger投影市场人口')
+    scopes = account_scopes(market, condition_slots, prefixes, projected, account.cutoff, root_started_at)
+    roots, count = account.orders.present.shape
+    device = account.cutoff.device
+    if (order_conditions.shape != (roots,count) or order_conditions.dtype != torch.int64
+            or order_conditions.device != device or order_condition_known.shape != (roots,count)
+            or order_condition_known.dtype != torch.bool or order_condition_known.device != device):
+        raise TypeError('订单作用域需要同冻结订单坐标的原condition及known列')
+    members = ((order_conditions[:,None,:,None] == scopes.conditions[:,:,None,:])
+               & scopes.present[:,:,None,:]).any(3) & order_condition_known[:,None,:]
+    # 原未知未闭合订单condition令非空scope订单读面Unavailable，不能忽略。
+    unknown_order = (account.orders.unfinished & ~order_condition_known).any(1)
+    population_known = torch.stack((torch.ones_like(scopes.population_known),scopes.population_known),1)
+    scope_known = population_known & ~(unknown_order[:,None] & scopes.present.any(2))
+    inputs = frozen_account_inputs(account,members,scope_known,scopes.applicable,
+        scope_conditions=scopes.conditions,scope_present=scopes.present,asset_outcomes=asset_outcomes)
+    slow = inputs.slow.clone()
+    # 没有完整old人口时，已有成员之和不能冒充整个old作用域；保留适用Unknown。
+    for first,last in [(0,27),(54,66)]:
+        width = last-first
+        value = slow[:,first:first+2*width].reshape(roots,2,width//3,3)
+        unknown = scopes.applicable & ~population_known
+        value = torch.where(unknown[:,:,None,None],torch.tensor([0.,0.,1.],device=device),value)
+        slow[:,first:first+2*width] = value.reshape(roots,2*width)
+    return NativeAccountAtPrefix(FrozenAccountInputs(slow,inputs.provided,inputs.order_fields,
+        inputs.cutoff,inputs.fault | scopes.fault),scopes)
