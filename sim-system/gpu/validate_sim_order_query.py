@@ -146,7 +146,9 @@ def check(source,runtime,noe,sampler,asset_tokens,state,live_resources):
         compare(repeated.requests,runtime.requests,'same_query_send_idempotent')
         target=BaseQueryTarget(item,integers([1 if frame['target']=='sim-1' else 999]),fault)
         choice=runtime.choose(ScheduledTime.absent(zero),yes,t([frame['arrived_at']]),yes)
-        assert choice.enabled(5).cpu().tolist()==[True] and choice.at.cpu().tolist()==[frame['arrived_at']]
+        assert choice.enabled(5).cpu().tolist()==[True] and choice.at.cpu().tolist()==[frame['arrived_at']], {
+            'phase':choice.phase.cpu().tolist(),'at':choice.at.cpu().tolist(),'present':choice.present.cpu().tolist(),
+            'fault':choice.fault.cpu().tolist(),'original_query_arrived_at':frame['arrived_at']}
         result_refs=item
         compute=lambda:runtime.query_base(choice,target,result_refs,noe,sampler,asset_tokens)
         warm=Numbers.device_exact_batch(compute,word_capacity=16,device='cuda')

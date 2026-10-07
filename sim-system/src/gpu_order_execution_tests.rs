@@ -233,7 +233,19 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     assert!(matches!(canceled.business, MutationActionBusinessEffectV3::Cancel(_)));
     let mut cancel_batches = Vec::new();
     let state = gpu_accept_projection_reference(&mut actor, state, BusinessReducerOutputV2::MutationAction(Some(canceled)), &mut cancel_batches);
-    let closed_at = cancel_receipt.platform_arrived_at_utc_ms + 10_000;
+    let closed_at = if live_query.is_some() {
+        let received=cancel_batches.iter().flat_map(|batch| {
+            let order=batch["orders"].as_array().unwrap().iter().map(|value|value["metadata"]["feedback_received_at_utc_ms"].as_i64().unwrap());
+            let trade=batch["trades"].as_array().unwrap().iter().map(|value|value["metadata"]["feedback_received_at_utc_ms"].as_i64().unwrap());
+            let settlement=batch["settlements"].as_array().unwrap().iter().map(|value|value["metadata"]["feedback_received_at_utc_ms"].as_i64().unwrap());
+            let direct=batch["direct"].as_array().unwrap().iter().map(|value|value["metadata"]["response_received_at_utc_ms"].as_i64().unwrap());
+            order.chain(trade).chain(settlement).chain(direct)
+        }).max().unwrap();
+        // 原领取门含等号；保留此前真实关闭前沿，不倒退或跨过下一返佣义务。
+        let closed=received.max(prefix_at);
+        assert!(closed<initial[0].market.window.end_at_utc_ms,"此有限Query场景不跨市场结束");
+        closed
+    } else {cancel_receipt.platform_arrived_at_utc_ms + 10_000};
     actor.projection_port.close_receive_prefix(closed_at);
     actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
         crate::public_consumption::ActorTimeRecordV1 { run_id: actor.opened.run_id.clone(), drive_position: 1, logical_time_utc_ms: closed_at }));
