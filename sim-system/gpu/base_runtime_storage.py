@@ -67,7 +67,7 @@ class BaseRuntimeStorage:
         """保留本次已提交SIM输出，后续图重放不能覆盖待消费反馈。"""
         return _owned(output, output)
 
-    def commit(self, candidate, resources_fit):
+    def commit(self, candidate, resources_fit, output=None):
         """资源不足保留全部活动字段；原各根fault/回退由业务协调器负责。
 
         resources_fit须同时包含字容量与本次各池容量需求，不能仅取Exact fit。
@@ -79,5 +79,8 @@ class BaseRuntimeStorage:
         # 先构建完整固定布局映射，再发射原位写入；图内不读任何业务值。
         pairs = tuple(_tensor_pairs(self.runtime, candidate))
         with torch.no_grad():
+            # emitted序号可能借原next_sequence；必须先保存，再改活动输入。
+            saved_output = self.snapshot_output(output) if output is not None else None
             for target, incoming in pairs:
                 target.copy_(torch.where(resources_fit, incoming, target))
+        return saved_output
