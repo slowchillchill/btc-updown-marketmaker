@@ -143,4 +143,8 @@ DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完�
 
 全局撤单读取分开保存原 receipt 登记与 `CancellationRequestCompleted` 来源。逐目标回应不代表请求完成；零目标完成保留三项已知零，尚无完成时三项为 NotApplicable。完整 scoped 关系、Single/Pair/Market 对象形成序和未知人口仍须继续接入。
 
-`gpu/registry_projection.py` 将实际 NOE 双门领取列批量解码为设备订单/Trade 来源；当前接入 Base Submission、Accepted 生命周期和 TradeLifecycleV3。原18前缀夹具以派生读面作 oracle，不给设备初始化 matched/active/commitment。真实非 post-only Maker 的9条 V4设备链已接首次领取→Registry→Ledger；其冷前缀缺接受引用时公开计量保持 Unknown，不补造历史。该局部不代表完整首次领取流、FOK/查询/取消映射、slow433、全根时钟或恢复已完成。
+`gpu/registry_projection.py` 将实际 NOE 双门领取列批量解码为设备订单/Trade 来源；当前接入 Base Submission、Accepted 生命周期和 TradeLifecycleV3。原21前缀夹具以派生读面作 oracle，不给设备初始化 matched/active/commitment。真实非 post-only Maker 的9条 V4设备链已接首次领取→Registry→Ledger；其冷前缀缺接受引用时公开计量保持 Unknown，不补造历史。该局部不代表完整首次领取流、FOK/查询/取消映射、slow433、全根时钟或恢复已完成。
+
+`gpu/commitments.py` 将原发送receipt与Submission逐腿关联分开；在接受反馈前，原双腿各自的完整目标继续进入承诺人口，不能由订单目录空推断零责任。`gpu/cancel_objects.py` 继承原完整形成证据：按市场组选择覆盖全部证据的处理链或来源链，否则合并两链相邻边；设备Kahn按原Identity字典序取就绪项。无就绪项时保持原Known对象结果，不新增业务错误。Single、原双腿Paired与请求的已公开Market按原顺序输出，空Market仍存在，未知可撤性仍保留。相邻图每节点至多两后继；当前对象成员输出仍是object×order稠密掩码，完整根容量尚未验收。固定根Order命名空间的动态`sim-u64`排序复用公共设备十进制字节原语，不回CPU拼业务字符串。
+
+`gpu/cancel_requests.py` 以原冻结请求作用域、逐目标NOE及整请求完成分别读取在途人口、最新可能相关响应和对象内三类结果；未知订单归属保留Unknown。当前原21前缀对照覆盖单订单、同市场另一订单、市场与未观察订单作用域。输入适配器仍是有限原JSON冷边界，尚未把完整生产取消/查询schema和前沿装配到首次领取器；不称整个Registry、slow433或全根完成。

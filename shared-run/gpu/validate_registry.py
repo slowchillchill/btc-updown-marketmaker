@@ -12,7 +12,7 @@ import time
 import torch
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path[:0] = [str(ROOT/'sim-system/gpu'), str(ROOT/'ledger/gpu'), str(Path(__file__).resolve().parent)]
+sys.path[:0] = [str(ROOT/'sim-system/gpu'), str(ROOT/'ledger/gpu'), str(ROOT/'execution-normalization/gpu'), str(Path(__file__).resolve().parent)]
 from registry import (PublicRegistryEvents, FrozenIntentOrders, PublicRegistryState,
     BASE_ACCEPTED, QUOTE_ACCEPTED, ORDER_LIFECYCLE, TRADE, CANCEL_TARGET,
     PublicCancellationState, CancellationCompletions)

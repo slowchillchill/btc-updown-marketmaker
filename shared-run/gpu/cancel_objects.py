@@ -157,7 +157,6 @@ def freeze_cancel_objects(order_read, formation, directory):
         selected=ready.gather(1,tie_order).to(torch.int32).argmax(1)
         at=tie_order.gather(1,selected[:,None])
         active=ready.any(1)
-        fault=fault|((pending.any(1))&~active).to(torch.int32)
         previous=ranks.gather(1,at)
         ranks=ranks.scatter(1,at,torch.where(active[:,None],ordinal,previous))
         pending=pending.scatter(1,at,pending.gather(1,at)&~active[:,None])
@@ -193,7 +192,7 @@ def freeze_cancel_objects(order_read, formation, directory):
         for leg in range(2):
             at=members[:,:,leg].gather(1,pair_order)
             membership[:,count:count+pair_count,:].scatter_(2,at[:,:,None],valid_pair.gather(1,pair_order)[:,:,None])
-        membership[:,count+pair_count:,:]=(formation.market[:,None,:]==selected_market[:,:,None])&eligible[:,None,:]&requested.gather(1,selected_market)[:,:,None]
+        membership[:,count+pair_count:,:]=(formation.market[:,None,:]==selected_market[:,:,None])&(ranks>=0)[:,None,:]&requested.gather(1,selected_market)[:,:,None]
     origin=torch.cat([torch.full_like(order,-1),pair_order,torch.full_like(selected_market,-1)],1)
     markets=torch.cat([torch.full_like(order,-1),torch.full_like(pair_order,-1),selected_market],1)
     return CancelObjectsRead(population,kinds,membership,ranks,origin,markets,fault)
