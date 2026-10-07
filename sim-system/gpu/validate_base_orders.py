@@ -450,23 +450,24 @@ def check_captured_hidden_step(runtime,index,tensor,fee_rate,fee_exponent,rebate
     torch.cuda.synchronize()
     assert captured.fits.cpu().item(), '仅资源退出边界可读此需求，不提交不足容量候选'
     actual,actual_effect=captured.value
-    def compare(a,b):
+    def compare(a,b,path="candidate"):
         if isinstance(a,torch.Tensor):
-            assert torch.equal(a,b)
+            assert torch.equal(a,b),(path,a.cpu().tolist(),b.cpu().tolist())
         elif isinstance(a,ExactInt):
-            assert values(a)==values(b) and torch.equal(a.fault,b.fault)
+            assert values(a)==values(b) and torch.equal(a.fault,b.fault),(path,values(a),values(b),a.fault.cpu().tolist(),b.fault.cpu().tolist())
         elif is_dataclass(a):
             for field in fields(a):
                 # 真实源引用为同一个冻结对象；不把Python对象绑定当设备业务状态。
                 if field.name not in ('source','columns'):
-                    compare(getattr(a,field.name),getattr(b,field.name))
+                    compare(getattr(a,field.name),getattr(b,field.name),path+"."+field.name)
         elif isinstance(a,(tuple,list)):
             assert len(a)==len(b)
-            for left,right in zip(a,b):compare(left,right)
+            for number,(left,right) in enumerate(zip(a,b)):compare(left,right,path+"["+str(number)+"]")
         elif a is None or isinstance(a,(str,int,bool)):
             assert a==b
-    compare(actual,expected)
-    compare(actual_effect,effect)
+    compare(warm.value[0],expected,"warm")
+    compare(actual,expected,"captured")
+    compare(actual_effect,effect,"effects")
     assert any(frame.event.emitted.cpu().item() for frame in actual_effect.fills)
     # 再次replay同一未提交原输入，纯候选应一致，不消耗订单/fill号或RNG。
     graph.replay()
