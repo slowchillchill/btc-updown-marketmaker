@@ -30,16 +30,74 @@ def resource_retry(compute, pools, *, metadata=lambda value:value):
             if need>getattr(owner,name): setattr(owner,name,1<<(need-1).bit_length())
 
 
+def validate_binance_received_day(args,root):
+    """独立短材料按实际可见prefix核原BN；不借旧44秒模型观察访问未来源。"""
+    sys.path[:0]=[str(root/'data-pipeline/gpu'),str(root/'model-train/native-inputs/gpu')]
+    from public_state import PublicPmState
+    from binance_state import PublicBinanceState
+    from input_binance import BinanceInputs
+    columns=json.loads(subprocess.check_output([str(args.binary),'--pm-device-columns',str(args.material),'268435456']))
+    state=PublicPmState(columns);binance=PublicBinanceState(state,columns)
+    assert columns['binance_symbols']==['BTCUSDT']
+    inputs=BinanceInputs(binance,initial_capacity=1)
+    rows=json.loads(args.binance_received_day_reference.read_text())
+    assert [r['phase'] for r in rows]==['fresh_before_received_day','received_day_missing','fresh_after_received_day']
+    assert [r['depth']['quality'] for r in rows]==['fresh','missing','fresh']
+    assert all(a['prefix']<b['prefix'] and a['visible_at']<b['visible_at'] for a,b in zip(rows,rows[1:]))
+    phases=[];previous_fresh=None
+    for row in rows:
+        prefix=torch.tensor([row['prefix']],device='cuda');frame=binance.frame(prefix)
+        symbol=torch.zeros_like(prefix);now=prefix.new_tensor([row['visible_at']])
+        native=resource_retry(lambda:inputs.encode(frame,binance.observation(prefix),symbol,now),
+            [(inputs.book,'capacity')],metadata=lambda value:value.packed)
+        original=row['depth'];ready=original['value'] is not None and original['quality']=='fresh'
+        assert frame.ready.cpu().tolist()==[[ready]] and native.fault.cpu().tolist()==[0]
+        quality=['fresh','stale','missing','unknown_not_observed','confirmed_gap','invalid'].index(original['quality'])
+        assert native.side.values[0,0,quality].cpu().item()==1
+        expected={}
+        if ready:
+            for side,name in enumerate(('bids','asks')):
+                levels=original['value'][name]
+                for level in levels:expected[side,Fraction(level['price_usdt_per_btc'])]=Fraction(level['quantity_btc'])
+                values=[[math.log1p(float(Fraction(level['price_usdt_per_btc']))),
+                    math.log1p(float(Fraction(level['quantity_btc']))),1.,*([0.]*5),
+                    math.log1p(float(Fraction(levels[0]['price_usdt_per_btc'])-Fraction(level['price_usdt_per_btc'])
+                        if side==0 else Fraction(level['price_usdt_per_btc'])-Fraction(levels[0]['price_usdt_per_btc'])))]
+                    for level in levels]
+                torch.testing.assert_close(native.packed.levels[0,side][native.packed.mask[0,side]].cpu(),
+                    torch.tensor(values,dtype=torch.float32),rtol=0,atol=0)
+            previous_fresh=expected.copy()
+        else:
+            assert not native.packed.mask.any().cpu().item() and not native.side.values[0,0,6:].any().cpu().item()
+            assert previous_fresh is not None
+            expected=previous_fresh
+        # Missing保留前一独立observer原载荷但不可用；拒绝99不写，新snapshot重置旧价位。
+        actual=[Fraction(n,d) for n,d in zip(frame.quantity.numerator.report_values(),frame.quantity.denominator.report_values())]
+        expected_slots=[expected.get((side,Fraction(columns['decimals'][price])),Fraction(0))
+            for symbol,side,price in columns['binance_slots']]
+        assert actual==expected_slots
+        phases.append({'phase':row['phase'],'prefix':row['prefix'],'visible_at':row['visible_at'],'quality':original['quality']})
+    report={'actual_received_day_compact_and_original_observer':True,'GPU_phases':phases,
+        'Missing_retained_payload_unavailable':True,'rejected_delta_and_old_levels_reset_by_new_snapshot':True,
+        'root_or_model_window':False}
+    args.output.parent.mkdir(parents=True,exist_ok=True)
+    args.output.write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report),flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary',type=Path,required=True)
     parser.add_argument('--material',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--original-reference',type=Path)
+    parser.add_argument('--binance-received-day-reference',type=Path,help='原producer短接收日链，只核实际公共BN前缀')
     parser.add_argument('--legacy-device-page',type=Path,help='现有v1页的消费列兼容核对')
     parser.add_argument('--device-page',type=Path,help='原reader一次构建并两次直接加载固定二进制列')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
+    if args.binance_received_day_reference is not None:
+        validate_binance_received_day(args,root)
+        return
     sys.path.insert(0,str(root/'data-pipeline/gpu'))
     from public_state import PublicPmState
     sys.path.insert(0,str(root/'model-train/native-inputs/gpu'))

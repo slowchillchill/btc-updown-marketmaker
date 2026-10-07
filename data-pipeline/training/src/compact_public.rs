@@ -781,9 +781,83 @@ mod tests {
         }
     }
 
+    fn verify_binance_received_day() {
+        const DAY:i64=86_400_000;
+        let temp=tempfile::tempdir().unwrap();
+        let target=temp.path().join("received-day-compact");
+        let header=PublicInputStreamHeaderV1 {
+            input_stream_id:"gpu-binance-received-day".into(),canonical_rule_version:"rule-v1".into(),
+            observation_version:"public-observation-v1".into(),ordering_version:"original-input-v1".into(),
+            input_scope:"constructed-short-received-day".into(),max_pending_ws_terminals:2,
+            initial_state:PublicInitialStateV1::Empty,
+        };
+        let mut initial=snapshot("received-day",100,1);
+        initial.timestamp_received=DAY-200;initial.snapshot_fetch_start_utc=DAY-300;
+        initial.collector_admission_time_utc_ms=DAY-190;
+        let mut missing=update("received-day",101,101,2,None,None,
+            BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable,
+            vec![DepthLevel {price:"64100".into(),quantity:"99".into()}]);
+        missing.timestamp_received=DAY+15;missing.event_time=DAY-5;
+        missing.collector_admission_time_utc_ms=DAY+3369;
+        let mut restored=snapshot("received-day",200,3);
+        restored.timestamp_received=DAY+3609;restored.snapshot_fetch_start_utc=DAY+3400;
+        restored.collector_admission_time_utc_ms=DAY+3616;
+        restored.bids=vec![DepthLevel {price:"63950".into(),quantity:"2.5".into()}];
+        restored.asks=vec![DepthLevel {price:"64500".into(),quantity:"0.1".into()}];
+        let sources=[
+            ("metadata",TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata_snapshot_row())))),
+            ("fresh_before_received_day",TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(initial))),
+            ("received_day_missing",TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(missing))),
+            ("fresh_after_received_day",TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(restored))),
+        ];
+        let mut core=PublicObservationCoreV1::new(header.clone()).unwrap();
+        let mut observer=PublicObservationCoreV1::new(header.clone()).unwrap();
+        let mut writer=PublicCompactWriterV1::create(&target,header.clone()).unwrap();
+        let mut stages=Vec::new();let mut prefix=0_u64;
+        for (position,(phase,source)) in sources.into_iter().map(|(p,s)|(p,Some(s)))
+            .chain(std::iter::once(("end",None))).enumerate() {
+            let ingress=source.map_or(DptIngressV1::EndOfInput,|row|DptIngressV1::Message {
+                source_evidence:source_evidence_v3_from_typed_raw_v2(&row).unwrap(),row,
+            });
+            let mut input=RecordedIngressV1 {input_stream_id:header.input_stream_id.clone(),
+                input_position:position as u64,ingress,dependency_record_refs:vec![]};
+            let mut observed_input=input.clone();
+            let prepared=prepare_reference(&core,&mut input,&[]);
+            let applied=core.push_facts(&prepared).unwrap();
+            let observed_prepared=prepare_reference(&observer,&mut observed_input,&[]);
+            let observed=observer.push(&observed_prepared).unwrap();
+            for group in &observed.applied.closed_groups {
+                if phase!="metadata" && phase!="end" {
+                    let observation=group.observations.first().unwrap();
+                    assert_eq!(observation.binance_depth.quality,if phase=="received_day_missing" {
+                        MarketDataQuality::Missing
+                    } else { MarketDataQuality::Fresh });
+                    stages.push(serde_json::json!({"phase":phase,"prefix":prefix,
+                        "visible_at":data_pipeline_core::public_observation_core::public_group_visible_at_utc_ms(
+                            prepared.recorded.ingress,&group.records),"depth":observation.binance_depth}));
+                }
+                prefix+=1;
+            }
+            let recorded=RecordedIngressV1 {input_stream_id:prepared.recorded.input_stream_id.clone(),
+                input_position:prepared.recorded.input_position,ingress:prepared.recorded.ingress.clone(),
+                dependency_record_refs:prepared.recorded.dependency_record_refs.clone()};
+            writer.push_prepared(&recorded,&prepared,&applied).unwrap();
+        }
+        writer.publish().unwrap();assert_eq!(stages.len(),3);
+        let reference=temp.path().join("received-day-reference.json");
+        serde_json::to_writer(File::create(&reference).unwrap(),&stages).unwrap();
+        let status=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+            .arg(std::env::var("B_GPU_STATE_VALIDATOR").unwrap())
+            .args(["--binary",&std::env::var("B_GPU_COLUMNS_BINARY").unwrap()])
+            .arg("--material").arg(&target).arg("--binance-received-day-reference").arg(reference)
+            .arg("--output").arg(temp.path().join("received-day-report.json")).status().unwrap();
+        assert!(status.success());
+    }
+
     #[test]
     #[ignore = "明确在AutoDL同提交GPU环境运行；包含独立原core语义对照"]
     fn gpu_public_zero_selection_matches_original_core() {
+        verify_binance_received_day();
         use data_pipeline_core::{public_observation_core::PmOwnedStateV1,
             pm_reduction::{PmStateReadV1, PmStepChangeV1}, typed_raw::{PolymarketOrderbookEvent, PolymarketPriceLevel}};
         let temp = tempfile::tempdir().unwrap();
