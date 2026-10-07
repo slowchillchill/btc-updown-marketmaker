@@ -126,7 +126,7 @@ def run_pending_base_acceptance(requests, orders, queue, account, fills, terms, 
         orders = orders.resized(1 << (max(1, required_orders)-1).bit_length())
         fills = fills.resized(1 << (max(1, required_fills)-1).bit_length())
         old_capacity = queue.capacity
-        queue = queue.resized(1 << (max(1, required_segments)-1).bit_length())
+        queue = queue.resized(max(queue.capacity, 1 << (max(1, required_segments)-1).bit_length()))
         if queue.capacity != old_capacity and queue.rows and ask_rows.size(1):
             # 段池增长只添加未成交padding；原ask×段路径坐标必须保持。
             selected_paths = torch.nn.functional.pad(

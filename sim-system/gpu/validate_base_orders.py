@@ -63,7 +63,6 @@ def main():
     assert read.item_refs.cpu().tolist() == [0] and read.accepted_at.cpu().tolist() == [source['processing_at']]
     assert_checkpoint(source['checkpoints'][0]['state'], read.quantity, account)
     # 原queue A段保存本根稳定slot。扩目录后不改变已有段中的slot或原完整u64身份。
-    orders = orders.resized(4)
     assert values(orders.read(slot).sequence) == [1]
     assert queue.order_ids[1][queue.kind[1] == 2].cpu().tolist() == [int(slot.cpu()[0])]
     maker_record = None
@@ -116,12 +115,37 @@ def main():
                              (orders.next_sequence, old_orders.next_sequence), (fills.next_sequence, old_fills.next_sequence)):
         assert values(actual) == values(previous)
     assert torch.equal(requests.done, old_requests.done) and torch.equal(queue.kind, old_queue.kind)
+    # 受控新工程请求复用同原SDK terms：只有订单目录满，队列已有8槽余量。
+    # 不改变原13个checkpoint或把此新增请求称原会话自然输入。
+    identity_bytes, identity_offsets = byte_column([source['post_request_key'].encode(), b'gpu-next-engineering-post'])
+    requests, _ = requests.run_registration(sampler, identity_bytes, identity_offsets, tensor([1]), tensor([1]),
+        integers([13]), tensor([source['cancel_arrived_at']+1]), tensor([[1]]), tensor([[ordinal]]),
+        tensor([[True]], torch.bool), tensor([[False]], torch.bool), tensor([0]), active, zero_fault)
+    assert orders.capacity == 1 and orders.occupied.sum().cpu().item() == 1
+    queue = queue.resized(8)
+    old_quantity = orders.read(slot).quantity
+    next_terms = replace(terms, item_refs=tensor([1]))
+    requests, orders, queue, account, fills, next_effect = run_pending_base_acceptance(requests, orders, queue,
+        account, fills, next_terms, tensor([[0]]), fee_rate, source['fee_exponent'],
+        torch.zeros((1,8), dtype=torch.int64, device='cuda'), rebate, tensor([0, 0]), tensor([1]))
+    assert next_effect.fault.cpu().tolist() == [0] and next_effect.order.emitted.cpu().tolist() == [True]
+    assert orders.capacity == 2 and queue.capacity == 8
+    assert values(orders.next_sequence) == [3] and values(fills.next_sequence) == [3]
+    from dataclasses import fields
+    for field in fields(old_quantity):
+        if field.name != 'fault':
+            assert values(getattr(orders.read(slot).quantity, field.name)) == values(getattr(old_quantity, field.name))
+    assert values(orders.read(next_effect.order.slots).sequence) == [2]
+    orders = orders.resized(4)
+    assert values(orders.read(slot).sequence) == [1]
+    assert queue.order_ids[1][queue.kind[1] == 2].cpu().tolist() == [1]
     torch.cuda.synchronize()
     print(json.dumps({'device_request_registration_to_real_GTC_acceptance_checked': True,
         'directory_routes_actual_hidden_maker_depletion_and_cancel_checked': True,
         'zero_quote_pending_keeps_original_fill_population_checked': True,
         'order_u64_identity_and_queue_slot_survive_growth_checked': True,
         'completed_request_inactive_zero_terms_no_effect_or_fault_checked': True,
+        'controlled_order_only_growth_keeps_eight_queue_segments_checked': True,
         'original_SIM_checkpoints': len(source['checkpoints']),
         'elapsed_seconds_with_reference_reads': time.perf_counter()-started,
         'device_peak_allocated_bytes': torch.cuda.max_memory_allocated(),
