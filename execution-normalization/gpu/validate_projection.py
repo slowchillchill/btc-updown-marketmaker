@@ -316,7 +316,9 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert not (cache.received & ~cache.consumed).any().cpu().item() and admission.fault.cpu().tolist()==[0]
     # 同一原21条NOE，同订单三成交，成交物理目录仅一槽：满池不变成业务错误或提交半个记录。
     from admission_lifecycle import LifecycleDirectory
-    limited=replace(append_start,trades=LifecycleDirectory.empty(1,1,device=columns.row_refs.device))
+    from trade_success import TradeSuccess
+    limited=replace(append_start,trades=LifecycleDirectory.empty(1,1,device=columns.row_refs.device),
+        trade_success=TradeSuccess.open(1,1,columns.row_refs.device))
     small_waiting=Numbers.run_exact_batch(lambda:ClosedAdmission.empty(columns).accept(columns,delivered))
     initial_rank=small_waiting.receive_rank.clone()
     initial_available=small_waiting.available_at.clone()
@@ -566,7 +568,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
         'actual_reserved_market_population_persists_after_conversion_and_directory_retry':True,
-        'device_closed_cache_waiting_then_new_records_retry_checked':True,'actual_order_directory_capacity_exit_then_growth_preserves_waiting_prefix_checked':True,
+        'device_closed_cache_waiting_then_new_records_retry_checked':True,'actual_trade_directory_capacity_exit_then_growth_preserves_waiting_prefix_checked':True,
         'incremental_feedback_append_preserves_account_waiting_and_delivery_checked':True,
         'incremental_feedback_pages':incremental_checked,
         'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_original_six_rebate_read_fields_checked':True,'actual_per_Ledger_record_unresolved_Pi_and_maximum_loss_checked':True,'actual_economic_before_Trade_OrderFunds_Unknown_and_binding_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'actual_trade_role_and_net_fee_executed_read_checked':True,'Native_actual_executed_quantity_principal_net_fee_176_to_211_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'full_clock_Ledger_reservation_delivered':False}
