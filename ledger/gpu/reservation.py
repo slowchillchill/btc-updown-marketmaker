@@ -47,6 +47,7 @@ class ReservationDecision:
     current_local_prefix: object
     required_capacity: torch.Tensor
     fault: torch.Tensor
+    required_market_conditions: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)

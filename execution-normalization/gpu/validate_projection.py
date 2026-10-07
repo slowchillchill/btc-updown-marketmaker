@@ -237,17 +237,30 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     pools=Numbers.run_exact_batch(lambda:SuccessPools.open(torch.tensor([0,0],device='cuda'),
         torch.tensor([0,0],device='cuda'),torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1))
     from buy_cost import limit_buy_cost
+    from projected_markets import ProjectedMarkets
+    assert not source['reservation_checkpoints'][0]['projection']['market_projections']
+    initial_population=ProjectedMarkets.open(torch.empty(0,dtype=torch.int64,device='cuda'),
+        torch.empty((1,0),dtype=torch.bool,device='cuda'),torch.ones(1,dtype=torch.bool,device='cuda'))
     admission=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,
         integers([source['reservation_checkpoints'][0]['projection']['ledger_entry_seq']]),integers([0]),pools,
         position_costs=PositionCosts.empty(1,columns.row_refs.size(1),'cuda'),
         order_funds=open_prefix(1,columns.row_refs.size(1),columns.row_refs.size(1),columns.row_refs.size(1),source['reservation_checkpoints'][0]),
-        unresolved_markets=open_markets(pools,source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id'])))
+        unresolved_markets=open_markets(pools,source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id']),
+        projected_markets=initial_population))
     cost=Numbers.run_exact_batch(lambda:limit_buy_cost(integers([500]),rational(['0.3']),rational([source['fee_rate']]),
         source['fee_exponent'],post_only=torch.tensor([False],device='cuda'),minimum_principal_micro=integers([1_000_000])))
     principal=Numbers.run_exact_batch(lambda:type(rational(['0'])).ratio(cost.principal_micro,cost.principal_micro.constant(1_000_000)))
     fee=Numbers.run_exact_batch(lambda:type(principal).ratio(cost.fee_1e5_units,cost.fee_1e5_units.constant(100_000)))
+    missing,reserve_pending=Numbers.run_exact_batch(lambda:admission.reserve_action(zero[:,None],zero[:,None],principal,fee,
+        torch.ones((1,1),dtype=torch.bool,device='cuda')))
+    assert missing.fault.cpu().tolist()==[0] and reserve_pending.required_market_conditions.cpu().tolist()==[0]
+    assert values(missing.current_entry_sequence)==values(admission.current_entry_sequence)
+    assert missing.reservations.request_slots.cpu().tolist()==admission.reservations.request_slots.cpu().tolist()
+    assert reserve_pending.outcomes.cpu().tolist()==[[0]], '物理目录不足没有Reserved决定或资金提交'
+    admission=replace(missing,projected_markets=missing.projected_markets.extended(zero))
     admission,reserve_event=Numbers.run_exact_batch(lambda:admission.reserve_action(zero[:,None],zero[:,None],principal,fee,
         torch.ones((1,1),dtype=torch.bool,device='cuda')))
+    assert admission.projected_markets.present.cpu().tolist()==[[True]], '原成功本地预留即进入市场投影人口'
     admission=Numbers.run_exact_batch(lambda:admission.submission_started(zero,zero,zero,zero,torch.tensor([True],device='cuda')))
     assert values(admission.current_entry_sequence)==[5] and values(admission.current_local_prefix)==[2]
     from closed import ClosedAdmission
@@ -346,6 +359,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert check_order_funds(early,reference['pending_after_economic'])
     assert check_markets(early,reference['pending_after_economic'],source['initial'][0]['market']['condition_id'])
     funds=Numbers.run_exact_batch(lambda:admission.funds())
+    assert admission.projected_markets.present.cpu().tolist()==[[True]], 'Converted和归零不移除市场人口'
     expected_cash=source['reservation_checkpoints'][-1]['cash']
     for actual,name in [(funds.actual_available,'actual_available_pusd'),(funds.maker_available,'maker_available_pusd'),
                         (funds.actual_reserved,'actual_reserved_pusd'),(funds.maker_reserved,'maker_reserved_pusd')]:
@@ -363,7 +377,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     def funds_candidate(fault):
         return replace(admission,platform=dual_platform,maker_cash=rational([initial,initial]),
             reservations=ReservationBook.empty(2,capacity=1),current_entry_sequence=integers([3,3]),
-            current_local_prefix=integers([0,0]),fault=fault)
+            current_local_prefix=integers([0,0]),fault=fault,projected_markets=None)
     requests=torch.tensor([[0],[0]],device='cuda')
     pair_enabled=torch.ones((2,1),dtype=torch.bool,device='cuda')
     dual=Numbers.run_exact_batch(lambda:funds_candidate(torch.zeros(2,dtype=torch.int32,device='cuda')))
@@ -476,5 +490,6 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'bank_physical_rows':state.normalizer.bank.kinds.numel(),'masked_or_unemitted_rows':state.normalizer.bank.kinds.numel()-checked,
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
+        'actual_reserved_market_population_persists_after_conversion_and_directory_retry':True,
         'device_closed_cache_waiting_then_new_records_retry_checked':True,
         'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_original_six_rebate_read_fields_checked':True,'actual_per_Ledger_record_unresolved_Pi_and_maximum_loss_checked':True,'actual_economic_before_Trade_OrderFunds_Unknown_and_binding_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'actual_trade_role_and_net_fee_executed_read_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'full_clock_Ledger_reservation_delivered':False}

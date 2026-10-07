@@ -18,6 +18,9 @@ class PublicMarketState:
         self.shared = pm_state
         device = pm_state.slots.device
         self.market_count = len(columns['markets'])
+        # 原NativeRoot的BTreeMap按condition字符串选择当前市场；物理字典槽序不替代它。
+        self.condition_order = torch.tensor(sorted(range(self.market_count),
+            key=lambda index:columns['markets'][index]['condition_id']),dtype=torch.int64,device=device)
         self.lifecycle_states = columns['lifecycle_states']
         # 原Native只编码outcome 0/1；完整其他身份仍留在公共registry，不改变经济合法域。
         pairs = [[-1,-1] for _ in range(self.market_count)]

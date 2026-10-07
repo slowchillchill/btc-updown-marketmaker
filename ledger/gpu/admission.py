@@ -73,10 +73,13 @@ class AdmissionLifecycle:
     has_available: torch.Tensor
     available_at: torch.Tensor
     fault: torch.Tensor
+    projected_markets: object | None = None
 
     @classmethod
-    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None):
+    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None,projected_markets=None):
         roots,width=columns.row_refs.shape
+        if projected_markets is not None and (projected_markets.present.size(0) != roots or projected_markets.present.device != columns.row_refs.device):
+            raise ValueError('市场投影人口须同根同设备')
         life=LifecycleColumns.from_projection(bank,columns)
         book=ReservationBook.empty(roots,capacity=max(1,width),device=columns.row_refs.device)
         empty=torch.full_like(book.request_slots,-1)
@@ -92,7 +95,7 @@ class AdmissionLifecycle:
             current_entry_sequence,current_local_prefix,empty,empty.clone(),torch.zeros_like(columns.enabled),
             ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=empty.device)),
             torch.zeros(roots,dtype=torch.int64,device=empty.device),torch.zeros(roots,dtype=torch.bool,device=empty.device),
-            torch.zeros_like(columns.row_refs),platform.fault)
+            torch.zeros_like(columns.row_refs),platform.fault | (0 if projected_markets is None else projected_markets.fault),projected_markets)
 
     def funds(self):
         roots=self.fault.numel()
@@ -123,8 +126,36 @@ class AdmissionLifecycle:
         actual,maker=funds.actual_available,funds.maker_available
         book,event=self.reservations.reserve_action(requests,conditions,principal,fee,enabled&(funds.fault==0)[:,None],actual,maker,
             self.current_entry_sequence,self.current_local_prefix)
-        return replace(self,reservations=book,current_entry_sequence=event.current_ledger_sequence,
-            current_local_prefix=event.current_local_prefix,fault=self.fault | funds.fault | event.fault),event
+        population = self.projected_markets
+        ready = torch.ones_like(self.fault, dtype=torch.bool)
+        if population is not None:
+            from reservation import RESERVED
+            for column in range(requests.size(1)):
+                added = enabled[:, column] & (event.outcomes[:, column] == RESERVED)
+                cached = (book.request_slots == requests[:, column, None]) & (book.request_slots >= 0)
+                at = cached.to(torch.int32).argmax(1)
+                original_condition = book.conditions.gather(1,at[:,None])[:,0]
+                population, enough = population.admit(original_condition, added)
+                ready &= enough
+            ready &= population.fault == 0
+            population = population.coordinated(self.projected_markets, ready & (event.fault == 0))
+            old_matches = (self.reservations.request_slots[:,None,:] == requests[:,:,None]) & (self.reservations.request_slots[:,None,:] >= 0)
+            old_found = old_matches.any(2)
+            old_at = old_matches.to(torch.int32).argmax(2)
+            old_outcomes = self.reservations.outcomes.gather(1,old_at)
+            old_outcomes = torch.where(enabled & old_found,old_outcomes,0)
+            old_coordinates = torch.arange(requests.size(0),device=requests.device)[:,None]*self.reservations.capacity+old_at
+            old_sequence = _take(self.reservations.decision_sequences,old_coordinates.flatten())
+            old_sequence = old_sequence.select((enabled & old_found).flatten(),old_sequence.constant(0))
+            event = replace(event,outcomes=torch.where(ready[:,None],event.outcomes,old_outcomes),
+                ledger_sequences=event.ledger_sequences.select(ready.repeat_interleave(requests.size(1)),old_sequence),
+                current_ledger_sequence=event.current_ledger_sequence.select(ready,self.current_entry_sequence),
+                current_local_prefix=event.current_local_prefix.select(ready,self.current_local_prefix),
+                required_market_conditions=population.required_conditions,fault=event.fault | population.fault)
+        return replace(self,reservations=coordinate(book,self.reservations,ready),
+            projected_markets=population,current_entry_sequence=event.current_ledger_sequence.select(ready,self.current_entry_sequence),
+            current_local_prefix=event.current_local_prefix.select(ready,self.current_local_prefix),
+            fault=self.fault | funds.fault | event.fault | (0 if population is None else population.fault)),event
 
     def submission_started(self,request,event,global_request,item,enabled):
         sequence=self.current_entry_sequence+self.current_entry_sequence.constant(1)
@@ -302,6 +333,16 @@ class AdmissionLifecycle:
         order_funds,funds_ready=self.order_funds.advance(self.lifecycle,self.columns,trade_at,local,
             next_entry,self.applied_sequences,lifecycle_use & use,economic & result.applied & use)
         fault=fault | order_funds.fault
+        population = self.projected_markets
+        if population is not None:
+            # 原空经济delta也创建account.market；仅保存终态订单/成交索引不会创建lifecycle.market。
+            actual_condition = self.lifecycle.conditions[root,local]
+            creates_market = (result.applied & (actual_condition >= 0)) | (
+                order_event & ((tag != 3) | bound) & (actual_condition >= 0) & (old_open | open_flag)) | (
+                trade_event & (actual_condition >= 0) & (self.trades.flags[root,trade_at] | pending))
+            population, population_ready = population.admit(actual_condition, creates_market & use & (fault == 0))
+            fault |= population.fault
+            funds_ready &= population_ready
         use=use & funds_ready
         markets=self.unresolved_markets
         if markets is not None:
@@ -328,7 +369,9 @@ class AdmissionLifecycle:
         key=self.columns.positions[index]
         same=(self.columns.positions.reshape(roots,width,-1)==key[:,None,:]).all(dim=2)&self.lifecycle.emitted
         applied=self.applied | (same&success[:,None])
-        return replace(self,platform=platform,success_pools=success_pools.coordinated(self.success_pools,valid),
+        return replace(self,platform=platform,
+            projected_markets=None if population is None else population.coordinated(self.projected_markets,valid),
+            success_pools=success_pools.coordinated(self.success_pools,valid),
             trade_success=coordinate(trade_success,self.trade_success,valid),
             position_costs=coordinate(position_costs,self.position_costs,valid),
             unresolved_markets=None if markets is None else markets.coordinated(self.unresolved_markets,valid),

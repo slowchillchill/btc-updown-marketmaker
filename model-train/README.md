@@ -663,3 +663,12 @@ Registry、原订单来源、资金、已领取待消费NOE人口和已登记撤
 显式提供原current/old condition作用域时，`input_reservations.py` 写0—53预留字段，
 分别读取发送前、发送未知、平台确认等待的本金、费用和人口。当前市场不存在为NA，
 空旧集合为Known零；不以合并pending总额替代三个状态。作用域选择与其余账户字段仍待装配。
+
+`ledger/gpu/projected_markets.py` 保存原账户、预留、生命周期市场图的并集人口。
+成功本地预留即置位；真正经济提交（含零delta）及原open/pending计数写入继续置位，
+Converted/Released或余额归零不清除。共享condition物理目录未包含新身份时，返回
+扩展需求并保留原事务前缀，不能当资金拒绝。中途前缀须安装真实人口，缺少绑定为None。
+`native-inputs/gpu/input_scopes.py` 按真实公共admitted前缀、窗口及原condition字典序
+选择current，按上述已投影人口选择old；ContextOnly不替换全账户current。
+人口known标识仍由根初始化/恢复接纳，不能将未知前缀当旧市场Known空集。
+当前这些接口尚未接全根时钟与全部账户字段；scope查询未冒称整根运行验证。
