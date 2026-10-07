@@ -1,9 +1,29 @@
 // 原外层请求登记与合法接单生成只读基线；设备自行生成撮合/计量/账户候选。
+#[cfg(feature = "shared-execution")]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "AutoDL同提交合法接单→真实行情maker→撤单设备纵向验证"]
 async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
-    let (_directory, mut actor) =
-        active_market_actor(SimCallerRoleV1::ModelTrain, "run-gpu-legal-gtc").await;
+    let saved = Rc::new(RefCell::new(None));
+    let capture = Rc::clone(&saved);
+    let normalization = Rc::new(RefCell::new(Vec::new()));
+    let normalization_capture = Rc::clone(&normalization);
+    let (_directory, mut actor) = active_market_actor_with_projection(
+        SimCallerRoleV1::ModelTrain, "run-gpu-legal-gtc", Arc::new(successful_policy_v2_for_tests()),
+        move |path, opened| {
+            opened.projection_version = crate::runtime_v2::BusinessProjectionVersionV1::V4;
+            let reference = contracts::execution_normalization::DurableSourceReferenceV1 {
+                source: contracts::execution_normalization::ImmutableSourceReferenceV1::Location(path.display().to_string()),
+            };
+            let memory = noe_projection::MemoryNoeProjectionPortV4::new(path.parent().unwrap().join("noe-memory"),
+                opened.clone(), reference.clone(), reference.clone(), "create-run-gpu-legal-gtc".into(), "gpu-cancel-source".into());
+            *capture.borrow_mut() = Some(memory.observation());
+            let durable = noe_projection::SimV2NoeProjectionPortV4::new(path.parent().unwrap().join("noe-durable"),
+                opened.clone(), reference.clone(), reference, "create-run-gpu-legal-gtc".into(), "gpu-cancel-source".into());
+            Box::new(GpuNoeReferencePort { memory, durable, normalization_reference: normalization_capture, normalization_core: None })
+        },
+    ).await;
+    let observation = saved.borrow_mut().take().unwrap();
+    let _initial_records = observation.take_closed_records();
     let initial = decoded_maker_initial_events();
     let condition = initial[0].market.condition_id.clone();
     let token = TokenId("1".to_owned());
@@ -73,9 +93,23 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     let (next, cancel_receipt) = register_request_candidate(&actor.opened, actor.scenario.initial_market_directory(),
         state, &request_cutoff(maker_at+30), &cancel, 12, actor._latency_profile.as_ref(), actor._rule_snapshot.snapshot());
     state = next;
+    let next_private = state.session.as_ref().unwrap().next_private_feedback_sequence;
+    let next_batch = state.session.as_ref().unwrap().next_projection_batch_sequence;
     let (state, canceled) = advance_mutation_candidate_with_outputs(&actor.opened, actor.scenario.initial_market_directory(),
         state, cancel_receipt.platform_arrived_at_utc_ms, actor._rule_snapshot.snapshot(), actor._finality_policy.as_ref());
-    assert!(matches!(canceled.unwrap().business, MutationActionBusinessEffectV3::Cancel(_)));
+    let canceled = canceled.expect("真实取消请求处理");
+    assert!(matches!(canceled.business, MutationActionBusinessEffectV3::Cancel(_)));
+    let mut cancel_batches = Vec::new();
+    let state = gpu_accept_projection_reference(&mut actor, state, BusinessReducerOutputV2::MutationAction(Some(canceled)), &mut cancel_batches);
+    let closed_at = cancel_receipt.platform_arrived_at_utc_ms + 10_000;
+    actor.projection_port.close_receive_prefix(closed_at);
+    actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
+        crate::public_consumption::ActorTimeRecordV1 { run_id: actor.opened.run_id.clone(), drive_position: 1, logical_time_utc_ms: closed_at }));
+    let cancel_records = observation.take_closed_records().into_iter().map(|record|serde_json::json!({
+        "record":record.record(),"position":record.position(),"visibility":record.visibility(),
+    })).collect::<Vec<_>>();
+    assert_eq!(cancel_records.len(), 4, "CallerCanceled、真实释放、Target与Completed");
+    assert!(observation.take_closed_records().is_empty());
     checkpoints.push(serde_json::json!({"stage":"canceled", "state":snapshot(&state)}));
     let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
     let mut confirmed_path = serde_json::to_value(actor._finality_policy.normal_path()).unwrap();
@@ -89,7 +123,9 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         "confirmed_economic_path":confirmed_policy.normal_path(),
         "fee_rate":rules.fee_schedule.rate.value().to_string(), "fee_exponent":rules.fee_schedule.exponent,
         "taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
-        "post":post, "cancel_arrived_at":cancel_receipt.platform_arrived_at_utc_ms});
+        "post":post, "cancel_arrived_at":cancel_receipt.platform_arrived_at_utc_ms,
+        "cancel_records":cancel_records,"cancel_batches":cancel_batches,"cancel_closed_at":closed_at,
+        "next_private":next_private,"next_batch":next_batch,"session_seed":state.session.as_ref().unwrap().session_seed.0});
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
         .arg(std::env::var("B_GPU_ORDER_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();

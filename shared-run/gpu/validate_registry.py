@@ -352,9 +352,22 @@ def check_family(source):
             evidence=reference['record']['Evidence']['evidence']
             if 'Cancellation' in evidence.get('Control',{}).get('result',{}):target_rows.append(reference)
         incoming.sort(key=lambda r:(r['visibility']['Feedback']['delivery_sequence'],r['position']['record_ordinal']))
+        registered={value['request'] for value in frame['cancel_source_requests']}
+        receipt_mask=torch.tensor([[name in registered for name in request_ids]],dtype=torch.bool,device='cuda')
+        latest=frame['cancel_latest']['Known']
+        reference=latest if latest is not None and position_key(latest) not in cancel_seen else None
+        if reference is not None:cancel_seen.add(position_key(reference))
+        cancellation_incoming=[row for row in incoming if 'Cancellation' in row['record']['Evidence']['evidence'].get('Control',{}).get('result',{})]
+        if reference is not None:cancellation_incoming.append(reference)
+        cancel=cancel.register(receipt_mask)
+        cancel,device_targets,cancel_rows=receive_cancel_source(source_columns,cancellation_incoming,cancel,device_targets,directory_sequences,directory_present)
+        from cancel_projection import cancellation_order_events
+        normal_incoming=[row for row in incoming if row not in cancellation_incoming]
         def compute():
-            events=event_columns(incoming,identities,rank,buy_ids)
+            events=event_columns(normal_incoming,identities,rank,buy_ids)
             candidate=PublicRegistryState(events) if state is None else state.receive(events)
+            cancel_events=cancellation_order_events(cancel_rows,torch.arange(rank,rank+len(cancellation_incoming),device='cuda')[None,:])
+            candidate=candidate.receive(cancel_events)
             return candidate,candidate.freeze_orders(directory(frame),torch.tensor([frame['logical_at']],device='cuda'))
         state,view=Numbers.run_exact_batch(compute)
         rank+=max(1,len(incoming))
@@ -413,15 +426,6 @@ def check_family(source):
         objects_saved.append((objects,objects.members.clone(),objects.present.clone()))
         leg_saved.append((legs_view,remaining))
         saved.append((view,amounts(view.active),view.unfinished.clone()))
-        registered={value['request'] for value in frame['cancel_source_requests']}
-        receipt_mask=torch.tensor([[name in registered for name in request_ids]],dtype=torch.bool,device='cuda')
-        latest=frame['cancel_latest']['Known']
-        reference=latest if latest is not None and position_key(latest) not in cancel_seen else None
-        if reference is not None:cancel_seen.add(position_key(reference))
-        cancellation_incoming=[row for row in incoming if 'Cancellation' in row['record']['Evidence']['evidence'].get('Control',{}).get('result',{})]
-        if reference is not None:cancellation_incoming.append(reference)
-        cancel=cancel.register(receipt_mask)
-        cancel,device_targets=receive_cancel_source(source_columns,cancellation_incoming,cancel,device_targets,directory_sequences,directory_present)
         cancel_view=Numbers.run_exact_batch(lambda:cancel.freeze_global(torch.tensor([frame['logical_at']],device='cuda')))
         assert cancel_view.fault.cpu().tolist()==[0]
         assert values(cancel_view.pending_count)==[frame['cancel_pending']['Known']],frame['stage']

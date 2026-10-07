@@ -119,9 +119,11 @@ def main():
                 pool,account,transition = Numbers.run_exact_batch(lambda:pool.advance_one(account,torch.tensor([checkpoint['at']],device='cuda'),rebate_rate))
                 assert values(transition.fill_sequence) == [2]
             elif stage == 'canceled':
-                queue,quantity,account,_,_,found,_ = Numbers.run_exact_batch(lambda:cancel_base_order(queue,quantity,account,
+                queue,quantity,account,_,_,found,cancel_delta = Numbers.run_exact_batch(lambda:cancel_base_order(queue,quantity,account,
                     torch.tensor([-1,7],device='cuda'),torch.tensor([0,0],device='cuda'),torch.tensor([False],device='cuda'),torch.tensor([True],device='cuda')))
                 assert found.cpu().tolist() == [False,True]
+                from validate_cancel_execution import validate_actual_cancel
+                validate_actual_cancel(reference,cancel_delta)
             try:
                 assert_checkpoint(checkpoint['state'],quantity,account)
             except AssertionError as error:

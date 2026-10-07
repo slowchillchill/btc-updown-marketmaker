@@ -36,7 +36,7 @@ def expected_semantic(record):
         if 'Existing' in transition:
             transition=transition['Existing']
         name,fields=(transition,{}) if isinstance(transition,str) else next(iter(transition.items()))
-        tag={'OrderAcceptedEncumbranceApplied':0,'FillFinalityEconomicApplied':6,'TakerRebateAccrualApplied':10,
+        tag={'OrderAcceptedEncumbranceApplied':0,'CallerCancellationEncumbranceReleased':2,'FillFinalityEconomicApplied':6,'TakerRebateAccrualApplied':10,
             'MakerRebateAccrualFinalized':9,
             'MakerRebateDayFinalized':11,'TakerRebateDayFinalized':12,'MakerRebatePaid':13,'TakerRebatePaid':14}[name]
         if tag==9:
@@ -44,7 +44,7 @@ def expected_semantic(record):
         elif tag>=11:
             sequence=fields['attribution_day_utc_ms']
         else:
-            identity=fields['order_identity' if tag==0 else 'trade_identity']
+            identity=fields['order_identity' if tag in [0,2] else 'trade_identity']
             entity=json.loads(identity.split(':',1)[1])[-1]
             sequence=int(next(iter(next(iter(entity.values())).values())).removeprefix('sim-'))
         balance=value['balance_delta']
@@ -73,9 +73,18 @@ def expected_semantic(record):
             torch.tensor([value['economic_application_account_transition_seq'] is not None],device='cuda'),
             integers([value['economic_application_account_transition_seq'] or 0]),torch.full_like(zero,maker_kind),rational([maker_value])])
     if kind=='OrderLifecycle':
+        if value['event']=='CallerCanceled':
+            return encode_fields([zero,zero,zero,integers([entity_sequence(value['order_identity'],'Order')]),torch.full_like(zero,4),zero])
         return encode_fields([zero,zero,zero,integers([entity_sequence(value['order_identity'],'Order')]),zero,
             torch.full_like(zero,{'Open':0,'Matched':1}[value['event']['Accepted']['state']])])
     if kind=='Control':
+        if 'Cancellation' in value:
+            result=value['Cancellation']
+            return encode_fields([zero,integers([entity_sequence(result['order_identity'],'Order')]),
+                torch.full_like(zero,['Canceled','NotCanceledNoEffect','EvidenceUnknownNoEffect'].index(result['outcome']))])
+        if 'CancellationRequestCompleted' in value:
+            result=value['CancellationRequestCompleted']['result']
+            return encode_fields([zero,*[integers([result[name]]) for name in ['canceled_count','not_canceled_no_effect_count','evidence_unknown_no_effect_count']]])
         value=value['Submission']['outcome']['Accepted']
         return encode_fields([zero,zero,zero,zero,integers([entity_sequence(value['order']['order_identity'],'Order')]),
             torch.full_like(zero,{'Open':0,'Matched':1}[value['order']['state']]),

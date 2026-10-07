@@ -23,6 +23,7 @@ class PublicCancellationRows:
     private_sequences: object
     batch_sequences: object
     record_ordinals: object
+    delivery_sequences: object
     context_slots: torch.Tensor
     run_slots: torch.Tensor
     record_refs: torch.Tensor
@@ -65,7 +66,7 @@ def cancellation_rows_from_closed(bank,batches,closed):
         torch.arange(3,device=device)[None,None,:]*width+torch.arange(width,device=device)[None,:,None]).flatten()
     counts=_take(counts,field_coordinates)
     source=PublicCancellationRows(target.reshape(roots,width),request,target_fields[1],identity[3],
-        target_fields[2].reshape(roots,width),private,batch,ordinal,
+        target_fields[2].reshape(roots,width),private,batch,ordinal,closed.delivered_sequences,
         torch.cat([item.context_slots for item in batches],1).gather(1,at),
         torch.cat([item.run_slots for item in batches],1).gather(1,at),closed.record_refs,closed.available_at,refs[0],fault)
     platform=torch.cat([item.platform_at for item in batches],1).gather(1,at)
@@ -110,3 +111,20 @@ def receive_cancellations(state,targets,bank,batches,closed,order_sequences,orde
     rows,completions=cancellation_rows_from_closed(bank,batches,closed)
     incoming=targets_from_rows(rows,order_sequences,order_present)
     return state.receive(completions),append_targets(targets,incoming),rows
+
+
+def cancellation_order_events(source,receive_rank):
+    """原Control Canceled独立粘滞关闭，不等待另一条CallerCanceled lifecycle。"""
+    from registry import PublicRegistryEvents,CANCEL_TARGET
+    roots,width=source.received.shape
+    if receive_rank.shape!=(roots,width) or receive_rank.dtype!=torch.int64 or receive_rank.device!=source.received.device:
+        raise TypeError('首次取消领取顺序需要同设备int64[roots,records]')
+    blank=torch.zeros_like(source.record_refs)
+    absent=torch.zeros_like(source.received)
+    zero=source.orders.constant(0)
+    ratio=ExactRational.ratio(zero,zero.constant(1))
+    return PublicRegistryEvents(source.received,torch.full_like(blank,CANCEL_TARGET),source.orders,zero,
+        source.private_sequences,source.delivery_sequences,source.record_ordinals,source.batch_sequences,
+        source.context_slots,source.run_slots,torch.full_like(blank,-1),torch.full_like(blank,-1),source.record_refs,
+        source.available_at,receive_rank,ratio,ratio,ratio,blank,blank,absent,absent,
+        source.received&(source.outcomes==0),absent,source.fault)

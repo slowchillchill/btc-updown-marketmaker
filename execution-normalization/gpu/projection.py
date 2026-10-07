@@ -8,7 +8,8 @@ import torch
 from core import EvidenceBank,Normalizer,EVIDENCE,ECONOMIC,OUT_FACT
 from trade import map_trade
 from economic import map_economic
-from lifecycle import map_base_accepted,map_order_accepted,map_taker_contribution
+from lifecycle import (map_base_accepted,map_order_accepted,map_taker_contribution,
+    map_cancellation,map_cancellation_completed,map_order_canceled)
 from source_order import map_source_ordinals
 
 
@@ -50,6 +51,19 @@ class ProjectionBatch:
     economic_outcomes: object
     economic_assets: torch.Tensor
     economic_enabled: torch.Tensor
+    cancellation_method: torch.Tensor | None = None  # 原直接响应method冷字典坐标，非反馈为-1。
+
+
+
+@dataclass(frozen=True)
+class CancelTargetFeedback:
+    order_sequence: object
+    target_ordinal: object
+    input_item_refs: object
+    outcome: torch.Tensor  # Canceled/NotCanceledNoEffect/EvidenceUnknownNoEffect。
+    active: torch.Tensor
+    delta: object  # 原SIM实际释放delta；Control本身不重复释放资金。
+    fault: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -176,6 +190,65 @@ class Projection:
             private_values,batch_values,ordinals,times,normalized.rows,normalized.emitted,fault,
             categories,platforms,requests,items,self.context_slots[:,None].expand_as(rows),self.run_slots[:,None].expand_as(rows),
             economic_sequence,economic_balance,economic_outcome,self.asset_indices[:,None].expand_as(rows),economic_mask)
+
+    def cancellation(self,sampler,targets,at,direct_received,method,completed):
+        """已处理完整单资产请求的真实取消效果，保原双重顺序。
+
+        SIM完成所有target之后提供原冻结人口，包含NoEffect。private按各正取消
+        CallerCanceled→最终Direct分配；mapper source ordinal按全部Target→Completed
+        →各CallerCanceled/Economic分配。未完成请求须在SIM保留，不能提前调用。
+        """
+        from queues import _take,ExactInt
+        roots=self.account_slots.numel()
+        width=len(targets)+1
+        zero=torch.zeros_like(at)
+        for value in [at,direct_received,method]:
+            if value.shape!=(roots,) or value.dtype!=torch.int64 or value.device!=self.account_slots.device:
+                raise TypeError('取消完成时点/method需同设备int64[roots]')
+        if completed.shape!=(roots,) or completed.dtype!=torch.bool or completed.device!=at.device:
+            raise TypeError('完整取消请求完成需同设备bool[roots]')
+        lives=[target.active&(target.outcome==0) for target in targets]
+        active=torch.stack([*lives,completed],1)
+        error=torch.zeros_like(at,dtype=torch.int32)
+        for target in targets:error=error|torch.where(target.active,target.fault|target.delta.fault,0)
+        error=error|((method<0)&completed).to(torch.int32)
+        direct=torch.zeros_like(active);direct[:,-1]=True
+        platforms=at[:,None].expand(roots,width)
+        received=torch.zeros_like(platforms);received[:,-1]=direct_received
+        emitter,emission=self.emitter.emit(sampler,active,direct,platforms,platforms,received,error[:,None].expand_as(active))
+        categories=torch.tensor([1]*len(targets)+[0],device=at.device).expand(roots,width)
+        direct_count=sum((target.active.to(torch.int64) for target in targets),torch.zeros_like(at))+1
+        counts=torch.stack([*[1+target.delta.emitted.to(torch.int64) for target in targets],direct_count],1)
+        ordinals=map_source_ordinals(emission.emitted,categories,counts,error[:,None].expand_as(active))
+        def sequence(column):
+            positions=torch.arange(roots,device=at.device)*width+column
+            return _take(emission.private_sequences,positions),_take(emission.batch_sequences,positions),emission.received_at[:,column]
+        private,batch,time=sequence(width-1)
+        records=[]
+        source_ordinal=ordinals.first_ordinals[:,-1]
+        for target in targets:
+            wanted=target.active&emission.emitted[:,-1]
+            mapped=map_cancellation(target.order_sequence,target.target_ordinal,target.input_item_refs,target.outcome,
+                private,source_ordinal,self.account_slots,self.request_slots,wanted)
+            records.append((mapped,EVIDENCE,private,batch,time,zero,at,wanted))
+            source_ordinal=source_ordinal+target.active.to(torch.int64)
+        total=lambda outcome:ExactInt.from_i64_tensor(sum(((target.active&(target.outcome==outcome)).to(torch.int64)
+            for target in targets),torch.zeros_like(at)))
+        mapped=map_cancellation_completed(total(0),total(1),total(2),private,source_ordinal,
+            self.account_slots,self.request_slots,emission.emitted[:,-1])
+        records.append((mapped,EVIDENCE,private,batch,time,zero,at,emission.emitted[:,-1]))
+        for column,target in enumerate(targets):
+            private,batch,time=sequence(column)
+            mapped=map_order_canceled(target.order_sequence,private,ordinals.first_ordinals[:,column],
+                self.account_slots,self.condition_slots,self.token_slots,emission.emitted[:,column])
+            records.append((mapped,EVIDENCE,private,batch,time,torch.ones_like(at),at,emission.emitted[:,column]))
+            mapped=map_economic(target.delta,self.account_slots,self.condition_slots,self.token_slots,
+                self.asset_indices,self.asset_roots,private,ordinals.first_ordinals[:,column]+1,at,
+                torch.full_like(at,2),target.order_sequence,zero)
+            records.append((mapped,ECONOMIC,private,batch,time,torch.ones_like(at),at,target.delta.emitted&emission.emitted[:,column]))
+        candidate,batch=self._finish(emitter,records,emission.root_fault|ordinals.fault)
+        return candidate,replace(batch,cancellation_method=torch.where(batch.source_categories==0,
+            method[:,None],torch.full_like(batch.source_categories,-1)))
 
     def acceptance(self,sampler,prepared,effects,pool,at,direct_received):
         """已真实接纳Base产生Order/逐fill/直接响应；其它结果须对应producer。"""

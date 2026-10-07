@@ -111,4 +111,4 @@ def receive_cancel_source(source,incoming,state,targets,order_sequences,order_pr
             actual_ordinals=target.input_item_refs.fields[1].cpu().reshape(len(rows),-1).tolist()[column]
             assert [(item_ids[member['item_id']],member['batch_item_ordinal']) for member in association['input_item_refs']]==[
                 (identifier,ordinal) for identifier,ordinal,present in zip(actual_ids,actual_ordinals,mask) if present]
-    return state,targets
+    return state,targets,target
