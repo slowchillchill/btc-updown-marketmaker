@@ -411,6 +411,7 @@ def main():
         'actual_positive_maker_fixed_address_commit_then_consumed_step_replay_checked':checked_captured_maker,
         'actual_positive_maker_pool_shortage_keeps_owned_state_before_cold_growth_checked':checked_captured_maker,
         'controlled_global_resource_gate_blocks_successful_Maker_candidate_and_feedback_checked':checked_captured_maker,
+        'actual_Maker_native_CUDA_WHILE_uses_device_cursor_and_skips_consumed_step_checked':checked_captured_maker,
         'runtime_hidden_reference_handler_covered':False,
         'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
@@ -477,7 +478,7 @@ def check_captured_hidden_step(runtime,index,tensor,fee_rate,fee_exponent,rebate
     graph.replay()
     torch.cuda.synchronize()
     compare(actual,expected)
-    from base_runtime_storage import BaseRuntimeStorage
+    from base_runtime_storage import BaseRuntimeStorage,CapturedHiddenBaseStep
     # 同一真实正Maker在尚未扩fill池的原状态上仅生成容量请求；全字段不提交。
     blocked=Numbers.device_exact_batch(lambda:compute(original_runtime),word_capacity=4,
         device=runtime.account.cash.words.device)
@@ -508,26 +509,21 @@ def check_captured_hidden_step(runtime,index,tensor,fee_rate,fee_exponent,rebate
             assert not getattr(frame.event,name).emitted.cpu().item()
     storage=BaseRuntimeStorage(runtime,expected)
     old=storage.snapshot()
-    def committed_step():
-        candidate=Numbers.device_exact_batch(lambda:compute(storage.runtime),word_capacity=4,
-            device=runtime.account.cash.words.device)
-        fit,output=storage.commit_hidden_base(candidate)
-        return candidate,fit,output
-    committed_graph=torch.cuda.CUDAGraph()
-    with torch.cuda.graph(committed_graph):
-        committed,fit,committed_output=committed_step()
-    committed_graph.replay()
+    paths=torch.zeros((storage.runtime.orders.roots,storage.runtime.hidden.queues.capacity),dtype=torch.int64,device=horizon.device)
+    loop=CapturedHiddenBaseStep(storage,index,horizon,enabled,conditions,paths,
+        fee_rate,fee_exponent,rebate,word_capacity=4)
+    loop.replay()
     torch.cuda.synchronize()
-    assert fit.cpu().item()
+    assert loop.resources_fit.cpu().item()
     compare(storage.runtime,expected,"committed")
-    compare(committed_output,effect,"committed_effects")
+    compare(loop.output,effect,"committed_effects")
     frozen=storage.snapshot()
-    frozen_effects=storage.snapshot_output(committed_output)
+    frozen_effects=storage.snapshot_output(loop.output)
     # 已提交游标继续作为同一图的输入；同原step已消费，不再生成fill/消耗序号。
-    committed_graph.replay()
+    loop.replay()
     torch.cuda.synchronize()
     compare(storage.runtime,frozen,"consumed_step")
-    assert not any(frame.event.emitted.cpu().item() for frame in committed_output.fills)
+    assert not any(frame.event.emitted.cpu().item() for frame in loop.output.fills)
     compare(old,runtime,"old_snapshot")
     compare(frozen,expected,"frozen_after_commit")
     compare(frozen_effects,effect,"frozen_committed_effects")

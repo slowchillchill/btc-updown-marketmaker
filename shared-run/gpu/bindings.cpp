@@ -4,6 +4,54 @@
 #include <c10/cuda/CUDAException.h>
 #include <limits>
 #include "../../contracts/gpu/exact.cuh"
+extern "C" cudaError_t public_graph_condition_node(cudaGraphNode_t*, cudaGraph_t,
+    cudaGraphNode_t, cudaGraphConditionalHandle, const bool*);
+
+class DeviceConditionalLoop {
+  torch::Tensor ready_;
+  cudaGraph_t graph_ = nullptr;
+  cudaGraphExec_t executable_ = nullptr;
+ public:
+  DeviceConditionalLoop(uint64_t entry, uint64_t body, torch::Tensor ready) : ready_(ready) {
+    TORCH_CHECK(ready.is_cuda() && ready.scalar_type() == torch::kBool && ready.is_contiguous()
+        && ready.dim() == 0, "条件循环须持有设备bool标量");
+    const c10::cuda::CUDAGuard guard(ready.device());
+    try {
+      C10_CUDA_CHECK(cudaGraphCreate(&graph_, 0));
+      cudaGraphConditionalHandle handle;
+      C10_CUDA_CHECK(cudaGraphConditionalHandleCreate(&handle, graph_, 0, 0));
+      cudaGraphNode_t entry_node, setter, loop;
+      C10_CUDA_CHECK(cudaGraphAddChildGraphNode(&entry_node, graph_, nullptr, 0,
+          reinterpret_cast<cudaGraph_t>(entry)));
+      C10_CUDA_CHECK(public_graph_condition_node(&setter, graph_, entry_node, handle, ready.data_ptr<bool>()));
+      cudaGraphNodeParams params{};
+      params.type = cudaGraphNodeTypeConditional;
+      params.conditional.handle = handle;
+      params.conditional.type = cudaGraphCondTypeWhile;
+      params.conditional.size = 1;
+      C10_CUDA_CHECK(cudaGraphAddNode(&loop, graph_, &setter, 1, &params));
+      auto loop_body = params.conditional.phGraph_out[0];
+      cudaGraphNode_t child, tail;
+      C10_CUDA_CHECK(cudaGraphAddChildGraphNode(&child, loop_body, nullptr, 0,
+          reinterpret_cast<cudaGraph_t>(body)));
+      C10_CUDA_CHECK(public_graph_condition_node(&tail, loop_body, child, handle, ready.data_ptr<bool>()));
+      C10_CUDA_CHECK(cudaGraphInstantiateWithFlags(&executable_, graph_, 0));
+    } catch (...) {
+      if (executable_) cudaGraphExecDestroy(executable_);
+      if (graph_) cudaGraphDestroy(graph_);
+      throw;
+    }
+  }
+  DeviceConditionalLoop(const DeviceConditionalLoop&) = delete;
+  ~DeviceConditionalLoop() {
+    if (executable_) cudaGraphExecDestroy(executable_);
+    if (graph_) cudaGraphDestroy(graph_);
+  }
+  void replay() {
+    const c10::cuda::CUDAGuard guard(ready_.device());
+    C10_CUDA_CHECK(cudaGraphLaunch(executable_, c10::cuda::getCurrentCUDAStream().stream()));
+  }
+};
 extern "C" void public_gpu_decimal(const uint8_t*, int64_t, const int64_t*,
     const bool*, uint32_t*, uint32_t*, int8_t*, int32_t*, int32_t*, int64_t, cudaStream_t);
 
@@ -306,6 +354,9 @@ std::vector<torch::Tensor> ordered_attribution(torch::Tensor tn,torch::Tensor td
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  pybind11::class_<DeviceConditionalLoop>(m, "DeviceConditionalLoop")
+      .def(pybind11::init<uint64_t, uint64_t, torch::Tensor>())
+      .def("replay", &DeviceConditionalLoop::replay);
   m.def("ordered_attribution", &ordered_attribution);
   m.def("sim_trade_key", &sim_trade_key);
   m.def("integer_op", &integer_op);

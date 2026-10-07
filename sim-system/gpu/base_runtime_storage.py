@@ -6,7 +6,7 @@ BaseSimRuntime生成。本层只提交已经共同协调的候选，不选择阶
 """
 from dataclasses import fields, is_dataclass, replace
 import torch
-from queues import ExactInt
+from queues import ExactInt, Numbers
 from fill_finality import FillRecord
 from hidden_base_execution import HiddenBaseEffects
 
@@ -109,3 +109,46 @@ class BaseRuntimeStorage:
                 terminal=event.terminal & resources_fit, **updates))
         # 容量需求/fault仍归冷退出协调，不把未提交候选当成成功反馈。
         return replace(output, fills=tuple(committed(frame) for frame in output.fills))
+
+
+class CapturedHiddenBaseStep:
+    """实际原LevelChange的设备条件入口；尚不分派其它源步/阶段。
+
+    CUDA WHILE读真实游标/phase/资源门；成功消费后退出，需求不足也退出供冷协调。
+    原固定源步索引及布局在冷边界绑定。这里不宣称跨步循环或完整资源重捕获。
+    """
+    def __init__(self, storage, index, horizon, enabled, conditions, selected_paths,
+                 fee_rate, fee_exponent, rebate_rate, *, word_capacity):
+        self.storage = storage
+        self._inputs = (horizon, enabled, conditions, selected_paths, fee_rate, rebate_rate)
+        self.ready = torch.zeros((), device=horizon.device, dtype=torch.bool)
+        def ready():
+            runtime = storage.runtime
+            choice = runtime.choose(None, None, horizon, enabled)
+            return (choice.enabled(4) & runtime.hidden_frontier.step_enabled(index)).any()
+        self.body = torch.cuda.CUDAGraph(keep_graph=True)
+        with torch.cuda.graph(self.body):
+            def compute():
+                runtime = storage.runtime
+                choice = runtime.choose(None, None, horizon, enabled)
+                return runtime.apply_hidden_step(choice, index, conditions, selected_paths,
+                    fee_rate, fee_exponent, rebate_rate)
+            self.candidate = Numbers.device_exact_batch(compute, word_capacity=word_capacity,
+                device=horizon.device)
+            self.resources_fit, self.output = storage.commit_hidden_base(self.candidate)
+            self.ready.copy_(ready() & self.resources_fit)
+        self.entry = torch.cuda.CUDAGraph(keep_graph=True)
+        with torch.cuda.graph(self.entry):
+            # 本次零次迭代时不可暴露上次graph输出；仅重置发射位，不重新领取反馈。
+            for frame in self.output.fills:
+                frame.event.emitted.zero_()
+                frame.event.terminal.zero_()
+                for name in ('economic_delta', 'failure_delta', 'rebate_delta'):
+                    getattr(frame.event, name).emitted.zero_()
+            self.ready.copy_(ready())
+        # 图句柄是冷资源元数据；所有业务条件仍在上述设备列中。
+        self._loop = Numbers.public_extension().DeviceConditionalLoop(
+            self.entry.raw_cuda_graph(), self.body.raw_cuda_graph(), self.ready)
+
+    def replay(self):
+        self._loop.replay()
