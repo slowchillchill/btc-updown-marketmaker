@@ -30,6 +30,16 @@ run_test() {
     tail -4 "$artifact_dir/$log"
 }
 case "$case_name" in
+    native-account-reference)
+        export NATIVE_ACCOUNT_SOURCE_OUTPUT="$artifact_dir/original-native-account.json"
+        command=(cargo test --manifest-path model-train/native-inputs/Cargo.toml --lib --locked --offline
+            real_public_chain_freezes_cash_encodes_original_legs_and_cold_root -- --nocapture)
+        printf '%q ' "${command[@]}" > "$artifact_dir/commands.txt"
+        printf '\n' >> "$artifact_dir/commands.txt"
+        echo "stage=original_NativeInputRoot_consume_and_encode commit=$(git rev-parse HEAD)"
+        "${command[@]}" > "$artifact_dir/native-reference.log" 2>&1
+        tail -4 "$artifact_dir/native-reference.log"
+        ;;
     trade-records)
         run_test gpu_legal_multiask tests.log
         ;;

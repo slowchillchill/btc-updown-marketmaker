@@ -283,6 +283,9 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
     if let Some(path) = std::env::var_os("NATIVE_INPUT_FIXTURE_OUTPUT") {
         std::fs::write(path, serde_json::to_vec(&exported).unwrap()).unwrap();
     }
+    if let Some(path) = std::env::var_os("NATIVE_ACCOUNT_SOURCE_OUTPUT") {
+        std::fs::write(path, serde_json::to_vec(&exported).unwrap()).unwrap();
+    }
 }
 
 #[test]
@@ -1119,6 +1122,23 @@ pub(crate) fn exported_group(group: &NativeInputGroup) -> serde_json::Value {
     use crate::prefix::*;
     use num_bigint::BigUint;
     let mut output = serde_json::to_value(group).unwrap();
+    if std::env::var_os("NATIVE_ACCOUNT_SOURCE_OUTPUT").is_some() {
+        // 借用consume已冻结的同一次读面，不再次freeze或领取共享NOE。
+        let before = group.action_before.as_ref().unwrap();
+        output["frozen_account_source"] = serde_json::json!({
+            "ledger": before.ledger(),
+            "economics": before.economics(),
+            "pending_noe_record_count": before.pending_noe_record_count(),
+            "requests": before.request_funds().map(|request| serde_json::json!({
+                "request_identity": request.request_identity,
+                "condition_id": request.condition_id,
+                "reservation_state": request.reservation_state,
+                "principal_pusd": request.principal_pusd,
+                "immediate_fee_pusd": request.immediate_fee_pusd,
+                "last_ledger_entry_seq": request.last_ledger_entry_seq,
+            })).collect::<Vec<_>>(),
+        });
+    }
     for (row, json) in group
         .rows
         .iter()
