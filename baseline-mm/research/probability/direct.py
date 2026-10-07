@@ -390,7 +390,9 @@ def price_samples(db,rows,samples,carry,kind):
         query='SELECT clock AS at,epoch_ms(timestamp_received) AS received,event,n.price,window_s,order_id FROM effective_common e JOIN normalized n ON e.full_accuracy_value=n.raw'
     db.execute('CREATE TEMP TABLE price_facts AS '+query)
     if carry:
-        names=list(carry[0]);db.executemany('INSERT INTO price_facts ('+','.join(names)+') VALUES ('+','.join('?' for _ in names)+')',[[f[k] for k in names] for f in carry])
+        names=list(carry[0])
+        columns=','.join('"'+name.replace('"','""')+'"' for name in names)
+        db.executemany('INSERT INTO price_facts ('+columns+') VALUES ('+','.join('?' for _ in names)+')',[[f[k] for k in names] for f in carry])
     if samples:
         ids=','.join(map(str,samples))
         cursor=db.execute(f'''SELECT t.id,f.* FROM targets t JOIN price_facts f ON f.at<=t.at
