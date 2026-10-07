@@ -192,9 +192,16 @@ def main():
     for incoming in [*maker_batches,terminal_batch]:
         public=Numbers.run_exact_batch(lambda:public.append_batch(projection.normalizer.bank,incoming))
     gates=gates.set_receive(tensor([41000]),enabled).set_public(tensor([41000]),enabled)
+    progress('Terminal_public_receive_begin',physical_columns=public.waiting.received.size(1))
     public,last=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,torch.ones_like(public.waiting.received)))
+    progress('Terminal_public_receive_end')
     assert last.fault.cpu().tolist()==[0] and last.closed.emitted.sum().cpu().item()==(4 if with_pending else 3)
     assert not public.waiting.received.logical_and(~public.waiting.consumed).any().cpu().item()
+    if with_pending:
+        predecessors=Numbers.run_exact_batch(lambda:public.ledger.resolutions.economic_predecessors(
+            public.ledger.trade_success,public.ledger.rebate_days))
+        assert predecessors.known.cpu().tolist()==[True] and predecessors.fault.cpu().tolist()==[0]
+        assert predecessors.closed.cpu().tolist()==[source['ledger_resolutions'][0]['economic_predecessors_closed']['Known']]
     after=source['ledger_after']['projection']
     assert values(public.ledger.current_entry_sequence)==[after['ledger_entry_seq']]
     assert values(public.ledger.platform.platform_source_prefix)==[after['platform_source_prefix']]
@@ -272,7 +279,9 @@ def main():
             assert batch.emitted.sum().cpu().item()==len(original['records'])
             public=Numbers.run_exact_batch(lambda:public.append_batch(projection.normalizer.bank,batch))
             gates=gates.set_receive(tensor([50000]),enabled).set_public(tensor([50000]),enabled)
+            progress('actual_post_resolution_finality_receive_begin',at=original['at'],physical_columns=public.waiting.received.size(1))
             public,received=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,torch.ones_like(public.waiting.received)))
+            progress('actual_post_resolution_finality_receive_end',at=original['at'])
             assert received.fault.cpu().tolist()==[0]
             expected=original['ledger']['projection']
             assert values(public.ledger.current_entry_sequence)==[expected['ledger_entry_seq']]
@@ -282,13 +291,23 @@ def main():
             result=Numbers.run_exact_batch(lambda:public.ledger.resolutions.read(public.ledger.success_pools))
             assert [Fraction(n,d) for n,d in zip(values(result.winner_orphan_receivable.numerator),values(result.winner_orphan_receivable.denominator))]==[Fraction(original['resolutions'][0]['orphan_receivable'])]
             assert public.ledger.rebate_days.maker_accrual_finalized.cpu().tolist()==[[confirmed]]
+            predecessors=Numbers.run_exact_batch(lambda:public.ledger.resolutions.economic_predecessors(
+                public.ledger.trade_success,public.ledger.rebate_days))
+            assert predecessors.known.cpu().tolist()==[True] and predecessors.fault.cpu().tolist()==[0]
+            assert predecessors.closed.cpu().tolist()==[original['resolutions'][0]['economic_predecessors_closed']['Known']]
+        cold_unknown=replace(public.ledger.resolutions,known=tensor([False],torch.bool))
+        unknown=Numbers.run_exact_batch(lambda:cold_unknown.economic_predecessors(public.ledger.trade_success,public.ledger.rebate_days))
+        assert unknown.known.cpu().tolist()==[False]
     print(json.dumps({'actual_empty_source_Books_to_outer_GTC_new_runtime_bid_checked':True,
         'actual_Terminal_order_close_tag5_release_and_Resolved_same_public_Ledger_checked':True,
         'original_end_clears_FIFO_without_releasing_GTC_then_Terminal_releases_once_checked':True,
         'new_schema18_19_complete_resolution_identity_and_original_NOE_positions_checked':True,
         'old_public_prefix_and_resource_denied_Terminal_preserved_checked':True,
-        'actual_records':6+int(with_pending),'pending_actual_fill_population':int(with_pending),
-        'actual_Maker_pending_Terminal_then_MINED_CONFIRMED_and_market_result_checked':with_pending,'full_root_and_requested_settlement':False,
+        'actual_records':6+int(with_pending)+sum(len(r['records']) for r in source['finality_reference']),
+        'actual_records_before_post_resolution_finality':6+int(with_pending),'pending_actual_fill_population':int(with_pending),
+        'actual_Maker_pending_Terminal_then_MINED_CONFIRMED_and_market_result_checked':with_pending,
+        'public_Ledger_economic_predecessors_and_Maker_gate_checked':with_pending,
+        'growth_new_slot_does_not_alias_old_pending_identity_checked':with_pending,'full_root_and_requested_settlement':False,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 
 

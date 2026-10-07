@@ -51,6 +51,13 @@ class ResolutionRead:
 
 
 @dataclass(frozen=True)
+class ResolutionPredecessors:
+    closed: torch.Tensor
+    known: torch.Tensor
+    fault: torch.Tensor
+
+
+@dataclass(frozen=True)
 class MarketResolutions:
     sources: object
     roots: torch.Tensor
@@ -129,3 +136,20 @@ class MarketResolutions:
         return ResolutionRead(self.present, self.identities, self.terminals, self.maker_category,
             select(pair, self.present, zero), select(orphan, self.present, zero), self.known,
             self.fault | self.root_fault[self.roots] | pair.fault | orphan.fault)
+
+    def economic_predecessors(self, trades, days):
+        """公开Ledger同condition成交与Maker结果门，不读取隐藏执行义务。"""
+        condition=trades.conditions[self.roots]
+        facts=trades.has_fact[self.roots] & (condition==self.conditions[:,None])
+        disposition=trades.dispositions[self.roots]
+        pending=torch.where(disposition==2,~trades.success_applied[self.roots],
+            torch.where((disposition==3)|(disposition==4),trades.economic_applied[self.roots],True))
+        closed=~(facts & pending).any(1)
+        known=self.known & self.present
+        fault=self.fault | self.root_fault[self.roots]
+        if days is None:
+            return ResolutionPredecessors(torch.zeros_like(closed),torch.zeros_like(known),fault)
+        members=days.condition_slots[self.roots]==self.conditions[:,None]
+        maker=(members & days.maker_accrual_finalized[self.roots]).any(1)
+        known &= members.any(1)
+        return ResolutionPredecessors(closed & maker,known,fault | days.fault[self.roots])

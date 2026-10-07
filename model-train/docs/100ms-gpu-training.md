@@ -1023,3 +1023,5 @@ Pi/历史亏损仍在每条实际提交时更新。请求、费用、兑付与�
 非零市场关闭接线沿同一真实 DPT 空双腿 Book 和原外层 GTC 请求建立账户段。运行价位由原意图的精确限价冷分配，不要求来源盘口已有该价位，也不从原订单后态初始化。SIM 按原订单字符串序关闭全部该市场 Base 订单，订单生命周期与正额本金释放使用完整 Resolution/Order 身份（设备 schema19/18），最后发一次 Resolved。Registry 在首次公开领取时独立关闭订单；Ledger 仅在实际经济提交时释放本金，并更新该条目的订单 condition/open/last sequence。零释放的订单关闭不耗平台经济序。当前工程对照仅一笔挂单、无实际 pending fill；请求式兑付、跨页和完整宿主仍继续。
 
 待成交判定义务沿同一原成交池接入最终性提交：首次合格Terminal保存非终局fill的完整u64序号，MINED及经济应用保留前驱，已提交CONFIRMED/FAILED才清退对应身份。Maker市场结果仍是独立请求前驱。有限工程对照使用原decode_and_seal的MATCHED+0/MINED+5000/CONFIRMED+6000、economic ordinal1，真实typedraw在26000增加Bid 0.4×3、27000归零生成Maker，市场end30000、Terminal31000先产生Resolved，应收随后成功更新；此密封profile仅用于该顺序验证，不是正式训练默认。请求式RESOLUTION_REDEEM_ONLY及Actor无Redeem保持；本切片未实现请求发送或清偿。
+
+公开请求前驱读面由 `MarketResolutions.economic_predecessors(TradeSuccess, RebateDays)` 按同condition归约：FinalSuccess须success_applied，FinalFailure须已撤销economic_applied，其余仍pending，再与原maker_accrual_finalized取AND。完整经济冷前缀的Known保持独立，Resolved不补历史；该读面不读取SIM隐藏pending，也不替代请求协调器的承诺／应收首次资格或后台独立屏障。上述工程Maker源在Terminal/MINED为false、CONFIRMED并消费实际Maker结果后为true，五条后续最终性NOE连同前面七条构成12条完整人口。
