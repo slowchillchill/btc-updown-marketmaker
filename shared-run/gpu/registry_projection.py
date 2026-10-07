@@ -88,7 +88,9 @@ def public_rows_from_closed(bank,batches,closed,receive_rank):
         units(decoded[3][6]),units(decoded[3][7]),units(decoded[8][10]),
         decoded[8][8].reshape(roots,width),decoded[8][6].reshape(roots,width),
         (formed & (decoded[7][5]==1)).reshape(roots,width),formed.reshape(roots,width),
-        torch.zeros_like(received),closed_order.reshape(roots,width),fault)
+        torch.zeros_like(received),closed_order.reshape(roots,width),
+        torch.cat([batch.platform_at for batch in batches],1).gather(1,at),
+        torch.cat([batch.received_at for batch in batches],1).gather(1,at),fault)
 
     submission=active & (schemas==3)
     fault=fault | (submission & ((decoded[3][1]<0)|(decoded[3][1]>2))).reshape(roots,width).any(1).to(torch.int32)

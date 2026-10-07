@@ -34,7 +34,7 @@ def position_key(reference):
     return (position['context_reference'], watermark['run_id'], watermark['projection_batch_sequence'], position['record_ordinal'])
 
 
-def event_columns(references, identities, rank_start, requests):
+def event_columns(references, identities, rank_start, requests, catalog):
     # 这是验证器冷边界的原强类型JSON解码，不是生产逐事件CPU业务循环。
     rows = []
     for reference in references:
@@ -42,7 +42,14 @@ def event_columns(references, identities, rank_start, requests):
         source = evidence['source_order']
         row = dict(kind=ORDER_LIFECYCLE, order=0, trade=0, private=source['sequence']['PrivateFeedback']['private_feedback_sequence'],
             delivery=reference['visibility']['Feedback']['delivery_sequence'], batch=reference['position']['source_watermark']['projection_batch_sequence'], available=reference['visibility']['Feedback']['available_at_utc_ms'], ordinal=reference['position']['record_ordinal'],
-            request=-1,item=-1,matched='0', opened='0', quantity='0', role=0, disposition=0, formed_matched=False, formation=False, canceled=False, closed=False)
+            platform=0,received_at=0,request=-1,item=-1,matched='0', opened='0', quantity='0', role=0, disposition=0, formed_matched=False, formation=False, canceled=False, closed=False)
+        original_source=evidence['source_reference']['record']
+        if 'DirectResponse' in original_source:
+            times=original_source['DirectResponse']
+            row.update(platform=times['platform_responded_at_utc_ms'],received_at=times['response_received_at_utc_ms'])
+        elif 'OrderLifecycle' in original_source:
+            times=original_source['OrderLifecycle']
+            row.update(platform=times['platform_event_at_utc_ms'],received_at=times['feedback_received_at_utc_ms'])
         payload = evidence['evidence']
         if 'Control' in payload:
             control = payload['Control']['result']
@@ -78,18 +85,19 @@ def event_columns(references, identities, rank_start, requests):
         rows.append(row)
     active = [True]*len(rows)
     if not rows:
-        rows=[dict(kind=0,order=0,trade=0,private=0,delivery=0,batch=0,available=0,ordinal=0,request=-1,item=-1,matched='0',opened='0',quantity='0',role=0,disposition=0,formed_matched=False,formation=False,canceled=False,closed=False)]
+        rows=[dict(platform=0,received_at=0,kind=0,order=0,trade=0,private=0,delivery=0,batch=0,available=0,ordinal=0,request=-1,item=-1,matched='0',opened='0',quantity='0',role=0,disposition=0,formed_matched=False,formation=False,canceled=False,closed=False)]
         active=[False]
     tensor = lambda name,dtype=torch.int64:torch.tensor([[row[name] for row in rows]],dtype=dtype,device='cuda')
     integer = lambda name:integers([row[name] for row in rows])
     ratio = lambda name:rational([row[name] for row in rows])
     return PublicRegistryEvents(torch.tensor([active],dtype=torch.bool,device='cuda'), tensor('kind'),
         integer('order'),integer('trade'),integer('private'),integer('delivery'),integer('ordinal'),integer('batch'),
-        torch.zeros((1,len(rows)),dtype=torch.int64,device='cuda'),torch.zeros((1,len(rows)),dtype=torch.int64,device='cuda'),tensor('request'),tensor('item'),
-        torch.arange(rank_start,rank_start+len(rows),device='cuda')[None,:],tensor('available'),
+        torch.tensor([[catalog['contexts'][r['position']['context_reference']] for r in references] if references else [0]],device='cuda'),
+        torch.tensor([[catalog['runs'][r['position']['source_watermark']['run_id']] for r in references] if references else [0]],device='cuda'),tensor('request'),tensor('item'),
+        torch.tensor([[catalog['references'][position_key(r)][0] for r in references] if references else [-1]],device='cuda'),tensor('available'),
         torch.arange(rank_start,rank_start+len(rows),device='cuda')[None,:],ratio('matched'),ratio('opened'),ratio('quantity'),
         tensor('role'),tensor('disposition'),tensor('formed_matched',torch.bool),tensor('formation',torch.bool),tensor('canceled',torch.bool),
-        tensor('closed',torch.bool),torch.zeros(1,dtype=torch.int32,device='cuda'))
+        tensor('closed',torch.bool),tensor('platform'),tensor('received_at'),torch.zeros(1,dtype=torch.int32,device='cuda'))
 
 
 def completion_columns(reference,requests,catalog):
@@ -278,11 +286,43 @@ def compare_scoped(frame,read,catalog,oracle_key='scoped_cancellation_requests')
                 if counts_known[index][outcome]:assert counts[index*3+outcome]==oracle['Known']
 
 
+def compare_order_sources(frame,sources,orders,catalog):
+    assert sources.fault.cpu().tolist()==[0]
+    raw={order['identity']:order for order in frame['raw_orders']}
+    for column,name,source_kind in [(sources.formed,'formed','OrderLifecycle'),(sources.latest_direct,'latest_direct','DirectResponse')]:
+        present=column.present.cpu().tolist()[0]
+        slots=column.record_refs.cpu().tolist()[0]
+        platform=column.platform_at.cpu().tolist()[0]
+        received=column.received_at.cpu().tolist()[0]
+        for index,identity in enumerate(orders):
+            expected=raw.get(identity,{}).get(name)
+            assert present[index]==(expected is not None),(frame['stage'],name,identity)
+            if expected is None:
+                assert slots[index]==-1
+                continue
+            slot,body=catalog['references'][position_key(expected)]
+            assert slots[index]==slot and body==expected,(frame['stage'],name,'完整来源引用')
+            source=expected['record']['Evidence']['source_reference']['record'][source_kind]
+            assert platform[index]==source['platform_event_at_utc_ms' if source_kind=='OrderLifecycle' else 'platform_responded_at_utc_ms']
+            assert received[index]==source['feedback_received_at_utc_ms' if source_kind=='OrderLifecycle' else 'response_received_at_utc_ms']
+            position=expected['position']
+            assert values(column.batch_sequences)[index]==position['source_watermark']['projection_batch_sequence']
+            assert values(column.record_ordinals)[index]==position['record_ordinal']
+            assert values(column.delivery_sequences)[index]==expected['visibility']['Feedback']['delivery_sequence']
+            assert values(column.private_sequences)[index]==source['private_feedback_sequence']
+            assert column.available_at.cpu().tolist()[0][index]==expected['visibility']['Feedback']['available_at_utc_ms']
+            assert column.context_slots.cpu().tolist()[0][index]==catalog['contexts'][position['context_reference']]
+            assert column.run_slots.cpu().tolist()[0][index]==catalog['runs'][position['source_watermark']['run_id']]
+
+
 def check_family(source):
     # 冷共享引用目录保存原完整正文；设备slot仅定位，不替代原context/run/业务position。
     catalog_refs={"references":{},"contexts":{},"runs":{}}
     for frame in source:
-        references=[frame['cancel_latest']['Known']]+[order['latest_cancel'] for order in frame['raw_orders']]
+        references=[frame['cancel_latest']['Known']]
+        for order in frame['raw_orders']:
+            references.extend(order[name] for name in ['accepted','formed','latest_lifecycle','latest_cancel','latest_direct'])
+            references.extend(order['trades'])
         for key in ['scoped_cancellation_requests','snapshot_scoped_cancellation_requests']:
             references.extend(query['latest'].get('Known') if isinstance(query['latest'],dict) else None for query in frame[key])
         for reference in references:
@@ -323,7 +363,16 @@ def check_family(source):
     target_rows=[]
     universe=sorted({platform_order_id(key) for key in catalog}|{order for frame in source for query in frame['scoped_cancellation_requests'] for order in query['scope'].get('orders',[])})
     from validate_cancel_source import prepare_cancel_source,receive_cancel_source
-    source_columns=prepare_cancel_source([value[1] for value in catalog_refs['references'].values()],request_ids,universe,catalog_refs)
+    cancellation_references=[value[1] for value in catalog_refs['references'].values()
+        if any(name in value[1]['record']['Evidence']['evidence'].get('Control',{}).get('result',{})
+            for name in ['Cancellation','CancellationRequestCompleted'])]
+    source_columns=prepare_cancel_source(cancellation_references,request_ids,universe,catalog_refs)
+    cancellation_positions={position_key(reference) for reference in cancellation_references}
+    next_slot=len(cancellation_references)
+    for key,(_,body) in list(catalog_refs['references'].items()):
+        if key not in cancellation_positions:
+            catalog_refs['references'][key]=(next_slot,body)
+            next_slot+=1
     directory_sequences=integers([int(name.removeprefix('sim-')) if name.startswith('sim-') else 0 for name in universe])
     directory_present=torch.tensor([[name.startswith('sim-') for name in universe]],dtype=torch.bool,device='cuda')
     target_received=torch.zeros((1,0),dtype=torch.bool,device='cuda')
@@ -341,7 +390,7 @@ def check_family(source):
     for frame in source:
         incoming=[]
         for order in frame['raw_orders']:
-            for name in ['accepted','formed','latest_lifecycle','latest_cancel']:
+            for name in ['accepted','formed','latest_lifecycle','latest_cancel','latest_direct']:
                 reference=order[name]
                 if reference is not None and position_key(reference) not in seen:
                     seen.add(position_key(reference));incoming.append(reference)
@@ -364,7 +413,7 @@ def check_family(source):
         from cancel_projection import cancellation_order_events
         normal_incoming=[row for row in incoming if row not in cancellation_incoming]
         def compute():
-            events=event_columns(normal_incoming,identities,rank,buy_ids)
+            events=event_columns(normal_incoming,identities,rank,buy_ids,catalog_refs)
             candidate=PublicRegistryState(events) if state is None else state.receive(events)
             cancel_events=cancellation_order_events(cancel_rows,torch.arange(rank,rank+len(cancellation_incoming),device='cuda')[None,:])
             candidate=candidate.receive(cancel_events)
@@ -372,6 +421,8 @@ def check_family(source):
         state,view=Numbers.run_exact_batch(compute)
         rank+=max(1,len(incoming))
         maximum_retained=max(maximum_retained,state.events.received.size(1))
+        sources=Numbers.run_exact_batch(lambda:state.freeze_order_sources(directory(frame),torch.tensor([frame['logical_at']],device='cuda')))
+        compare_order_sources(frame,sources,catalog,catalog_refs)
         assert view.fault.cpu().tolist()==[0]
         indexes={key:index for index,key in enumerate(catalog)}
         unfinished=view.unfinished.cpu().tolist()[0]
@@ -467,7 +518,7 @@ def main():
     torch.cuda.synchronize()
     print(json.dumps({'frozen_prefixes':sum(n for n,_,_ in counts),'distinct_original_order_records':sum(n for _,n,_ in counts),
         'receipt_without_order_keeps_original_leg_target':True,'continuous_received_state':True,'maximum_retained_order_records_per_family':[width for _,_,width in counts],'derived_oracle_initialization':False,'old_freeze_unchanged':True,
-        'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'single_paired_market_cancel_objects':True,'scoped_cancel_request_results':True,'original_action_snapshot_needed_cancel_projection':True,'latest_response_full_source_position_checked':True,'cancel_noe_mapper_core_and_closed_decoder':True,'cancel_first_delivery_filtered_original_references':True,'scoped_unknown_order_location_preserved':True,'device_sim_identity_tie_order':True,
+        'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'single_paired_market_cancel_objects':True,'scoped_cancel_request_results':True,'original_action_snapshot_needed_cancel_projection':True,'latest_response_full_source_position_checked':True,'Order_formed_and_latest_direct_original_times_and_full_reference_checked':True,'cancel_noe_mapper_core_and_closed_decoder':True,'cancel_first_delivery_filtered_original_references':True,'scoped_unknown_order_location_preserved':True,'device_sim_identity_tie_order':True,
         'full_registry_or_root':False,'seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 
 

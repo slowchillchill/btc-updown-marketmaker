@@ -40,6 +40,8 @@ class PublicRegistryEvents:
     formation: torch.Tensor
     canceled: torch.Tensor
     lifecycle_closed: torch.Tensor
+    platform_at: torch.Tensor  # 原source reference的平台事件/回应时刻。
+    received_at: torch.Tensor  # 原source reference的实际反馈收到时刻。
     fault: torch.Tensor
 
 
@@ -50,7 +52,7 @@ class PublicRegistryEvents:
         zero=ExactInt.from_i64_tensor(columns.flatten())
         ratio=ExactRational(zero,zero.constant(1))
         return cls(blank,columns,zero,zero,zero,zero,zero,zero,columns,columns,columns,columns,columns,columns,columns,
-            ratio,ratio,ratio,columns,columns,blank,blank,blank,blank,torch.zeros(roots,dtype=torch.int32,device=device))
+            ratio,ratio,ratio,columns,columns,blank,blank,blank,blank,columns,columns,torch.zeros(roots,dtype=torch.int32,device=device))
 
 
 @dataclass(frozen=True)
@@ -230,6 +232,10 @@ def compact_order_events(events):
     ordinary=events.received & ((events.kinds!=CANCEL_TARGET)|events.canceled)
     keep=first_identity_population(key,category,ordinary,priority)
     keep=keep | first_identity_population(key,category,events.received & (events.kinds==ORDER_LIFECYCLE) & events.formation,priority)
+    # 最新Direct按原领取delivery/record ordinal选择，三类取消结果均保留。
+    direct=(events.kinds<=QUOTE_ACCEPTED)|(events.kinds==CANCEL_TARGET)
+    direct_priority=delivery_priority(events.delivery_sequences,events.record_ordinals,events.receive_rank)
+    keep=keep | first_identity_population(events.orders,torch.zeros_like(events.kinds),events.received & direct,direct_priority)
     # root fault保存全部输入的故障，不因来源替换或压紧洗掉失败。
     fault=events.fault.clone()
     for value in [events.orders,events.trades,events.private_sequences,events.delivery_sequences,events.record_ordinals,events.batch_sequences]:
@@ -288,6 +294,14 @@ class PublicRegistryState:
             else:
                 payload[field.name] = join_integer(old,new)
         return PublicRegistryState(compact_order_events(PublicRegistryEvents(**payload)))
+
+    def freeze_order_sources(self, intents, cutoff):
+        from dataclasses import replace
+        roots=self.events.received.size(0)
+        if cutoff.shape!=(roots,) or cutoff.dtype!=torch.int64 or cutoff.device!=self.events.received.device:
+            raise TypeError('冻结cutoff需要同设备int64[roots]可信公开逻辑时刻')
+        visible=self.events.received & (self.events.available_at<=cutoff[:,None])
+        return frozen_order_sources(replace(self.events,received=visible),intents)
 
     def freeze_orders(self, intents, cutoff):
         from dataclasses import replace
@@ -438,3 +452,67 @@ class PublicCancellationState:
         return GlobalCancellationRead(pending_count,has_latest,counts,has_latest,
             self.completions.responded_at.gather(1,at[:,None])[:,0],
             self.completions.received_at.gather(1,at[:,None])[:,0],fault,completion_reference(self.completions,at[:,None],has_latest[:,None]))
+
+
+@dataclass(frozen=True)
+class OrderFeedbackSource:
+    """冻结来源引用与原双时间；不存在时不补造接受或领取时刻。"""
+    present: torch.Tensor
+    record_refs: torch.Tensor
+    platform_at: torch.Tensor
+    received_at: torch.Tensor
+    available_at: torch.Tensor
+    context_slots: torch.Tensor
+    run_slots: torch.Tensor
+    batch_sequences: object
+    record_ordinals: object
+    private_sequences: object
+    delivery_sequences: object
+
+
+@dataclass(frozen=True)
+class FrozenOrderSources:
+    formed: OrderFeedbackSource
+    latest_direct: OrderFeedbackSource
+    fault: torch.Tensor
+
+
+def delivery_priority(delivery, ordinal, receive_rank):
+    """原replace_delivery的u64(delivery,record ordinal)最大值；不是private顺序。"""
+    roots,width=receive_rank.shape
+    order=receive_rank.argsort(dim=1,stable=True)
+    for sequence in [ordinal,delivery]:
+        words=sequence.words.to(torch.int64)&0xffffffff
+        for limb in [0,1]:
+            key=words[:,limb].reshape(roots,width)
+            order=order.gather(1,key.gather(1,order).argsort(dim=1,descending=True,stable=True))
+    return order
+
+
+def frozen_order_sources(events,intents):
+    roots,width=events.received.shape
+    count=intents.present.size(1)
+    device=events.received.device
+    if width==0 or count==0:
+        blank=torch.zeros((roots,count),dtype=torch.bool,device=device)
+        columns=torch.zeros((roots,count),dtype=torch.int64,device=device)
+        zero=ExactInt.from_i64_tensor(columns.flatten())
+        source=OrderFeedbackSource(blank,torch.full_like(columns,-1),columns,columns,columns,columns,columns,zero,zero,zero,zero)
+        return FrozenOrderSources(source,source,events.fault)
+    same,error=identity_matches(intents.identities,events.orders,roots,count,width)
+    member=same&events.received[:,None,:]&intents.present[:,:,None]
+    fault=events.fault|Numbers.combine_fault_rows(torch.where(member,error,0).reshape(roots,-1))
+    def select_source(population,priority):
+        at,known=choose_latest(member&population[:,None,:],priority)
+        coordinates=(torch.arange(roots,device=device)[:,None]*width+at).flatten()
+        def column(value):
+            return value.gather(1,at)
+        return OrderFeedbackSource(known,torch.where(known,column(events.record_refs),-1),
+            column(events.platform_at),column(events.received_at),column(events.available_at),
+            column(events.context_slots),column(events.run_slots),_take(events.batch_sequences,coordinates),
+            _take(events.record_ordinals,coordinates),_take(events.private_sequences,coordinates),
+            _take(events.delivery_sequences,coordinates))
+    formed=select_source((events.kinds==ORDER_LIFECYCLE)&events.formation,source_priority(events.private_sequences,events.receive_rank))
+    direct=select_source((events.kinds<=QUOTE_ACCEPTED)|(events.kinds==CANCEL_TARGET),
+        delivery_priority(events.delivery_sequences,events.record_ordinals,events.receive_rank))
+    return FrozenOrderSources(formed,direct,fault)

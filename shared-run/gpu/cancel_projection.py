@@ -29,6 +29,8 @@ class PublicCancellationRows:
     record_refs: torch.Tensor
     available_at: torch.Tensor
     input_item_refs: object
+    platform_at: torch.Tensor
+    received_at: torch.Tensor
     fault: torch.Tensor
 
 
@@ -65,10 +67,12 @@ def cancellation_rows_from_closed(bank,batches,closed):
     field_coordinates=(torch.arange(roots,device=device)[:,None,None]*(width*3)+
         torch.arange(3,device=device)[None,None,:]*width+torch.arange(width,device=device)[None,:,None]).flatten()
     counts=_take(counts,field_coordinates)
+    platform=torch.cat([item.platform_at for item in batches],1).gather(1,at)
+    received=torch.cat([item.received_at for item in batches],1).gather(1,at)
     source=PublicCancellationRows(target.reshape(roots,width),request,target_fields[1],identity[3],
         target_fields[2].reshape(roots,width),private,batch,ordinal,closed.delivered_sequences,
         torch.cat([item.context_slots for item in batches],1).gather(1,at),
-        torch.cat([item.run_slots for item in batches],1).gather(1,at),closed.record_refs,closed.available_at,refs[0],fault)
+        torch.cat([item.run_slots for item in batches],1).gather(1,at),closed.record_refs,closed.available_at,refs[0],platform,received,fault)
     platform=torch.cat([item.platform_at for item in batches],1).gather(1,at)
     received=torch.cat([item.received_at for item in batches],1).gather(1,at)
     completions=CancellationCompletions(complete.reshape(roots,width),request,closed.delivered_sequences,ordinal,counts,
@@ -127,4 +131,4 @@ def cancellation_order_events(source,receive_rank):
         source.private_sequences,source.delivery_sequences,source.record_ordinals,source.batch_sequences,
         source.context_slots,source.run_slots,torch.full_like(blank,-1),torch.full_like(blank,-1),source.record_refs,
         source.available_at,receive_rank,ratio,ratio,ratio,blank,blank,absent,absent,
-        source.received&(source.outcomes==0),absent,source.fault)
+        source.received&(source.outcomes==0),absent,source.platform_at,source.received_at,source.fault)
