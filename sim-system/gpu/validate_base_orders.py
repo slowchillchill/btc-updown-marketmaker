@@ -410,6 +410,7 @@ def main():
         'actual_positive_maker_joint_candidate_CUDA_graph_replay_to_same_NOE_checked':checked_captured_maker,
         'actual_positive_maker_fixed_address_commit_then_consumed_step_replay_checked':checked_captured_maker,
         'actual_positive_maker_pool_shortage_keeps_owned_state_before_cold_growth_checked':checked_captured_maker,
+        'controlled_global_resource_gate_blocks_successful_Maker_candidate_and_feedback_checked':checked_captured_maker,
         'runtime_hidden_reference_handler_covered':False,
         'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
@@ -490,6 +491,21 @@ def check_captured_hidden_step(runtime,index,tensor,fee_rate,fee_exponent,rebate
     torch.cuda.synchronize()
     assert not blocked_fit.cpu().item() and blocked.value[1].required_records.cpu().tolist()==[2]
     compare(blocked_storage.runtime,original_runtime,"pool_shortage_keeps_input")
+    # 受控全物理批门：本根的实际候选已成功，另处资源不足仍不允许它发布。
+    suppressed_storage=BaseRuntimeStorage(runtime,expected)
+    suppressed_graph=torch.cuda.CUDAGraph()
+    with torch.cuda.graph(suppressed_graph):
+        successful=Numbers.device_exact_batch(lambda:compute(suppressed_storage.runtime),word_capacity=4,
+            device=runtime.account.cash.words.device)
+        suppressed=suppressed_storage.commit(successful.value[0],torch.zeros_like(successful.fits),successful.value[1])
+    suppressed_graph.replay()
+    torch.cuda.synchronize()
+    assert any(frame.event.emitted.cpu().item() for frame in successful.value[1].fills)
+    compare(suppressed_storage.runtime,runtime,"global_resource_gate_keeps_input")
+    for frame in suppressed.fills:
+        assert not frame.event.emitted.cpu().item() and not frame.event.terminal.cpu().item()
+        for name in ('economic_delta','failure_delta','rebate_delta'):
+            assert not getattr(frame.event,name).emitted.cpu().item()
     storage=BaseRuntimeStorage(runtime,expected)
     old=storage.snapshot()
     def committed_step():

@@ -8,6 +8,7 @@ from dataclasses import fields, is_dataclass, replace
 import torch
 from queues import ExactInt
 from fill_finality import FillRecord
+from hidden_base_execution import HiddenBaseEffects
 
 
 def _shared(value, name):
@@ -89,7 +90,22 @@ class BaseRuntimeStorage:
         pairs = tuple(_tensor_pairs(self.runtime, candidate))
         with torch.no_grad():
             # emitted序号可能借原next_sequence；必须先保存，再改活动输入。
-            saved_output = self.snapshot_output(output) if output is not None else None
+            saved_output = self.snapshot_output(self._committed_output(output, resources_fit)) if output is not None else None
             for target, incoming in pairs:
                 target.copy_(torch.where(resources_fit, incoming, target))
         return saved_output
+
+    def _committed_output(self, output, resources_fit):
+        if not isinstance(output, HiddenBaseEffects):
+            raise TypeError('固定地址输出提交当前只接原hidden Base effects')
+        def committed(frame):
+            event = frame.event
+            updates = {}
+            for name in ('economic_delta', 'failure_delta', 'rebate_delta'):
+                delta = getattr(event, name)
+                updates[name] = self.runtime.account.coordinate_delta(
+                    delta, delta.emitted & resources_fit, delta.fault)
+            return replace(frame, event=replace(event, emitted=event.emitted & resources_fit,
+                terminal=event.terminal & resources_fit, **updates))
+        # 容量需求/fault仍归冷退出协调，不把未提交候选当成成功反馈。
+        return replace(output, fills=tuple(committed(frame) for frame in output.fills))
