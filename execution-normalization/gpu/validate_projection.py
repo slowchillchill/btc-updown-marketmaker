@@ -26,7 +26,7 @@ def entity_sequence(identity,kind):
     return int(value[kind]['source_'+kind.lower()+'_id'].removeprefix('sim-'))
 
 
-def expected_semantic(record, resolution_index=0, terminal_index=0):
+def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=0):
     zero=torch.zeros(1,dtype=torch.int64,device='cuda')
     body=next(iter(record['record'].values()))
     if 'fact' in body:
@@ -55,7 +55,7 @@ def expected_semantic(record, resolution_index=0, terminal_index=0):
         outcomes=balance['outcome_balance_deltas']
         semantic=[zero,torch.full_like(zero,-1) if value['condition_id'] is None else zero,torch.tensor([value['economic_effective_at_utc_ms']],device='cuda'),
             torch.full_like(zero,tag),integers([sequence]),torch.full_like(zero,fields.get('path_ordinal',0)),
-            *[rational([balance[name]]) for name in names],torch.tensor([bool(outcomes)],device='cuda'),zero,
+            *[rational([balance[name]]) for name in names],torch.tensor([bool(outcomes)],device='cuda'),torch.full_like(zero,token_index if outcomes else 0),
             rational([outcomes[0]['balance_shares_delta'] if outcomes else '0']),rational(['0']),rational(['0'])]
         if tag==5:
             semantic.append(torch.full_like(zero,resolution_index))
@@ -77,10 +77,10 @@ def expected_semantic(record, resolution_index=0, terminal_index=0):
             integers([value['economic_application_account_transition_seq'] or 0]),torch.full_like(zero,maker_kind),rational([maker_value])])
     if kind=='OrderLifecycle':
         if isinstance(value['event'],dict) and 'MarketResolvedCanceled' in value['event']:
-            return encode_fields([zero,zero,zero,integers([entity_sequence(value['order_identity'],'Order')]),torch.full_like(zero,5),zero,torch.full_like(zero,resolution_index)])
+            return encode_fields([zero,zero,torch.full_like(zero,token_index),integers([entity_sequence(value['order_identity'],'Order')]),torch.full_like(zero,5),zero,torch.full_like(zero,resolution_index)])
         if value['event']=='CallerCanceled':
-            return encode_fields([zero,zero,zero,integers([entity_sequence(value['order_identity'],'Order')]),torch.full_like(zero,4),zero])
-        return encode_fields([zero,zero,zero,integers([entity_sequence(value['order_identity'],'Order')]),zero,
+            return encode_fields([zero,zero,torch.full_like(zero,token_index),integers([entity_sequence(value['order_identity'],'Order')]),torch.full_like(zero,4),zero])
+        return encode_fields([zero,zero,torch.full_like(zero,token_index),integers([entity_sequence(value['order_identity'],'Order')]),zero,
             torch.full_like(zero,{'Open':0,'Matched':1}[value['event']['Accepted']['state']])])
     if kind=='Control':
         if 'Cancellation' in value:
@@ -91,7 +91,7 @@ def expected_semantic(record, resolution_index=0, terminal_index=0):
             result=value['CancellationRequestCompleted']['result']
             return encode_fields([zero,*[integers([result[name]]) for name in ['canceled_count','not_canceled_no_effect_count','evidence_unknown_no_effect_count']]])
         value=value['Submission']['outcome']['Accepted']
-        return encode_fields([zero,zero,zero,zero,integers([entity_sequence(value['order']['order_identity'],'Order')]),
+        return encode_fields([zero,zero,zero,torch.full_like(zero,token_index),integers([entity_sequence(value['order']['order_identity'],'Order')]),
             torch.full_like(zero,{'Open':0,'Matched':1}[value['order']['state']]),
             integers([units(value['measurement']['Base']['matched_base_quantity_shares'])]),
             integers([units(value['measurement']['Base']['open_base_quantity_shares'])]),

@@ -196,7 +196,7 @@ def main():
             ordinal=values(batch.record_ordinals)[column]
             original=next(r for r in records if r['position']['record_ordinal']==ordinal)
             row=batch.rows[0,column]
-            expected=Numbers.run_exact_batch(lambda:expected_semantic(original))
+            expected=Numbers.run_exact_batch(lambda:expected_semantic(original,token_index=asset))
             semantic=projection.normalizer.bank.semantic[row]
             assert torch.equal(semantic[:expected.size(1)],expected[0]) and not semantic[expected.size(1):].any().cpu().item()
             assert values(batch.batch_sequences)[column]==original['position']['source_watermark']['projection_batch_sequence']
