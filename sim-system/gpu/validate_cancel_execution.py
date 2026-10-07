@@ -158,8 +158,15 @@ def validate_actual_cancel(source,delta):
     assert values(account_blocked.pending_noe_count)==[int((coordinated.waiting.received & ~coordinated.waiting.consumed).sum().cpu())]
     assert values(account_blocked.cancellations.pending_count)==[0]
     assert values(account_blocked.cancellations.response_counts)==[1,0,0]
+    completion_width=coordinated.cancellations.completions.received.size(1)
+    assert completion_width==1, '仅保留实际完整请求完成人口'
     coordinated,again=Numbers.run_exact_batch(lambda:coordinated.receive(state.normalizer.bank,gates,torch.ones_like(ledger.columns.enabled),passes=1))
     assert not again.closed.emitted.any().cpu().item()
+    assert coordinated.cancellations.completions.received.size(1)==completion_width, '空领取不增长完成目录'
+    empty_faulty=replace(completions,received=torch.zeros_like(completions.received),fault=torch.ones_like(completions.fault))
+    faulty_empty=Numbers.run_exact_batch(lambda:coordinated.cancellations.receive(empty_faulty))
+    assert faulty_empty.completions.received.size(1)==completion_width
+    assert faulty_empty.completions.fault.cpu().tolist()==[1], '空人口仍保留完整来源故障'
     assert not (coordinated.waiting.received & ~coordinated.waiting.consumed).any().cpu().item()
     assert torch.equal(coordinated.waiting.available_at,delivery.closed.available_at)
     assert check_order_funds(coordinated.ledger,source['cancel_ledger_after'])
@@ -249,6 +256,7 @@ def validate_actual_cancel(source,delta):
         'same_cutoff_public_account_funds_waiting_and_cancel_request_freeze_checked':True,
         'Native_actual_frozen_account_fields_and_fault_checked':True,
         'registered_request_identity_fault_before_any_completion_reaches_Native':True,
+        'empty_completion_population_does_not_grow_and_preserves_source_fault':True,
         'each_actual_receive_prefix_order_condition_open_and_last_sequence_checked':True,
         'Ledger_control_closes_without_cash_and_economic_releases_once':True,
         'cold_original_cancel_prefix_initialized_once':True,'cancellation_method_mixed_transport_checked':True,'each_cancel_prefix_original_OrderFunds_checked':True,'full_root':False}

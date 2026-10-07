@@ -424,7 +424,29 @@ class PublicCancellationState:
                     torch.cat([old.words.reshape(roots,old_width*components,capacity),new.words.reshape(roots,new_width*components,capacity)],1).flatten(0,1),
                     torch.cat([old.sign.reshape(roots,old_width*components),new.sign.reshape(roots,new_width*components)],1).flatten(),
                     torch.cat([old.fault.reshape(roots,old_width*components),new.fault.reshape(roots,new_width*components)],1).flatten())
-        return PublicCancellationState(self.requests,self.registered,CancellationCompletions(**payload))
+        completed = CancellationCompletions(**payload)
+        width = old_width + new_width
+        # 仅把设备上的实际人口总量回传给物理分配器；不回传完成身份或业务选择。
+        # 稳定压紧完整记录坐标，等待重试中的空领取不积累块宽度的padding。
+        retained = int(completed.received.to(torch.int64).sum(1).max().cpu())
+        order = (~completed.received).argsort(dim=1,stable=True)[:,:retained]
+        coordinates = (torch.arange(roots,device=order.device)[:,None]*width+order).flatten()
+        compacted = {}
+        for field in fields(completed):
+            value = getattr(completed,field.name)
+            if field.name == 'fault':
+                compacted[field.name] = compacted.get(field.name,value) | value
+            elif isinstance(value,torch.Tensor):
+                compacted[field.name] = value.gather(1,order)
+            else:
+                components = 3 if field.name == 'counts' else 1
+                population = coordinates[:,None]*components+torch.arange(components,device=order.device)[None,:]
+                # 字段故障沿实际人口保留；全块来源故障在空人口时也不丢失。
+                enabled = completed.received[:,:,None].expand(roots,width,components).reshape(roots,-1)
+                compacted['fault'] = compacted.get('fault',completed.fault) | Numbers.combine_fault_rows(
+                    torch.where(enabled,value.fault.reshape(roots,-1),0))
+                compacted[field.name] = _take(value,population.flatten())
+        return PublicCancellationState(self.requests,self.registered,CancellationCompletions(**compacted))
 
     def freeze_global(self, cutoff):
         roots,width = self.completions.received.shape
