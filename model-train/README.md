@@ -654,7 +654,7 @@ age只计action_snapshot未闭合订单；缺形成反馈保留Unknown，空集�
 原i64时点先转精确整数再作差，旧冻结结果不随后续反馈改写。当前接口尚未装成完整
 slow433/cancel184，也不负责选择current/old市场或推进根时钟。
 
-`shared-run/gpu/public_ledger.py::freeze_account` 在同一真实公開cutoff冻结Ledger、
+`shared-run/gpu/public_ledger.py::freeze_account` 在同一真实公开cutoff冻结Ledger、
 Registry、原订单来源、资金、已领取待消费NOE人口和已登记撤单请求完成读面。
 `native-inputs/gpu/input_account.py` 从该快照写资金110—121、订单382—411、
 待NOE412—414和完整全局请求415—432，并共同携带故障。输出的`provided`显式标明

@@ -136,6 +136,7 @@ def validate_actual_cancel(source,delta):
     # 同真实来源另算纯候选，作为统一生产入口的对照，不重复接纳手工分支。
     request_state=PublicCancellationState.open(integers([0]),active[:,None])
     coordinated=PublicLedgerState(pending_initial,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),cache,ledger,request_state)
+    coordinated_initial=coordinated
     # 缺经济关联只暂停Ledger释放；公开Control已领取，Registry仍先关闭。
     # 原Registry已有故障不能继续提交该根Ledger。NOE实际领取引用仍在返回结果中。
     broken=replace(coordinated,registry=PublicRegistryState(replace(coordinated.registry.events,
@@ -196,6 +197,14 @@ def validate_actual_cancel(source,delta):
     broken_account=replace(account_after,fault=torch.ones_like(account_after.fault))
     broken_input=Numbers.run_exact_batch(lambda:frozen_account_inputs(broken_account,current_and_empty_old,scope_known,scope_known))
     assert broken_input.fault.cpu().tolist()==[1], 'Native共同携带共享账户故障'
+    # 原精确请求身份故障须在尚无完成反馈的正常登记前缀就传播，不靠补account.fault。
+    faulty_identity=replace(request_state.requests,fault=torch.ones_like(request_state.requests.fault))
+    faulty_request_state=PublicCancellationState.open(faulty_identity,active[:,None])
+    faulty_prefix=replace(coordinated_initial,cancellations=faulty_request_state)
+    faulty_frozen=Numbers.run_exact_batch(lambda:faulty_prefix.freeze_account(directory,closed_at))
+    faulty_native=Numbers.run_exact_batch(lambda:frozen_account_inputs(faulty_frozen,current_and_empty_old,scope_known,scope_known))
+    assert faulty_frozen.fault.cpu().tolist()==[1] and faulty_native.fault.cpu().tolist()==[1]
+    assert faulty_request_state.completions.received.size(1)==0
     # 较晚Ledger提交不能修改已冻结的公开读取。
     assert frozen_blocked.cancellable.cpu().tolist()==[[False]]
     # 设备实际take_closed输出定义次序；原CPU逐条after只用于比较，不提供应用控制。
@@ -239,6 +248,7 @@ def validate_actual_cancel(source,delta):
         'source_private_batch_and_actual_release_checked':True,'Ledger_four_original_positions_and_sequences_checked':True,
         'same_cutoff_public_account_funds_waiting_and_cancel_request_freeze_checked':True,
         'Native_actual_frozen_account_fields_and_fault_checked':True,
+        'registered_request_identity_fault_before_any_completion_reaches_Native':True,
         'each_actual_receive_prefix_order_condition_open_and_last_sequence_checked':True,
         'Ledger_control_closes_without_cash_and_economic_releases_once':True,
         'cold_original_cancel_prefix_initialized_once':True,'cancellation_method_mixed_transport_checked':True,'each_cancel_prefix_original_OrderFunds_checked':True,'full_root':False}

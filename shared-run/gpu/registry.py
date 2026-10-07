@@ -389,8 +389,9 @@ class PublicCancellationState:
         roots = registered.size(0)
         columns = torch.empty((roots, 0), dtype=torch.int64, device=registered.device)
         zero = ExactInt.from_i64_tensor(columns.flatten())
+        source_fault = Numbers.combine_fault_rows(torch.where(registered, requests.fault.reshape_as(registered), 0))
         completed = CancellationCompletions(columns.bool(), zero, zero, zero, zero,
-            columns, columns, columns, torch.zeros(roots, dtype=torch.int32, device=registered.device),
+            columns, columns, columns, source_fault,
             columns, columns, columns, zero, zero)
         return cls(requests, registered, completed)
 
@@ -398,7 +399,10 @@ class PublicCancellationState:
         from dataclasses import replace
         if receipt_registered.shape != self.registered.shape or receipt_registered.dtype != torch.bool or receipt_registered.device != self.registered.device:
             raise TypeError('原receipt登记需要同设备bool请求人口')
-        return replace(self,registered=self.registered | receipt_registered)
+        registered = self.registered | receipt_registered
+        source_fault = Numbers.combine_fault_rows(torch.where(registered, self.requests.fault.reshape_as(registered), 0))
+        return replace(self,registered=registered,
+            completions=replace(self.completions,fault=self.completions.fault | source_fault))
 
     def receive(self, incoming):
         # 共享设备列追加沿用同一资源事务；保留全部原完成引用的领取顺序。
@@ -428,12 +432,14 @@ class PublicCancellationState:
         device = self.registered.device
         if cutoff.shape != (roots,) or cutoff.dtype != torch.int64 or cutoff.device != device:
             raise TypeError('冻结cutoff需要同设备int64[roots]可信公开逻辑时刻')
+        request_fault = Numbers.combine_fault_rows(torch.where(self.registered, self.requests.fault.reshape_as(self.registered), 0))
+        source_fault = self.completions.fault | request_fault
         if width == 0:
             pending=ExactInt.from_i64_tensor(self.registered.to(torch.int64).sum(1))
             absent=torch.zeros(roots,dtype=torch.bool,device=device)
             counts=ExactInt.from_i64_tensor(torch.zeros(roots*3,dtype=torch.int64,device=device))
             time=torch.zeros(roots,dtype=torch.int64,device=device)
-            return GlobalCancellationRead(pending,absent,counts,absent,time,time,self.completions.fault | pending.fault,
+            return GlobalCancellationRead(pending,absent,counts,absent,time,time,source_fault | pending.fault,
                 completion_reference(self.completions,torch.zeros((roots,1),dtype=torch.int64,device=device),absent[:,None]))
         visible = self.completions.received & (self.completions.available_at <= cutoff[:,None])
         matches,comparison_fault = identity_matches(self.requests,self.completions.requests,roots,count,width)
@@ -453,7 +459,7 @@ class PublicCancellationState:
         global_at=torch.arange(roots,device=device)*width+at
         population=global_at[:,None]*3+torch.arange(3,device=device)[None,:]
         counts=_take(self.completions.counts,population.flatten())
-        fault=self.completions.fault | Numbers.combine_fault_rows(torch.where(member,comparison_fault,0).reshape(roots,-1))
+        fault=source_fault | Numbers.combine_fault_rows(torch.where(member,comparison_fault,0).reshape(roots,-1))
         for sequence,components in [(self.completions.requests,1),(self.completions.delivery_sequences,1),
                 (self.completions.record_ordinals,1),(self.completions.batch_sequences,1),
                 (self.completions.private_sequences,1),(self.completions.counts,3)]:
