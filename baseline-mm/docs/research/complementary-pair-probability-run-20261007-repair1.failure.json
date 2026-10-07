@@ -1,0 +1,457 @@
+{
+  "format": "direct-probability-run-failure-v1",
+  "execution": "second-actual-run-repair1",
+  "source_head": "36401b1c05433d1bd602022e34275668a8c52bce",
+  "source_archive_sha256": "b365991cd733e63ed4aee0e366dc492354c7a220e5f1e2440c53670a4fe6c550",
+  "config_sha256": "3b69d5dd28f68141c99f80191203bf5867854e511ace5652632d13c483f824ad",
+  "probability_helper_sha256": "d77d6d2dbf5a252cd66ce171dc68a0c597733b0fc24014387b8188af773539ee",
+  "initialization_helper_sha256": "45bab72dca21884eb4ee418f6952b629720b78b00b8d593cfe3c9dcfbf48f4b0",
+  "prepare": {
+    "stage": "prepare",
+    "returncode": 1,
+    "terminated_by_signal": false,
+    "stopped_for_archive": false,
+    "supervisor_interruption": null,
+    "supervisor_signal": null
+  },
+  "study_started": false,
+  "prepare_complete": false,
+  "formal_adoption": false,
+  "run_start_utc": "2026-10-07T11:41:56Z",
+  "run_exit_utc": "2026-10-07T11:53:56Z",
+  "resource": {
+    "exec_main_wall_seconds": 720.165138,
+    "service_runtime_stderr_seconds": 720.164,
+    "cgroup_cpu_seconds": 1761.80039,
+    "cgroup_memory_peak_bytes": 19996930048,
+    "prepare_wall_seconds": 704.08,
+    "prepare_maximum_rss_kib": 19451972,
+    "prepare_user_seconds": 1448.67,
+    "prepare_system_seconds": 312.98,
+    "swap_bytes": 0,
+    "oom_caused_exit": false,
+    "exit_result": "exit-code",
+    "process_code": "exited",
+    "exit_status": 1,
+    "last_valid_cgroup_memory_events": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0
+    },
+    "last_valid_cgroup_check_utc": "2026-10-07T11:52:30.581634+00:00",
+    "spill_observed_max_bytes": 0,
+    "spill_measurement": "30秒及阶段变化进度采样下界，不是完整临时盘峰值",
+    "temporary_total_peak_bytes": null,
+    "complete_job_io_bytes": null,
+    "gnu_time_filesystem_inputs": 7328,
+    "gnu_time_filesystem_outputs": 813536,
+    "gnu_time_io_units": "系统文件输入/输出操作计数，不转为字节",
+    "invalid_cgroup_sample": {
+      "check_utc": "2026-10-07T12:02:42.199612+00:00",
+      "excluded_fields": [
+        "cgroup_files"
+      ],
+      "reason": "退出后ControlGroup为空，误读根cgroup；所有该次cgroup文件读数剔除，unit属性和阶段日志有效"
+    }
+  },
+  "protection": {
+    "memory_high_bytes": 51539607552,
+    "memory_max_bytes": 68719476736,
+    "memory_swap_max_bytes": 0,
+    "oom_policy": "stop",
+    "duckdb_threads": 24,
+    "engine_memory": "8GiB",
+    "stage_spill_allowance": "64GiB",
+    "arrow_use_threads": false,
+    "openblas_threads": 1,
+    "omp_threads": 1
+  },
+  "failure": {
+    "type": "_duckdb.ParserException",
+    "stage": "prepare",
+    "function": "price_samples",
+    "kind": "twap",
+    "source_path": "baseline-mm/research/probability/direct.py",
+    "executed_line": 393,
+    "operation": "INSERT INTO price_facts (at,received,event,price,window_s,order_id) VALUES (?,?,?,?,?,?)",
+    "reason": "动态INSERT列列表中的at未按标识符双引号引用",
+    "carry_nonempty": true,
+    "actual_carry_values_retained": false,
+    "actual_twap_file_and_row": null
+  },
+  "partial_market_coverage": {
+    "status": "市场目录阶段已落盘，完整prepare未发布",
+    "sha256": "130e7301629d226d3811f87cc63ec335c9b1e8abf948bb91327191d680b62559",
+    "bytes": 10134764,
+    "counts": {
+      "raw_markets": 5186,
+      "public_markets": 5182,
+      "raw_locatable_markets": 5186,
+      "raw_locatable_targets": 41472,
+      "raw_target_count_unknown_markets": 0,
+      "public_targets": 41440,
+      "target_union": 41472,
+      "identity_known_samples": 41440,
+      "identity_missing_samples": 32
+    },
+    "missing_identity_markets": [
+      {
+        "condition_id": "0x3e9935c3802a6f232aca18028c01d073665f41707ed79b9c805a7e1e6527969c",
+        "raw_first_seen_at": 1789503351824,
+        "identity_at": null,
+        "raw_variants": [
+          {
+            "asset_ids": [
+              "28537778185080448718218686928786474302133680771677585917351272005806485389391",
+              "85040493961988799222752583148263530153691861369564781560358284477942689733726"
+            ],
+            "first": {
+              "origin": {
+                "kind": "file",
+                "path": "2026-09-15/typed_raw/utc_day=2026-09-15/source_kind=polymarket_market_metadata/polymarket_market_metadata_20-part-2.parquet",
+                "row": 3
+              },
+              "received_at": 1789503351822,
+              "source_message_id": "c8857da3805563a354b6ac65f1cad451682e4344861bef69764c0910dcb8b261",
+              "visible_at": 1789503351824
+            },
+            "last": {
+              "origin": {
+                "kind": "file",
+                "path": "2026-09-15/typed_raw/utc_day=2026-09-15/source_kind=polymarket_market_metadata/polymarket_market_metadata_20-part-3.parquet",
+                "row": 40
+              },
+              "received_at": 1789503960052,
+              "source_message_id": "fe7218809db828207634bc986966d4908116caa3ec62d20a34196843082ccbb5",
+              "visible_at": 1789503960056
+            },
+            "market": {
+              "clob_market_id": "4566837",
+              "condition_id": "0x3e9935c3802a6f232aca18028c01d073665f41707ed79b9c805a7e1e6527969c",
+              "window": {
+                "end_at_utc_ms": 1789503600000,
+                "start_at_utc_ms": 1789503300000
+              }
+            }
+          }
+        ],
+        "raw_rows": 9,
+        "raw_target_count": 8,
+        "public_target_count": 0,
+        "identity_known_samples": 0,
+        "missing_identity_snapshot": {
+          "first": {
+            "origin": {
+              "kind": "file",
+              "path": "2026-09-15/typed_raw/utc_day=2026-09-15/source_kind=polymarket_market_metadata/polymarket_market_metadata_20-part-2.parquet",
+              "row": 3
+            },
+            "received_at": 1789503351822,
+            "source_message_id": "c8857da3805563a354b6ac65f1cad451682e4344861bef69764c0910dcb8b261",
+            "visible_at": 1789503351824
+          },
+          "last": {
+            "origin": {
+              "kind": "file",
+              "path": "2026-09-15/typed_raw/utc_day=2026-09-15/source_kind=polymarket_market_metadata/polymarket_market_metadata_20-part-3.parquet",
+              "row": 40
+            },
+            "received_at": 1789503960052,
+            "source_message_id": "fe7218809db828207634bc986966d4908116caa3ec62d20a34196843082ccbb5",
+            "visible_at": 1789503960056
+          },
+          "reason": "missing_identity_snapshot",
+          "row_kinds": {
+            "MarketStateTransition": 1,
+            "ResolutionPollAttempt": 4
+          },
+          "rows": 5
+        },
+        "census_identity_conflicts": [],
+        "identity_gap": {
+          "start": 1789503351824,
+          "end": 1790467200000,
+          "right_censored": true
+        }
+      },
+      {
+        "condition_id": "0x7150142fe2a3a93564914194e30431e0d80d8cb64d906937cf1c0fdacfb74177",
+        "raw_first_seen_at": 1789267805736,
+        "identity_at": null,
+        "raw_variants": [
+          {
+            "asset_ids": [
+              "43013704951217087804501632851683041927911465982632260115639836646181331898228",
+              "81089695477562730613850766618648255570194812368438172199599953433302441718453"
+            ],
+            "first": {
+              "origin": {
+                "kind": "file",
+                "path": "2026-09-13/typed_raw/utc_day=2026-09-13/source_kind=polymarket_market_metadata/polymarket_market_metadata_02-part-1.parquet",
+                "row": 3
+              },
+              "received_at": 1789267805291,
+              "source_message_id": "93957ecb68b245cd7d41b439b8a2d9ddf8608b0bc56f4152b76c875d54776f02",
+              "visible_at": 1789267805736
+            },
+            "last": {
+              "origin": {
+                "kind": "file",
+                "path": "2026-09-13/typed_raw/utc_day=2026-09-13/source_kind=polymarket_market_metadata/polymarket_market_metadata_02-part-1.parquet",
+                "row": 97
+              },
+              "received_at": 1789268220079,
+              "source_message_id": "9d66f0fb1da73acd4216dbbcb4dc36430927c34beb1778a125e9c5dd24f8a7c0",
+              "visible_at": 1789268220101
+            },
+            "market": {
+              "clob_market_id": "4489171",
+              "condition_id": "0x7150142fe2a3a93564914194e30431e0d80d8cb64d906937cf1c0fdacfb74177",
+              "window": {
+                "end_at_utc_ms": 1789268100000,
+                "start_at_utc_ms": 1789267800000
+              }
+            }
+          }
+        ],
+        "raw_rows": 64,
+        "raw_target_count": 8,
+        "public_target_count": 0,
+        "identity_known_samples": 0,
+        "missing_identity_snapshot": {
+          "first": {
+            "origin": {
+              "kind": "file",
+              "path": "2026-09-13/typed_raw/utc_day=2026-09-13/source_kind=polymarket_market_metadata/polymarket_market_metadata_02-part-1.parquet",
+              "row": 3
+            },
+            "received_at": 1789267805291,
+            "source_message_id": "93957ecb68b245cd7d41b439b8a2d9ddf8608b0bc56f4152b76c875d54776f02",
+            "visible_at": 1789267805736
+          },
+          "last": {
+            "origin": {
+              "kind": "file",
+              "path": "2026-09-13/typed_raw/utc_day=2026-09-13/source_kind=polymarket_market_metadata/polymarket_market_metadata_02-part-1.parquet",
+              "row": 68
+            },
+            "received_at": 1789268100000,
+            "source_message_id": "590bf37b1dc1fdba0998c0d07f2632f8a4cd6d59e7b9e66eedacb81308a0d7d3",
+            "visible_at": 1789268100013
+          },
+          "reason": "missing_identity_snapshot",
+          "row_kinds": {
+            "MarketStateTransition": 2
+          },
+          "rows": 2
+        },
+        "census_identity_conflicts": [],
+        "identity_gap": {
+          "start": 1789267805736,
+          "end": 1790467200000,
+          "right_censored": true
+        }
+      },
+      {
+        "condition_id": "0x7b443d179b4fe520ee251f5a7cc5aa9e52c009439a63d9e9a60fe69d06b19b7d",
+        "raw_first_seen_at": 1789240506940,
+        "identity_at": null,
+        "raw_variants": [
+          {
+            "asset_ids": [
+              "49427938372795411688155483784930948885067383790368870122619762667209071727197",
+              "90108467648093501153395540403390268073412397189344680623368447756949863610453"
+            ],
+            "first": {
+              "origin": {
+                "kind": "file",
+                "path": "2026-09-12/typed_raw/utc_day=2026-09-12/source_kind=polymarket_market_metadata/polymarket_market_metadata_19-part-1.parquet",
+                "row": 3
+              },
+              "received_at": 1789240506938,
+              "source_message_id": "e26e899b0ad861e8da4bb7435a75e724d0b9e65a17dc005a15b81ef382baaef5",
+              "visible_at": 1789240506940
+            },
+            "last": {
+              "origin": {
+                "kind": "file",
+                "path": "2026-09-12/typed_raw/utc_day=2026-09-12/source_kind=polymarket_market_metadata/polymarket_market_metadata_19-part-1.parquet",
+                "row": 97
+              },
+              "received_at": 1789240917287,
+              "source_message_id": "4ee74f03b9a35a01e578ff134e7b8727b393725f8af8ca4ed601f4ea16c95ead",
+              "visible_at": 1789240917287
+            },
+            "market": {
+              "clob_market_id": "4475338",
+              "condition_id": "0x7b443d179b4fe520ee251f5a7cc5aa9e52c009439a63d9e9a60fe69d06b19b7d",
+              "window": {
+                "end_at_utc_ms": 1789240800000,
+                "start_at_utc_ms": 1789240500000
+              }
+            }
+          }
+        ],
+        "raw_rows": 64,
+        "raw_target_count": 8,
+        "public_target_count": 0,
+        "identity_known_samples": 0,
+        "missing_identity_snapshot": {
+          "first": {
+            "origin": {
+              "kind": "file",
+              "path": "2026-09-12/typed_raw/utc_day=2026-09-12/source_kind=polymarket_market_metadata/polymarket_market_metadata_19-part-1.parquet",
+              "row": 3
+            },
+            "received_at": 1789240506938,
+            "source_message_id": "e26e899b0ad861e8da4bb7435a75e724d0b9e65a17dc005a15b81ef382baaef5",
+            "visible_at": 1789240506940
+          },
+          "last": {
+            "origin": {
+              "kind": "file",
+              "path": "2026-09-12/typed_raw/utc_day=2026-09-12/source_kind=polymarket_market_metadata/polymarket_market_metadata_19-part-1.parquet",
+              "row": 68
+            },
+            "received_at": 1789240800007,
+            "source_message_id": "6e255d95040a6db0e8086c9ddc6ebdf6de27f2a7f3ba28337e1eaa25a1b31ad4",
+            "visible_at": 1789240800015
+          },
+          "reason": "missing_identity_snapshot",
+          "row_kinds": {
+            "MarketStateTransition": 2
+          },
+          "rows": 2
+        },
+        "census_identity_conflicts": [],
+        "identity_gap": {
+          "start": 1789240506940,
+          "end": 1790467200000,
+          "right_censored": true
+        }
+      },
+      {
+        "condition_id": "0xe77e634df41223a87193e2ebf973d2d0b44f362d262ed7caa3733b0d6484e34d",
+        "raw_first_seen_at": 1789342531251,
+        "identity_at": null,
+        "raw_variants": [
+          {
+            "asset_ids": [
+              "108965185595794938134984063609362679742412546535311531844782750735789424834738",
+              "26936804948292539171836742456987588755443140408184457545459305764154847422999"
+            ],
+            "first": {
+              "origin": {
+                "kind": "file",
+                "path": "2026-09-13/typed_raw/utc_day=2026-09-13/source_kind=polymarket_market_metadata/polymarket_market_metadata_23-part-2.parquet",
+                "row": 3
+              },
+              "received_at": 1789342531251,
+              "source_message_id": "613411d346484d9969a7d9a6479566c03f879db50c9798b54174dfa363a89b1c",
+              "visible_at": 1789342531251
+            },
+            "last": {
+              "origin": {
+                "kind": "file",
+                "path": "2026-09-13/typed_raw/utc_day=2026-09-13/source_kind=polymarket_market_metadata/polymarket_market_metadata_23-part-2.parquet",
+                "row": 93
+              },
+              "received_at": 1789342922590,
+              "source_message_id": "8f42eb0387e92a2139cf4d72fad75b6dd5b10c45f85550c7849e1f4b44c26fb3",
+              "visible_at": 1789342922591
+            },
+            "market": {
+              "clob_market_id": "4511984",
+              "condition_id": "0xe77e634df41223a87193e2ebf973d2d0b44f362d262ed7caa3733b0d6484e34d",
+              "window": {
+                "end_at_utc_ms": 1789342800000,
+                "start_at_utc_ms": 1789342500000
+              }
+            }
+          }
+        ],
+        "raw_rows": 58,
+        "raw_target_count": 8,
+        "public_target_count": 0,
+        "identity_known_samples": 0,
+        "missing_identity_snapshot": {
+          "first": {
+            "origin": {
+              "kind": "file",
+              "path": "2026-09-13/typed_raw/utc_day=2026-09-13/source_kind=polymarket_market_metadata/polymarket_market_metadata_23-part-2.parquet",
+              "row": 3
+            },
+            "received_at": 1789342531251,
+            "source_message_id": "613411d346484d9969a7d9a6479566c03f879db50c9798b54174dfa363a89b1c",
+            "visible_at": 1789342531251
+          },
+          "last": {
+            "origin": {
+              "kind": "file",
+              "path": "2026-09-13/typed_raw/utc_day=2026-09-13/source_kind=polymarket_market_metadata/polymarket_market_metadata_23-part-2.parquet",
+              "row": 62
+            },
+            "received_at": 1789342800009,
+            "source_message_id": "c4204cc14674f336a8d918f41ac1968ea400ad169ddd5e99f678f70933083a67",
+            "visible_at": 1789342800014
+          },
+          "reason": "missing_identity_snapshot",
+          "row_kinds": {
+            "MarketStateTransition": 2
+          },
+          "rows": 2
+        },
+        "census_identity_conflicts": [],
+        "identity_gap": {
+          "start": 1789342531251,
+          "end": 1790467200000,
+          "right_censored": true
+        }
+      }
+    ],
+    "ordinary_metadata_missing_identity_rows": 11,
+    "census_identity_conflict_markets": 0
+  },
+  "probability_results": {
+    "frozen_folds": 0,
+    "brier": null,
+    "calibration": null,
+    "candidate_rankings": null,
+    "computable_sample_count": null,
+    "trusted_label_sample_count": null,
+    "fallback_samples": null
+  },
+  "repair": {
+    "change": "仅在动态INSERT列列表按SQL标识符引用并双写内部双引号",
+    "source_path": "baseline-mm/research/probability/direct.py",
+    "frozen_execution_source_modified": false,
+    "helper_rebuilt": false,
+    "third_actual_run_started": false
+  },
+  "validation": {
+    "regression_path": "tests/probability/test_probability.py",
+    "representative_test": "ProbabilityTests.test_price_samples_cross_unit_carry_and_new_native_order",
+    "before": {
+      "tests": 1,
+      "subtest_errors": 2,
+      "error": "_duckdb.ParserException at INSERT column list"
+    },
+    "after": {
+      "tests": 1,
+      "subtests": [
+        "twap",
+        "trade"
+      ],
+      "passed": true
+    },
+    "python_regression": {
+      "tests": 13,
+      "passed": true
+    },
+    "reused": "PR #257/#258未修改Rust公共核心、辅助程序与健康兼容证据"
+  },
+  "archive_relative": "issue-185/probability-calibration-actual-repair1-20261007"
+}
