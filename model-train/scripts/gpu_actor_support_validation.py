@@ -205,9 +205,10 @@ def check_mixed(source):
     assert values(state.quantity)==[500]
     support=Numbers.run_exact_batch(lambda:actor.support(state))
     assert support.price.cpu().tolist()==[source['a_price_support']['mask']]
+    price_a=torch.full_like(state.stage,18)
     def compute():
         support=actor.support(state)
-        selected=actor.choose(state,torch.full_like(state.stage,18))
+        selected=actor.choose(state,price_a)
         support_b=actor.support(selected)
         selected=actor.choose(selected,torch.full_like(state.stage,19))
         return support,support_b,selected
@@ -224,9 +225,16 @@ def check_mixed(source):
     assert selected.prices.cpu().tolist()==[[19,20]] and values(selected.quantity)==[500]
     saved=_owned(selected)
     # 下一次实际重放覆盖同一发布源；这是组件暂存覆写，不是自然业务路径。
-    state.quantity.words.copy_(integers([400]).with_capacity(state.quantity.words.shape[1]).words)
+    # 价格阶段的数量已由lo=hi收敛；覆盖同一合法前缀的三个精确值，保持内部一致。
+    # A价.01、B FOK价.20投入1.2>=最低支出1，总本金1.26<现金2；不新增最低份数mask。
+    replacement=integers([600])
+    for field in (state.quantity,state.lo,state.hi):
+        field.words.copy_(replacement.with_capacity(field.words.shape[1]).words)
+    price_a.fill_(0)
     graph.replay();torch.cuda.synchronize()
-    assert values(captured.value[2].quantity)==[400]
+    assert captured.fits.cpu().item() and captured.value[2].stage.cpu().tolist()==[7]
+    assert values(captured.value[2].quantity)==[600]
+    assert captured.value[2].fault.cpu().tolist()==[0] and captured.value[2].prices.cpu().tolist()==[[1,20]]
     assert values(saved.quantity)==[500] and saved.prices.cpu().tolist()==[[19,20]]
     return {'quantity_centishares':500,'variants':['GTC','FOK'],'prices':[19,20],
         'CUDA_capture_replay':True,'owned_selected_prefix':True,'required_words':int(captured.required_words.cpu())}
