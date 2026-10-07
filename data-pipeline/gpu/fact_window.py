@@ -29,7 +29,7 @@ class PublicFactWindow:
                     and start <= end <= len(columns['fact_sources'])):
                 raise ValueError('公共事实区间/来源坐标无效')
             for source in columns['fact_sources'][start:end]:
-                if source[:2] != [group,kind] or source[2] not in (0,1):
+                if (source[0],source[1]) != (group,kind) or source[2] not in (0,1):
                     raise ValueError('公共事实直接来源关联或存在位错误')
             expected_source, previous_group = end, group
         if expected_source != len(columns['fact_sources']):
