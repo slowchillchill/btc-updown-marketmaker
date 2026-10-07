@@ -111,3 +111,29 @@ Rust 工具前缀为 `/root/autodl-tmp/tools/rust-1.95.0`。后续编译和运�
 原生扩展编译及 CPU／GPU 验证都在训练服务器进行。已有有效环境证据直接复用；
 实际模型的前向、反向、更新、保存／加载、显存及端到端耗时随真实 100ms GPU 路径验证，
 不再建立独立低配置参考任务或将重复环境样板设为开发前置。
+
+## 学习依赖的实际差异准备
+
+共同依赖已补TorchRL0.13.3、TensorDict0.13.0及MLflow3.15.2。原Python/uv、
+Torch cu128及NumPy保持准确版本；databricks-sdk的protobuf<7共同约束要求protobuf6.33.6。
+目标锁仅取Linux依赖闭包，CPU多平台锁中的Windows pywin32不进入此GPU锁。
+
+正常运行复用已提交锁。必要重锁使用`lock_training_dependencies.sh`，最后一个参数是进度间隔秒数；
+仅该求解进程启用网络，不改变平时离线执行环境。生成锁仍须回传、审查、提交及准确bundle同步。
+`install_training_dependencies.py`对照现有虚拟环境，只下载和安装真实版本差异；
+复用已校验的下载、有限同制品换源和官方SHA，完全离线按哈希安装，再核全部锁定版本和依赖一致性。
+脚本保留虚拟环境解释器的原路径，真实路径仅用于数据盘边界核对，不能把符号链接解析结果作为uv目标。
+
+```bash
+source /root/autodl-tmp/environments/issue-181-cu128.sh
+bash model-train/scripts/lock_training_dependencies.sh "$LOCK_EVIDENCE" 10
+model-train/.venv/bin/python model-train/scripts/install_training_dependencies.py \
+  --artifact "$INSTALL_EVIDENCE" --jobs 8 --progress-seconds 10
+PYTHONPATH=model-train model-train/.venv/bin/python model-train/scripts/training_dependencies_validation.py \
+  --artifact "$VALIDATION_EVIDENCE"
+```
+
+上述证据变量须指数据盘下的新目录。已完成的环境不重复安装。
+工程验证真实调用原100ms GRU、family头及Critic，检查CUDA GAE/PPO反向更新和MLflow记录读回，
+另检查共同protobuf下Critic ONNX/ORT固定输入输出。GRU无dropout，但cuDNN反向需要training前向缓存。
+合成输入、合成奖励及family分布只验证依赖接线；不代表完整合法Actor、业务PPO或活动恢复。

@@ -369,9 +369,15 @@ GAE使用TorchRL `generalized_advantage_estimate` 基础函数，输入各根有
 及[GAE说明](https://docs.pytorch.org/rl/0.13/reference/generated/torchrl.objectives.value.GAE.html)，
 本项目需核对循环和全域条件分布的适配，不由普通连续动作教程证明已兼容。
 
-环境差异先核对共同候选TorchRL0.13.3/TensorDict0.13.0、MLflow3.15.2与现有Python3.13.15/
-Torch2.11.0+cu128的实际兼容；记录官方制品哈希并补GPU锁与离线材料，不重装已有效环境。
-候选不是已安装版本；兼容缺口回报具体方案，不暗中自研PPO基础损失或更换栈。
+当前已在原虚拟环境差异安装TorchRL0.13.3/TensorDict0.13.0、MLflow3.15.2，
+CPU及Linux cu128锁保存官方wheel和SHA；Python3.13.15、Torch2.11.0+cu128、NumPy2.5.3未更换。
+Linux锁按CPU依赖的真实平台marker取闭包，不要求安装Windows的pywin32。
+MLflow传递依赖databricks-sdk要求protobuf<7，因此共同protobuf由7.36.2改为6.33.6；
+原Critic的固定输入ONNX导出、checker和CPU ORT输出已在服务器核对。
+实际Policy100ms的GRU/Actor family/Critic已接TensorDict、GAE及一次ClipPPOLoss反向更新，
+MLflow写入和读回也已验证。该工程夹具使用合成观察、合成奖励和仅family分布，
+不替代本节的完整合法动作联合概率、独立联合熵、物理时间优势或正式profile；
+完整业务轨迹、PPO采集屏障及活动恢复仍未交付。
 MLflow写训练profile、版本、准备成本、更新/学习/经济/资源结果及完整checkpoint引用，
 不作为恢复唯一来源。
 
@@ -792,3 +798,12 @@ Trade 详情到达后绑定原订单身份，消费这些原分录；不新增�
 当前仍绑定共享 NOE 块和已有订单/意图目录；跨块退役、动态接单与完整冻结账户/100ms 宿主继续接入。
 有界取消验证复用四条真实来源，以设备经济关联门暂留释放记录，
 核 Registry 先关闭、随后等待记录消费且不重复领取，与原最终 Ledger 相等。
+
+### 公开订单的原时间来源
+
+`shared-run/gpu/registry.py`的冻结来源保存原共享引用和platform/received/available时刻。
+formed只取原OrderLifecycle Accepted；Control Submission Accepted不能补成formed。
+latestDirect按原delivery序及record ordinal选，三类取消结果均保留；明确无效果响应不能因不关单而丢失。
+压紧来源分别保留formed、最新生命周期、粘滞关闭及latestDirect，旧冻结继续持有不可变引用。
+这些字段供Native订单年龄及取消T5读取；模型冻结逻辑时刻和首次公开领取时刻仍是不同量。
+有限原21前缀已逐项核源时间、完整位置和引用，仍不代替完整账户slow433及全根时钟。
