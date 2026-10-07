@@ -103,8 +103,12 @@ def validate(groups):
         'actual_public_bound_prefix_scope_selector_and_native_0_to_77_checked': checked,
         'same_ActionBeforeRead_source_used': True,
         'public_current_without_Ledger_market_cold_cost_unknown_still_Known_zero_checked': True,
-        'checked_native_fields': [54, 77], 'continuous_GPU_account_or_full_slow433_checked': False}
+        'checked_native_fields': [0, 77], 'continuous_GPU_account_or_full_slow433_checked': False}
 
 
 if __name__ == '__main__':
-    print(json.dumps(validate(json.loads(Path(sys.argv[1]).read_text())), sort_keys=True))
+    groups=json.loads(Path(sys.argv[1]).read_text())
+    result=validate(groups)
+    from validate_original_commitments import validate_commitments
+    result.update(validate_commitments(groups))
+    print(json.dumps(result,sort_keys=True))

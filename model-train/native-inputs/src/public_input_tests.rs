@@ -163,6 +163,7 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
     let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes).unwrap();
     let mut driver = FinitePublicConsumptionV1::new(execution, source, "native".into());
     let mut exported = Vec::new();
+    let mut submitted_sources = Vec::new();
     let mut frozen = None;
     for index in 0..2 {
         driver.next_group().unwrap().unwrap();
@@ -189,6 +190,8 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
         let mut output = exported_group(&group);
         if std::env::var_os("NATIVE_ACCOUNT_SOURCE_OUTPUT").is_some() {
             output["bound_markets"] = native.account_binding_sources_for_tests();
+            output["submitted_sources"] = serde_json::json!(submitted_sources);
+            output["public_order_sources"] = account_registry_sources_for_tests(shared.registry());
         }
         exported.push(output);
         if index == 1 {
@@ -196,18 +199,35 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
         }
     }
     let frozen = frozen.unwrap();
-    shared
+    let paired_intent = Arc::new(ModelIntentV1::SubmitPairedBuy {
+        condition_id: ConditionId(CONDITION_ID.into()),
+        orders: [leg(UP_TOKEN_ID, 50), leg(DOWN_TOKEN_ID, 50)],
+    });
+    let paired_receipt = shared
         .execute(
             &mut driver.decision().unwrap(),
             context("paired"),
-            Some(Arc::new(ModelIntentV1::SubmitPairedBuy {
-                condition_id: ConditionId(CONDITION_ID.into()),
-                orders: [leg(UP_TOKEN_ID, 50), leg(DOWN_TOKEN_ID, 50)],
-            })),
+            Some(paired_intent),
         )
         .await
         .unwrap()
         .unwrap();
+    if std::env::var_os("NATIVE_ACCOUNT_SOURCE_OUTPUT").is_some() {
+        let original = shared.registry().frozen_intent("paired").unwrap();
+        let ModelIntentV1::SubmitPairedBuy { condition_id,orders }=original.intent() else { unreachable!() };
+        let legs=orders.iter().enumerate().map(|(item,leg)| {
+            let BuyOrderIntentV1::GtcLimit { limit_price_pusd_per_share,size_shares,post_only }=&leg.order else { unreachable!() };
+            serde_json::json!({"item":item,"condition":condition_id,"token":leg.token_id,
+                "variant":"GtcLimit","price":limit_price_pusd_per_share,"target":size_shares,"post_only":post_only})
+        }).collect::<Vec<_>>();
+        submitted_sources.push(serde_json::json!({
+            "request":original.global_request_id(),"legs":legs,
+            "introduced_after_cutoff":frozen.cutoff,
+            "input_sequence":paired_receipt.input_sequence(),
+            "platform_arrived_at":paired_receipt.platform_arrived_at_utc_ms(),
+            "scheduled_actions":paired_receipt.scheduled_action_count(),
+        }));
+    }
     assert_eq!(frozen.rows[0].slow[110], projection("100"));
     assert_eq!(
         frozen
@@ -283,6 +303,8 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
         let mut output = exported_group(&group);
         if std::env::var_os("NATIVE_ACCOUNT_SOURCE_OUTPUT").is_some() {
             output["bound_markets"] = native.account_binding_sources_for_tests();
+            output["submitted_sources"] = serde_json::json!(submitted_sources);
+            output["public_order_sources"] = account_registry_sources_for_tests(shared.registry());
         }
         exported.push(output);
     }
@@ -1124,6 +1146,22 @@ async fn old_pairing_is_market_local_before_sum() {
     );
     assert_eq!(slots, [0., 1., 1.], "跨市场A5/B5不能变成pair5");
     driver.stop_and_drain().unwrap();
+}
+
+// 只读同次唯一消费后的公开来源；不读取派生matched/active/commitment初始化GPU。
+fn account_registry_sources_for_tests(registry:&SharedExecutionRegistryV2)->serde_json::Value {
+    fn record(value:&execution_normalization::NoeConsumedRecordRefV2)->serde_json::Value {
+        serde_json::json!({"record":value.record(),"position":value.position(),"visibility":value.visibility()})
+    }
+    serde_json::json!(registry.orders().map(|order| serde_json::json!({
+        "identity":order.order_identity,
+        "origin":order.origin.as_ref().map(|origin| serde_json::json!({
+            "request":origin.intent.global_request_id(),"item":origin.batch_item_ordinal,
+        })),
+        "accepted":order.accepted.map(record),"formed":order.formed.map(record),
+        "latest_lifecycle":order.latest_lifecycle.map(record),"latest_direct":order.latest_direct_feedback.map(record),
+        "trades":registry.order_trades(order.order_identity).map(record).collect::<Vec<_>>(),
+    })).collect::<Vec<_>>())
 }
 
 pub(crate) fn exported_group(group: &NativeInputGroup) -> serde_json::Value {
