@@ -18,7 +18,8 @@ from registry import (PublicRegistryEvents, FrozenIntentOrders, PublicRegistrySt
     PublicCancellationState, CancellationCompletions)
 from validate_base_execution import integers, rational, values
 from commitments import SubmittedLegs,SubmissionBindings,freeze_leg_commitments
-from cancel_objects import OrderFormation,CancelObjectDirectory,freeze_cancel_objects
+from cancel_objects import OrderFormation,CancelObjectDirectory,freeze_cancel_objects,sim_identity_order
+from cancel_requests import CancellationScopes,CancellationTargets,freeze_scoped_cancel_requests
 from registry import identity_matches
 from queues import Numbers
 
@@ -116,7 +117,8 @@ def cancel_object_columns(frame,catalog,identities,events):
     raw={row['identity']:row for row in frame['raw_orders']}
     markets=frame['public_market_sources']
     market_ids={market['condition_id']:index for index,market in enumerate(markets)}
-    identity_rank={identity:index for index,identity in enumerate(sorted(catalog))}
+    business_sequences=integers([int(platform_order_id(identity).removeprefix('sim-')) for identity in catalog])
+    identity_rank,identity_fault=sim_identity_order(business_sequences,torch.ones((1,len(catalog)),dtype=torch.bool,device='cuda'))
     receipts={receipt['request']:receipt for receipt in frame['buy_source_receipts']}
     processed=[];times=[];sequences=[];items=[];formed=[];source_sequence=[];locations=[]
     for identity in catalog:
@@ -135,8 +137,8 @@ def cancel_object_columns(frame,catalog,identities,events):
     tensor=lambda values,dtype=torch.int64:torch.tensor([values],dtype=dtype,device='cuda')
     same,error=identity_matches(integers([identities[key] for key in catalog]),events.orders,1,len(catalog),events.received.size(1))
     evidence=(same&events.received[:,None,:]).any(2)
-    formation=OrderFormation(evidence,tensor([identity_rank[key] for key in catalog]),tensor(locations),
-        tensor(processed,torch.bool),tensor(times),integers(sequences),tensor(items),tensor(formed,torch.bool),integers(source_sequence),events.fault)
+    formation=OrderFormation(evidence,identity_rank,tensor(locations),
+        tensor(processed,torch.bool),tensor(times),integers(sequences),tensor(items),tensor(formed,torch.bool),integers(source_sequence),events.fault|identity_fault)
     pairs=[]
     for request in sorted(receipts):
         receipt=receipts[request]
@@ -178,6 +180,61 @@ def compare_objects(frame,result,directory,catalog):
     assert actual==oracle,(frame['stage'],'完整撤单对象/形成顺序',actual,oracle)
 
 
+def platform_order_id(identity):
+    return json.loads(identity.split(':',1)[1])[-1]['Order']['source_order_id']
+
+
+def scope_columns(scopes,universe,markets):
+    tensor=lambda values,dtype=torch.int64:torch.tensor([values],dtype=dtype,device='cuda')
+    return CancellationScopes(tensor(['market' in scope for scope in scopes],torch.bool),
+        tensor([markets.get(scope.get('market'),-1) for scope in scopes]),
+        torch.tensor([[[order in scope.get('orders',[]) for order in universe] for scope in scopes]],dtype=torch.bool,device='cuda').reshape(1,len(scopes),len(universe)))
+
+
+def scoped_freeze(frame,cancel,request_ids,target_rows,universe):
+    markets={market['condition_id']:index for index,market in enumerate(frame['public_market_sources'])}
+    source_requests={source['request']:source['scope'] for source in frame['cancel_source_requests']}
+    requests=scope_columns([source_requests.get(name,{'orders':[]}) for name in request_ids],universe,markets)
+    queries=scope_columns([query['scope'] for query in frame['scoped_cancellation_requests']],universe,markets)
+    location={platform_order_id(order['identity']):markets.get(order['condition'],-1) for order in frame['raw_orders']}
+    tensor=lambda values,dtype=torch.int64:torch.tensor([values],dtype=dtype,device='cuda')
+    order_markets=tensor([location.get(order,-1) for order in universe])
+    known=order_markets>=0
+    target_scopes=[];request_keys=[];outcomes=[];available=[]
+    for reference in target_rows:
+        evidence=reference['record']['Evidence']
+        control=evidence['evidence']['Control']['result']['Cancellation']
+        request=evidence['source_reference']['record']['DirectResponse']['association']['CancellationTarget']['global_request_id']
+        target_scopes.append({'orders':[platform_order_id(control['order_identity'])]})
+        request_keys.append(request_ids[request])
+        outcomes.append(['Canceled','NotCanceledNoEffect','EvidenceUnknownNoEffect'].index(control['outcome']))
+        available.append(reference['visibility']['Feedback']['available_at_utc_ms'])
+    targets=CancellationTargets(tensor([True]*len(target_rows),torch.bool),integers(request_keys),
+        scope_columns(target_scopes,universe,markets),tensor(outcomes),tensor(available),torch.zeros(1,dtype=torch.int32,device='cuda'))
+    return freeze_scoped_cancel_requests(cancel,requests,queries,order_markets,known,targets,
+        torch.tensor([frame['logical_at']],device='cuda'))
+
+
+def compare_scoped(frame,read):
+    assert read.fault.cpu().tolist()==[0]
+    pending=values(read.pending_count)
+    counts=values(read.response_counts)
+    pending_known=read.pending_known.cpu().tolist()[0]
+    latest_known=read.latest_known.cpu().tolist()[0]
+    latest=read.has_latest.cpu().tolist()[0]
+    counts_known=read.counts_known.cpu().tolist()[0]
+    for index,query in enumerate(frame['scoped_cancellation_requests']):
+        assert pending_known[index]==('Known' in query['pending']),(frame['stage'],'作用域pending Known')
+        if pending_known[index]:assert pending[index]==query['pending']['Known']
+        assert latest_known[index]==('Known' in query['latest']),(frame['stage'],'作用域latest Known')
+        if latest_known[index]:assert latest[index]==(query['latest']['Known'] is not None)
+        for outcome,oracle in enumerate(query['counts']):
+            if oracle=='NotApplicable':assert not latest[index]
+            else:
+                assert counts_known[index][outcome]==('Known' in oracle),(frame['stage'],'逐目标counts Known')
+                if counts_known[index][outcome]:assert counts[index*3+outcome]==oracle['Known']
+
+
 def check_family(source):
     identities = {}
     targets = {}
@@ -205,6 +262,9 @@ def check_family(source):
     cancel=Numbers.run_exact_batch(lambda:PublicCancellationState(integers(list(request_ids.values())),
         torch.zeros((1,len(request_ids)),dtype=torch.bool,device='cuda'),completion_columns(None,request_ids)))
     cancel_seen=set()
+    target_rows=[]
+    universe=sorted({platform_order_id(key) for key in catalog}|{order for frame in source for query in frame['scoped_cancellation_requests'] for order in query['scope'].get('orders',[])})
+    scoped_saved=[]
     maximum_retained=0
     cancel_saved=[]
     seen=set()
@@ -222,6 +282,9 @@ def check_family(source):
             for reference in order['trades']:
                 if position_key(reference) not in seen:
                     seen.add(position_key(reference));incoming.append(reference)
+        for reference in incoming:
+            evidence=reference['record']['Evidence']['evidence']
+            if 'Cancellation' in evidence.get('Control',{}).get('result',{}):target_rows.append(reference)
         incoming.sort(key=lambda r:(r['visibility']['Feedback']['delivery_sequence'],r['position']['record_ordinal']))
         def compute():
             events=event_columns(incoming,identities,rank,buy_ids)
@@ -302,6 +365,11 @@ def check_family(source):
         else:
             assert frame['cancel_response_counts']==['NotApplicable']*3
         cancel_saved.append((cancel_view,values(cancel_view.pending_count),values(cancel_view.response_counts)))
+        scoped=Numbers.run_exact_batch(lambda:scoped_freeze(frame,cancel,request_ids,target_rows,universe))
+        compare_scoped(frame,scoped)
+        scoped_saved.append((scoped,values(scoped.response_counts),scoped.pending_known.clone()))
+    for scoped,counts,pending_known in scoped_saved:
+        assert values(scoped.response_counts)==counts and torch.equal(scoped.pending_known,pending_known),'旧作用域读取不倒灌'
     for objects,members,present in objects_saved:
         assert torch.equal(objects.members,members) and torch.equal(objects.present,present),'旧撤单对象不倒灌'
     for view,active,unfinished in saved:
@@ -319,7 +387,7 @@ def main():
     torch.cuda.synchronize()
     print(json.dumps({'frozen_prefixes':sum(n for n,_,_ in counts),'distinct_original_order_records':sum(n for _,n,_ in counts),
         'receipt_without_order_keeps_original_leg_target':True,'continuous_received_state':True,'maximum_retained_order_records_per_family':[width for _,_,width in counts],'derived_oracle_initialization':False,'old_freeze_unchanged':True,
-        'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'single_paired_market_cancel_objects':True,'scoped_cancel_request_results':False,'dynamic_identity_ties':False,
+        'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'single_paired_market_cancel_objects':True,'scoped_cancel_request_results':True,'scoped_unknown_order_location_preserved':True,'device_sim_identity_tie_order':True,
         'full_registry_or_root':False,'seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 
 

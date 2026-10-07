@@ -62,6 +62,23 @@ def _sequence_fault(value, enabled):
     return Numbers.combine_fault_rows(torch.where(enabled,invalid.reshape(roots,width),0))
 
 
+def sim_identity_order(sequences, population):
+    """同根Order命名空间的原sim-u64字典序，复用所属公共设备十进制原语。
+
+    sequences是业务order序号而非物理槽。固定账户和Order前缀由根绑定，
+    因此同根完整Identity排序与后缀字节排序等价，不回CPU拼动态字串。
+    """
+    from device_identity import sim_trade_order_key
+    roots,width=population.shape
+    keys=sim_trade_order_key(sequences)
+    order=torch.arange(width,device=population.device)[None,:].expand(roots,width)
+    for byte in range(19,-1,-1):
+        order=_sort(order,keys.bytes.reshape(roots,width,20)[:,:,byte])
+    ranks=order.argsort(dim=1)
+    fault=Numbers.combine_fault_rows(torch.where(population,keys.fault.reshape(roots,width),0))
+    return ranks,fault
+
+
 def freeze_cancel_objects(order_read, formation, directory):
     roots,count=formation.evidence.shape
     device=formation.evidence.device

@@ -3441,6 +3441,33 @@ fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&S
         CancelObjectReadV2::Paired { origin,orders }=>serde_json::json!({"kind":1,"origin":origin.global_request_id(),"members":[orders[0].order_identity,orders[1].order_identity]}),
         CancelObjectReadV2::Market { condition_id,orders }=>serde_json::json!({"kind":2,"condition":condition_id,"members":orders.iter().map(|order|order.order_identity).collect::<Vec<_>>()}),
     }).collect::<Vec<_>>();
+    let cancel_sources=cancel_sources.iter().map(|source| {
+        let request=source["request"].as_str().unwrap();
+        let intent=registry.frozen_intent(request).unwrap().intent();
+        let scope=match intent {
+            ModelIntentV1::CancelOrder { platform_order_id }=>serde_json::json!({"orders":[platform_order_id]}),
+            ModelIntentV1::CancelOrders { platform_order_ids }=>serde_json::json!({"orders":platform_order_ids}),
+            ModelIntentV1::CancelMarketOrders { condition_id }=>serde_json::json!({"market":condition_id}),
+            _=>panic!("原冻结撤单请求"),
+        };
+        let mut source=source.clone();source["scope"]=scope;source
+    }).collect::<Vec<_>>();
+    let condition=ConditionId(CONDITION_ID.into());
+    let scope_queries=[CancellationScopeV1::Orders(vec!["sim-1"]),CancellationScopeV1::Orders(vec!["sim-2"]),
+        CancellationScopeV1::Market(&condition),CancellationScopeV1::Orders(vec!["not-observed-order"])];
+    let scoped=scope_queries.iter().map(|scope| {
+        let request=view.cancellation_requests(Some(scope));
+        let encoded_scope=match scope {
+            CancellationScopeV1::Orders(orders)=>serde_json::json!({"orders":orders}),
+            CancellationScopeV1::Market(condition)=>serde_json::json!({"market":condition}),
+        };
+        let latest=match request.latest_response {
+            ExecutionReadValueV1::Known(value)=>serde_json::json!({"Known":value.map(record)}),
+            ExecutionReadValueV1::Unavailable=>serde_json::json!("Unavailable"),
+            ExecutionReadValueV1::NotApplicable=>serde_json::json!("NotApplicable"),
+        };
+        serde_json::json!({"scope":encoded_scope,"pending":request.pending_count,"counts":request.response_counts,"latest":latest})
+    }).collect::<Vec<_>>();
     let requests=view.cancellation_requests(None);
     let latest=match requests.latest_response {
         ExecutionReadValueV1::Known(value)=>serde_json::json!({"Known":value.map(record)}),
@@ -3450,6 +3477,6 @@ fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&S
     serde_json::json!({"stage":stage,"logical_at":view.cutoff().decision_time().logical_time_utc_ms(),
         "orders":orders,"raw_orders":raw_orders,"commitments":commitments,"cancel_objects":objects,"public_market_sources":market_sources,"request_funds":funds,
         "pending_noe_records":view.pending_noe_record_count(),"ledger":view.ledger(),"economics":view.economics(),
-        "buy_source_receipts":buy_sources,"cancel_source_requests":cancel_sources,"cancel_pending":requests.pending_count,"cancel_response_counts":requests.response_counts,"cancel_latest":latest,
+        "buy_source_receipts":buy_sources,"cancel_source_requests":cancel_sources,"scoped_cancellation_requests":scoped,"cancel_pending":requests.pending_count,"cancel_response_counts":requests.response_counts,"cancel_latest":latest,
         "source":"original_SharedExecutionV2_ActionBeforeReadV2","post_only_fixture_not_B_Actor_domain":true})
 }
