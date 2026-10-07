@@ -12,6 +12,8 @@ class PackedPmBooks:
     mask: torch.Tensor
     quality: torch.Tensor  # [roots,2,6]，原Native Q6。
     fault: torch.Tensor
+    required: torch.Tensor  # 每根六侧中的所属侧最大正量档数；未扩池。
+    enough: torch.Tensor
 
 
 class PmBookInputs:
@@ -47,8 +49,8 @@ class PmBookInputs:
     def pack(self, frame, asset_indices, observation_ms):
         """asset_indices[roots,2]由原市场身份给定，观察时间与模型墙钟无关。
 
-        容量检查仅回传一次资源请求；扩池只消耗墙钟，不丢档位或改变交易支持。
-        调用方须在fault为零后提交观察，不把错误转换为缺盘口。
+        本函数不回传设备值或扩池。调用方在enough及精确字容量满足、fault为零后才
+        提交观察；不足时保持原前缀和端点，增长后重试，不把资源退出转换成缺盘口。
         """
         numbers = _numbers()
         state = self.state
@@ -68,7 +70,8 @@ class PmBookInputs:
         if not state.assets or slots == 0:
             levels = torch.zeros((roots, 2*self.outcomes, self.capacity, 9), dtype=torch.float32, device=state.slots.device)
             return PackedPmBooks(levels, torch.zeros(levels.shape[:3],dtype=torch.bool,device=levels.device),
-                                 quality, fault)
+                                 quality, fault,torch.zeros(roots,dtype=torch.int64,device=levels.device),
+                                 torch.ones(roots,dtype=torch.bool,device=levels.device))
         visible = frame.ready & ((frame.quality == 0) | (frame.quality == 1))
         quantity_positive = frame.quantity.numerator.sign.reshape(roots, slots) > 0
         candidates = []
@@ -82,9 +85,7 @@ class PmBookInputs:
                 # 原精确价格顺序内稳定压紧；未来/零量槽位不进入配对树。
                 local = torch.argsort((~selected[:, order]).to(torch.int8), dim=1, stable=True)
                 candidates.append((order[local], selected.sum(dim=1)))
-        required = int(torch.stack([count for _, count in candidates]).max().cpu())
-        while self.capacity < required:
-            self.capacity *= 2
+        required = torch.stack([count for _, count in candidates],dim=1).max(dim=1).values
         capacity = self.capacity
         levels = torch.zeros((roots, 2*self.outcomes, capacity, 9), dtype=torch.float32, device=state.slots.device)
         mask = torch.zeros((roots, 2*self.outcomes, capacity), dtype=torch.bool, device=state.slots.device)
@@ -117,4 +118,4 @@ class PmBookInputs:
             levels[:, side, :count] = torch.where(valid[:, :, None], rows, 0.0)
             mask[:, side, :count] = valid
             fault = fault | numbers.combine_fault_rows(errors)
-        return PackedPmBooks(levels, mask, quality, fault)
+        return PackedPmBooks(levels, mask, quality, fault,required,required<=capacity)

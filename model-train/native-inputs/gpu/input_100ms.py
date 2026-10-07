@@ -1,5 +1,5 @@
 """真实公共GPU状态到完整Native fast626；冻结只生成不可变输入和候选端点。"""
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 import torch
 from prepare import _numbers
 from public_state import _take
@@ -34,6 +34,20 @@ class FrozenMarket100ms:
     history_memory: object
     endpoint_memory: MarketFreezeMemory
     fault: torch.Tensor
+    required: torch.Tensor  # [roots,5]：PM、Binance、事实、来源、成交人口。
+    resources_fit: torch.Tensor  # 不含精确字资源；由同一device_exact_batch.fits协调。
+
+    def snapshot(self):
+        """图外成功发布时拥有全部冻结值/记忆；共享只读DPT列不在本对象中。"""
+        return _snapshot_owned(self)
+
+
+def _snapshot_owned(value):
+    if isinstance(value,torch.Tensor): return value.clone()
+    if is_dataclass(value):
+        return replace(value,**{field.name:_snapshot_owned(getattr(value,field.name)) for field in fields(value)})
+    if value is None: return None
+    raise TypeError('冻结只包含已装配的张量、精确值及端点/历史记忆')
 
 
 def _endpoint_commit(candidate,previous,active):
@@ -70,6 +84,15 @@ class MarketInputs100ms:
         self.events = EventInputs(PublicFactWindow(columns))
         self.trades = TradeInputs(shared,PublicTradeWindow(columns))
         self.rules = RuleInputs(shared,process_rules)
+
+    def grow_resources(self, required):
+        """仅在图外资源退出接收已回传人口；不接纳任何观察或重读已消费来源。"""
+        if len(required)!=5 or any(type(value) is not int or value<0 for value in required):
+            raise ValueError('需要PM/Binance/事实/来源/成交五个实际人口')
+        for owner,name,need in zip((self.packer,self.binance.book,self.events.window,self.events.window,self.trades.window),
+                ('capacity','capacity','fact_capacity','source_capacity','capacity'),required):
+            capacity=getattr(owner,name)
+            if need>capacity: setattr(owner,name,1<<(need-1).bit_length())
 
     def prefix_at(self, observation_ms):
         return torch.searchsorted(self.delivered_cutoffs,observation_ms,right=True)-1
@@ -145,4 +168,8 @@ class MarketInputs100ms:
         candidate = MarketFreezeMemory(prefixes.clone(),observation_ms.clone(),
             _endpoint_commit(pm.memory,endpoint_memory.pm_sides,active),
             _endpoint_commit(binance.side.memory,endpoint_memory.binance_sides,active))
-        return FrozenMarket100ms(fast,levels,mask,rules.values,role,prefixes.clone(),history.memory,candidate,fault)
+        required=torch.stack((pm_books.required,binance.packed.required,events.required[:,0],
+            events.required[:,1],trades.required),dim=1)
+        resources_fit=pm_books.enough & binance.packed.enough & events.enough & trades.enough
+        return FrozenMarket100ms(fast,levels,mask,rules.values,role,prefixes.clone(),history.memory,candidate,
+            fault,required,resources_fit)

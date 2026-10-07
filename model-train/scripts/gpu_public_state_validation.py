@@ -14,6 +14,22 @@ from fractions import Fraction
 import torch
 
 
+def resource_retry(compute, pools, *, metadata=lambda value:value):
+    """有限验证入口的图外资源退出；同一输入重算，不在设备算子里扩池。"""
+    from prepare import _numbers
+    numbers=_numbers(); words=4
+    while True:
+        candidate=numbers.device_exact_batch(compute,word_capacity=words,device='cuda')
+        result=metadata(candidate.value)
+        fit=candidate.fits & result.enough.all()
+        if bool(fit.cpu()): return candidate.value
+        required=result.required.reshape(-1,len(pools)).max(dim=0).values
+        requests=torch.cat((candidate.required_words.reshape(1),required)).cpu().tolist()
+        words=1<<(max(4,requests[0])-1).bit_length()
+        for (owner,name),need in zip(pools,requests[1:]):
+            if need>getattr(owner,name): setattr(owner,name,1<<(need-1).bit_length())
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary',type=Path,required=True)
@@ -214,7 +230,7 @@ def main():
     if args.original_reference is not None:
         now[-1] = json.loads(args.original_reference.read_text())['observation_ms']
     packer = PmBookInputs(state, initial_capacity=1)
-    packed = packer.pack(frame, assets, now)
+    packed = resource_retry(lambda:packer.pack(frame,assets,now),[(packer,'capacity')])
     native_fields = pm_fields(state,observation,assets,now)
     market_indices = torch.full((3,),target_market,dtype=torch.int64,device='cuda')
     native_lifecycle = LifecycleInputs(market_state).encode(market_frame,market_indices,assets,now)
@@ -223,7 +239,9 @@ def main():
     binance_inputs = BinanceInputs(binance_state,initial_capacity=1)
     binance_frame = binance_state.frame(prefixes)
     symbols = torch.zeros_like(prefixes)
-    native_binance = binance_inputs.encode(binance_frame,binance_state.observation(prefixes),symbols,now)
+    def encode_binance(*inputs):
+        return resource_retry(lambda:binance_inputs.encode(*inputs),[(binance_inputs.book,'capacity')],metadata=lambda value:value.packed)
+    native_binance = encode_binance(binance_frame,binance_state.observation(prefixes),symbols,now)
     assert not native_binance.fault.any().cpu().item()
     native_reference = ReferenceInputs(reference_state).encode(reference_state.frame(prefixes),market_frame,market_indices,now)
     if columns['reference_preparation_complete'] and columns['markets']:
@@ -238,24 +256,28 @@ def main():
     torch.cuda.reset_peak_memory_stats()  # 正常窗口阶段，含已驻留公共列/盘口/直接字段。
     fact_windows = PublicFactWindow(columns,initial_capacity=1)
     events = EventInputs(fact_windows)
+    def encode_events(*inputs):
+        return resource_retry(lambda:events.encode(*inputs),[(fact_windows,'fact_capacity'),(fact_windows,'source_capacity')])
     previous = prefixes.new_tensor([-1,-1,max(-1,prefix_values[-1]-1)])
-    native_events = events.encode(previous,prefixes,now)
+    native_events = encode_events(previous,prefixes,now)
     trades = TradeInputs(state,PublicTradeWindow(columns,initial_capacity=1))
-    native_window_trades = trades.encode(previous,prefixes,assets,now)
+    def encode_trades(*inputs):
+        return resource_retry(lambda:trades.encode(*inputs),[(trades.window,'capacity')])
+    native_window_trades = encode_trades(previous,prefixes,assets,now)
     if len(columns['assets']) >= 2:
         assert not native_window_trades.fault.any().cpu().item()
-    empty_trades = trades.encode(prefixes,prefixes,assets,now)
+    empty_trades = encode_trades(prefixes,prefixes,assets,now)
     assert torch.count_nonzero(empty_trades.values) == 0
     assert not native_events.fault.any().cpu().item()
-    empty_window = events.encode(prefixes,prefixes,now)
+    empty_window = encode_events(prefixes,prefixes,now)
     assert torch.count_nonzero(empty_window.values) == 0
     capacities_before_invalid = (fact_windows.fact_capacity,fact_windows.source_capacity)
-    invalid_window = events.encode(prefixes.new_tensor([-1]),prefixes.new_tensor([len(columns['groups'])]),now[:1])
+    invalid_window = encode_events(prefixes.new_tensor([-1]),prefixes.new_tensor([len(columns['groups'])]),now[:1])
     assert invalid_window.fault.ne(0).all().cpu().item()
     assert torch.count_nonzero(invalid_window.values) == 0
     assert capacities_before_invalid == (fact_windows.fact_capacity,fact_windows.source_capacity)
     trade_capacity_before_invalid = trades.window.capacity
-    invalid_trade_window = trades.encode(prefixes.new_tensor([-1]),prefixes.new_tensor([len(columns['groups'])]),assets[:1],now[:1])
+    invalid_trade_window = encode_trades(prefixes.new_tensor([-1]),prefixes.new_tensor([len(columns['groups'])]),assets[:1],now[:1])
     assert invalid_trade_window.fault.ne(0).all().cpu().item()
     assert torch.count_nonzero(invalid_trade_window.values) == 0
     assert trades.window.capacity == trade_capacity_before_invalid
@@ -265,7 +287,7 @@ def main():
         grid = torch.arange(last_grid-900,last_grid+1,100,dtype=torch.int64,device='cuda')
         end_prefix = state.prefix_at(grid)
         begin_prefix = state.prefix_at(grid-100)
-        grid_events = events.encode(begin_prefix,end_prefix,grid)
+        grid_events = encode_events(begin_prefix,end_prefix,grid)
         assert not grid_events.fault.any().cpu().item()
     torch.cuda.synchronize()
     normal_window_peak = torch.cuda.max_memory_allocated()
@@ -358,11 +380,11 @@ def main():
                     expected[start+2*k] = original_log(Fraction(min(values),1000))
                     expected[start+2*k+1] = original_log(Fraction(max(values),1000))
                 expected[start+6+k] = len(values)/len(rows)
-        full_window = events.encode(prefixes.new_tensor([-1]),prefixes[-1:],now[-1:])
+        full_window = encode_events(prefixes.new_tensor([-1]),prefixes[-1:],now[-1:])
         assert torch.equal(full_window.values[0],torch.tensor(expected,device='cuda',dtype=torch.float32)), (full_window.values,expected)
         assert not full_window.fault.any().cpu().item()
         # 原canonical PublicTrade缺量/未知方向仍计入整窗，不被public latest trade抑制。
-        full_trades = trades.encode(prefixes.new_tensor([-1]),prefixes[-1:],assets[-1:],now[-1:])
+        full_trades = encode_trades(prefixes.new_tensor([-1]),prefixes[-1:],assets[-1:],now[-1:])
         expected_trades = [0.0]*77
         for leg,asset_id in enumerate(original_pair):
             rows = [event for event in reference['public_events']
@@ -555,6 +577,7 @@ def main():
             from rules import PublicRuleGpu
             from input_rules import RuleInputs
             from input_100ms import MarketInputs100ms,MarketFreezeMemory
+            from validate_freeze_resources import freeze_with_resources,validate_freeze_replay
             snapshot = root/'sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json'
             request = args.output.parent/'historical-rule-request.json'
             request.write_text(json.dumps({'snapshot_path':str(snapshot),'expected_file_sha256':hashlib.sha256(snapshot.read_bytes()).hexdigest(),
@@ -588,14 +611,17 @@ def main():
                 assert not error.any().cpu().item()
             continuous = source_history.freeze(continuous).memory
             endpoints = MarketFreezeMemory(prefixes.new_tensor([through-1]),prefixes.new_tensor([before]),None,None)
-            saved = None;roles = set();native_freezes = 0
+            saved = None;roles = set();native_freezes = 0;capture_inputs=[]
             for grid in range(19900,26300,100):
                 end = bisect.bisect_right(clocks,grid)
                 if end>through:
                     batch = torch.arange(through,end,device='cuda',dtype=torch.int64)
                     continuous,error = source_history.consume(batch,state.causal_visible_at[batch],market_indices[-1:],start_at,continuous)
                     assert not error.any().cpu().item()
-                frozen_market = encoder.freeze(prefixes.new_tensor([grid]),market_indices[-1:],start_at,continuous,endpoints)
+                if grid in (24000,26100):
+                    capture_inputs.append((prefixes.new_tensor([grid]),market_indices[-1:].clone(),start_at.clone(),continuous,endpoints))
+                frozen_market,_,_ = freeze_with_resources(encoder,
+                    (prefixes.new_tensor([grid]),market_indices[-1:],start_at,continuous,endpoints))
                 assert not frozen_market.fault.any().cpu().item()
                 assert frozen_market.fast.shape==(1,626) and frozen_market.book_levels.shape[1]==6
                 assert torch.equal(frozen_market.fast[:,566:596],frozen_market.rule)
@@ -632,16 +658,18 @@ def main():
                 through=end;native_freezes+=1
                 if native_freezes%8==0: print(json.dumps({'stage':'native_100ms_freeze','ticks':native_freezes,'observation_ms':grid}),flush=True)
             assert roles=={0,1}
+            replay_report=validate_freeze_replay(encoder,*capture_inputs)
             native_freeze_reference = {'ticks':native_freezes,'first_observation_ms':19900,'last_observation_ms':26200,
                 'context_only_and_decision_required':True,'frozen_fast626_immutable':True,
                 'received_24000_closed_24001_frozen_at_24100':True,
+                'capacity_and_freeze_replay':replay_report,
                 'rule_snapshot':'historical_test_fixture_not_formal_training','account_policy_execution':False}
         depth_rows = reference['binance_observations']
         saw_gap = saw_missing = False
         for row in depth_rows:
             prefix = prefixes.new_tensor([row['prefix']])
             current = binance_state.frame(prefix)
-            native = binance_inputs.encode(current,binance_state.observation(prefix),symbols[:1],now[:1])
+            native = encode_binance(current,binance_state.observation(prefix),symbols[:1],now[:1])
             original = row['depth']
             q = quality_names.index(original['quality'])
             assert native.side.values[0,0,q].cpu().item() == 1
@@ -671,9 +699,9 @@ def main():
             assert torch.equal(a,b)
         original_binance = selected_reference['binance_depth']
         original_first = reference['first_binance']
-        first_binance = binance_inputs.encode(binance_state.frame(prefixes.new_tensor([original_first['prefix']])),
+        first_binance = encode_binance(binance_state.frame(prefixes.new_tensor([original_first['prefix']])),
             binance_state.observation(prefixes.new_tensor([original_first['prefix']])),symbols[:1],now[:1])
-        continued_binance = binance_inputs.encode(binance_state.frame(prefixes[-1:]),binance_state.observation(prefixes[-1:]),
+        continued_binance = encode_binance(binance_state.frame(prefixes[-1:]),binance_state.observation(prefixes[-1:]),
             symbols[-1:],now[-1:],first_binance.side.memory)
         expected_depth = [0.0]*38;expected_depth[0]=1.0
         for side,name in enumerate(('bids','asks')):

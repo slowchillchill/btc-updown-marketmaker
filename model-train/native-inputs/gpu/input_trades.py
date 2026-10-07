@@ -10,6 +10,8 @@ from input_events import _extreme, time_envelope
 class NativeTradeWindow:
     values: torch.Tensor  # 原fast[258:335]：UP28、DOWN28、Binance21。
     fault: torch.Tensor
+    required: torch.Tensor
+    enough: torch.Tensor
 
 
 def _sum(value, present):
@@ -53,7 +55,8 @@ class TradeInputs:
                 or asset_indices.device != current_prefix.device or observation_ms.shape != (roots,)
                 or observation_ms.dtype != torch.int64 or observation_ms.device != current_prefix.device):
             raise ValueError('需同设备int64市场资产/观察时间')
-        rows,present,prefix_fault = self.window.query(previous_prefix,current_prefix)
+        window = self.window.query(previous_prefix,current_prefix)
+        rows,present,prefix_fault = window.rows,window.present,window.fault
         valid_assets = (asset_indices >= 0) & (asset_indices < self.window.asset_count)
         base_fault = prefix_fault | (~valid_assets.all(dim=1)).to(torch.int32)
         numbers = _numbers()
@@ -132,5 +135,5 @@ class TradeInputs:
                 envelope,ef = time_envelope(rows[:,:,9],rows[:,:,10],mask & rows[:,:,8].bool(),mask,observation_ms)
                 out[:,time_start:] = envelope
                 fault = fault | ef
-            return NativeTradeWindow(result,fault)
+            return NativeTradeWindow(result,fault,window.required,window.enough)
         return numbers.run_exact_batch(compute,initial_word_capacity=self.units.words.shape[1])

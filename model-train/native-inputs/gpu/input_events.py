@@ -24,6 +24,8 @@ EVENT_CLASSES = {
 class NativeEvents:
     values: torch.Tensor  # [roots,104] = 原fast[335:439]
     fault: torch.Tensor
+    required: torch.Tensor
+    enough: torch.Tensor
 
 
 def _extreme(value, present, *, maximum):
@@ -108,5 +110,5 @@ class EventInputs:
                                             present & window.sources[:,:,2].bool(),present,observation_ms)
                 result[:,23+9*group:32+9*group] = envelope
                 fault = fault | ef
-            return NativeEvents(result,fault)
+            return NativeEvents(result,fault,window.required,window.enough)
         return numbers.run_exact_batch(compute)

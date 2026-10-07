@@ -844,6 +844,28 @@ Maker 市场应计是一个汇总经济事实，贡献向量不拆成多条 NOE�
 `contracts/gpu/numbers.py` 的同一模块和资源协调批，不重建 ExactInt 类型或
 覆盖已缓存模块。模型、完整合法 Actor 和账户 slow433 仍须在该接缝继续装配。
 
+### Native 冻结的固定容量与发布边界
+
+`PmBookInputs.pack`、`PublicFactWindow.query` 和 `PublicTradeWindow.query` 不在设备
+候选中读取人口或增长容量。它们返回当前固定布局的候选、设备 `required` 和 `enough`。
+盘口需求是每根各侧最大正量档数；事实及直接来源分别保留人口，成交也独立保留人口。
+这些容量请求不加入业务 `fault`，不足候选不能作为完整输入消费。
+`BinanceInputs` 经 `packed` 转交，`EventInputs` 和 `TradeInputs` 经各自结果转交需求。
+
+`MarketInputs100ms.freeze` 汇总 PM／Binance／事实／来源／成交五个人口，返回
+`required[root,5]` 和 `resources_fit[root]`。调用方以同一公共
+`device_exact_batch` 的 `required_words`／`fits` 协调精确字容量。全部物理资源满足、
+业务故障检查通过后才发布观察并提交历史／端点。图外退出可调用 `grow_resources`，
+并从同一 cutoff、市场、根起点、已消费来源记忆和旧端点重算；不重吃已消费来源，
+不丢窗口、历史或端点。本接口没有交付完整环境宿主。
+
+成功发布使用 `FrozenMarket100ms.snapshot()` 拥有 fast、六侧盘口及 mask、规则、角色、
+前缀和所有历史／端点记忆，包括精确字、符号和故障张量。活动输入或捕获暂存区的
+下一次重放不能修改旧冻结。这里不复制共享只读 DPT 页，也不引入无消费者的通用队列。
+`gpu_public_state_validation.py` 在现有合法有限场景接纳这条资源边界，专用验证检查
+同图的两个不同活跃观察，以及资源退出／增长后的完整旧冻结与同输入足容量结果。
+必要服务器检查完成前，这些接口不构成已验收能力。
+
 ### 当前公开 Registry 与物理人口接缝
 
 `shared-run/gpu/registry.py` 在原 NOE 首次公开领取后、Ledger 等待前接纳公开订单/Trade；

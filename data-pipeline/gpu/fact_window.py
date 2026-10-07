@@ -10,6 +10,8 @@ class FactWindow:
     sources: torch.Tensor
     source_present: torch.Tensor
     fault: torch.Tensor
+    required: torch.Tensor  # [roots,2]，事实与直接来源的实际人口。
+    enough: torch.Tensor
 
 
 class PublicFactWindow:
@@ -44,7 +46,7 @@ class PublicFactWindow:
         self.source_groups = self.sources[:,0].contiguous()
 
     def query(self, previous_prefix, current_prefix):
-        """(previous,current]区间；资源扩池只影响墙钟，绝不截断事实。"""
+        """固定容量的(previous,current]候选；容量不足由外层退出、增长并原前缀重试。"""
         if (previous_prefix.ndim != 1 or current_prefix.shape != previous_prefix.shape
                 or previous_prefix.dtype != torch.int64 or current_prefix.dtype != torch.int64
                 or previous_prefix.device != self.facts.device or current_prefix.device != self.facts.device):
@@ -58,10 +60,8 @@ class PublicFactWindow:
             start = torch.searchsorted(groups,safe_previous,right=True)
             end = torch.searchsorted(groups,safe_current,right=True)
             spans.append((start,torch.where(valid,(end-start).clamp_min(0),0)))
-        # 唯一回传为本批两种资源总需求，不回传事实值或模型业务分支。
-        required = torch.stack([count.max() for _,count in spans]).cpu().tolist()
-        while self.fact_capacity < required[0]: self.fact_capacity *= 2
-        while self.source_capacity < required[1]: self.source_capacity *= 2
+        required = torch.stack([count for _,count in spans],dim=1)
+        enough = (required[:,0]<=self.fact_capacity)&(required[:,1]<=self.source_capacity)
         results = []
         for padded,(start,count),capacity in zip((self.fact_padded,self.source_padded),spans,
                                                 (self.fact_capacity,self.source_capacity)):
@@ -69,7 +69,16 @@ class PublicFactWindow:
             present = (offsets < count[:,None]) & valid[:,None]
             indices = torch.where(present,start[:,None]+offsets+1,0)
             results.extend((padded[indices],present))
-        return FactWindow(*results,(~valid).to(torch.int32))
+        return FactWindow(*results,(~valid).to(torch.int32),required,enough)
+
+
+@dataclass(frozen=True)
+class TradeWindow:
+    rows: torch.Tensor
+    present: torch.Tensor
+    fault: torch.Tensor
+    required: torch.Tensor
+    enough: torch.Tensor
 
 
 class PublicTradeWindow:
@@ -107,9 +116,7 @@ class PublicTradeWindow:
         start = torch.searchsorted(self.groups,previous,right=True)
         end = torch.searchsorted(self.groups,current,right=True)
         count = torch.where(valid,(end-start).clamp_min(0),0)
-        required = int(count.max().cpu())  # 仅一次资源需求，不回传成交值或方向。
-        while self.capacity < required: self.capacity *= 2
         offset = torch.arange(self.capacity,device=current.device)[None]
         present = (offset < count[:,None]) & valid[:,None]
         indices = torch.where(present,start[:,None]+offset+1,0)
-        return self.padded[indices],present,(~valid).to(torch.int32)
+        return TradeWindow(self.padded[indices],present,(~valid).to(torch.int32),count,count<=self.capacity)
