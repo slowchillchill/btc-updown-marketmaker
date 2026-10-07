@@ -133,6 +133,12 @@ pub struct NativeInputRoot {
     histories: BTreeMap<String, crate::market::MarketHistory>,
 }
 impl NativeInputRoot {
+    #[cfg(test)]
+    pub(crate) fn account_binding_sources_for_tests(&self) -> serde_json::Value {
+        serde_json::Value::Array(self.markets.values().map(|binding| {
+            serde_json::json!({"market": binding.market, "assets": binding.assets})
+        }).collect())
+    }
     pub fn new(
         trajectory_id: String,
         account_id: AccountInstanceKeyV1,

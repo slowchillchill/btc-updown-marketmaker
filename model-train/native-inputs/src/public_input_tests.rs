@@ -188,9 +188,7 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
         }
         let mut output = exported_group(&group);
         if std::env::var_os("NATIVE_ACCOUNT_SOURCE_OUTPUT").is_some() {
-            output["bound_markets"] = serde_json::Value::Array(native.markets.values().map(|binding| {
-                serde_json::json!({"market": binding.market, "assets": binding.assets})
-            }).collect());
+            output["bound_markets"] = native.account_binding_sources_for_tests();
         }
         exported.push(output);
         if index == 1 {
@@ -284,9 +282,7 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
         }
         let mut output = exported_group(&group);
         if std::env::var_os("NATIVE_ACCOUNT_SOURCE_OUTPUT").is_some() {
-            output["bound_markets"] = serde_json::Value::Array(native.markets.values().map(|binding| {
-                serde_json::json!({"market": binding.market, "assets": binding.assets})
-            }).collect());
+            output["bound_markets"] = native.account_binding_sources_for_tests();
         }
         exported.push(output);
     }
