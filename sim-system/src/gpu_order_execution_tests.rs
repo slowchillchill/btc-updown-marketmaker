@@ -291,7 +291,7 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         public_consumption_tests::gpu_public_for_order_fixture(&initial,&events,false)
     });
     let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
-    let input = serde_json::json!({"hidden_material":compact_source.as_ref().map(|(_, value)| value),
+    let mut input = serde_json::json!({"hidden_material":compact_source.as_ref().map(|(_, value)| value),
         "empty_hidden_material":empty_compact_source.as_ref().map(|(_,value)| value),
         "checkpoints":checkpoints, "initial":initial, "events":events,
         "processing_at":processing_at, "maker_at":maker_at,
@@ -316,10 +316,10 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         "opening_ledger":opening_ledger,
         "cancel_ledger_before":cancel_ledger_before,"cancel_ledger_after":cancel_ledger_after,"cancel_ledger_attempts":cancel_ledger_attempts,
         "next_private":next_private,"next_batch":next_batch,"session_seed":session_seed,
-        "order_queries":order_queries,
-        "joint_public":joint_public.as_ref().map(|_|serde_json::json!({
-            "compact":std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap()).join("public-compact"),"root_started_at":-29000,
-            "model_hidden_start":1500,"cutoffs":[1500,1600]}))});
+        "order_queries":order_queries});
+    input["joint_public"]=serde_json::to_value(joint_public.as_ref().map(|_|serde_json::json!({
+        "compact":std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap()).join("public-compact"),
+        "root_started_at":-29000,"model_hidden_start":1500,"cutoffs":[1500,1600]}))).unwrap();
     let mut command=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap());
     command.arg(std::env::var("B_GPU_ORDER_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped());
     if std::env::var_os("B_GPU_SIM_ORDER_QUERY").is_some() {
