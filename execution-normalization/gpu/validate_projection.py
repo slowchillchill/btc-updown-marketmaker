@@ -314,20 +314,20 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         v for v,keep in zip(first_delivery,first_pending.flatten().cpu().tolist()) if keep]
     admission,cache=Numbers.run_exact_batch(lambda:cache.drain(admission,torch.ones_like(columns.enabled),passes=3))
     assert not (cache.received & ~cache.consumed).any().cpu().item() and admission.fault.cpu().tolist()==[0]
-    # 同一原21条NOE，订单物理目录仅一槽：满池不变成业务错误或提交半个记录。
+    # 同一原21条NOE，同订单三成交，成交物理目录仅一槽：满池不变成业务错误或提交半个记录。
     from admission_lifecycle import LifecycleDirectory
-    limited=replace(append_start,orders=LifecycleDirectory.empty(1,1,device=columns.row_refs.device))
+    limited=replace(append_start,trades=LifecycleDirectory.empty(1,1,device=columns.row_refs.device))
     small_waiting=Numbers.run_exact_batch(lambda:ClosedAdmission.empty(columns).accept(columns,delivered))
     initial_rank=small_waiting.receive_rank.clone()
     initial_available=small_waiting.available_at.clone()
     limited,small_waiting=Numbers.run_exact_batch(lambda:small_waiting.drain(limited,torch.ones_like(columns.enabled),passes=3))
     assert limited.fault.cpu().tolist()==[0] and small_waiting.fault.cpu().tolist()==[0]
-    assert limited.orders.capacity_required.cpu().tolist()==[2]
-    assert limited.orders.occupied.sum().cpu().item()==1
+    assert limited.trades.capacity_required.cpu().tolist()==[2], limited.trades.capacity_required.cpu().tolist()
+    assert limited.trades.occupied.sum().cpu().item()==1
     assert (small_waiting.received & ~small_waiting.consumed).any().cpu().item()
     assert values(limited.current_entry_sequence)[0]<values(admission.current_entry_sequence)[0]
-    expanded=limited.resized_lifecycle(orders=admission.orders.occupied.size(1))
-    assert values(expanded.orders.keys)[:1]==values(limited.orders.keys)
+    expanded=limited.resized_lifecycle(trades=admission.trades.occupied.size(1))
+    assert values(expanded.trades.keys)[:1]==values(limited.trades.keys)
     resumed,small_waiting=Numbers.run_exact_batch(lambda:small_waiting.drain(expanded,torch.ones_like(columns.enabled),passes=3))
     assert resumed.fault.cpu().tolist()==[0] and not (small_waiting.received & ~small_waiting.consumed).any().cpu().item()
     assert values(resumed.current_entry_sequence)==values(admission.current_entry_sequence)
@@ -336,8 +336,8 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert values(resumed.platform.balances.denominator)==values(admission.platform.balances.denominator)
     assert torch.equal(resumed.applied,admission.applied)
     assert torch.equal(small_waiting.receive_rank,initial_rank) and torch.equal(small_waiting.available_at,initial_available)
-    assert torch.equal(resumed.orders.occupied,admission.orders.occupied)
-    assert values(resumed.orders.keys)==values(admission.orders.keys)
+    assert torch.equal(resumed.trades.occupied,admission.trades.occupied)
+    assert values(resumed.trades.keys)==values(admission.trades.keys)
     assert check_order_funds(resumed,source['reservation_checkpoints'][-1])
     assert check_markets(resumed,source['reservation_checkpoints'][-1],source['initial'][0]['market']['condition_id'])
     # 同一真实设备NOE人口分成两页接入。第一页末是完整feedback边界；
