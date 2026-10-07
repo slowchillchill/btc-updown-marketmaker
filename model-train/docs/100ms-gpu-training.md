@@ -1001,3 +1001,17 @@ SIM 候选、反馈与引用游标共用提交门，资源退出不公开未提�
 保留原订单字符串顺序与整次回退。当前新增非零订单／待 fill 分支仅静态，不作为本例运行覆盖。
 请求发送、清偿、质量失效、Resolution Ledger 消费、跨页身份承接、图内 Terminal 输出和完整宿主继续实现。
 判定／完整 Terminal 字典必须随 NOE、冻结与恢复引用存活；当前字段索引不能脱离绑定重新解释。
+
+
+公开 `Resolved` 使用独立 schema17，与撤单请求完成的 schema16 分开。
+Ledger 的 `ResolutionSources` 在冷绑定时按原 token 匹配完整 Terminal 的 payout；
+`MarketResolutions` 在首次实际消费时保存原 canonical 身份、完整 Terminal 引用和费用归属类别。
+`AdmissionLifecycle` 对这条证据分配 Ledger 条目序号，并按完整 NOE position 去重；
+它不推进平台经济序号或本地预留序号，不增加现金。已判定市场的未兑付应收随成功池读取，
+Pi/历史亏损仍在每条实际提交时更新。请求、费用、兑付与经济前驱屏障尚须后续事实消费者接齐，
+不能把当前未兑付读面作为已清偿市场读面。来源页和完整身份字典尚未跨页退役。
+
+本轮自然零额 Terminal 对照沿原唯一 Memory 消费者把同一原引用送进 Ledger；
+设备端沿同一 `PublicLedgerState.receive` 双门领取、Registry 接纳及 Ledger 消费。
+开户和初始市场前缀只冷安装一次；原 CPU 输出仅检查结果，不驱动设备逐条尝试。
+该人口没有订单或待最终性成交，不能证明非零释放、迟到成功或请求屏障。

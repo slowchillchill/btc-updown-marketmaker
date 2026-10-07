@@ -167,9 +167,9 @@ def main():
     from cancel_projection import cancellation_rows_from_closed
     from memory import EconomicColumns
     from admission_lifecycle import LifecycleColumns
-    unsupported=Numbers.run_exact_batch(lambda:LifecycleColumns.from_projection(
+    resolved_columns=Numbers.run_exact_batch(lambda:LifecycleColumns.from_projection(
         projection.normalizer.bank,EconomicColumns.from_projection_batches([batch])))
-    assert unsupported.fault.cpu().tolist()==[[1]]
+    assert resolved_columns.fault.cpu().tolist()==[[0]]
     decoded,error=Numbers.run_exact_batch(lambda:decode_fields(projection.normalizer.bank.semantic[actual_row],
         ['scalar']*4,batch.emitted.flatten()))
     assert error.cpu().tolist()==[0] and [value.cpu().item() for value in decoded]==[0,0,column[3],column[2]]
@@ -182,19 +182,104 @@ def main():
     assert batch.source_categories.cpu().tolist()==[[3]]
     ordinal=integers([int(projection.normalizer.bank.source_order[actual_row,3].cpu().item())])
     assert values(ordinal)==[evidence['source_order']['ordinal']]
-    pending=PendingRecords.from_columns(batch.emitted,batch.received_at,batch.private_sequences,ordinal,batch.rows,integers([0]))
+    # 一次开户/初始市场前缀冷安装；之后由同一公开领取器和Ledger设备事务消费。
+    import importlib.util
+    from admission import AdmissionLifecycle
+    from closed import ClosedAdmission
+    from success_pool import SuccessPools
+    from position_cost import PositionCosts
+    from market_economics import UnresolvedMarkets
+    from resolution import ResolutionSources,MarketResolutions
+    from registry import PublicRegistryEvents,PublicRegistryState
+    from public_ledger import PublicLedgerState
+    spec=importlib.util.spec_from_file_location('gpu_terminal_platform',root/'ledger/gpu/platform.py')
+    module=importlib.util.module_from_spec(spec)
+    sys.modules[spec.name]=module
+    spec.loader.exec_module(module)
+    before_ledger=source['ledger_before']['projection']
+    names=['cash_pusd','available_pusd','principal_encumbrance_pusd','immediate_taker_fee_encumbrance_pusd',
+        'maker_rebate_receivable_pusd','taker_rebate_receivable_pusd',
+        'maker_rebate_locked_remainder_pusd','taker_rebate_locked_remainder_pusd']
+    original_balances=before_ledger['platform_confirmed_projection']
+    def assemble():
+        balances=module.PlatformBalances.open(rational([original_balances[key] for key in names]),
+            rational(['0','0']),tensor([0,0]),integers([before_ledger['platform_source_prefix']]))
+        pools=SuccessPools.open(tensor([0,0]),tensor([0,0]),tensor([0,1]),tensor([1,0]),1)
+        markets=UnresolvedMarkets.open(pools,tensor([0]))
+        sources=ResolutionSources.bind(block.terminal_columns,[asset['token_id'] for asset in block.assets])
+        resolutions=MarketResolutions.open(pools,markets,sources)
+        columns=EconomicColumns.from_projection_batches([batch])
+        admission=AdmissionLifecycle.open(balances,projection.normalizer.bank,columns,
+            integers([before_ledger['ledger_entry_seq']]),integers([before_ledger['ledger_local_prefix']]),pools,
+            position_costs=PositionCosts.empty(1,1,'cuda'),unresolved_markets=markets,resolutions=resolutions)
+        pending=PendingRecords.from_columns(batch.emitted,batch.received_at,batch.private_sequences,ordinal,
+            batch.rows,integers([0]))
+        return PublicLedgerState(pending,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),
+            ClosedAdmission.empty(columns),admission)
+    public=Numbers.run_exact_batch(assemble)
+    old_public=public
     gates=ReceiveGates.unset(1).set_receive(tensor([source['resolved_close_at']]),enabled)
-    pending,blocked=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
-    assert not blocked.emitted.any().cpu().item()
+    public,blocked=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,
+        torch.ones_like(public.waiting.received)))
+    assert not blocked.closed.emitted.any().cpu().item()
+    assert values(public.ledger.current_entry_sequence)==[before_ledger['ledger_entry_seq']]
     gates=gates.set_public(tensor([source['resolved_close_at']]),enabled)
-    pending,closed=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
-    assert closed.emitted.cpu().tolist()==[[True]]
-    targets,completions=Numbers.run_exact_batch(lambda:
-        cancellation_rows_from_closed(projection.normalizer.bank,[batch],closed))
-    assert targets.fault.cpu().tolist()==[0] and completions.fault.cpu().tolist()==[0]
-    assert not targets.received.any().cpu().item() and not completions.received.any().cpu().item()
-    pending,repeated=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
-    assert not repeated.emitted.any().cpu().item()
+    public,delivery=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,
+        torch.ones_like(public.waiting.received)))
+    assert delivery.closed.emitted.cpu().tolist()==[[True]] and delivery.fault.cpu().tolist()==[0]
+    assert not delivery.cancellation_targets.received.any().cpu().item()
+    assert not delivery.cancellation_completions.received.any().cpu().item()
+    admission=public.ledger
+    after_ledger=source['ledger_after']['projection']
+    assert values(admission.current_entry_sequence)==[after_ledger['ledger_entry_seq']]
+    assert values(admission.current_entry_sequence)==[before_ledger['ledger_entry_seq']+1]
+    assert values(admission.current_local_prefix)==[after_ledger['ledger_local_prefix']]
+    assert values(admission.platform.platform_source_prefix)==[after_ledger['platform_source_prefix']]
+    assert admission.available_through.cpu().tolist()==[source['resolved_close_at']]
+    assert public.waiting.available_at.cpu().tolist()==[[source['resolved_close_at']]]
+    assert public.waiting.consumed.cpu().tolist()==[[True]] and admission.applied.cpu().tolist()==[[True]]
+    assert values(admission.platform.balances.numerator)==values(old_public.ledger.platform.balances.numerator)
+    assert values(admission.platform.balances.denominator)==values(old_public.ledger.platform.balances.denominator)
+    resolved=Numbers.run_exact_batch(lambda:admission.resolutions.read(admission.success_pools))
+    original=source['ledger_resolutions'][0]
+    assert original['request'] is None and original['category']=='Directional'
+    assert resolved.present.cpu().tolist()==[True] and resolved.maker_category.cpu().tolist()==[False]
+    assert resolved.identities.cpu().tolist()==[column[3]] and resolved.terminals.cpu().tolist()==[column[2]]
+    for amount,key in [(resolved.paired_receivable,'paired_receivable'),(resolved.winner_orphan_receivable,'orphan_receivable')]:
+        assert [Fraction(n,d) for n,d in zip(values(amount.numerator),values(amount.denominator))]==[Fraction(original[key])]
+    # 此已判定阶段使用同一每条提交更新的Pi/peak，未兑付应收不加现金。
+    market_read=Numbers.run_exact_batch(lambda:admission.unresolved_markets.read(admission.success_pools,
+        admission.trade_success,admission.rebate_days,resolutions=admission.resolutions))
+    original_market=source['ledger_after']['markets'][0]
+    from validate_market_economics import exact
+    for amount,key in [(market_read.guarantee,'guaranteed_position_value_pusd'),
+        (market_read.orphan_cost,'unresolved_orphan_principal_cost_pusd'),(market_read.profit,'confirmed_net_pnl_pusd'),
+        (market_read.maximum_loss,'maximum_confirmed_net_loss_pusd')]:
+        assert [Fraction(n,d) for n,d in zip(values(amount.numerator),values(amount.denominator))]==[exact(original_market[key])]
+    assert not old_public.ledger.resolutions.present.any().cpu().item()
+    held_ledger=public
+    public,repeated=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,
+        torch.ones_like(public.waiting.received)))
+    assert not repeated.closed.emitted.any().cpu().item()
+    compare(public.ledger,held_ledger.ledger,'repeat_Resolved_no_entry_or_cash_change')
+    assert source['ledger_before']['cash']==source['ledger_after']['cash']
+    # 相同完整position显式重传也不增加条目，不刷新首次available。
+    reused,waiting=Numbers.run_exact_batch(lambda:admission.apply_closed(delivery.closed,
+        torch.ones_like(admission.applied)))
+    assert not waiting.any().cpu().item()
+    compare(reused,admission,'same_Resolved_position_already_applied')
+    missing_binding=replace(old_public.ledger,resolutions=None)
+    rejected,_=Numbers.run_exact_batch(lambda:missing_binding.apply_record(tensor([0]),enabled,
+        tensor([source['resolved_close_at']]),enabled))
+    assert rejected.fault.cpu().tolist()==[1] and not rejected.applied.any().cpu().item()
+    assert values(rejected.current_entry_sequence)==[before_ledger['ledger_entry_seq']]
+    # 传输vector顺序改变不能改变token归属；仅此冷绑定组件代表，非新源事件。
+    reversed_columns=replace(block.terminal_columns,terminals=tuple(
+        dict(terminal,payout_vector=list(reversed(terminal['payout_vector'])))
+        for terminal in block.terminal_columns.terminals))
+    rebound=Numbers.run_exact_batch(lambda:ResolutionSources.bind(reversed_columns,
+        [asset['token_id'] for asset in block.assets]))
+    compare(rebound.payouts,admission.resolutions.sources.payouts,'payouts_match_token_not_vector_position')
     # 同一固定图接后继真实Lifecycle；此前从未提前安装它。
     loop.replay()
     torch.cuda.synchronize()
@@ -224,7 +309,10 @@ def main():
         'Terminal_resource_exit_withholds_state_and_Resolved_feedback_checked':True,
         'Terminal_private_sequence_overflow_reverts_candidate_and_withholds_Resolved_checked':True,
         'Resolved_schema_is_distinct_from_CancelCompleted_at_actual_consumer_checked':True,
-        'unsupported_Resolved_Ledger_consumer_explicit_fault_checked':True,
+        'Resolved_actual_V4_unique_memory_reference_to_Ledger_entry_and_cash_checked':True,
+        'device_PublicLedgerState_receives_Resolved_once_and_preserves_first_visibility_and_position_checked':True,
+        'Resolved_payout_token_binding_and_missing_source_binding_explicit_fault_checked':True,
+        'zero_balance_Resolved_read_is_not_nonzero_receivable_or_settlement_barrier_coverage':True,
         'no_orders_or_pending_fills_in_original_Terminal_population':True,
         'cold_projection_prefix_initialization':True,
         'Resolved_Ledger_consumer_and_request_settlement_complete':False,

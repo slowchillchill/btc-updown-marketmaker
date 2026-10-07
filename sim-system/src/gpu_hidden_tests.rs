@@ -85,6 +85,7 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     eprintln!("gpu_hidden_asset_reference={}",String::from_utf8(output.stdout).unwrap());
 }
+#[cfg(feature="shared-execution")]
 #[tokio::test(flavor="current_thread")]
 #[ignore="AutoDL真实紧凑TWAP/空Book/Terminal→一次原Resolved与后继Lifecycle"]
 async fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_effects() {
@@ -189,7 +190,10 @@ async fn gpu_compact_hidden_reference_population_closes_without_fabricating_mark
         steps:Vec::new(),costs:Vec::new()}).unwrap();
     let observation=saved.borrow_mut().take().unwrap();
     // 开户/初始市场已由同一原端口接纳；唯一消费者先领取初始化人口。
-    let _initial_records=observation.take_closed_records();
+    let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
+    for record in observation.take_closed_records() {ledger.apply_noe_memory_v2(&record).unwrap();}
+    let ledger_before=gpu_ledger_reservation_checkpoint(&ledger,"before_Resolved");
     let mut state=execution.actor.state.take().unwrap();
     let next_private=state.session.as_ref().unwrap().next_private_feedback_sequence;
     let next_batch=state.session.as_ref().unwrap().next_projection_batch_sequence;
@@ -266,12 +270,26 @@ async fn gpu_compact_hidden_reference_population_closes_without_fabricating_mark
     execution.actor.projection_port.close_receive_prefix(close_at);
     execution.actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
         crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:1,logical_time_utc_ms:close_at}));
-    let records=observation.take_closed_records().into_iter()
-        .map(|r|serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
+    let closed_records=observation.take_closed_records();
+    let records=closed_records.iter().map(|r|serde_json::json!({"record":r.record(),
+        "position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
+    for record in &closed_records {ledger.apply_noe_memory_v2(record).unwrap();}
+    let ledger_after=gpu_ledger_reservation_checkpoint(&ledger,"after_Resolved");
+    let resolutions=ledger.economic_read().unwrap().resolutions().map(|r|serde_json::json!({
+        "resolved":r.resolved,"request":r.request,"category":r.settlement_cost_attribution,
+        "economic_predecessors_closed":r.economic_predecessors_closed,
+        "paired_receivable":r.paired_receivable_pusd,"orphan_receivable":r.winner_orphan_receivable_pusd,
+    })).collect::<Vec<_>>();
+    assert_eq!(resolutions.len(),1,"同一原NOE进入Ledger只保存一个判定");
+    let before_repeat=ledger.projection_v2().unwrap();
+    for record in &closed_records {ledger.apply_noe_memory_v2(record).unwrap();}
+    assert_eq!(ledger.projection_v2().unwrap(),before_repeat,
+        "重读完整原position不产生Ledger条目");
     assert_eq!(records.len(),1,"真实唯一Memory消费者只有一条Resolved，无经济delta");
     assert!(observation.take_closed_records().is_empty());
     let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,
         "original_controls":controls,"qualified_sources":qualified_sources,"resolved_records":records,
+        "ledger_before":ledger_before,"ledger_after":ledger_after,"ledger_resolutions":resolutions,
         "next_private":next_private,"next_batch":next_batch,"session_seed":session_seed,"resolved_close_at":close_at,
         "original_batches":batches,"terminal_reference_index":terminal_index.unwrap(),
         "canonical_market_facts_checked":canonical_market_facts_checked,

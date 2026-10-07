@@ -51,7 +51,7 @@ class UnresolvedMarkets:
         return cls(safe, roots, conditions, ratio, ratio,
             torch.full_like(safe, known, dtype=torch.bool), fault)
 
-    def values(self, pools, trades, days):
+    def values(self, pools, trades, days, resolutions=None):
         count = self.roots.numel()
         first, second = self.asset_indices, pools.counterpart[self.asset_indices]
         guarantee = take_ratio(pools.paired_quantity, first)
@@ -79,12 +79,17 @@ class UnresolvedMarkets:
             rebate = sum_population(select(values, member_day.flatten(), absent), count, width*conditions)
             fault |= rebate.fault | days.fault[self.roots]
         profit = guarantee - paired_cost + rebate - net_fee
+        if resolutions is not None:
+            orphan = resolutions.orphan_value(pools)
+            zero = ExactRational(orphan.numerator.constant(0), orphan.denominator.constant(1))
+            profit = profit + select(orphan-orphan_cost, resolutions.present, zero)
+            fault |= resolutions.fault | orphan.fault
         fault |= profit.fault
         return guarantee, paired_cost, orphan_cost, profit, ~detail_missing, fault
 
-    def refresh(self, pools, trades, days, committed_roots):
+    def refresh(self, pools, trades, days, committed_roots, *, resolutions=None):
         """候选先计算完整精确值，随后随同一Ledger事务提交，不能冻结时才补最大值。"""
-        _, _, _, profit, complete, fault = self.values(pools, trades, days)
+        _, _, _, profit, complete, fault = self.values(pools, trades, days, resolutions)
         zero = ExactRational(profit.numerator.constant(0), profit.denominator.constant(1))
         loss = zero - profit
         comparison = loss.compare(self.maximum_loss)
@@ -101,7 +106,11 @@ class UnresolvedMarkets:
             maximum_loss=select(self.maximum_loss, use, original.maximum_loss),
             known=torch.where(use, self.known, original.known))
 
-    def read(self, pools, trades, days):
-        guarantee, paired_cost, orphan_cost, _, complete, fault = self.values(pools, trades, days)
+    def read(self, pools, trades, days, *, resolutions=None):
+        guarantee, paired_cost, orphan_cost, _, complete, fault = self.values(pools, trades, days, resolutions)
+        if resolutions is not None:
+            zero = ExactRational(guarantee.numerator.constant(0), guarantee.denominator.constant(1))
+            guarantee = select(zero, resolutions.present, guarantee)
+            orphan_cost = select(zero, resolutions.present, orphan_cost)
         return UnresolvedMarketRead(guarantee, paired_cost, orphan_cost, self.profit,
             self.maximum_loss, self.known & complete, fault)

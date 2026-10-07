@@ -74,9 +74,10 @@ class AdmissionLifecycle:
     available_at: torch.Tensor
     fault: torch.Tensor
     projected_markets: object | None = None
+    resolutions: object | None = None
 
     @classmethod
-    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None,projected_markets=None):
+    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None,projected_markets=None,resolutions=None):
         roots,width=columns.row_refs.shape
         if projected_markets is not None and (projected_markets.present.size(0) != roots or projected_markets.present.device != columns.row_refs.device):
             raise ValueError('市场投影人口须同根同设备')
@@ -95,7 +96,7 @@ class AdmissionLifecycle:
             current_entry_sequence,current_local_prefix,empty,empty.clone(),torch.zeros_like(columns.enabled),
             ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=empty.device)),
             torch.zeros(roots,dtype=torch.int64,device=empty.device),torch.zeros(roots,dtype=torch.bool,device=empty.device),
-            torch.zeros_like(columns.row_refs),platform.fault | (0 if projected_markets is None else projected_markets.fault),projected_markets)
+            torch.zeros_like(columns.row_refs),platform.fault | (0 if projected_markets is None else projected_markets.fault),projected_markets,resolutions)
 
     def funds(self):
         roots=self.fault.numel()
@@ -227,7 +228,7 @@ class AdmissionLifecycle:
         maker_cash=self.maker_cash+cash_delta
         fault=fault | torch.where(result.applied,maker_cash.fault,0)
         applicable=((outcome_kind==OUT_EVIDENCE)&((tag==3)|(tag==7)|(tag==8)|(tag==9)|
-            (tag==12)|(tag==13)|(tag==14)|(tag==15)|(tag==16))) | (outcome_kind==OUT_PENDING)
+            (tag==12)|(tag==13)|(tag==14)|(tag==15)|(tag==16)|(tag==17))) | (outcome_kind==OUT_PENDING)
         use=(requested&applicable)|result.applied
         fault=fault | result.fault
         use=use&(fault==0)
@@ -369,9 +370,19 @@ class AdmissionLifecycle:
             fault |= population.fault
             funds_ready &= population_ready
         use=use & funds_ready
+        resolutions=self.resolutions
+        resolved_event=lifecycle_use & (tag==17)
+        if resolutions is None:
+            # 缺完整Terminal/资产绑定仍显式故障，不能消费后冒充零应收。
+            fault |= resolved_event.to(torch.int32)
+        else:
+            resolutions=resolutions.observe(self.lifecycle.conditions[root,local],
+                self.lifecycle.resolution_identities[root,local],self.lifecycle.resolution_terminals[root,local],
+                success_pools,resolved_event & use & (fault==0))
+            fault |= resolutions.root_fault
         markets=self.unresolved_markets
         if markets is not None:
-            markets=markets.refresh(success_pools,trade_success,days,use & (fault==0))
+            markets=markets.refresh(success_pools,trade_success,days,use & (fault==0),resolutions=resolutions)
             root_fault=Numbers.combine_fault_rows(torch.where(
                 markets.roots[None,:]==root[:,None],markets.fault[None,:],0))
             fault=fault | root_fault
@@ -400,6 +411,7 @@ class AdmissionLifecycle:
             trade_success=coordinate(trade_success,self.trade_success,valid),
             position_costs=coordinate(position_costs,self.position_costs,valid),
             unresolved_markets=None if markets is None else markets.coordinated(self.unresolved_markets,valid),
+            resolutions=None if resolutions is None else resolutions.coordinated(self.resolutions,valid),
             rebate_contributions=contributions,rebate_days=days,maker_cash=ExactRational(
             maker_cash.numerator.select(success & economic,self.maker_cash.numerator),
             maker_cash.denominator.select(success & economic,self.maker_cash.denominator)),reservations=coordinate(book,self.reservations,valid),
