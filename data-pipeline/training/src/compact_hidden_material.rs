@@ -454,6 +454,18 @@ impl CompactHiddenMaterialReaderV1 {
         Ok(fact)
     }
 
+    /// 仅恢复已验证引用的原canonical MarketFact；组和来源顺序来自原材料。
+    pub fn reference_market_fact(&mut self, index_position: u64)
+        -> RecordingResult<Option<CanonicalMarketFactV1>> {
+        if self.failed {return Err(io::Error::other("失败的hidden材料读取不能继续").into());}
+        self.failed = true;
+        let canonical = self.reference_locations.get(&index_position).copied()
+            .ok_or_else(|| io::Error::other("参考不属于已验证的hidden索引位置"))?;
+        let fact = self.source.canonical_market_fact(canonical)?;
+        self.failed = false;
+        Ok(fact)
+    }
+
     /// 冷块消费者复原原强类型步骤；快照仅从自身来源原消息取回，不归约public步骤。
     pub fn restore_step(&mut self, reference: &HiddenDerivedStepRefV1) -> RecordingResult<PmReductionStepV1<'static, SourceEvidenceRefV3>> {
         if self.failed { return Err(io::Error::other("失败的hidden材料读取不能继续").into()); }

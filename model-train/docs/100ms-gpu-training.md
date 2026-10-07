@@ -978,3 +978,11 @@ FixedIdentity只在原完整目录/成员绑定后消费，InitialTick只设置t
 Terminal保留原来源并等待真实Resolution、义务与NOE输出协调；已批准政策仍是请求式
 RESOLUTION_REDEEM_ONLY，正式延迟/费用/失败查询参数未定不改变这个政策。
 当前mapped值ID借同一固定源页字典解释，跨页更换须承接完整原值/字典引用，不能直接复用局部ID。
+
+冷材料的市场事实身份沿 `public_reduction::materialize_market_fact_v1` 复用原纯物化配方。
+compact reader 从原完整组恢复 `group_id`，按 `direct_sources` 原顺序提取直接来源 ID；
+hidden reader 只对已验证的引用索引恢复 canonical MarketFact，不重新归约业务、不推进运行前沿。
+GPU 桶保留与引用同人口的原市场事实 `event_id`，不以位置字符串代替 canonical ID。
+当前 TWAP／双空 Book／终态短源的真实顺序是 Terminal 后接生命周期。
+非 WS 元数据的 source time 为 None，不能用 received 构造 hidden 桶；Terminal 前控制事实人口为零。
+该短源验证冷身份与原同次物化逐字段一致，并保留 Terminal 等待，不证明控制分支或 Terminal 经济处理已经执行。

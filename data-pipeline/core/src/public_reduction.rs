@@ -275,6 +275,61 @@ fn bind_market_reduction_with_prefix(
     finish(context, facts, batch.reports, identities)
 }
 
+/// 原MarketFact纯物化配方；冷材料复用原组及直接来源顺序，不读取归约状态。
+pub fn materialize_market_fact_v1(
+    group_id: &Sha256Hex,
+    direct_source_message_ids: &[Sha256Hex],
+    fact: &PublicBusinessFactV1,
+) -> Result<CanonicalMarketFactV1, ContractError> {
+    let PublicBusinessPayloadV1::MarketFact {market, payload} = &fact.payload else {
+        return Err(ContractError::InvalidField {field: "market_fact.payload".into(),
+            reason: "MarketFact物化需原市场事实载荷".into()});
+    };
+    #[derive(Serialize)]
+    struct Identity<'a> {
+        schema_version: &'a str,
+        market: &'a MarketIdentityV2,
+        group_id: &'a Sha256Hex,
+        direct_source_message_ids: &'a [Sha256Hex],
+        lineage: &'a EventLineageV3,
+        direct_time: &'a EventTimeV2,
+        dependency_time: &'a EventTimeV2,
+        quality: &'a EventQualityV2,
+        payload: &'a CanonicalMarketFactPayloadV1,
+    }
+    let id = CanonicalEventId(
+        hash_domain_bytes(
+            b"data-pipeline/canonical-event-id/market-fact/v1\0",
+            &stable_json(&Identity {
+                schema_version: CANONICAL_MARKET_FACT_SCHEMA_V1,
+                market,
+                group_id,
+                direct_source_message_ids,
+                lineage: &fact.lineage,
+                direct_time: &fact.direct_time,
+                dependency_time: &fact.dependency_time,
+                quality: &fact.quality,
+                payload,
+            })?,
+        )
+        .0,
+    );
+    let event = CanonicalMarketFactV1 {
+        schema_version: CANONICAL_MARKET_FACT_SCHEMA_V1.to_owned(),
+        event_id: id.clone(),
+        market: market.clone(),
+        group_id: group_id.clone(),
+        source_refs: fact.source_refs.clone(),
+        direct_source_message_ids: direct_source_message_ids.to_vec(),
+        lineage: fact.lineage.clone(),
+        direct_time: fact.direct_time.clone(),
+        dependency_time: fact.dependency_time.clone(),
+        quality: fact.quality.clone(),
+        payload: payload.clone(),
+    };
+    Ok(event)
+}
+
 /// 后台唯一事实流调用。所有规则、前序证据及载荷都来自传入结果。
 pub fn materialize_public_reduction_v1(
     batch: PublicReductionBatchV1,
@@ -315,49 +370,10 @@ pub fn materialize_public_reduction_v1(
                 let id = event.event_id.clone();
                 (CanonicalEventRecordV2::ReferenceEvent(event), id)
             }
-            PublicBusinessPayloadV1::MarketFact { market, payload } => {
-                #[derive(Serialize)]
-                struct Identity<'a> {
-                    schema_version: &'a str,
-                    market: &'a MarketIdentityV2,
-                    group_id: &'a Sha256Hex,
-                    direct_source_message_ids: &'a [Sha256Hex],
-                    lineage: &'a EventLineageV3,
-                    direct_time: &'a EventTimeV2,
-                    dependency_time: &'a EventTimeV2,
-                    quality: &'a EventQualityV2,
-                    payload: &'a CanonicalMarketFactPayloadV1,
-                }
-                let id = CanonicalEventId(
-                    hash_domain_bytes(
-                        b"data-pipeline/canonical-event-id/market-fact/v1\0",
-                        &stable_json(&Identity {
-                            schema_version: CANONICAL_MARKET_FACT_SCHEMA_V1,
-                            market,
-                            group_id: &batch.group_id,
-                            direct_source_message_ids: &batch.direct_source_message_ids,
-                            lineage: &fact.lineage,
-                            direct_time: &fact.direct_time,
-                            dependency_time: &fact.dependency_time,
-                            quality: &fact.quality,
-                            payload,
-                        })?,
-                    )
-                    .0,
-                );
-                let event = CanonicalMarketFactV1 {
-                    schema_version: CANONICAL_MARKET_FACT_SCHEMA_V1.to_owned(),
-                    event_id: id.clone(),
-                    market: market.clone(),
-                    group_id: batch.group_id.clone(),
-                    source_refs: fact.source_refs.clone(),
-                    direct_source_message_ids: batch.direct_source_message_ids.clone(),
-                    lineage: fact.lineage.clone(),
-                    direct_time: fact.direct_time.clone(),
-                    dependency_time: fact.dependency_time.clone(),
-                    quality: fact.quality.clone(),
-                    payload: payload.clone(),
-                };
+            PublicBusinessPayloadV1::MarketFact { .. } => {
+                let event = materialize_market_fact_v1(
+                    &batch.group_id, &batch.direct_source_message_ids, fact)?;
+                let id = event.event_id.clone();
                 (CanonicalEventRecordV2::MarketFact(event), id)
             }
         };

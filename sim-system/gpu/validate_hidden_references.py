@@ -93,25 +93,22 @@ def main():
     assert loop.reference_iterations.cpu().tolist() == [source['terminal_reference_index']-before.hidden_frontier.next_reference.cpu().item()]
     assert frontier.fault.cpu().tolist() == [0] and loop.page.count.cpu().item() == 0
     actual = storage.runtime.market_controls
-    expected = source['original_controls'][-1]
-    mapped = actual.mapped_lifecycle.cpu().tolist()[0][0]
-    assert (None if mapped < 0 else block.lifecycle_values[mapped]) == expected['mapped']
-    assert actual.trading.cpu().tolist()[0][0] == [-1 if expected['trading'][name] is None else int(expected['trading'][name])
-        for name in ('active', 'closed', 'accepting_orders')]
-    from hidden_inputs import QUALITY
-    assert actual.quality.cpu().tolist() == [[QUALITY[expected['quality']]]]
+    assert source['original_controls'] == []
+    compare(actual, before.market_controls, 'terminal_does_not_apply_future_lifecycle')
     assert actual.fault.cpu().tolist() == [0]
     held = storage.snapshot()
     loop.replay()
     torch.cuda.synchronize()
     compare(storage.runtime, held, 'unknown_market_handler_waits_without_consuming')
-    progress('actual_market_controls_then_terminal_wait', actual_market_controls=len(source['original_controls']))
+    progress('actual_terminal_before_lifecycle_wait', actual_market_controls=len(source['original_controls']))
     print(json.dumps({'actual_typedraw_TWAP_references':2, 'actual_bucket_times':[21000,22000,31000],
         'pure_reference_bucket_closed_without_SIM_business_effects':True,
         'missing_source_time_did_not_fabricate_bucket':True,
         'same_graph_reference_then_actual_empty_Books_checked':True,
         'actual_MarketFact_waiting_preserves_cursor_and_closed_frontier':True,
-        'original_SIM_control_reducer_receives_same_actual_MarketFacts_checked':True,
+        'original_SIM_control_reducer_receives_same_actual_MarketFacts_checked':False,
+        'canonical_market_facts_exactly_restored_against_original_materialization':source['canonical_market_facts_checked'],
+        'actual_terminal_precedes_lifecycle_and_is_not_skipped':True,
         'actual_control_facts_consumed_before_terminal':len(source['original_controls']),
         'first_disabled_reference_entry_and_old_freeze_checked':True,
         'market_fact_handler_complete':False, 'full_unified_host_clock_complete':False,

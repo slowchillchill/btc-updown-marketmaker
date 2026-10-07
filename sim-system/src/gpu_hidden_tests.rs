@@ -141,7 +141,23 @@ fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_eff
         "gpu-hidden-reference-test".into(), None, |_,_,_,_| {}).unwrap();
     let mut reader = CompactHiddenMaterialReaderV1::open(&hidden, &source, 1, 1<<20, 1<<20, |_,_,_,_| {}).unwrap();
     let mut buckets = Vec::new();
-    while let Some(bucket) = next_compact_hidden_gpu_bucket_v1(&mut reader).unwrap() { buckets.push(bucket); }
+    let mut canonical_market_facts_checked = 0;
+    while let Some(bucket) = next_compact_hidden_gpu_bucket_v1(&mut reader).unwrap() {
+        for ((position, reference), event_id) in bucket.bucket.reference_positions.iter()
+            .zip(&bucket.references).zip(&bucket.reference_market_event_ids) {
+            let restored = reader.reference_market_fact(*position).unwrap();
+            match &reference.payload {
+                CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact {..}) => {
+                    let expected = &market_facts[&reference.position];
+                    assert_eq!(restored.as_ref(), Some(expected));
+                    assert_eq!(event_id.as_ref(), Some(&expected.event_id));
+                    canonical_market_facts_checked += 1;
+                }
+                _ => {assert!(restored.is_none()); assert!(event_id.is_none());}
+            }
+        }
+        buckets.push(bucket);
+    }
     assert_eq!(buckets.iter().map(|b| b.bucket.bucket_time_utc_ms).collect::<Vec<_>>(), vec![21000,22000,31000]);
     assert_eq!(buckets[0].references.len(), 2);
     assert!(buckets[0].steps.is_empty());
@@ -184,9 +200,16 @@ fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_eff
         }
     }
     assert!(terminal_index.is_some());
-    assert!(!controls.is_empty(), "真实terminal源先产生控制事实，不能以人工read初始化");
+    // 非WS元数据无source time，不进hidden；真实终态组先Terminal再Lifecycle。
+    assert!(controls.is_empty());
+    assert!(canonical_market_facts_checked > 0);
+    assert!(matches!(buckets[2].references[0].payload,
+        CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact {payload:CanonicalMarketFactPayloadV1::Terminal(_),..})));
+    assert!(matches!(buckets[2].references[1].payload,
+        CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact {payload:CanonicalMarketFactPayloadV1::LifecycleTransition(_),..})));
     let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,
         "original_controls":controls,"terminal_reference_index":terminal_index.unwrap(),
+        "canonical_market_facts_checked":canonical_market_facts_checked,
         "source_binding":{"binary":std::env::var("B_GPU_HIDDEN_CLI").unwrap(),"hidden":hidden,"public":source,
             "rows":1,"bytes":1048576,"max_batch_bytes":1048576}});
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
