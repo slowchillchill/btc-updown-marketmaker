@@ -58,6 +58,18 @@ class PositionCosts:
             cost=select(take_ratio(cost, repeated), install.flatten(), self.cost),
             fee=select(take_ratio(fee, repeated), install.flatten(), self.fee))
 
+    def resized(self,capacity):
+        from transport import append_root_fields
+        roots,old=self.active.shape
+        if capacity<old:
+            raise ValueError('未退役成本目录不能缩小')
+        blank=type(self).empty(roots,capacity-old,self.active.device)
+        updates={name:torch.cat([getattr(self,name),getattr(blank,name)],1)
+            for name in ['active','conditions','assets','application_ordinals']}
+        for name in ['cost','fee']:
+            updates[name]=append_root_fields(getattr(self,name),getattr(blank,name),roots,old,capacity-old)
+        return replace(self,**updates)
+
     def read(self, scope_conditions=None, scope_present=None):
         roots, width = self.active.shape
         member = self.active

@@ -8,6 +8,52 @@ import torch
 from queues import ExactInt, ExactRational, Numbers, _take
 
 
+def append_root_fields(left, right, roots, left_width, right_width, *, fields=1):
+    """按[root,record,field]追加原字段；只依赖物理形状，不读取业务值。"""
+    if isinstance(left, ExactRational):
+        return ExactRational(
+            append_root_fields(left.numerator,right.numerator,roots,left_width,right_width,fields=fields),
+            append_root_fields(left.denominator,right.denominator,roots,left_width,right_width,fields=fields))
+    if isinstance(left, ExactInt):
+        word_width=max(left.words.size(1),right.words.size(1))
+        def joined(name):
+            values=[getattr(value.with_capacity(word_width),name) for value in [left,right]]
+            suffix=(word_width,) if name=='words' else ()
+            return torch.cat([value.reshape((roots,width,fields)+suffix)
+                for value,width in zip(values,[left_width,right_width])],dim=1).reshape((-1,)+suffix)
+        return ExactInt(joined('words'),joined('sign'),joined('fault'))
+    if isinstance(left,torch.Tensor):
+        return torch.cat([left.reshape(roots,left_width,fields),
+            right.reshape(roots,right_width,fields)],dim=1).flatten()
+    raise TypeError('共享记录字段须为原精确数值或张量')
+
+
+def select_batch_columns(batch, order):
+    """原批的不可变列视图；保留原record/private/batch身份及来源人口。"""
+    from dataclasses import fields as members
+    roots,width=batch.rows.shape
+    root=torch.arange(roots,device=order.device)[:,None]
+    coordinates=(root*width+order).flatten()
+    def integer(value,count=1):
+        return _take(value,(coordinates[:,None]*count+torch.arange(count,device=order.device)).flatten())
+    updates={}
+    for member in members(batch):
+        value=getattr(batch,member.name)
+        if value is None or member.name=='fault':
+            updates[member.name]=value
+        elif member.name=='normalized':
+            updates[member.name]=replace(value,**{name:getattr(value,name).gather(1,order)
+                for name in ['rows','outcomes','primary_fact_rows','emitted']})
+        elif isinstance(value,torch.Tensor):
+            updates[member.name]=value.gather(1,order)
+        elif isinstance(value,ExactRational):
+            count=8 if member.name=='economic_balances' else 1
+            updates[member.name]=ExactRational(integer(value.numerator,count),integer(value.denominator,count))
+        else:
+            updates[member.name]=integer(value)
+    return replace(batch,**updates)
+
+
 @dataclass(frozen=True)
 class TransportPopulation:
     original_width: int

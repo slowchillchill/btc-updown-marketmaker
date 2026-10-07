@@ -109,6 +109,31 @@ class AdmissionLifecycle:
         fault=self.fault | actual.fault | maker.fault | reserved.fault
         return CashFunds(actual,maker,reserved,reserved,local,platform_pending,fault)
 
+    def append_columns(self,bank,incoming):
+        """持续接入新NOE批；账户、原三序、旧position及资金关联原样承接。
+
+        新记录人口给目录提供保守物理扩容上界，不作为业务数量上界。
+        历史缓存退役仍由完整宿主按原引用生命周期处理。
+        """
+        from transport import append_root_fields
+        roots,width=self.columns.row_refs.shape
+        extra=incoming.row_refs.size(1)
+        columns=self.columns.append(incoming)
+        life=self.lifecycle.append(LifecycleColumns.from_projection(bank,incoming))
+        blank=torch.zeros_like(incoming.enabled)
+        zero=ExactInt.from_i64_tensor(torch.zeros(roots*extra,dtype=torch.int64,device=blank.device))
+        order_capacity=self.orders.occupied.size(1)+extra
+        trade_capacity=self.trades.occupied.size(1)+extra
+        return replace(self,columns=columns,lifecycle=life,
+            applied=torch.cat([self.applied,blank],1),
+            applied_sequences=append_root_fields(self.applied_sequences,zero,roots,width,extra),
+            available_at=torch.cat([self.available_at,torch.zeros_like(incoming.row_refs)],1),
+            orders=self.orders.resized(order_capacity),trades=self.trades.resized(trade_capacity),
+            trade_success=self.trade_success.resized(trade_capacity),
+            position_costs=self.position_costs.resized(trade_capacity),
+            order_funds=self.order_funds.resized(self.order_funds.occupied.size(1)+extra).append_records(extra,trade_capacity),
+            rebate_contributions=self.rebate_contributions.resized(self.rebate_contributions.occupied.size(1)+extra))
+
     def resized_contributions(self,capacity):
         """宿主只核人口容量请求后扩目录；原未消费NOE再试，不推进业务或随机数。"""
         return replace(self,rebate_contributions=self.rebate_contributions.resized(capacity))

@@ -1,5 +1,5 @@
 """原成交经济应用/成功观察双门；资料缺失不推断金额或提前配平。"""
-from dataclasses import dataclass,replace
+from dataclasses import dataclass,replace,fields
 import torch
 from queues import Numbers,ExactRational,_take
 from asset_buy import take_ratio
@@ -63,6 +63,21 @@ class TradeSuccess:
         ratio=ExactRational.ratio(zero,zero.constant(1))
         return cls(blank,blank.clone(),blank.clone(),columns,columns.clone(),columns.clone(),ratio,ratio,ratio,
             blank.clone(),columns.clone(),torch.zeros_like(columns),ratio,torch.ones_like(columns),ratio)
+
+    def resized(self,capacity):
+        from transport import append_root_fields
+        roots,old=self.has_fact.shape
+        if capacity<old:
+            raise ValueError('未退役成交目录不能缩小')
+        if capacity==old:
+            return self
+        blank=type(self).open(roots,capacity-old,self.has_fact.device)
+        updates={}
+        for member in fields(self):
+            a,b=getattr(self,member.name),getattr(blank,member.name)
+            updates[member.name]=(torch.cat([a,b],1) if isinstance(a,torch.Tensor)
+                else append_root_fields(a,b,roots,old,capacity-old))
+        return replace(self,**updates)
 
     def update(self,slots,condition,token,quantity,cost,disposition,trade_enabled,economic_enabled,economic_applied,
                *,role=None,matched_at=None,immediate_fee=None,maker_fee_read_kind=None,maker_fee_equivalent=None):

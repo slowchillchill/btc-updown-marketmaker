@@ -156,3 +156,10 @@ DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完�
 `freeze_account(...,submitted_legs=...)` 复用同次Registry订单读取，连同原receipt逐腿
 承诺冻结；condition/token绑定来自冻结意图，不由余额、SIM内部订单或可撤性补造。
 旧快照保留不可变张量。完整请求登记、跨块字典迁移及历史身份退役仍属于整根装配。
+
+`PublicLedgerState.append_batch(bank,batch)` 接入同一持续Normalizer已经生成的新批。
+它只对新记录解码Lifecycle字段，追加原位置与经济列；既有账户、三个账本前缀、
+公开Registry、已消费position及未解waiting继续保留。首次可见时间、领取rank和
+交付序不会因追加或重试刷新。物理扩容按新人口安排，空发射不积累padding且保留fault。
+调用方须在关闭receive时间之前接齐该时间的完整feedback来源；追加和预取不推进时间门。
+当前接口仍复制扩展缓存，未交付历史退役、共享bank回收或完整15天容量方案。

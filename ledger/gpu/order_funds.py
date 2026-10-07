@@ -84,6 +84,15 @@ class OrderFunds:
         index = torch.where(found, same.to(torch.int64).argmax(1), (~self.occupied).to(torch.int64).argmax(1))
         return index, found, Numbers.combine_fault_rows(relation.fault.reshape(roots, width))
 
+    def append_records(self,extra,trade_capacity):
+        """扩展原未关联record及trade关联缓存；旧关联不重建。"""
+        roots,old=self.trade_bound.shape
+        if trade_capacity<old:
+            raise ValueError('未退役成交关联不能缩小')
+        return replace(self,trade_orders=grow_integer(self.trade_orders,roots,old,trade_capacity),
+            trade_bound=torch.nn.functional.pad(self.trade_bound,(0,trade_capacity-old),value=False),
+            unassigned_records=torch.nn.functional.pad(self.unassigned_records,(0,extra),value=False))
+
     def advance(self, lifecycle, columns, trade_slots, local, ledger_sequence, applied_sequences,
                 evidence, economic):
         roots, capacity = self.occupied.shape

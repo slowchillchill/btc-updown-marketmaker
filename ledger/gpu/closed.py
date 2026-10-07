@@ -18,6 +18,18 @@ class ClosedAdmission:
     available_at: torch.Tensor
     fault: torch.Tensor
 
+    def append_columns(self, incoming):
+        """物理扩展待消费人口；不重领旧waiting，不刷新首次visibility。"""
+        from transport import append_root_fields
+        roots,width=self.received.shape
+        extra=incoming.row_refs.size(1)
+        blank=type(self).empty(incoming)
+        return replace(self,received=torch.cat([self.received,blank.received],1),
+            consumed=torch.cat([self.consumed,blank.consumed],1),
+            receive_rank=torch.cat([self.receive_rank,blank.receive_rank],1),
+            available_at=torch.cat([self.available_at,blank.available_at],1),
+            delivered_sequences=append_root_fields(self.delivered_sequences,blank.delivered_sequences,roots,width,extra))
+
     @classmethod
     def empty(cls, columns):
         roots, width = columns.row_refs.shape

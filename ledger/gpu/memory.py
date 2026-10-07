@@ -34,6 +34,25 @@ class EconomicColumns:
     enabled: torch.Tensor
     projection_batches: tuple  # 同一不可变共享列，保留source参考和实际收到时刻。
 
+    def append(self, incoming):
+        """追加新批共享列；旧字段不重新解码，完整原位置保持不变。"""
+        from transport import append_root_fields
+        roots,width=self.row_refs.shape
+        extra=incoming.row_refs.size(1)
+        if incoming.row_refs.size(0)!=roots or incoming.row_refs.device!=self.row_refs.device:
+            raise ValueError('Ledger新列须同根同设备')
+        position_width=max(self.positions.size(1),incoming.positions.size(1))
+        positions=[torch.nn.functional.pad(value,(0,position_width-value.size(1)))
+            for value in [self.positions,incoming.positions]]
+        return replace(self,row_refs=torch.cat([self.row_refs,incoming.row_refs],1),
+            positions=append_root_fields(*positions,roots,width,extra,fields=position_width).reshape(-1,position_width),
+            sequences=append_root_fields(self.sequences,incoming.sequences,roots,width,extra),
+            balances=append_root_fields(self.balances,incoming.balances,roots,width,extra,fields=8),
+            outcomes=append_root_fields(self.outcomes,incoming.outcomes,roots,width,extra),
+            asset_indices=torch.cat([self.asset_indices,incoming.asset_indices],1),
+            enabled=torch.cat([self.enabled,incoming.enabled],1),
+            projection_batches=self.projection_batches+incoming.projection_batches)
+
     @classmethod
     def from_projection_batches(cls,batches):
         from fields import encode_fields

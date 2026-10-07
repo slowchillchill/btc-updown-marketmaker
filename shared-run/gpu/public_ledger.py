@@ -29,6 +29,29 @@ class PublicLedgerState:
 
     submission_bindings: object | None = None  # 冷前缀须安装已公开关联；None不证明完整历史。
 
+    def append_batch(self,bank,batch):
+        """原SIM/NOE发射新批后追加一次；不重开账户，不领取或推进可见门。
+
+        bank为同一持续Normalizer的追加后只读存储，原物理row引用须保持。
+        消费只在receive处理完整关闭来源；未来已预取材料不可借此提高公开时间。
+        """
+        from memory import EconomicColumns
+        from transport import select_batch_columns
+        # 只读取物理人口以分配缓存；空发射不添加padding历史，fault仍保留。
+        population=batch.emitted.to(torch.int64).sum(1)
+        width=int(population.max().cpu())
+        if width==0:
+            return replace(self,pending_noe=replace(self.pending_noe,fault=self.pending_noe.fault | batch.fault),
+                waiting=replace(self.waiting,fault=self.waiting.fault | batch.fault),
+                ledger=replace(self.ledger,fault=self.ledger.fault | batch.fault))
+        order=(~batch.emitted).to(torch.int64).argsort(dim=1,stable=True)[:,:width]
+        batch=select_batch_columns(batch,order)
+        incoming=EconomicColumns.from_projection_batches([batch])
+        ledger=self.ledger.append_columns(bank,incoming)
+        return replace(self,pending_noe=self.pending_noe.append_batch(bank,batch),
+            ledger=replace(ledger,fault=ledger.fault | batch.fault),
+            waiting=self.waiting.append_columns(incoming))
+
     def receive(self, bank, gates, association_available, *, passes=None):
         """资源重试只重算整个纯候选；调用方成功后接纳返回状态和完整来源引用。"""
         pending, closed = self.pending_noe.take_closed(gates)

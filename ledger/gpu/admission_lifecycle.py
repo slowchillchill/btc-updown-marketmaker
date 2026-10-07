@@ -3,7 +3,7 @@
 共享字段只在块接入时解码一次。业务序号保持完整精确整数，目录槽位不替代身份；
 贡献/成功成本/结算经济归属由Ledger经济层接线，不由此处生成余额。
 """
-from dataclasses import dataclass,replace
+from dataclasses import dataclass,replace,fields
 import torch
 from queues import ExactInt,Numbers,_take
 from fields import decode_fields,IntegerList,RecordList
@@ -50,6 +50,50 @@ class LifecycleColumns:
     maker_statuses: torch.Tensor
     emitted: torch.Tensor
     fault: torch.Tensor
+
+    def append(self, incoming):
+        """只合并已解码的新批；变长正文保留原人口和成员顺序。"""
+        from transport import append_root_fields
+        from queues import ExactRational
+        roots,width=self.schemas.shape
+        extra=incoming.schemas.size(1)
+
+        def padded(value,rows,old,target,*,denominator=False):
+            if isinstance(value,torch.Tensor):
+                return torch.nn.functional.pad(value.reshape(rows,old),(0,target-old)).flatten()
+            if isinstance(value,ExactRational):
+                return ExactRational(padded(value.numerator,rows,old,target),
+                    padded(value.denominator,rows,old,target,denominator=True))
+            if old==0:
+                return ExactInt.from_i64_tensor(torch.full((rows*target,),int(denominator),
+                    dtype=torch.int64,device=self.schemas.device))
+            columns=torch.arange(target,device=self.schemas.device)
+            at=(torch.arange(rows,device=columns.device)[:,None]*old+columns.clamp_max(old-1)).flatten()
+            result=_take(value,at)
+            return result.select((columns<old).expand(rows,target).flatten(),result.constant(int(denominator)))
+
+        updates={}
+        for member in fields(self):
+            left,right=getattr(self,member.name),getattr(incoming,member.name)
+            if isinstance(left,(IntegerList,RecordList)):
+                capacities=[left.present.size(1),right.present.size(1)]
+                capacity=max(capacities)
+                masks=[torch.nn.functional.pad(value.present,(0,capacity-old))
+                    for value,old in zip([left,right],capacities)]
+                present=torch.cat([masks[0].reshape(roots,width,capacity),
+                    masks[1].reshape(roots,extra,capacity)],dim=1).reshape(-1,capacity)
+                def join(a,b):
+                    a=padded(a,roots*width,capacities[0],capacity)
+                    b=padded(b,roots*extra,capacities[1],capacity)
+                    return append_root_fields(a,b,roots,width,extra,fields=capacity)
+                updates[member.name]=(IntegerList(join(left.values,right.values),present)
+                    if isinstance(left,IntegerList) else RecordList(tuple(join(a,b)
+                        for a,b in zip(left.fields,right.fields)),present))
+            elif isinstance(left,torch.Tensor):
+                updates[member.name]=torch.cat([left,right],dim=1)
+            else:
+                updates[member.name]=append_root_fields(left,right,roots,width,extra)
+        return replace(self,**updates)
 
     @classmethod
     def from_projection(cls,bank,columns):
