@@ -53,6 +53,7 @@ def normalized(name: str) -> str:
 
 
 def source_inputs() -> tuple[list[str], dict[str, str], dict[str, str]]:
+    from packaging.markers import Marker
     project = tomllib.loads((MODEL_ROOT / "pyproject.toml").read_text())
     cpu_lock = tomllib.loads((MODEL_ROOT / "uv.lock").read_text())
     if project["project"]["requires-python"] != f"=={PYTHON_VERSION}":
@@ -63,10 +64,30 @@ def source_inputs() -> tuple[list[str], dict[str, str], dict[str, str]]:
     if dependencies.count("torch==2.11.0") != 1:
         raise ValueError("项目须声明 torch==2.11.0，GPU 锁明确选用 2.11.0+cu128")
     direct = ["torch==2.11.0+cu128" if x == "torch==2.11.0" else x for x in dependencies]
+    # CPU uv.lock覆盖多个操作系统；GPU锁仅保留本Linux目标的依赖闭包。
+    # 例如MLflow的docker在Windows依赖pywin32，不能要求Linux安装它。
+    environment = {
+        "implementation_name": "cpython", "implementation_version": PYTHON_VERSION,
+        "os_name": "posix", "platform_machine": "x86_64", "platform_python_implementation": "CPython",
+        "platform_system": "Linux", "python_full_version": PYTHON_VERSION,
+        "python_version": "3.13", "sys_platform": "linux", "extra": "",
+    }
+    by_name = {normalized(p["name"]): p for p in cpu_lock["package"]}
+    needed = {normalized(requirement.split("==")[0]) for requirement in dependencies}
+    pending = list(needed)
+    while pending:
+        package = by_name[pending.pop()]
+        for dependency in package.get("dependencies", []):
+            if "marker" in dependency and not Marker(dependency["marker"]).evaluate(environment):
+                continue
+            name = normalized(dependency["name"])
+            if name not in needed:
+                needed.add(name)
+                pending.append(name)
     preserved = {
         normalized(p["name"]): p["version"]
         for p in cpu_lock["package"]
-        if "registry" in p["source"] and normalized(p["name"]) != "torch"
+        if "registry" in p["source"] and normalized(p["name"]) in needed and normalized(p["name"]) != "torch"
     }
     metadata = {
         "python-version": PYTHON_VERSION,
