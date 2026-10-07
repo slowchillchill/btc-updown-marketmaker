@@ -141,7 +141,7 @@ DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完�
 
 该状态服务向前推进的合法公开 cutoff。预取记录不能提前 receive；未来 cutoff 不能反写过去。已冻结观察持有不可变结果，后续接纳不会改写它。当前状态不是任意更早 cutoff 的历史重建接口，也不是活动根恢复。
 
-全局撤单读取分开保存原 receipt 登记与 `CancellationRequestCompleted` 来源。逐目标回应不代表请求完成；零目标完成保留三项已知零，尚无完成时三项为 NotApplicable。完整 scoped 关系、Single/Pair/Market 对象形成序和未知人口仍须继续接入。
+全局撤单读取分开保存原 receipt 登记与 `CancellationRequestCompleted` 来源。逐目标回应不代表请求完成；零目标完成保留三项已知零，尚无完成时三项为 NotApplicable。作用域关系和Single/Pair/Market对象由下述设备接口读取，完整生产首次领取装配仍须继续接入。
 
 `gpu/registry_projection.py` 将实际 NOE 双门领取列批量解码为设备订单/Trade 来源；当前接入 Base Submission、Accepted 生命周期和 TradeLifecycleV3。原21前缀夹具以派生读面作 oracle，不给设备初始化 matched/active/commitment。真实非 post-only Maker 的9条 V4设备链已接首次领取→Registry→Ledger；其冷前缀缺接受引用时公开计量保持 Unknown，不补造历史。该局部不代表完整首次领取流、FOK/查询/取消映射、slow433、全根时钟或恢复已完成。
 

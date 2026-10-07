@@ -226,7 +226,7 @@ def compare_scoped(frame,read):
     for index,query in enumerate(frame['scoped_cancellation_requests']):
         assert pending_known[index]==('Known' in query['pending']),(frame['stage'],'作用域pending Known')
         if pending_known[index]:assert pending[index]==query['pending']['Known']
-        assert latest_known[index]==('Known' in query['latest']),(frame['stage'],'作用域latest Known')
+        assert latest_known[index]==('Known' in query['latest']),(frame['stage'],'作用域latest Known',index,query['scope'],query['latest'],latest_known,latest)
         if latest_known[index]:assert latest[index]==(query['latest']['Known'] is not None)
         for outcome,oracle in enumerate(query['counts']):
             if oracle=='NotApplicable':assert not latest[index]

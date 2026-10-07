@@ -700,7 +700,7 @@ Maker 市场应计是一个汇总经济事实，贡献向量不拆成多条 NOE�
 原 intent/receipt 决定提交关联，不从 SIM 真实余量或账户余额推断。原 GTC 承诺
 Known(0) 不输出，Unknown 保留。原接受、形成、最新生命周期、明确撤成及每个 Trade
 最高 private 来源按所属身份保留；压紧前合并所有输入故障。排序相邻键去重替代
-Trade×Trade 历史关系。完整 scoped 取消对象、FOK/查询及 slow433 仍在接入。
+Trade×Trade 历史关系。对象/作用域候选见下文；完整取消首次领取、FOK/查询及 slow433 仍在接入。
 
 该表示只服务向前推进的合法 cutoff。预取不是接纳，旧观察使用已冻结结果，不能用
 压紧后的当前状态重新声称任意较早 cutoff 可重建。原 NOE batch/context/run/record
