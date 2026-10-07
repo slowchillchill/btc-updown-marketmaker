@@ -27,6 +27,8 @@ class PublicLedgerState:
     ledger: object
     cancellations: object | None = None  # 原已登记请求人口；None不是Known空请求集合。
 
+    submission_bindings: object | None = None  # 冷前缀须安装已公开关联；None不证明完整历史。
+
     def receive(self, bank, gates, association_available, *, passes=None):
         """资源重试只重算整个纯候选；调用方成功后接纳返回状态和完整来源引用。"""
         pending, closed = self.pending_noe.take_closed(gates)
@@ -35,6 +37,11 @@ class PublicLedgerState:
         rank = self.waiting.next_rank[:, None] + closed.emitted.to(torch.int64).cumsum(1)-1
         events, bindings = public_rows_from_closed(bank, batches, closed, rank)
         targets, completions = cancellation_rows_from_closed(bank, batches, closed)
+        from commitments import SubmissionBindings
+        old_bindings = self.submission_bindings
+        if old_bindings is None:
+            old_bindings = SubmissionBindings.empty(closed.emitted.size(0),closed.emitted.device,prefix_known=False)
+        submission_bindings = old_bindings.receive(bindings)
         registry = self.registry.receive(events)
         registry = registry.receive(cancellation_order_events(targets, rank))
         cancellations = None if self.cancellations is None else self.cancellations.receive(completions)
@@ -42,13 +49,13 @@ class PublicLedgerState:
         # Registry只在首次领取路径更新。Ledger再试始终引用原waiting和首次visibility。
         waiting = self.waiting.accept(self.ledger.columns, closed)
         # 原Registry接纳失败时不得继续提交同根Ledger；其它独立根仍能推进。
-        ledger_input=replace(self.ledger,fault=self.ledger.fault | registry.events.fault | targets.fault | cancellation_fault)
+        ledger_input=replace(self.ledger,fault=self.ledger.fault | registry.events.fault | targets.fault | cancellation_fault | submission_bindings.fault)
         ledger, waiting = waiting.drain(ledger_input, association_available, passes=passes)
-        fault = closed.fault | registry.events.fault | targets.fault | cancellation_fault | waiting.fault | ledger.fault
-        return replace(self, pending_noe=pending, registry=registry, waiting=waiting, ledger=ledger, cancellations=cancellations), PublicDelivery(
+        fault = closed.fault | registry.events.fault | targets.fault | cancellation_fault | waiting.fault | ledger.fault | submission_bindings.fault
+        return replace(self, pending_noe=pending, registry=registry, waiting=waiting, ledger=ledger, cancellations=cancellations, submission_bindings=submission_bindings), PublicDelivery(
             closed, bindings, targets, completions, fault)
 
-    def freeze_account(self, intents, cutoff):
+    def freeze_account(self, intents, cutoff, *, submitted_legs=None):
         """在真实公开推进/apply_closed之后一次冻结，不领取反馈或读取SIM。
 
         cutoff须为此状态实际ActionBefore的逻辑时间；压紧状态不支持任意历史回读。
@@ -64,9 +71,18 @@ class PublicLedgerState:
         pending = Numbers.ExactInt.from_i64_tensor((self.waiting.received & ~self.waiting.consumed).to(torch.int64).sum(1))
         requests = None if self.cancellations is None else self.cancellations.freeze_global(cutoff)
         fault = self.ledger.fault | self.waiting.fault | orders.fault | sources.fault | funds.fault | pending.fault
+        if self.submission_bindings is not None:
+            fault |= self.submission_bindings.fault
+        commitments = None
+        if submitted_legs is not None:
+            from commitments import freeze_leg_commitments
+            if self.submission_bindings is None:
+                raise ValueError('冻结完整请求承诺需安装原公开Submission关联前缀')
+            commitments = freeze_leg_commitments(submitted_legs,self.submission_bindings,intents,orders)
+            fault |= commitments.fault
         if requests is not None:
             fault |= requests.fault
-        return FrozenPublicAccount(cutoff.clone(), self.ledger, orders, sources, funds, pending, requests, fault)
+        return FrozenPublicAccount(cutoff.clone(), self.ledger, orders, sources, funds, pending, requests, fault, commitments)
 
 
 @dataclass(frozen=True)
@@ -79,3 +95,4 @@ class FrozenPublicAccount:
     pending_noe_count: object
     cancellations: object | None
     fault: torch.Tensor
+    commitments: object | None = None  # 完整receipt逐腿读面；None不是Known空承诺集合。

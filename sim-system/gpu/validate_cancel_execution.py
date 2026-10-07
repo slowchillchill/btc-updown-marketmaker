@@ -135,7 +135,8 @@ def validate_actual_cancel(source,delta):
     from registry import PublicRegistryEvents
     # 同真实来源另算纯候选，作为统一生产入口的对照，不重复接纳手工分支。
     request_state=PublicCancellationState.open(integers([0]),active[:,None])
-    coordinated=PublicLedgerState(pending_initial,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),cache,ledger,request_state)
+    from commitments import SubmissionBindings
+    coordinated=PublicLedgerState(pending_initial,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),cache,ledger,request_state,SubmissionBindings.empty(1,'cuda'))
     coordinated_initial=coordinated
     # 缺经济关联只暂停Ledger释放；公开Control已领取，Registry仍先关闭。
     # 原Registry已有故障不能继续提交该根Ledger。NOE实际领取引用仍在返回结果中。
@@ -173,7 +174,22 @@ def validate_actual_cancel(source,delta):
     assert values(coordinated.ledger.current_entry_sequence)==[source['cancel_ledger_after']['projection']['ledger_entry_seq']]
     assert amounts(coordinated.ledger.platform.balances)==[Fraction(source['cancel_ledger_after']['projection']['platform_confirmed_projection'][name]) for name in names]
     # 共享冻结包含首次领取后的公开请求完成；Ledger资金仍按实际经济提交改变。
-    account_after=Numbers.run_exact_batch(lambda:coordinated.freeze_account(directory,closed_at))
+    from commitments import SubmittedLegs,SubmissionBindings
+    # 该取消前缀的接纳关联未冷装；另一个已收receipt的合法Submit腿仍未公开订单。
+    # 它必须从原目标产生承诺，不能从公开订单目录缺项推断零。
+    unbound_legs=SubmittedLegs(active[:,None],active[:,None],torch.tensor([[1]],device='cuda'),
+        torch.tensor([[0]],device='cuda'),rational(['2']),active[:,None],
+        torch.tensor([[0]],device='cuda'),torch.tensor([[1]],device='cuda'),active[:,None])
+    account_after=Numbers.run_exact_batch(lambda:coordinated.freeze_account(directory,closed_at,submitted_legs=unbound_legs))
+    assert account_after.commitments.present.cpu().tolist()==[[True]]
+    assert account_after.commitments.known.cpu().tolist()==[[True]]
+    assert amounts(account_after.commitments.remaining)==[Fraction(2)]
+    assert coordinated.submission_bindings.received.size(1)==0, '无Submission的实际取消领取不制造关联人口'
+    bad_bindings=replace(coordinated.submission_bindings,fault=torch.ones_like(coordinated.submission_bindings.fault))
+    bad_prefix=replace(coordinated,submission_bindings=bad_bindings)
+    bad_frozen=Numbers.run_exact_batch(lambda:bad_prefix.freeze_account(directory,closed_at,submitted_legs=unbound_legs))
+    assert bad_frozen.fault.cpu().tolist()==[1]
+
     assert values(account_after.pending_noe_count)==[0]
     assert values(account_blocked.pending_noe_count)!=[0], '旧冻结waiting人口不倒灌'
     assert amounts(account_blocked.funds.actual_available)==[Fraction(before['cash']['actual_available_pusd'])]

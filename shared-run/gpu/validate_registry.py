@@ -453,6 +453,7 @@ def check_family(source):
     cancel_saved=[]
     seen=set()
     state=None
+    binding_state=SubmissionBindings.empty(1,'cuda')
     rank=0
     saved=[]
     objects_saved=[]
@@ -487,8 +488,12 @@ def check_family(source):
             candidate=PublicRegistryState(events) if state is None else state.receive(events)
             cancel_events=cancellation_order_events(cancel_rows,torch.arange(rank,rank+len(cancellation_incoming),device='cuda')[None,:])
             candidate=candidate.receive(cancel_events)
-            return candidate,candidate.freeze_orders(directory(frame),torch.tensor([frame['logical_at']],device='cuda'))
-        state,view=Numbers.run_exact_batch(compute)
+            submission=SubmissionBindings(events.received & ((events.kinds==BASE_ACCEPTED)|(events.kinds==QUOTE_ACCEPTED)),
+                events.request_slots,events.item_ordinals,events.private_sequences,events.receive_rank,events.orders,
+                torch.ones_like(events.received),events.fault)
+            bindings=binding_state.receive(submission)
+            return candidate,candidate.freeze_orders(directory(frame),torch.tensor([frame['logical_at']],device='cuda')),bindings
+        state,view,binding_state=Numbers.run_exact_batch(compute)
         rank+=max(1,len(incoming))
         maximum_retained=max(maximum_retained,state.events.received.size(1))
         sources=Numbers.run_exact_batch(lambda:state.freeze_order_sources(directory(frame),torch.tensor([frame['logical_at']],device='cuda')))
@@ -523,13 +528,10 @@ def check_family(source):
                 torch.tensor([[buy_ids[request] for request,_,_ in leg_keys]],device='cuda'),
                 torch.tensor([[item for _,item,_ in leg_keys]],device='cuda'),
                 rational([target for _,_,target in leg_keys]),torch.ones_like(registered))
-            events=state.events
-            bindings=SubmissionBindings(events.received & ((events.kinds==BASE_ACCEPTED)|(events.kinds==QUOTE_ACCEPTED)),
-                events.request_slots,events.item_ordinals,events.private_sequences,events.receive_rank,events.orders,
-                torch.ones_like(events.received),events.fault)
-            return freeze_leg_commitments(legs,bindings,directory(frame),view)
+            return freeze_leg_commitments(legs,binding_state,directory(frame),view)
         legs_view=Numbers.run_exact_batch(leg_freeze)
         assert legs_view.fault.cpu().tolist()==[0]
+        assert binding_state.received.size(1)<=len(leg_keys), '关联目录按请求腿保留，不累计版本/padding'
         included=legs_view.present.cpu().tolist()[0]
         assert {(request,item) for (request,item,_),active_leg in zip(leg_keys,included) if active_leg}=={
             (item['request'],item['item']) for item in frame['commitments']},(frame['stage'],'完整逐腿承诺人口')
