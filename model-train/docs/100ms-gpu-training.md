@@ -999,7 +999,7 @@ SIM 候选、反馈与引用游标共用提交门，资源退出不公开未提�
 判定计量候选已独立于普通撤单：取消量是 pending＋open，释放金额仅为 open 占款；
 零金额仍可以关单，写原 market-resolved 计量。整市场候选复用完整 u64 的 sim-N 字节序，
 保留原订单字符串顺序与整次回退。单笔正额挂单关闭、tag5释放及完整schema18/19身份已关联运行；零金额关单和多订单顺序当前仍静态。
-请求发送、清偿、质量失效、完整经济前驱读面、跨页身份承接、图内 Terminal 输出和完整宿主继续实现。
+首次请求发送、Registered及有限成功清偿已接下文原路径；Query／Retry、费用、质量失效、跨页身份承接、图内 Terminal 输出和完整宿主继续实现。
 判定／完整 Terminal 字典必须随 NOE、冻结与恢复引用存活；当前字段索引不能脱离绑定重新解释。
 
 
@@ -1008,8 +1008,8 @@ Ledger 的 `ResolutionSources` 在冷绑定时按原 token 匹配完整 Terminal
 `MarketResolutions` 在首次实际消费时保存原 canonical 身份、完整 Terminal 引用和费用归属类别。
 `AdmissionLifecycle` 对这条证据分配 Ledger 条目序号，并按完整 NOE position 去重；
 它不推进平台经济序号或本地预留序号，不增加现金。已判定市场的未兑付应收随成功池读取，
-Pi/历史亏损仍在每条实际提交时更新。请求、费用、兑付与经济前驱屏障尚须后续事实消费者接齐，
-不能把当前未兑付读面作为已清偿市场读面。来源页和完整身份字典尚未跨页退役。
+Pi/历史亏损仍在每条实际提交时更新。此处原Resolved切片只证明首次未兑付应收；
+下文成功经济接线保存已兑付量，不将旧未兑付读面用于清偿后。费用与Query／Retry仍未接齐；来源页和完整身份字典尚未跨页退役。
 
 本轮自然零额 Terminal 对照沿原唯一 Memory 消费者把同一原引用送进 Ledger；
 设备端沿同一 `PublicLedgerState.receive` 双门领取、Registry 接纳及 Ledger 消费。
@@ -1028,7 +1028,7 @@ Pi/历史亏损仍在每条实际提交时更新。请求、费用、兑付与�
 
 下一首请求增量在 shared-run 所属 `SettlementCoordinator` 消费同一次 `FrozenPublicAccount`。首次发送须公开Ledger waiting为空、同condition完整receipt逐腿承诺为空、经济前驱Known(true)且应收正；未知腿关联不能证明本condition无承诺。已有Request的查询和显式RetryAuthorized不重查首次资格，按最后已处理公开observation抑制重复；普通Unknown/Timeout不增加赎回次数，Timeout分支只查询。请求身份保原account、condition、canonical resolution及固定RESOLUTION_REDEEM_ONLY，SDK indexSets固定[1,2]。设备目录坐标借完整原字符串字典，不是新业务身份。
 
-SIM `SettlementRegistrations` 当前只消费显式单Registered步骤的有限scenario：首次到达按原canonical resolution ID的出站SHA时延采样，保存first_arrival/完整u64 sends，后台独立核原resolution pending集合为空及Maker市场结果存在。重复登记保首次到达与scenario进度。真实Registered观察由原SettlementLifecycle映射为schema20，经同Emitter/private时延、Normalizer、NOE双门及持续公开Ledger接纳；Ledger只增加条目并保存非终局Request，平台经济/本地序和现金不变。此类型不是完整scenario解释器，不代表成功兑付、费用、查询或受控重试后台已交付。完整Request证据仍由bank/原position保存，终局Request状态沿原Ledger保持sticky。
+SIM `SettlementRegistrations` 支持显式Registered及可选TerminalSuccess的有限scenario：首次到达按原canonical resolution ID的出站SHA时延采样，保存first_arrival/完整u64 sends，后台独立核原resolution pending集合为空及Maker市场结果存在。重复登记保首次到达与scenario进度。真实Registered观察由原SettlementLifecycle映射为schema20，经同Emitter/private时延、Normalizer、NOE双门及持续公开Ledger接纳；Ledger只增加条目并保存非终局Request，平台经济/本地序和现金不变。此类型不是完整scenario解释器；成功经济接线见下文，费用、查询和受控重试后台尚未交付。完整Request证据仍由bank/原position保存，终局Request状态沿原Ledger保持sticky。
 
 该有限验证继续原26000/27000 Maker→31000 Terminal→32000 MINED→33000 CONFIRMED来源；在实际50000公开cutoff第一次符合发送门后，请求出站到达加scenario offset1产生Registered。原参考调用实际reduce_actor_input_v2与scheduled obligation消费、finalizer、唯一Memory及Ledger；设备侧从公开冻结选择请求并由后台登记/阶段0时钟生成反馈，原结果只检查金额/位置/时间/状态。源profile和单Registered步骤是工程输入，不冻结正式训练延迟/费用/失败查询重试参数，完整宿主和清偿继续接线。
 

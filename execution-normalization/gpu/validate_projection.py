@@ -116,8 +116,8 @@ def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=
             request=value['Request']
             assert request['index_sets']==['0x1','0x2'] and request['settlement_request_id']['policy_version']=='RESOLUTION_REDEEM_ONLY'
             outcomes={'Registered':0,'Pending':1,'FinalSuccess':2,'FinalFailureNoEffect':3}
-            observations=['Registered','SubmissionAccepted','SubmissionUnknown','SubmissionTimeout','QueryAcceptedPending','QueryFinalSuccess',
-                'QueryUnknown','ObservationTimeout','RetryAuthorized','TerminalSuccess','TerminalFailureNoEffect']
+            observations=['Registered','SubmissionUnknown','ObservationTimeout','QueryUnknown','QueryAcceptedPending','QueryFinalSuccess',
+                'QueryConfirmedNoTransaction','RetryAuthorized','RetryNotAuthorized','TerminalSuccess','TerminalFailureNoEffect']
             return encode_fields([zero,zero,torch.full_like(zero,resolution_index),zero,torch.ones_like(zero),torch.full_like(zero,2),
                 torch.full_like(zero,outcomes[request['outcome']]),torch.full_like(zero,observations.index(request['observation']))])
         if 'Resolved' in value:
