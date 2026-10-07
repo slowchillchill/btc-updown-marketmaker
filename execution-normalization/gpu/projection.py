@@ -90,6 +90,73 @@ class Projection:
             raise TypeError('NOE批资产目录需同设备int64[assets]')
         return cls(emitter,None,account,condition,token,assets,asset_roots,order_sequence,request,item,context,run)
 
+    def bind_base_order(self,order,asset_tokens,enabled):
+        """只替换本次来源绑定；Emitter/Core及其此前成功批保持同一连续状态。
+
+        order来自SIM当前BaseOrders读取，asset_tokens是原资产→token不可变目录。
+        物理order slot不充当NOE身份；完整order u64和原request/item均从实际目录取。
+        """
+        roots=self.account_slots.numel()
+        if enabled.shape!=(roots,) or enabled.dtype!=torch.bool or enabled.device!=self.account_slots.device:
+            raise TypeError('实际反馈人口需同设备bool[roots]')
+        if asset_tokens.shape!=self.asset_roots.shape or asset_tokens.dtype!=torch.int64 or asset_tokens.device!=enabled.device:
+            raise TypeError('原token目录需同设备int64[assets]')
+        if order.conditions is None:
+            raise ValueError('动态Base反馈须保留实际市场绑定')
+        if asset_tokens.numel()==0:
+            token=torch.full_like(order.assets,-1)
+            invalid=enabled
+        else:
+            safe=order.assets.clamp(0,asset_tokens.numel()-1)
+            token=asset_tokens[safe]
+            invalid=(order.assets<0)|(order.assets>=asset_tokens.numel())|(token<0)|(
+                self.asset_roots[safe]!=torch.arange(roots,device=enabled.device))
+        error=order.sequence.fault | order.quantity.fault | order.price.fault
+        error=error | (~order.present | invalid | (order.conditions<0) |
+            (order.request_keys<0) | (order.item_ordinals<0) | (order.item_ordinals>65535)).to(torch.int32)
+        fault=self.emitter.fault | order.fault | torch.where(enabled,error,0)
+        return replace(self,emitter=replace(self.emitter,fault=fault),
+            condition_slots=order.conditions,token_slots=token,asset_indices=order.assets,
+            order_sequence=order.sequence,request_slots=order.request_keys,item_ordinals=order.item_ordinals)
+
+    def pending_base_acceptance(self,sampler,orders,pool,effects,asset_tokens):
+        """已完成的单项Base接单来源；完整Pair响应仍须原请求封口协调。
+
+        当前入口只映射本次接受的订单/成交。未接受项须由独立原拒绝producer装配。
+        """
+        order=orders.read(effects.order.slots)
+        bound=self.bind_base_order(order,asset_tokens,effects.order.emitted)
+        return bound.acceptance(sampler,effects.prepared,effects.acceptance,pool,
+            order.accepted_at,effects.response.received_at,direct_completed=effects.response.emitted)
+
+    def fill_from_origin(self,sampler,orders,pool,frame,asset_tokens,calendars,rebate_rate,at,*,maker_results=()):
+        """首Maker反馈或后续唯一最终性义务均取同一实际fill来源，不读取冷结果正文。"""
+        from queues import _take
+        from fill_pool import _take_record
+        from asset_buy import take_ratio
+        root=torch.arange(pool.roots,device=at.device)
+        safe=frame.slot.clamp(0,pool.capacity-1)
+        index=root*pool.capacity+safe
+        origin=pool.origins.take(index)
+        order=orders.read(origin.order_slots)
+        enabled=frame.event.emitted
+        bound=self.bind_base_order(order,asset_tokens,enabled)
+        same_order=origin.order_sequences.compare(order.sequence)
+        same_fill=_take(pool.sequences,index).compare(frame.fill_sequence)
+        error=origin.order_sequences.fault | origin.prices.fault | same_order.fault | same_fill.fault
+        error=error | ((frame.slot<0)|(frame.slot>=pool.capacity)|~pool.occupied[root,safe]|
+            (same_order.order!=0)|(same_fill.order!=0)|(origin.conditions!=order.conditions)|
+            (origin.roles<0)|(origin.roles>1)).to(torch.int32)
+        maker_index,found,lookup_fault=calendars.maker._lookup(frame.fill_sequence)
+        maker=origin.roles==1
+        equivalent=take_ratio(calendars.maker.fee_equivalent,
+            root*calendars.maker.fill_occupied.size(1)+maker_index)
+        error=error | torch.where(maker,lookup_fault | (~found).to(torch.int32) | equivalent.fault,0)
+        fault=bound.emitter.fault | pool.fault | torch.where(enabled,error,0)
+        bound=replace(bound,emitter=replace(bound.emitter,fault=fault))
+        return bound.finality(sampler,_take_record(pool.records,index),frame,origin.prices,rebate_rate,at,
+            maker_results=maker_results,liquidity_role=origin.roles,maker_fee_equivalent=equivalent)
+
     def _record(self,emitter,mapped,kind,private,batch,received):
         roots=self.account_slots.numel()
         size=roots
@@ -250,15 +317,18 @@ class Projection:
         return candidate,replace(batch,cancellation_method=torch.where(batch.source_categories==0,
             method[:,None],torch.full_like(batch.source_categories,-1)))
 
-    def acceptance(self,sampler,prepared,effects,pool,at,direct_received):
+    def acceptance(self,sampler,prepared,effects,pool,at,direct_received,*,direct_completed=None):
         """已真实接纳Base产生Order/逐fill/直接响应；其它结果须对应producer。"""
         from queues import _take,ExactRational
         from fill_pool import _take_record
         from asset_buy import take_ratio
         roots=self.account_slots.numel()
         width=len(effects.fills)+2
+        direct_active=effects.submission_delta.emitted | effects.rejected
+        if direct_completed is not None:
+            direct_active=direct_active & direct_completed
         active=torch.stack([effects.submission_delta.emitted,*[frame.event.emitted for frame in effects.fills],
-            effects.submission_delta.emitted | effects.rejected],dim=1)
+            direct_active],dim=1)
         direct=torch.zeros_like(active)
         direct[:,-1]=True
         platform=at[:,None].expand(roots,width)

@@ -34,6 +34,7 @@ class PendingBaseEffects:
     calendars: object = None
     required_day_fills: object = None
     required_days: object = None
+    prepared: object = None  # 同次纯候选计量/逐段计划，供真实反馈装配，不从原oracle反造。
 
 
 def _coordinate_orders(candidate, original, fault):
@@ -144,7 +145,7 @@ def accept_pending_base(requests, pending, orders, queue, account, fills, terms,
         rejected=accepted.rejected & committed, fills=tuple(acceptance_events), fault=root_fault)
     response = replace(response, emitted=response.emitted & committed, fault=root_fault)
     return requests, orders, queue, account, fills, PendingBaseEffects(accepted, insertion, response,
-        remainder.required_segments, root_fault, calendars, required_day_fills, required_days)
+        remainder.required_segments, root_fault, calendars, required_day_fills, required_days, prepared)
 
 
 def run_pending_base_acceptance(requests, orders, queue, account, fills, terms, ask_rows,

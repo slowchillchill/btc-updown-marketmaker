@@ -38,6 +38,17 @@ def main():
     sha = source['proxy_latency_sha256']
     sampler = EmpiricalDelaySampler.build((root/'sim-system/config/latency-profiles'/sha/'profile.json').read_bytes(),
                                          sha, [source['session_seed'].encode('ascii')])
+    sys.path.insert(0,str(root/'execution-normalization/gpu'))
+    from projection import Projection
+    from feedback import FeedbackEmitter
+    from validate_projection import expected_semantic
+    from consumption import PendingRecords,ReceiveGates
+    # 原根开户/静态目录一次安装；订单、请求、角色、原价以后从设备目录取。
+    zero=tensor([0])
+    noe=Projection.open(FeedbackEmitter.open(1),zero,zero,zero,zero,tensor([0,0]),
+        integers([0]),tensor([-1]),tensor([-1]),zero,zero)
+    asset_tokens=tensor([0,1])
+    batches=[]
     identity_bytes, identity_offsets = byte_column([source['post_request_key'].encode()])
     requests = MutationRequests.empty(integers([0]), capacity=1, action_capacity=1)
     requests, receipt = requests.run_registration(sampler, identity_bytes, identity_offsets,
@@ -63,6 +74,8 @@ def main():
         torch.zeros((1,queue.capacity), dtype=torch.int64, device='cuda'), rebate, tensor([0, 0]), tensor([0]),
         calendars=calendars)
     calendars = accepted.calendars
+    noe,batch=Numbers.run_exact_batch(lambda:noe.pending_base_acceptance(sampler,orders,fills,accepted,asset_tokens))
+    batches.append(batch)
     assert accepted.fault.cpu().tolist() == [0] and accepted.order.emitted.cpu().tolist() == [True]
     assert values(accepted.order.sequence) == [1] and accepted.response.emitted.cpu().tolist() == [True]
     assert not requests.next_pending().exists.cpu().item()
@@ -83,9 +96,12 @@ def main():
         stage = checkpoint['stage']
         if stage in ('taker_finality', 'maker_finality'):
             at = tensor([checkpoint['at']])
-            fills, account, maker, taker, transition, _ = Numbers.run_exact_batch(lambda:
+            fills, account, maker, taker, transition, market = Numbers.run_exact_batch(lambda:
                 fills.advance_mixed(account,calendars.maker,calendars.taker,at,maker_rate,rebate))
             calendars = RebateCoordinator(maker,taker)
+            noe,batch=Numbers.run_exact_batch(lambda:noe.fill_from_origin(sampler,orders,fills,transition,
+                asset_tokens,calendars,rebate,at,maker_results=(market,)))
+            batches.append(batch)
             assert transition.origin.roles.cpu().tolist() == [int(stage=='maker_finality')]
         elif stage == 'hidden_step':
             event = source['events'][checkpoint['ordinal']]['payload']['event']
@@ -102,6 +118,9 @@ def main():
             if values(read.quantity.pending_maker_depletion_base_units)[0] > 0:
                 observed_pending_zero_quote = True
             for maker_transition in hidden.fills:
+                noe,batch=Numbers.run_exact_batch(lambda:noe.fill_from_origin(sampler,orders,fills,maker_transition,
+                    asset_tokens,calendars,rebate,tensor([source['maker_at']])))
+                batches.append(batch)
                 if maker_transition.event.emitted.cpu().item():
                     assert maker_record is None
                     maker_record = maker_transition
@@ -123,6 +142,45 @@ def main():
     assert calendars.maker.market_pending.cpu().tolist() == [[0]]
     assert calendars.maker.terminal_consumed.cpu().tolist() == [[True]]
     assert not calendars.taker.pending.any().cpu().item()
+    expected={(record['position']['source_watermark']['projection_batch_sequence'],record['position']['record_ordinal']):record
+        for record in source['prior_records']}
+    by_row={}
+    from consumption import PendingRecords,ReceiveGates
+    pending=None
+    for batch in batches:
+        assert batch.fault.cpu().tolist()==[0]
+        for column,wanted in enumerate(batch.emitted.cpu().tolist()[0]):
+            if not wanted:continue
+            key=values(batch.batch_sequences)[column],values(batch.record_ordinals)[column]
+            original=expected[key]
+            body=next(iter(original['record'].values()))
+            source_ref=body.get('source_reference') or body['fact']['source_reference']
+            category,metadata=next(iter(source_ref['record'].items()))
+            assert values(batch.private_sequences)[column]==metadata['private_feedback_sequence']
+            received_name='response_received_at_utc_ms' if category=='DirectResponse' else 'feedback_received_at_utc_ms'
+            assert int(batch.received_at[0,column].cpu())==metadata[received_name]
+            row=int(batch.rows[0,column].cpu())
+            semantic=Numbers.run_exact_batch(lambda:expected_semantic(original))
+            actual=noe.normalizer.bank.semantic[row:row+1]
+            width=max(actual.size(1),semantic.size(1))
+            assert torch.equal(torch.nn.functional.pad(actual,(0,width-actual.size(1))),
+                torch.nn.functional.pad(semantic,(0,width-semantic.size(1)))),(key,'实际动态来源正文')
+            assert int(noe.normalizer.bank.source_order[row,3].cpu())==body['source_order']['ordinal']
+            by_row[row]=original
+        if pending is None:
+            from queues import _take
+            pending=PendingRecords.from_columns(batch.emitted,batch.received_at,batch.private_sequences,
+                Numbers.ExactInt.from_i64_tensor(noe.normalizer.bank.source_order[batch.rows.flatten(),3]),batch.rows,integers([0]))
+        else:
+            pending=Numbers.run_exact_batch(lambda:pending.append_batch(noe.normalizer.bank,batch))
+    assert len(by_row)==len(expected)
+    closed=tensor([max(int(record['visibility']['Feedback']['available_at_utc_ms']) for record in source['prior_records'])])
+    gates=ReceiveGates.unset(1).set_receive(closed,active).set_public(closed,active)
+    pending,delivery=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
+    delivered=[by_row[row]['position'] for row,present in zip(delivery.record_refs.cpu().tolist()[0],delivery.emitted.cpu().tolist()[0]) if present]
+    assert delivered==[record['position'] for record in source['prior_records']]
+    _,repeat=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
+    assert not repeat.emitted.any().cpu().item()
     # 已完成请求无pending：调度padding零terms/故障不得污染既存状态。
     padding = FrozenBaseTerms(tensor([-1]), integers([0]), integers([0]), rational(['0']),
                               tensor([-1]), tensor([-1]), tensor([1], torch.int32),tensor([-1]))
@@ -172,6 +230,8 @@ def main():
         'actual_order_role_and_source_price_bound_to_each_fill_checked':True,
         'same_fill_pool_finality_uses_actual_role_and_calendar_predecessors_checked':True,
         'single_original_hidden_transition_queue_order_fill_calendar_common_commit_checked':True,
+        'continuous_directory_bound_order_taker_maker_NOE_payload_and_positions_checked':True,
+        'dynamic_NOE_records':len(by_row),
         'original_SIM_checkpoints': len(source['checkpoints']),
         'elapsed_seconds_with_reference_reads': time.perf_counter()-started,
         'device_peak_allocated_bytes': torch.cuda.max_memory_allocated(),

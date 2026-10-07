@@ -184,6 +184,9 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
         crate::public_consumption::ActorTimeRecordV1 { run_id: actor.opened.run_id.clone(), drive_position: 1, logical_time_utc_ms: prefix_at }));
     let mut previous = observation.take_closed_records();
+    let prior_records = previous.iter().map(|record| serde_json::json!({
+        "record":record.record(), "position":record.position(), "visibility":record.visibility(),
+    })).collect::<Vec<_>>();
     while !previous.is_empty() {
         let count = previous.len();
         let mut waiting = Vec::new();
@@ -254,6 +257,7 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         },"proxy_latency_sha256":actor._latency_profile.file_sha256(),
         "cancel_arrived_at":cancel_receipt.platform_arrived_at_utc_ms,
         "cancel_records":cancel_records,"cancel_batches":cancel_batches,"cancel_closed_at":closed_at,
+        "prior_records":prior_records,"prior_batches":prior_batches,
         "cancel_ledger_before":cancel_ledger_before,"cancel_ledger_after":cancel_ledger_after,"cancel_ledger_attempts":cancel_ledger_attempts,
         "next_private":next_private,"next_batch":next_batch,"session_seed":state.session.as_ref().unwrap().session_seed.0});
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())

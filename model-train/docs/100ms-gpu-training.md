@@ -846,3 +846,10 @@ GTC接纳按原ask与FIFO段的逐fill人口绑定来源并登记正费Taker日�
 任何业务故障或物理池不足回退本条transition，保留之前已成功的源前缀。
 扩容从同一原输入重算，不按订单排序，不将同毫秒不同step拼成一次数量归约。
 这仍是单条已绑定价位入口；新价位目录、整消息/完整桶事务及外层hidden关闭前沿继续由后续宿主衔接。
+
+`execution-normalization/gpu/projection.py`的动态Base来源入口从当前订单目录取得真实
+order/request/item/condition/asset，从成交池取得原角色和原价，并核对两者的完整订单身份。
+原token目录只读共享，Emitter及Normalizer在后续批继续使用，不按每笔订单重开。
+首Maker反馈与后续最终性采用同一逐fill来源；Maker费用等价沿其登记时冻结的原H5值。
+单项Base接纳只在原请求已封口时发直接响应。本切片没有装配完整Pair响应、拒绝正文或全部取消请求。
+原工程步骤和密封路径仍驱动短链；来源批连续生成及双门领取不等于全局时钟已经交付。
