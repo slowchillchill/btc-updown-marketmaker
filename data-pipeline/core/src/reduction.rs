@@ -819,29 +819,41 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                     .as_mut()
                     .expect("expected verdict requires a book");
                 let previous_frontier = book.visibility_frontier_evidence.clone();
-                let (bid_summary, mut prior_evidence) = apply_reference_level_updates(
+                let bid_report = apply_reference_level_updates(
                     &mut book.bids,
                     &mut book.deleted_bids,
                     &row.bids,
                     &evidence,
                     "bids",
+                    !quantity_only,
                 )?;
-                let (ask_summary, ask_prior_evidence) = apply_reference_level_updates(
+                let ask_report = apply_reference_level_updates(
                     &mut book.asks,
                     &mut book.deleted_asks,
                     &row.asks,
                     &evidence,
                     "asks",
+                    !quantity_only,
                 )?;
-                prior_evidence.extend(ask_prior_evidence);
-                let summary = bid_summary.combine(ask_summary)?;
+                // 薄入口无报告消费者；只维护共同权威映射及可见性状态。
+                let report = match (bid_report, ask_report) {
+                    (
+                        Some((bid_summary, mut prior_evidence)),
+                        Some((ask_summary, ask_prior_evidence)),
+                    ) => {
+                        prior_evidence.extend(ask_prior_evidence);
+                        Some((bid_summary.combine(ask_summary)?, prior_evidence))
+                    }
+                    (None, None) => None,
+                    _ => unreachable!("两侧采用相同报告模式"),
+                };
                 book.local_u = Some(row.final_update_id);
                 book.anchor_evidence = evidence.clone();
                 book.visibility_frontier_evidence =
                     visibility_frontier_evidence(vec![previous_frontier, evidence])?;
-                if quantity_only {
+                let Some((summary, prior_evidence)) = report else {
                     return Ok(None);
-                }
+                };
                 let event = finalize_binance_depth_event(
                     &self.canonical_rule_version,
                     book,
@@ -1031,10 +1043,10 @@ fn apply_reference_level_updates<E: ReductionEvidenceV1>(
     updates: &[DepthLevel],
     evidence: &E,
     field: &str,
-) -> Result<(QuantityTotals, Vec<E>), ContractError> {
+    collect_report: bool,
+) -> Result<Option<(QuantityTotals, Vec<E>)>, ContractError> {
     let mut seen = BTreeSet::new();
-    let mut summary = QuantityTotals::default();
-    let mut prior_evidence = Vec::new();
+    let mut report = collect_report.then(|| (QuantityTotals::default(), Vec::new()));
     for (index, update) in updates.iter().enumerate() {
         let price =
             typed_raw::normalize_decimal_text(&update.price, &format!("{field}[{index}].price"))
@@ -1053,23 +1065,25 @@ fn apply_reference_level_updates<E: ReductionEvidenceV1>(
             .map(|level| parse_canonical_decimal(&level.quantity, field))
             .transpose()?
             .unwrap_or(Decimal::ZERO);
-        if let Some(previous) = previous {
-            prior_evidence.push(previous.direct_evidence.clone());
-        } else if let Some(previous_deletion) = deleted_levels.get(&key) {
-            prior_evidence.push(previous_deletion.clone());
-        }
         let after = parse_canonical_decimal(&quantity, field)?;
-        let (added, reduced) = match after.cmp(&before) {
-            Ordering::Greater => (after - before, Decimal::ZERO),
-            Ordering::Less => (Decimal::ZERO, before - after),
-            Ordering::Equal => (Decimal::ZERO, Decimal::ZERO),
-        };
-        summary = summary.combine(QuantityTotals {
-            before,
-            after,
-            added,
-            reduced,
-        })?;
+        if let Some((summary, prior_evidence)) = report.as_mut() {
+            if let Some(previous) = previous {
+                prior_evidence.push(previous.direct_evidence.clone());
+            } else if let Some(previous_deletion) = deleted_levels.get(&key) {
+                prior_evidence.push(previous_deletion.clone());
+            }
+            let (added, reduced) = match after.cmp(&before) {
+                Ordering::Greater => (after - before, Decimal::ZERO),
+                Ordering::Less => (Decimal::ZERO, before - after),
+                Ordering::Equal => (Decimal::ZERO, Decimal::ZERO),
+            };
+            *summary = std::mem::take(summary).combine(QuantityTotals {
+                before,
+                after,
+                added,
+                reduced,
+            })?;
+        }
         if after.is_zero() {
             levels.remove(&key);
             if !before.is_zero() || deleted_levels.contains_key(&key) {
@@ -1087,7 +1101,7 @@ fn apply_reference_level_updates<E: ReductionEvidenceV1>(
             );
         }
     }
-    Ok((summary, prior_evidence))
+    Ok(report)
 }
 
 fn finalize_binance_depth_event<E: ReductionEvidenceV1>(

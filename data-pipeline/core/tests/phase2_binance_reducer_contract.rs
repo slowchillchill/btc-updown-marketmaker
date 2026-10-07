@@ -1556,4 +1556,38 @@ fn quantity_sampling_preserves_valid_sum_beyond_decimal_capacity() {
     let (bid, _) = thin.current_quantity_totals().unwrap().unwrap();
     assert_eq!(bid.numerator, "158456325028528675187087900670");
     assert_eq!(bid.denominator, "1");
+
+    // 同样合法数量来自 applied 更新时，也不能触发无消费者的报告溢出。
+    let initial = snapshot("quantity-large-update", 100, 1);
+    let mut thin = BinanceDepthReducer::new("rule-v1").unwrap();
+    let evidence = source_evidence_from_typed_raw(
+        &TypedRawRow::BinanceDepthSnapshot(initial.clone()),
+        &sha('a'),
+        &sha('b'),
+    )
+    .unwrap();
+    thin.apply_quantity_snapshot(&initial, evidence).unwrap();
+    let applied = update(
+        "quantity-large-update",
+        101,
+        101,
+        2,
+        Some(100),
+        None,
+        BinanceDepthStitchVerdict::Applied,
+        vec![
+            level("64000", "79228162514264337593543950335"),
+            level("64100", "79228162514264337593543950335"),
+        ],
+    );
+    let evidence = source_evidence_from_typed_raw(
+        &TypedRawRow::BinanceDepthUpdate(applied.clone()),
+        &sha('a'),
+        &sha('b'),
+    )
+    .unwrap();
+    thin.apply_quantity_update(&applied, evidence).unwrap();
+    let (bid, _) = thin.current_quantity_totals().unwrap().unwrap();
+    assert_eq!(bid.numerator, "158456325028528675187087900670");
+    assert_eq!(bid.denominator, "1");
 }

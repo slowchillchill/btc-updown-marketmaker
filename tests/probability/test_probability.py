@@ -202,6 +202,19 @@ class ProbabilityTests(unittest.TestCase):
                 self.assertEqual(rows[0]['depth_pressure'],.6)
                 self.assertIsNone(rows[1].get('depth_total'))
             finally:boundary.close();db.close()
+            # 经过实际helper类型解析及applied更新后，采样仍保留精确大数量。
+            large=dict(update,bids='[["100","79228162514264337593543950335"],["99","79228162514264337593543950335"]]')
+            a,b=root/'large-depth.jsonl',root/'large-depth-samples.jsonl'
+            lines=[dict(at=fact['clock'],sample=False,kind=fact['source_kind'],
+                row={k:fact[k] for k in direct.DEPTH_COLUMNS[fact['source_kind']].split(',')}) for fact in (snap,large)]
+            lines.append(dict(at=2102,sample=True))
+            a.write_text(''.join(json.dumps(line)+'\n' for line in lines))
+            boundary=direct.Boundary(HELPER)
+            try:
+                boundary.call(op='depth',input=str(a),output=str(b))
+                quantity=json.loads(b.read_text())['bid']
+                self.assertEqual(quantity,dict(numerator='158456325028528675187087900670',denominator='1'))
+            finally:boundary.close()
 
     def test_study_freezes_before_evaluation_and_writes_fixed_bins(self):
         from probability import cli
