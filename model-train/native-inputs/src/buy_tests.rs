@@ -1191,7 +1191,8 @@ fn cash_root_is_not_replaced_by_encoding_limit() {
     assert_eq!(actor.state.interval.as_ref().unwrap().hi, original);
     if let Some(directory)=std::env::var_os("B_GPU_ACTOR_CANCEL_REFERENCE") {
         let report=serde_json::json!({"actor_context":actor.gpu_context_reference(),
-            "root_upper":original.to_string(),"quantity_support":actor.support().unwrap()});
+            "root_upper":original.to_string(),"quantity_support":actor.support().unwrap(),
+            "prefix_features":actor.prefix_features().to_vec()});
         std::fs::write(std::path::Path::new(&directory).join("encoding.json"),
             serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
@@ -1981,6 +1982,7 @@ fn export_gpu_exact_buy_reference_v1() {
     let a_price_coordinates = actor.price_indices().unwrap();
     let a_price_prefix_path = actor.path.clone();
     actor.choose(18).unwrap();
+    let b_price_prefix_features = actor.prefix_features();
     let b_price_coordinate = actor.price_indices().unwrap()[0];
     assert_eq!(b_price_coordinate, 19);
     actor.choose(b_price_coordinate as usize).unwrap();
@@ -2037,6 +2039,7 @@ fn export_gpu_exact_buy_reference_v1() {
             "legal_coordinates": a_price_coordinates,
             "prefix_path": a_price_prefix_path,
         },
+        "b_price_prefix_features": b_price_prefix_features.to_vec(),
         "selected_path": actor.path,
         "selected_intent": {
             "condition_id": condition_id.0,
@@ -2072,7 +2075,8 @@ pub(crate) fn gpu_actor_paths(group: Arc<NativeInputGroup>, families: &[usize]) 
         let mut choice=family;
         loop {
             let mask=actor.support().unwrap();
-            steps.push(serde_json::json!({"stage":format!("{:?}",actor.state.stage),"mask":mask,"choice":choice}));
+            steps.push(serde_json::json!({"stage":format!("{:?}",actor.state.stage),"mask":mask,
+                "choice":choice,"prefix_features":actor.prefix_features().to_vec()}));
             actor.choose(choice).unwrap();
             if actor.is_complete() { break; }
             choice=actor.support().unwrap().iter().position(|enabled|*enabled).unwrap();

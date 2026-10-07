@@ -55,6 +55,11 @@ class DeviceNativeActor:
         return ActorPrefix(unset,stage,unset,zero,zero,zero,zero,
             unset[:,None].expand(-1,2).clone(),unset[:,None].expand(-1,2).clone(),unset,c.fault.clone())
 
+    def prefix_features(self,state):
+        """同一合法选择前缀的36列模型投影及原精确fault；不推进动作。"""
+        from actor_features import prefix_features
+        return prefix_features(self,state)
+
     def _side(self,state):
         return torch.where(state.stage==3,1,torch.where(state.stage==5,1,0))
 

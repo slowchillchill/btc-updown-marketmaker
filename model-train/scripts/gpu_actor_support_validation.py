@@ -61,7 +61,7 @@ def mask_for(support,stage):
         'Variant(B)':'variant','Price(A)':'price','Price(B)':'price','CancelObject':'cancel'}[stage])
 
 
-def check_accepted_only(path):
+def check_accepted_only(path,*,prefix_check=None):
     """实际Accepted-only冷切片→公共账户/市场freeze→publisher；非完整收到流。"""
     from public_device_page import PreparedPublicPage,build_public_device_page
     from validate_portfolio_nav import cold_ledger
@@ -159,10 +159,12 @@ def check_accepted_only(path):
     actor=DeviceNativeActor(context);support=run(lambda:actor.support(actor.initial()))
     assert support.fault.cpu().tolist()==[0] and support.family.cpu().tolist()==[source['actor_paths']['family_support']]
     assert support.family[0,0].cpu().item() and support.family[0,2].cpu().item()
+    prefix_report=prefix_check(actor,source['actor_paths']) if prefix_check is not None else None
     report={'cutoff':source['cutoff'],'source':'actual_GTC_receipts_and_Accepted_only',
         'gap_known':repair.gap_known.cpu().tolist(),'public_cap_known':repair.cap_known.cpu().tolist(),
         'original_family_support':support.family.cpu().tolist(),'actual_publish_actor_context':True,
         'continuous_received_stream':False}
+    if prefix_report is not None:report['prefix_features']=prefix_report
     (artifact/'GPU-report.json').write_text(json.dumps(report,indent=2)+'\n');return report
 
 
