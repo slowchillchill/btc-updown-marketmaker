@@ -98,11 +98,15 @@ case "$case_name" in
         "${command[@]}" > "$artifact_dir/build.log" 2>&1
         run_test gpu_compact_hidden_drives_exact_asset_state_and_queues tests.log
         ;;
-    base-hidden)
+    base-hidden|base-hidden-pages)
         export B_GPU_ORDER_VALIDATOR="$repo_root/sim-system/gpu/validate_base_orders.py"
         export B_GPU_COMPACT_BASE_SOURCE=1
         export B_GPU_SORT_WORKER="$repo_root/data-pipeline/gpu/sort_worker.py"
         export B_GPU_HIDDEN_CLI="$CARGO_TARGET_DIR/debug/dpt-compact-hidden"
+        if [ "$case_name" = base-hidden-pages ]; then
+            export B_GPU_HIDDEN_ORDER_PAGES=1
+            printf '%s\n' 'B_GPU_HIDDEN_ORDER_PAGES=1' >> "$artifact_dir/commands.txt"
+        fi
         command=(cargo build -p data-pipeline-training --bin dpt-compact-hidden --locked --offline)
         printf '%q ' "${command[@]}" >> "$artifact_dir/commands.txt"
         printf '\n' >> "$artifact_dir/commands.txt"

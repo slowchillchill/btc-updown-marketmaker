@@ -644,11 +644,22 @@ Terminal 候选、执行义务、NOE 和 Ledger 使用同源稳定参考 ID。
 此冷验收读取设备页完成凭据，不是统一热循环自动换页。新图绑定新页地址，
 SIM 业务状态、源判定、旧图/冻结/反馈引用及公开消费者由宿主继续保留。
 
-本增量准备沿原 TWAP→双空 Book→Terminal 三桶在第二桶后分两页，使用同一
-公开账户，核旧冻结、稳定来源 ID、一次 Resolved 和首次可见性。此人口无订单
-或 pending fill，不作为非空订单跨页/完整根恢复证据。首版 writer 仍一次构建
-已结束材料的完整列文件，reader 使用只读 mmap 范围；尚无持续 writer flush、
-catalog 发布协议、全目录退役或十五天工作集预算。
+`da2e94d` 已沿原 TWAP→双空 Book→Terminal 三桶在第二桶后分两页，使用同一
+公开账户，核旧冻结、稳定来源 ID、一次 Resolved 和首次可见性。入口 6.03 秒，
+原 pure-reference 0.13 秒；页面 38,185 字节。typed 列写入 0.00406 秒只计文件
+writer，不含前面的原严格材料验收及 GPU 数字构建；两次加载/安装分别
+0.03359/0.00408 秒。此人口无订单或 pending fill，不作为非空订单跨页/完整根
+恢复证据。共享 7 桶/21 步入口 6.19 秒，公共首分钟页回归 52.1845 秒通过。
+准确原件、失败和独审关联见 #181 公共页阶段证据。
+
+下一必要对照复用原 GTC 请求/Taker/Maker/取消链：双初始 Book 为第一页，
+七条同毫秒 Maker 消息为第二页。在真实接纳生成开放 FIFO 账户段和仍处于
+MATCHED 的 Taker fill 后换页，保留请求、订单、资金、返佣前驱、完整 fill 身份
+与旧冻结；后续最终性和 Maker 继续消费第二页。此对照尚待执行，不以旧无单
+结果代替。原 NOE 公开账户仍沿现入口消费，尚非在页边界内自动公开/冻结的宿主。
+
+首版 writer 仍一次构建已结束材料的完整列文件，reader 使用只读 mmap 范围；
+尚无持续 writer flush、catalog 发布协议、全目录退役或十五天工作集预算。
 
 `dpt-compact-hidden <公共compact目录> <新hidden目录> <config.json> <locked-python>
 <same-commit>/data-pipeline/gpu/sort_worker.py` 从完整原规范事实选择实际 PM 消息，

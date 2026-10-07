@@ -110,6 +110,8 @@ def main():
         tensor([[True]],torch.bool),fills=1,days=1),TakerDays.empty(1,'cuda',fills=1,days=1))
     frontier=None
     block=None
+    prepared_hidden=None
+    hidden_page_report={}
     if material is not None:
         from hidden_inputs import HiddenPmBlock
         from hidden_frontier import HiddenBucketColumns,HiddenBucketFrontier
@@ -117,6 +119,18 @@ def main():
         block=HiddenPmBlock(material['buckets'],material['assets'],slots,source_binding=material['source_binding'])
         assert all(not value['references'] for value in block.buckets), '该有限源尚未接市场reference处理器'
         assert len(block.buckets)==2, '初始双Book一桶，七条Maker消息同一完整桶'
+        if os.environ.get('B_GPU_HIDDEN_ORDER_PAGES')=='1':
+            from hidden_device_page import build_hidden_device_columns,PreparedHiddenMaterial,_json_bytes
+            destination=Path(os.environ['B_GPU_ORDER_ARTIFACT_DIR'])/'hidden-order-columns'
+            binding=build_hidden_device_columns(block,destination,material['source_binding'],progress=progress)
+            (destination.parent/'hidden-order-binding.json').write_bytes(_json_bytes(binding.__dict__))
+            prepared_hidden=PreparedHiddenMaterial(destination,material['source_binding'],binding=binding)
+            compare(prepared_hidden.decimals,block.decimals,'order_pages_shared_exact_source')
+            assert prepared_hidden.banks['buckets']==material['buckets']
+            block=HiddenPmBlock.from_prepared(prepared_hidden.page(0,1))
+            hidden_page_report={'nonempty_hidden_pages':[[0,1],[1,2]],
+                'nonempty_hidden_columns_bytes':sum(p.stat().st_size for p in destination.iterdir()),
+                'nonempty_once_build_uses_same_original_DPT_material':True}
         hidden_state=Numbers.run_exact_batch(lambda:block.empty_state(segment_capacity=2))
         frontier=Numbers.run_exact_batch(lambda:HiddenBucketFrontier.open(HiddenBucketColumns.from_block(block),1))
     runtime=BaseSimRuntime(hidden_state,requests,orders,account,fills,calendars,frontier)
@@ -207,6 +221,29 @@ def main():
     assert values(fills.origins.order_sequences) == [1]
     assert values(fills.origins.prices.numerator) == [1] and values(fills.origins.prices.denominator) == [5]
     assert queue.order_ids[1][queue.kind[1] == 2].cpu().tolist() == [int(slot.cpu()[0])]
+    if prepared_hidden is not None:
+        from base_runtime_storage import BaseRuntimeStorage
+        held_page=BaseRuntimeStorage(runtime,runtime).snapshot()
+        second_block=HiddenPmBlock.from_prepared(prepared_hidden.page(1,2))
+        continued=replace(runtime,hidden_frontier=runtime.hidden_frontier.handoff(
+            HiddenBucketColumns.from_block(second_block)))
+        for name in ('hidden','requests','orders','account','fills','calendars'):
+            compare(getattr(continued,name),getattr(held_page,name),'nonempty_handoff_'+name)
+        assert continued.hidden_frontier.columns.source.terminal_columns is block.terminal_columns
+        assert continued.hidden_frontier.closed_at.cpu().tolist()==[1100]
+        assert continued.hidden_frontier.closed_bucket.cpu().tolist()==[0]
+        assert values(continued.orders.read(slot).sequence)==[1]
+        assert continued.fills.occupied.cpu().tolist()==[[True]]
+        record=continued.fills.records
+        assert record.states[record.selected_path,record.ordinal].cpu().tolist()==[1]  # 原MATCHED，尚待终局。
+        assert values(continued.fills.sequences)==[1]
+        assert held_page.hidden_frontier.columns.source is block
+        assert not held_page.hidden_frontier.columns.end_of_input
+        runtime=continued
+        block=second_block
+        hidden_page_report.update(actual_open_GTC_FIFO_request_and_pending_Taker_fill_kept_across_pages=True,
+            nonempty_page_first_closure_is_not_EOF=True,nonempty_old_runtime_freeze_preserved=True,
+            same_source_directory_Terminal_bank_and_full_u64_fill_identity_kept=True)
     maker_record = None
     cancel_batch=None
     observed_pending_zero_quote = False
@@ -475,7 +512,7 @@ def main():
         'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
         'elapsed_seconds_with_reference_reads': time.perf_counter()-started,
-        'device_peak_allocated_bytes': torch.cuda.max_memory_allocated(),
+        'device_peak_allocated_bytes': torch.cuda.max_memory_allocated(), **hidden_page_report,
         'global_clock_SDK_admission_and_full_response_body_delivered': False}))
 
 
@@ -603,7 +640,7 @@ def check_captured_hidden_bucket(runtime,source,tensor,fee_rate,fee_exponent,reb
     choice=reference.choose(None,None,horizon,enabled)
     assert choice.enabled(4).cpu().tolist()==[True] and choice.at.cpu().tolist()==[source['maker_at']]
     reference=reference.advance_role_time(choice,end).begin_hidden_bucket(choice)
-    first=len(block.buckets[0]['steps'])
+    first=0 if getattr(block,'prepared_page',None) is not None else len(block.buckets[0]['steps'])
     frames=[]
     before_positive=None
     needs={}
