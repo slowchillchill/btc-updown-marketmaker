@@ -166,7 +166,7 @@ class TradeSuccess:
         # 跨所有日的同kind原trade贡献均剔除，不按condition/token猜关联。
         kinds=torch.arange(2,device=member.device)
         contributed=(same[:,None,:,:] & (contributions.kinds[:,None,None,:]==kinds[None,:,None,None])).any(3)
-        roles=torch.tensor([1,0],device=member.device,dtype=torch.int64)
+        roles=1-kinds
         eligible=member[:,None,:]&~contributed
         unknown=(eligible&~self.details_known[:,None,:]).any(2)
         selected=eligible&self.details_known[:,None,:]&(self.roles[:,None,:]==roles[None,:,None])
@@ -179,7 +179,7 @@ class TradeSuccess:
         maker_mask=(kinds[None,:,None]==0).expand(roots,2,width).flatten()
         fee=select(equivalent,maker_mask,taker)
         rate=ExactRational.ratio(Numbers.ExactInt.from_i64_tensor(
-            torch.tensor([20,8],device=member.device,dtype=torch.int64)[None,:,None].expand(roots,2,width).flatten()),fee.denominator.constant(100))
+            (20-12*kinds)[None,:,None].expand(roots,2,width).flatten()),fee.denominator.constant(100))
         value=fee*rate
         zero=ExactRational(value.numerator.constant(0),value.denominator.constant(1))
         amount=sum_rows(select(value,selected.flatten(),zero),roots*2,width)

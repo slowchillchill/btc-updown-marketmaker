@@ -272,6 +272,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         torch.tensor([0,0],device='cuda'),torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1))
     from buy_cost import limit_buy_cost
     from projected_markets import ProjectedMarkets
+    sys.path[:0]=[str(Path(__file__).resolve().parents[2]/'data-pipeline/gpu')]
     from resolution import MarketResolutions,ResolutionSources
     from settlement_accounting import SettlementCosts,ExternalCashIdentities
     from types import SimpleNamespace

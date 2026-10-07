@@ -6,7 +6,7 @@ from success_pool import select
 from trade_success import sum_rows
 from market_economic_read import read_market_economics
 from liability_read import read_economic_liabilities
-from rebate_read import read_rebates
+from rebate_read import read_confirmed_rebates
 
 
 @dataclass(frozen=True)
@@ -44,7 +44,7 @@ def read_portfolio_economics(ledger,*,economic_prefix_known,success_prefix_known
         days=ledger.rebate_days
         rebate_conditions=(days.condition_slots if days is not None else
             torch.empty((roots,0),dtype=torch.int64,device=device))
-        rebate=read_rebates(ledger,rebate_conditions,torch.ones_like(rebate_conditions,dtype=torch.bool),rebate_prefix_known)
+        rebate=read_confirmed_rebates(ledger,rebate_conditions,torch.ones_like(rebate_conditions,dtype=torch.bool),rebate_prefix_known)
         unpaid_rebate=sum_rows(rebate.confirmed_unpaid,roots,2)
         maker_fee=zero;fees_known=torch.zeros(roots,dtype=torch.bool,device=device)
         costs=ledger.settlement_costs

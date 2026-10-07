@@ -50,6 +50,19 @@ def check(admission,checkpoint,condition):
     assert encoded.fault.cpu().tolist()==[0]
     unknown=Numbers.run_exact_batch(lambda:rebate_inputs(admission,conditions,present,applicable,prefix_known=~yes))
     assert torch.equal(unknown.values[0,1],torch.tensor([0.,0.,1.],device='cuda').expand(2,6,3))
+    # 原实际Native返佣读面本身捕获，不用WCM绕开的路径替代这项能力。
+    live=yes.clone()
+    def graph_read():return rebate_inputs(admission,conditions,present,applicable,prefix_known=live)
+    Numbers.device_exact_batch(graph_read,word_capacity=8,device='cuda')
+    graph=torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):captured=Numbers.device_exact_batch(graph_read,word_capacity=8,device='cuda')
+    graph.replay()
+    assert captured.fits.cpu().item() and captured.value.fault.cpu().tolist()==[0]
+    torch.testing.assert_close(captured.value.values,encoded.values)
+    live.zero_();graph.replay()
+    assert captured.fits.cpu().item() and captured.value.fault.cpu().tolist()==[0]
+    torch.testing.assert_close(captured.value.values,unknown.values)
+    assert torch.equal(actual[0,248:284],torch.tensor(expected,dtype=torch.float32,device='cuda'))
     # 原完整空old集合是Known零；没有完整非空前缀时仍独立保持这个语义。
     empty=Numbers.run_exact_batch(lambda:rebate_inputs(admission,conditions,torch.zeros_like(present),
         torch.tensor([[False,True]],device='cuda'),prefix_known=~yes))
