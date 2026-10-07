@@ -1,0 +1,299 @@
+{
+  "format": "direct-probability-run-failure-v1",
+  "execution": "third-actual-run-repair2",
+  "source_head": "cdcbc73dafea6ec8b8b7deb7adf4e844d0b4de84",
+  "source_archive_sha256": "ecfdf89d945d6aa582fb713debecb783f93d3813f180a8d7c2e2e534fc2d7782",
+  "config_sha256": "fdc63693ac9cf237ee1747df7cc41e3019b9f8babdff97d0680e9d1aacad48a0",
+  "probability_helper_sha256": "d77d6d2dbf5a252cd66ce171dc68a0c597733b0fc24014387b8188af773539ee",
+  "initialization_helper_sha256": "45bab72dca21884eb4ee418f6952b629720b78b00b8d593cfe3c9dcfbf48f4b0",
+  "authorization_url": "https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6038140003",
+  "failure_routing_url": "https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6038958004",
+  "prepare": {
+    "stage": "prepare",
+    "returncode": 1,
+    "terminated_by_signal": false,
+    "stopped_for_archive": false,
+    "supervisor_interruption": null,
+    "supervisor_signal": null
+  },
+  "study_started": false,
+  "prepare_complete": false,
+  "formal_adoption": false,
+  "automatic_retry": false,
+  "run_start_utc": "2026-10-07T12:44:27.639354+00:00",
+  "launch_protection_checked_utc": "2026-10-07T12:44:39.258274+00:00",
+  "run_exit_utc": "2026-10-07T13:25:27.947557+00:00",
+  "resource": {
+    "exec_main_wall_seconds": 2460.300867,
+    "cgroup_cpu_seconds": 4537.533725,
+    "cgroup_memory_peak_bytes": 20200595456,
+    "prepare_wall_seconds": 2433.8,
+    "prepare_maximum_rss_kib": 19484032,
+    "prepare_user_seconds": 4130.35,
+    "prepare_system_seconds": 406.9,
+    "oom_caused_exit": false,
+    "exit_result": "exit-code",
+    "process_code": "exited",
+    "exit_status": 1,
+    "last_valid_cgroup_check_utc": "2026-10-07T13:15:29.585650+00:00",
+    "last_valid_cgroup_memory_events": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0,
+      "sock_throttled": 0
+    },
+    "last_valid_cgroup_swap_bytes": 0,
+    "final_cgroup_files_read": false,
+    "final_cgroup_skip_reason": "ControlGroup为空，未读取根cgroup；最终OOM/swap计数不可再读",
+    "session_checks": 4,
+    "progress_records": 85,
+    "spill_observed_max_bytes": 0,
+    "spill_measurement": "30秒及阶段变化进度采样下界，不是完整临时盘峰值",
+    "temporary_total_peak_bytes": null,
+    "complete_job_io_bytes": null,
+    "cgroup_io_stat_available": false,
+    "gnu_time_filesystem_inputs": 357928,
+    "gnu_time_filesystem_outputs": 5134944,
+    "gnu_time_io_units": "沿GNU time原字段记录，不换算字节或完整作业组I/O"
+  },
+  "protection": {
+    "memory_high_bytes": 51539607552,
+    "memory_max_bytes": 68719476736,
+    "memory_swap_max_bytes": 0,
+    "oom_policy": "stop",
+    "duckdb_threads": 24,
+    "engine_memory": "8GiB",
+    "stage_spill_allowance": "64GiB",
+    "arrow_use_threads": false,
+    "openblas_threads": 1,
+    "omp_threads": 1
+  },
+  "failure": {
+    "type": "ContractError::InvalidField",
+    "field": "binance_depth_update.stitch_coordinates",
+    "reason": "do not match the reducer's current epoch state",
+    "stage": "prepare",
+    "function": "depth_unit",
+    "source_path": "baseline-mm/research/probability/direct.py",
+    "executed_line": 443,
+    "operation": "boundary.call(op='depth')",
+    "public_reducer_path": "data-pipeline/core/src/reduction.rs",
+    "public_reducer_function": "expected_depth_verdict",
+    "secondary_errors": [
+      "public probability boundary stopped; original stderr remains in stage log",
+      "public probability boundary exit 1"
+    ],
+    "preceding_sources_completed": [
+      "chainlink_spot",
+      "chainlink_twap60",
+      "binance_trade"
+    ],
+    "first_error_input_line": 2
+  },
+  "retained_depth_boundary": {
+    "input": {
+      "archive_relative_path": "failure-material/projection/depth.jsonl",
+      "bytes": 28477453,
+      "sha256": "ec208bdac0b6fdcb2f03fa2e5aa2128fbcfcc1b1a052eb0ffc6452f0ac8fea6b",
+      "lines": 16070,
+      "kinds": {
+        "sample": 42,
+        "binance_depth_update": 16027,
+        "binance_depth_snapshot": 1
+      }
+    },
+    "first_lines": [
+      {
+        "line": 1,
+        "at": 1788998400000,
+        "sample": true,
+        "kind": null,
+        "coordinates": {
+          "source_sequence_epoch_id": null,
+          "connection_generation": null,
+          "collector_admission_sequence": null,
+          "depth_ingress_sequence": null,
+          "timestamp_received": null,
+          "collector_admission_time_utc_ms": null,
+          "last_update_id": null,
+          "snapshot_last_update_id": null,
+          "local_u_before": null,
+          "first_update_id": null,
+          "final_update_id": null,
+          "stitch_verdict": null,
+          "stitch_gap_reason": null,
+          "snapshot_fetch_start_utc": null
+        }
+      },
+      {
+        "line": 2,
+        "at": 1788998403369,
+        "sample": false,
+        "kind": "binance_depth_update",
+        "coordinates": {
+          "source_sequence_epoch_id": "5d71d25d92436a120d413f9e94de4d31e67092512c837457298dfcc68a162a94",
+          "connection_generation": 1,
+          "collector_admission_sequence": 1169007,
+          "depth_ingress_sequence": 1169007,
+          "timestamp_received": 1788998400015,
+          "collector_admission_time_utc_ms": 1788998403369,
+          "last_update_id": null,
+          "snapshot_last_update_id": null,
+          "local_u_before": null,
+          "first_update_id": 99917061706,
+          "final_update_id": 99917061741,
+          "stitch_verdict": "not_applied_snapshot_unavailable",
+          "stitch_gap_reason": null,
+          "snapshot_fetch_start_utc": null
+        }
+      },
+      {
+        "line": 3,
+        "at": 1788998403616,
+        "sample": false,
+        "kind": "binance_depth_snapshot",
+        "coordinates": {
+          "source_sequence_epoch_id": "5d71d25d92436a120d413f9e94de4d31e67092512c837457298dfcc68a162a94",
+          "connection_generation": 1,
+          "collector_admission_sequence": 1169008,
+          "depth_ingress_sequence": 1169043,
+          "timestamp_received": 1788998403609,
+          "collector_admission_time_utc_ms": 1788998403616,
+          "last_update_id": 99917063901,
+          "snapshot_last_update_id": null,
+          "local_u_before": null,
+          "first_update_id": null,
+          "final_update_id": null,
+          "stitch_verdict": null,
+          "stitch_gap_reason": null,
+          "snapshot_fetch_start_utc": 1788998403380
+        }
+      },
+      {
+        "line": 4,
+        "at": 1788998403617,
+        "sample": false,
+        "kind": "binance_depth_update",
+        "coordinates": {
+          "source_sequence_epoch_id": "5d71d25d92436a120d413f9e94de4d31e67092512c837457298dfcc68a162a94",
+          "connection_generation": 1,
+          "collector_admission_sequence": 1169009,
+          "depth_ingress_sequence": 1169008,
+          "timestamp_received": 1788998403380,
+          "collector_admission_time_utc_ms": 1788998403617,
+          "last_update_id": null,
+          "snapshot_last_update_id": 99917063901,
+          "local_u_before": null,
+          "first_update_id": 99917061742,
+          "final_update_id": 99917061791,
+          "stitch_verdict": "not_applied_stale_duplicate",
+          "stitch_gap_reason": null,
+          "snapshot_fetch_start_utc": null
+        }
+      }
+    ],
+    "already_written_sample": {
+      "ask": {
+        "denominator": "50000",
+        "numerator": "162769273"
+      },
+      "at": 1788998400000,
+      "bid": {
+        "denominator": "625",
+        "numerator": "4714977"
+      }
+    },
+    "sample_output_bytes": 125,
+    "sample_output_sha256": "62d1b92741a3f091f3af51c4c3e86e94a9b4d7f96222394a12671db066e0eb59"
+  },
+  "partial_market_coverage": {
+    "status": "本次市场目录阶段已完成并落盘，完整prepare未发布",
+    "sha256": "130e7301629d226d3811f87cc63ec335c9b1e8abf948bb91327191d680b62559",
+    "bytes": 10134764,
+    "counts": {
+      "raw_markets": 5186,
+      "public_markets": 5182,
+      "raw_locatable_markets": 5186,
+      "raw_locatable_targets": 41472,
+      "raw_target_count_unknown_markets": 0,
+      "public_targets": 41440,
+      "target_union": 41472,
+      "identity_known_samples": 41440,
+      "identity_missing_samples": 32
+    },
+    "ordinary_metadata_missing_identity_rows": 11,
+    "census_identity_conflict_markets": 0,
+    "reused_detail": "baseline-mm/docs/research/complementary-pair-probability-run-20261007-repair1.failure.json#partial_market_coverage"
+  },
+  "probability_results": {
+    "frozen_folds": 0,
+    "brier": null,
+    "calibration": null,
+    "candidate_rankings": null,
+    "computable_sample_count": null,
+    "trusted_label_sample_count": null,
+    "fallback_samples": null
+  },
+  "diagnosis": {
+    "confirmed": "公共归约器仍持有盘口，采集端该行声明snapshot_unavailable且snapshot/local_u为空，两者状态不一致",
+    "strong_evidence_direction": "同epoch UTC日界连续性清空缺少公共归约交接",
+    "qualification": "上一单元输入已删除，未重新扫描原始Parquet或回放，不能认证完整原生流无缺行",
+    "rejected_naive_rule": "裸snapshot接收日!=update接收日即清空，会误清新快照排空的合法跨午夜缓冲update",
+    "repair_status": "已形成获批窄规则的修复候选，受影响验证通过，独立内容审查进行中",
+    "public_semantics_preserved": true,
+    "remaining_gap": "Deferred后同日围栏ResetContinuity未持久化仍未解决；无法证明的坐标冲突继续拒绝"
+  },
+  "validation": {
+    "representative_test": "received_day_reset_and_snapshot_provenance_preserve_pending_and_strict_stitching",
+    "regression_path": "data-pipeline/core/tests/phase2_binance_reducer_contract.rs",
+    "core_lib_and_tests": {
+      "passed": 193,
+      "failed": 0
+    },
+    "probability_example": {
+      "passed": 2,
+      "failed": 0
+    },
+    "python_regression": {
+      "passed": 13,
+      "failed": 0,
+      "helper": "本轮新release helper"
+    },
+    "release_helper_build": "passed",
+    "ordinary_clippy": "passed with existing warnings",
+    "format_check": "passed",
+    "representative_initial_attempts": [
+      "编译字段名错误，已修正",
+      "空两侧更新被typed_raw真实入口拒绝，已修正为合法状态"
+    ],
+    "real_data_prefix_or_replay_run": false,
+    "prepare_or_study_run_after_failure": false,
+    "reused": "未改初始化helper及其他未改公共/健康工程证据保留原身份；不代替本次受影响193项回归"
+  },
+  "archive_relative": "issue-185/probability-calibration-actual-repair2-20261007",
+  "source_archive_relative": "issue-185/probability-calibration-repair2-proposal-cdcbc73-20261007/execution-source.tar",
+  "diagnostic_evidence_sha256": "ddf413568f120f79df85ab19fba6ceefbc66dcb738589c483098d4744b219be4",
+  "archive_originals": {
+    "files": 20,
+    "logical_bytes": 46772653,
+    "source_and_archive_hashes_verified": true
+  },
+  "next_actual_run_authorized": false,
+  "repair": {
+    "source_base": "cdcbc73dafea6ec8b8b7deb7adf4e844d0b4de84",
+    "source_path": "data-pipeline/core/src/reduction.rs",
+    "change": "每epoch保存最近真实snapshot的接收UTC日/ingress/generation；仅同generation、update ingress更大且接收日不同才在严格stitch校验前失效旧book",
+    "trigger_independent_of_verdict_and_coordinates": true,
+    "identical_snapshot_refreshes_continuity": true,
+    "pending_before_snapshot_preserved": true,
+    "full_missing_required_and_thin_unavailable_share_transition": true,
+    "fourth_actual_run_started": false,
+    "new_probability_helper_sha256": "d0ad1c1197b18705f5bd25ad2eb10cc77e12186ea562a53980c39926ef9b2261",
+    "initialization_helper_rebuilt": false,
+    "candidate_content_review": "pending"
+  },
+  "repair_contract_url": "https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6039188793"
+}

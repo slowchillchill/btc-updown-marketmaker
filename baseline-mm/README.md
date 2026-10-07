@@ -85,4 +85,4 @@ Chainlink 与两个资产盘口是新增配对的依赖。Binance 只按实际�
 
 ### 当前直接概率与跨来源研究
 
-`research/research_probability_direct.py` 按原始 Parquet 必要列准备紧凑目标采样，复用公共参考、终局及深度数量状态，再按四折和最后开发窗做75次顺序拟合、冻结评价。准确查询、公式、候选、资源与一次运行命令见[方法及配置](docs/research/complementary-pair-probability-direct.md)。两次实际十八日prepare均已失败：首次缺身份前态，修复后在TWAP跨单元价格保留SQL触发解析错误；study均未启动。[本次失败与最小SQL修复](docs/research/complementary-pair-probability-run-20261007-repair1.md)保存准确运行身份、目录中间分母和验证，正式参数与完整经营比较仍未完成。
+`research/research_probability_direct.py` 按原始 Parquet 必要列准备紧凑目标采样，复用公共参考、终局及深度数量状态，再按四折和最后开发窗做75次顺序拟合、冻结评价。准确查询、公式、候选、资源与一次运行命令见[方法及配置](docs/research/complementary-pair-probability-direct.md)。三次实际十八日prepare均已失败：身份前态、TWAP跨单元SQL和公共深度拼接状态分别保留独立记录；study均未启动。[第三次失败及窄范围公共修复](docs/research/complementary-pair-probability-run-20261007-repair2.md)保存准确运行身份、目录分母、深度边界及验证。修复不恢复所有未持久化reset；正式参数与完整经营比较仍未完成。
