@@ -164,8 +164,48 @@ struct MetadataSemanticLocatorV1<'a> {
     ws_claimant_collector_admission_sequence: Option<u64>,
 }
 
+/// 公共元数据来源身份所需的最小事实；不包含交易上下文或报价tick。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MetadataSourceIdentityInputV1 {
+    pub schema_version: String,
+    pub metadata_row_kind: typed_raw::PolymarketMetadataRowKind,
+    pub timestamp_received: i64,
+    pub collector_host_id: String,
+    pub collector_admission_sequence: u64,
+    pub collector_admission_time_utc_ms: i64,
+    pub slug: String,
+    pub condition_id: String,
+    pub clob_market_id: String,
+    pub source_evidence_origin: Option<typed_raw::MetadataSourceEvidenceOrigin>,
+    pub source_evidence_received_at_utc: Option<i64>,
+    pub ws_platform_timestamp_utc: Option<i64>,
+    pub ws_claimant_source_sequence_epoch_id: Option<String>,
+    pub ws_claimant_collector_admission_sequence: Option<u64>,
+    pub source_evidence_raw_sha256: Option<String>,
+}
+impl From<&typed_raw::PolymarketMarketMetadataRow> for MetadataSourceIdentityInputV1 {
+    fn from(row: &typed_raw::PolymarketMarketMetadataRow) -> Self {
+        Self {
+            schema_version: row.schema_version.clone(),
+            metadata_row_kind: row.metadata_row_kind,
+            timestamp_received: row.timestamp_received,
+            collector_host_id: row.collector_host_id.clone(),
+            collector_admission_sequence: row.collector_admission_sequence,
+            collector_admission_time_utc_ms: row.collector_admission_time_utc_ms,
+            slug: row.slug.clone(),
+            condition_id: row.condition_id.clone(),
+            clob_market_id: row.clob_market_id.clone(),
+            source_evidence_origin: row.source_evidence_origin,
+            source_evidence_received_at_utc: row.source_evidence_received_at_utc,
+            ws_platform_timestamp_utc: row.ws_platform_timestamp_utc,
+            ws_claimant_source_sequence_epoch_id: row.ws_claimant_source_sequence_epoch_id.clone(),
+            ws_claimant_collector_admission_sequence: row.ws_claimant_collector_admission_sequence,
+            source_evidence_raw_sha256: row.source_evidence_raw_sha256.clone(),
+        }
+    }
+}
 fn metadata_semantic_identity(
-    row: &typed_raw::PolymarketMarketMetadataRow,
+    row: &MetadataSourceIdentityInputV1,
 ) -> Result<SourceNativeIdentityV1, ContractError> {
     let sha256 = match &row.source_evidence_raw_sha256 {
         Some(value) => Sha256Hex(value.clone()),
@@ -334,6 +374,11 @@ fn source_evidence_parts_from_typed_raw(
 
 fn metadata_source_evidence_parts(
     row: &typed_raw::PolymarketMarketMetadataRow,
+) -> Result<TypedSourceEvidenceParts, ContractError> {
+    metadata_source_evidence_parts_from_fields(&MetadataSourceIdentityInputV1::from(row))
+}
+pub(crate) fn metadata_source_evidence_parts_from_fields(
+    row: &MetadataSourceIdentityInputV1,
 ) -> Result<TypedSourceEvidenceParts, ContractError> {
     Ok((
         CanonicalSourceKind::PolymarketMarketMetadata,

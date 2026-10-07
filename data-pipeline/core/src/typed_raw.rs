@@ -1091,6 +1091,91 @@ pub struct PolymarketMarketMetadataRow {
     pub ws_claimant_collector_admission_sequence: Option<u64>,
 }
 
+/// 公共终局和资产映射实际消费的元数据字段；没有生产身份时间或交易tick。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolymarketTerminalMetadataFieldsV1 {
+    pub metadata_row_kind: PolymarketMetadataRowKind,
+    pub timestamp_received: i64,
+    pub metadata_origin: PolymarketMetadataOrigin,
+    pub slug: String,
+    pub condition_id: String,
+    pub clob_market_id: String,
+    pub asset_ids: String,
+    pub market_start_utc: i64,
+    pub market_end_utc: i64,
+    pub market_lifecycle_state: MetadataMarketLifecycleState,
+    pub market_runtime_role: MetadataMarketRuntimeRole,
+    pub source_evidence_origin: Option<MetadataSourceEvidenceOrigin>,
+    pub source_evidence_event_type: Option<MetadataSourceEvidenceEventType>,
+    pub source_evidence_channel: Option<MetadataSourceEvidenceChannel>,
+    pub source_evidence_received_at_utc: Option<i64>,
+    pub source_evidence_payload_json: Option<String>,
+    pub market_lifecycle_transition: Option<MetadataMarketLifecycleTransition>,
+    pub market_runtime_role_transition: Option<MetadataMarketRuntimeRoleTransition>,
+    pub closed: Option<bool>,
+    pub closed_time_utc: Option<i64>,
+    pub closed_time_check_failure_reason: Option<MetadataClosedTimeCheckFailureReason>,
+    pub uma_resolution_status: Option<String>,
+    pub outcomes_raw: Option<String>,
+    pub outcome_prices_raw: Option<String>,
+    pub accepting_orders: Option<bool>,
+    pub ws_platform_timestamp_raw: Option<String>,
+    pub ws_platform_timestamp_utc: Option<i64>,
+    pub winning_asset_id: Option<String>,
+    pub winning_outcome: Option<String>,
+    pub resolution_evidence_source: Option<MetadataResolutionEvidenceSource>,
+    pub terminal_claim_owner: Option<MetadataTerminalClaimOwner>,
+    pub resolution_poll_result: Option<MetadataResolutionPollResult>,
+    pub resolution_integrity_error_class: Option<MetadataResolutionIntegrityErrorClass>,
+    pub resolution_followup_status: Option<MetadataResolutionFollowupStatus>,
+    pub ws_claimant_source_sequence_epoch_id: Option<String>,
+    pub ws_claimant_collector_admission_sequence: Option<u64>,
+    pub active: Option<bool>,
+}
+impl From<&PolymarketMarketMetadataRow> for PolymarketTerminalMetadataFieldsV1 {
+    fn from(row: &PolymarketMarketMetadataRow) -> Self {
+        Self {
+            active: row.active,
+            metadata_row_kind: row.metadata_row_kind,
+            timestamp_received: row.timestamp_received,
+            metadata_origin: row.metadata_origin,
+            slug: row.slug.clone(),
+            condition_id: row.condition_id.clone(),
+            clob_market_id: row.clob_market_id.clone(),
+            asset_ids: row.asset_ids.clone(),
+            market_start_utc: row.market_start_utc,
+            market_end_utc: row.market_end_utc,
+            market_lifecycle_state: row.market_lifecycle_state,
+            market_runtime_role: row.market_runtime_role,
+            source_evidence_origin: row.source_evidence_origin,
+            source_evidence_event_type: row.source_evidence_event_type,
+            source_evidence_channel: row.source_evidence_channel,
+            source_evidence_received_at_utc: row.source_evidence_received_at_utc,
+            source_evidence_payload_json: row.source_evidence_payload_json.clone(),
+            market_lifecycle_transition: row.market_lifecycle_transition,
+            market_runtime_role_transition: row.market_runtime_role_transition,
+            closed: row.closed,
+            closed_time_utc: row.closed_time_utc,
+            closed_time_check_failure_reason: row.closed_time_check_failure_reason,
+            uma_resolution_status: row.uma_resolution_status.clone(),
+            outcomes_raw: row.outcomes_raw.clone(),
+            outcome_prices_raw: row.outcome_prices_raw.clone(),
+            accepting_orders: row.accepting_orders,
+            ws_platform_timestamp_raw: row.ws_platform_timestamp_raw.clone(),
+            ws_platform_timestamp_utc: row.ws_platform_timestamp_utc,
+            winning_asset_id: row.winning_asset_id.clone(),
+            winning_outcome: row.winning_outcome.clone(),
+            resolution_evidence_source: row.resolution_evidence_source,
+            terminal_claim_owner: row.terminal_claim_owner,
+            resolution_poll_result: row.resolution_poll_result,
+            resolution_integrity_error_class: row.resolution_integrity_error_class,
+            resolution_followup_status: row.resolution_followup_status,
+            ws_claimant_source_sequence_epoch_id: row.ws_claimant_source_sequence_epoch_id.clone(),
+            ws_claimant_collector_admission_sequence: row.ws_claimant_collector_admission_sequence,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RtdsFreshnessStatus {
     Fresh,
@@ -1736,63 +1821,81 @@ fn validate_polymarket_market_identity(
     Ok(())
 }
 
-impl PolymarketMarketMetadataRow {
-    /// Gamma 原响应的 token 顺序绑定原始标签和价格；固定 asset_ids 顺序定义 outcome.index。
-    /// 旧行未携带 token 顺序证据时保持其既有按 asset_ids 对齐的读取合同。
+/// Gamma token顺序与原始标签/价格的同一公共映射，不涉及交易tick。
+pub fn metadata_outcome_evidence_v1(
+    asset_ids: &str,
+    outcomes_raw: Option<&str>,
+    outcome_prices_raw: Option<&str>,
+    source_evidence_payload_json: Option<&str>,
+) -> Result<Vec<MetadataOutcomeEvidence>, TypedRawError> {
+    let fixed = map_metadata_outcomes(asset_ids, outcomes_raw, outcome_prices_raw)?;
+    if outcomes_raw.is_none() && outcome_prices_raw.is_none() {
+        return Ok(fixed);
+    }
+    let Some(payload) = source_evidence_payload_json else {
+        return Ok(fixed);
+    };
+    #[derive(Deserialize)]
+    struct TokenOrder {
+        #[serde(rename = "clobTokenIds")]
+        token_ids: Option<String>,
+    }
+    let source =
+        serde_json::from_str::<TokenOrder>(payload).map_err(|error| TypedRawError::Json {
+            field: "source_evidence_payload_json".to_owned(),
+            message: error.to_string(),
+        })?;
+    let Some(token_ids) = source.token_ids else {
+        return Ok(fixed);
+    };
+    // 官方 SDK 的 U256 在 payload 中序列化为十六进制；持久身份使用十进制。
+    let ids = serde_json::from_str::<Vec<alloy_primitives::U256>>(&token_ids).map_err(|error| {
+        TypedRawError::Json {
+            field: "source_evidence_payload_json.clobTokenIds".to_owned(),
+            message: error.to_string(),
+        }
+    })?;
+    let ids = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let source = map_metadata_outcomes(
+        &serde_json::to_string(&ids).expect("token strings serialize"),
+        outcomes_raw,
+        outcome_prices_raw,
+    )?;
+    fixed
+        .into_iter()
+        .map(|fixed| {
+            source
+                .iter()
+                .find(|value| value.asset_id == fixed.asset_id)
+                .cloned()
+                .ok_or_else(|| {
+                    invalid(
+                        "source_evidence_payload_json.clobTokenIds",
+                        "must match the fixed asset IDs",
+                    )
+                })
+        })
+        .collect()
+}
+impl PolymarketTerminalMetadataFieldsV1 {
     pub fn outcome_evidence(&self) -> Result<Vec<MetadataOutcomeEvidence>, TypedRawError> {
-        let fixed = map_metadata_outcomes(
+        metadata_outcome_evidence_v1(
             &self.asset_ids,
             self.outcomes_raw.as_deref(),
             self.outcome_prices_raw.as_deref(),
-        )?;
-        if self.outcomes_raw.is_none() && self.outcome_prices_raw.is_none() {
-            return Ok(fixed);
-        }
-        let Some(payload) = self.source_evidence_payload_json.as_deref() else {
-            return Ok(fixed);
-        };
-        #[derive(Deserialize)]
-        struct TokenOrder {
-            #[serde(rename = "clobTokenIds")]
-            token_ids: Option<String>,
-        }
-        let source =
-            serde_json::from_str::<TokenOrder>(payload).map_err(|error| TypedRawError::Json {
-                field: "source_evidence_payload_json".to_owned(),
-                message: error.to_string(),
-            })?;
-        let Some(token_ids) = source.token_ids else {
-            return Ok(fixed);
-        };
-        // 官方 SDK 的 U256 在 payload 中序列化为十六进制；持久身份使用十进制。
-        let ids =
-            serde_json::from_str::<Vec<alloy_primitives::U256>>(&token_ids).map_err(|error| {
-                TypedRawError::Json {
-                    field: "source_evidence_payload_json.clobTokenIds".to_owned(),
-                    message: error.to_string(),
-                }
-            })?;
-        let ids = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
-        let source = map_metadata_outcomes(
-            &serde_json::to_string(&ids).expect("token strings serialize"),
+            self.source_evidence_payload_json.as_deref(),
+        )
+    }
+}
+
+impl PolymarketMarketMetadataRow {
+    pub fn outcome_evidence(&self) -> Result<Vec<MetadataOutcomeEvidence>, TypedRawError> {
+        metadata_outcome_evidence_v1(
+            &self.asset_ids,
             self.outcomes_raw.as_deref(),
             self.outcome_prices_raw.as_deref(),
-        )?;
-        fixed
-            .into_iter()
-            .map(|fixed| {
-                source
-                    .iter()
-                    .find(|value| value.asset_id == fixed.asset_id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        invalid(
-                            "source_evidence_payload_json.clobTokenIds",
-                            "must match the fixed asset IDs",
-                        )
-                    })
-            })
-            .collect()
+            self.source_evidence_payload_json.as_deref(),
+        )
     }
 
     pub fn validate(&self) -> Result<(), TypedRawError> {

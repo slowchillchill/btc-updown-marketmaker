@@ -216,8 +216,44 @@ pub fn observed_settlement_reference_v1(
 }
 
 /// 一份实际响应可以产生锚点及规则两个成员；封组仍由唯一共享核心负责。
+/// 参考公式实际消费的响应字段；交易上下文不参与参考构造。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct MarketReferenceResponseFieldsV1 {
+    pub metadata_origin: MarketAnchorOriginV1,
+    pub anchor_query_result: MarketAnchorQueryResultV1,
+    pub price_to_beat_decimal: Option<String>,
+    pub price_to_beat_source_field: Option<String>,
+    pub twap_enabled: Option<bool>,
+    pub twap_lookback_seconds: Option<u32>,
+}
+impl From<&MarketAnchorRuleUpdateInput> for MarketReferenceResponseFieldsV1 {
+    fn from(row: &MarketAnchorRuleUpdateInput) -> Self {
+        Self {
+            metadata_origin: row.metadata_origin,
+            anchor_query_result: row.anchor_query_result,
+            price_to_beat_decimal: row.price_to_beat_decimal.clone(),
+            price_to_beat_source_field: row.price_to_beat_source_field.clone(),
+            twap_enabled: row.twap_enabled,
+            twap_lookback_seconds: row.twap_lookback_seconds,
+        }
+    }
+}
 pub fn canonicalize_market_reference_response_v1(
     row: &MarketAnchorRuleUpdateInput,
+    market: &MarketIdentityV2,
+    source: &SourceEvidenceRefV3,
+    canonical_rule_version: &str,
+) -> Result<Vec<CanonicalReferenceEventV2>, ContractError> {
+    canonicalize_market_reference_response_from_fields_v1(
+        &row.into(),
+        market,
+        source,
+        canonical_rule_version,
+    )
+}
+
+pub fn canonicalize_market_reference_response_from_fields_v1(
+    row: &MarketReferenceResponseFieldsV1,
     market: &MarketIdentityV2,
     source: &SourceEvidenceRefV3,
     canonical_rule_version: &str,
@@ -401,6 +437,14 @@ fn source_evidence_v3_from_semantic(
     })
 }
 
+/// 窄字段与完整typed-raw入口共用同一来源身份规则。
+/// V6 Existing须按既有物理reader规范化为V5；本函数不签发市场资格。
+pub fn metadata_source_evidence_v3_from_fields(
+    row: &crate::MetadataSourceIdentityInputV1,
+) -> Result<SourceEvidenceRefV3, ContractError> {
+    source_evidence_v3_from_parts(crate::metadata_source_evidence_parts_from_fields(row)?)
+}
+
 /// 只提取公共来源语义，不需要物理文件或清单，也不拥有 DPT 接纳位置。
 pub fn source_evidence_v3_from_typed_raw_v2(
     row: &TypedRawRowV2,
@@ -496,9 +540,41 @@ pub fn historical_response_source_evidence_v3(
     })
 }
 
-/// 新查询使用实际响应与实际准入坐标；没有完整响应的失败仍保留为零成员输入。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct MarketAnchorSourceIdentityInputV1 {
+    pub metadata_origin: crate::public_input::MarketAnchorOriginV1,
+    pub http_request_url: Option<String>,
+    pub http_body_sha256: Option<String>,
+    pub timestamp_received: i64,
+    pub anchor_query_ordinal: u64,
+    pub anchor_query_source_epoch_id: String,
+    pub collector_admission_sequence: u64,
+    pub collector_admission_time_utc_ms: i64,
+    pub anchor_source_computed_at_utc: Option<i64>,
+}
+impl From<&MarketAnchorRuleUpdateInput> for MarketAnchorSourceIdentityInputV1 {
+    fn from(row: &MarketAnchorRuleUpdateInput) -> Self {
+        Self {
+            metadata_origin: row.metadata_origin,
+            http_request_url: row.http_request_url.clone(),
+            http_body_sha256: row.http_body_sha256.clone(),
+            timestamp_received: row.timestamp_received,
+            anchor_query_ordinal: row.anchor_query_ordinal,
+            anchor_query_source_epoch_id: row.anchor_query_source_epoch_id.clone(),
+            collector_admission_sequence: row.collector_admission_sequence,
+            collector_admission_time_utc_ms: row.collector_admission_time_utc_ms,
+            anchor_source_computed_at_utc: row.anchor_source_computed_at_utc,
+        }
+    }
+}
 pub fn market_anchor_source_evidence_v3(
     row: &MarketAnchorRuleUpdateInput,
+) -> Result<SourceEvidenceRefV3, ContractError> {
+    market_anchor_source_evidence_v3_from_fields(&MarketAnchorSourceIdentityInputV1::from(row))
+}
+/// 新查询使用实际响应与实际准入坐标；没有完整响应的失败仍保留为零成员输入。
+pub fn market_anchor_source_evidence_v3_from_fields(
+    row: &MarketAnchorSourceIdentityInputV1,
 ) -> Result<SourceEvidenceRefV3, ContractError> {
     let admission = CollectorAdmissionCoordinateV1 {
         source_sequence_epoch_id: row.anchor_query_source_epoch_id.clone(),
