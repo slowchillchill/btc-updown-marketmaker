@@ -1894,7 +1894,7 @@ async fn gpu_actual_pair_and_winner_orphan_redemption_preserves_one_economic_fac
         let read=ledger.economic_read().unwrap();
         serde_json::json!({"projection":read.base(),"cash":read.cash(),"directional_cash":read.residual_cash().directional_cash_pusd,
             "markets":read.market_totals().collect::<Vec<_>>(),
-            "resolved":read.resolutions().next().unwrap().resolved,
+            "resolved":read.resolutions().next().unwrap().resolved,"request":read.resolutions().next().unwrap().request,
             "successful_trades":read.successful_trades().map(|trade|serde_json::json!({
                 "identity":trade.trade_identity,"fact":trade.terminal,"remaining_shares":trade.remaining_success_shares,
                 "remaining_principal":trade.remaining_principal_cost_pusd})).collect::<Vec<_>>()})

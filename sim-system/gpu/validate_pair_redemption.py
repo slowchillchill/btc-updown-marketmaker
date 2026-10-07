@@ -109,6 +109,16 @@ def main():
         public_source=SimpleNamespace(terminals=[before['resolved']['payout_vector']],canonical_ids=[before['resolved']['resolution_identity']])
         resolutions=MarketResolutions.open(pools,market,ResolutionSources.bind(public_source,tokens))
         resolutions=resolutions.observe(zero,zero,zero,pools,enabled)
+        request=before['request']
+        consumed_request=source['request_record']['record']['Evidence']['evidence']['SettlementLifecycleV2']['result']['Request']
+        assert request['settlement_request_id']==consumed_request['settlement_request_id']
+        assert request['index_sets']==['0x1','0x2']
+        outcomes=['Registered','Pending','FinalSuccess','FinalFailureNoEffect']
+        observations=['Registered','SubmissionUnknown','ObservationTimeout','QueryUnknown','QueryAcceptedPending',
+            'QueryFinalSuccess','QueryConfirmedNoTransaction','RetryAuthorized','RetryNotAuthorized','TerminalSuccess','TerminalFailureNoEffect']
+        resolutions,ready=resolutions.observe_request(zero,zero,zero,tensor([outcomes.index(request['outcome'])]),
+            tensor([observations.index(request['observation'])]),enabled)
+        assert ready.cpu().tolist()==[True]
         resolutions=replace(resolutions,realized_pnl=rational([balances['realized_pnl_pusd']]),directional_cash=rational([before['directional_cash']]))
         costs=PositionCosts.empty(1,2,'cuda')
         costs=replace(costs,active=tensor([[True,True]],torch.bool),conditions=tensor([[0,0]]),assets=tensor([[0,1]]),
@@ -124,6 +134,10 @@ def main():
             maker_cash=rational([Fraction(before['cash']['maker_available_pusd'])+Fraction(before['cash']['maker_reserved_pusd'])]))
     ledger=Numbers.run_exact_batch(initialize_ledger)
     old=ledger
+    assert old.resolutions.requests.present.cpu().tolist()==[True]
+    assert old.resolutions.requests.outcomes.cpu().tolist()==[2]
+    assert old.resolutions.requests.observations.cpu().tolist()==[9]
+    assert old.resolutions.requests.policies.cpu().tolist()==[0]
     visible=source['visibility']['Feedback']['available_at_utc_ms']
     delivered=source['visibility']['Feedback']['delivery_sequence']
     pending=PendingRecords.from_columns(batch.emitted,batch.received_at,batch.private_sequences,
@@ -147,6 +161,9 @@ def main():
     assert ratio(ledger.resolutions.realized_pnl)==[Fraction(after['projection']['platform_confirmed_projection']['realized_pnl_pusd'])]
     assert ratio(ledger.maker_cash)==[Fraction(after['cash']['maker_available_pusd'])+Fraction(after['cash']['maker_reserved_pusd'])]
     assert ratio(ledger.resolutions.directional_cash)==[Fraction(after['directional_cash'])]
+    assert before['request']==after['request']
+    for name in ('present','policies','outcomes','observations'):
+        assert torch.equal(getattr(ledger.resolutions.requests,name),getattr(old.resolutions.requests,name))
     read=Numbers.run_exact_batch(lambda:ledger.resolutions.read(ledger.success_pools))
     assert ratio(read.paired_receivable)==[0] and ratio(read.winner_orphan_receivable)==[0]
     assert ratio(old.platform.outcomes)==[Fraction(5),Fraction(6)] and ratio(old.position_costs.read().cost)==[Fraction('6.6')]
@@ -156,6 +173,7 @@ def main():
         'actual_Request_Economic_semantic_positions_private_source_times_checked':True,
         'same_NOE_closed_first_visibility_direct_platform_prefix_and_no_double_apply_checked':True,
         'actual_pair_five_maker_and_orphan_one_directional_attribution_checked':True,
+        'actual_already_consumed_FinalSuccess_Request_and_sticky_state_cold_prefix_preserved_checked':True,
         'cold_actual_committed_before_initialized_once':True,'continuous_full_1716_root_checked':False,
         'settlement_cost_query_retry_consumers_checked':False,'wall_seconds_including_cold_reference':time.perf_counter()-started,
         'peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
