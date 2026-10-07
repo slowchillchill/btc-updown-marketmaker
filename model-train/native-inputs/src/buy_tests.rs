@@ -232,11 +232,20 @@ fn fixture_with_execution(
         rows.push(TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(r)));
         times.push(visible);
     }
+    let end_position=rows.len() as u64;
     for (i, row) in rows.into_iter().enumerate() {
         let input = record(i as u64, row);
         let prepared = prepare_public_ingress_v1(&core, &input, &Default::default(), &[]).unwrap();
         let applied = core.push(&prepared).unwrap().into_owned();
         writer.record(input, applied).unwrap();
+    }
+    if configured.is_some() {
+        // 此有限来源确已结束；静默observe的peek必须读到原EndOfInput，而非未完稳定前缀。
+        let input=RecordedIngressV1 {input_stream_id:core.header().input_stream_id.clone(),
+            input_position:end_position,ingress:DptIngressV1::EndOfInput,dependency_record_refs:vec![]};
+        let prepared=prepare_public_ingress_v1(&core,&input,&Default::default(),&[]).unwrap();
+        let applied=core.push(&prepared).unwrap().into_owned();
+        writer.record(input,applied).unwrap();
     }
     writer.stabilize().unwrap();
     let (mut execution, observation, rules) = match configured.as_ref() {
