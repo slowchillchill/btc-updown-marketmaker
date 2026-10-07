@@ -171,7 +171,7 @@ def main():
     assert source["ledger_before"]["order_funds"]==[] and source["ledger_before"]["trades"]==[]
     def assemble():
         balances=module.PlatformBalances.open(rational([opening[key] for key in names]),rational(['0','0']),tensor([0,0]),integers([before['platform_source_prefix']]))
-        pools=SuccessPools.open(tensor([0,0]),tensor([0,0]),tensor([a["outcome"]["index"] for a in block.assets]),tensor([1,0]),1)
+        pools=SuccessPools.open(tensor([0,0]),tensor([0,0]),tensor([0,1]),tensor([1,0]),1)
         markets=UnresolvedMarkets.open(pools,zero)
         resolutions=MarketResolutions.open(pools,markets,ResolutionSources.bind(block.terminal_columns,[a['token_id'] for a in block.assets]))
         columns=EconomicColumns.from_projection_batches([accepted_batch])
@@ -239,6 +239,24 @@ def main():
     assert resumed_storage.runtime.hidden_frontier.closed_at.cpu().tolist()==[31000]
     runtime=resumed_storage.runtime
     if with_pending:
+        # 实际已登记fill0仍pending；物理增长后未登记fill1终态不影响旧义务。
+        obligations=runtime.resolution_obligations
+        from fill_pool import FillPoolTransition, _take_record
+        small_pool=replace(runtime.fills,records=_take_record(runtime.fills.records,zero),
+            occupied=runtime.fills.occupied[:,:1],sequences=_take(runtime.fills.sequences,zero),
+            origins=runtime.fills.origins.take(zero))
+        grown_pool=small_pool.resized(2)
+        assert grown_pool.capacity==2 and values(grown_pool.sequences)[0]==values(small_pool.sequences)[0]
+        probe_event=replace(transition.event,emitted=enabled,terminal=enabled,fault=tensor([0],torch.int32))
+        old_one=replace(obligations,pending=obligations.pending[:,:,:1],sequences=_take(obligations.sequences,zero))
+        later=FillPoolTransition(integers([2]),tensor([1]),probe_event)
+        unchanged=Numbers.run_exact_batch(lambda:old_one.complete(later))
+        compare(unchanged,old_one,'new_unregistered_terminal_does_not_alias_old_pending_slot')
+        grown=old_one.resized(grown_pool.capacity)
+        assert grown.pending.cpu().tolist()==[[[True,False]]]
+        assert values(grown.sequences)[0]==values(obligations.sequences)[0]
+        assert values(grown.sequences)[1:]==[0]*(grown_pool.capacity-1)
+        assert grown.reference_indices.cpu().tolist()==obligations.reference_indices.cpu().tolist()
         maker_rate=Numbers.run_exact_batch(lambda:rational(['0.2']))
         for original in source['finality_reference']:
             horizon.fill_(original['at'])

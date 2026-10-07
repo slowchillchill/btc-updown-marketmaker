@@ -30,7 +30,7 @@ class BaseSimRuntime:
         """冷安装判定存储；不把未来Terminal、订单或成交当已应用事实。"""
         from hidden_resolution import SourceQualifiedResolutions,ResolutionObligations
         if self.source_resolutions is not None:
-            return self
+            return replace(self,resolution_obligations=self.resolution_obligations.resized(self.fills.capacity))
         source = self.hidden_frontier.columns.source
         roots = self.orders.roots
         return replace(self,source_resolutions=SourceQualifiedResolutions.empty(

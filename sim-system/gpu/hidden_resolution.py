@@ -187,7 +187,8 @@ class ResolutionObligations:
         roots, _, width = self.pending.shape
         axis = torch.arange(roots,device=self.pending.device)
         slot = transition.slot.clamp(0,width-1)
-        members = self.pending[axis,:,slot].any(1)
+        in_range = (transition.slot>=0) & (transition.slot<width)
+        members = in_range & self.pending[axis,:,slot].any(1)
         terminal = transition.event.emitted & transition.event.terminal
         identity = _take(self.sequences,axis*width+slot).compare(transition.fill_sequence)
         fault = self.fault | transition.event.fault | torch.where(terminal & members,
@@ -196,6 +197,22 @@ class ResolutionObligations:
         selected = torch.arange(width,device=self.pending.device)[None,:] == slot[:,None]
         remove = terminal & members & (fault==0)
         return replace(self,pending=self.pending & ~(remove[:,None,None] & selected[:,None,:]),fault=fault)
+
+    def resized(self, capacity):
+        """冷容量承接保留旧市场集合和完整序号；新槽不加入已有判定义务。"""
+        from queues import ExactInt
+        roots, _, old = self.pending.shape
+        if capacity<old:
+            raise ValueError('未退役判定成交身份不能缩容')
+        if capacity==old:
+            return self
+        value=self.sequences
+        pad=torch.nn.functional.pad
+        words=pad(value.words.reshape(roots,old,-1),(0,0,0,capacity-old)).flatten(0,1)
+        signs=pad(value.sign.reshape(roots,old),(0,capacity-old)).flatten()
+        faults=pad(value.fault.reshape(roots,old),(0,capacity-old)).flatten()
+        return replace(self,pending=pad(self.pending,(0,capacity-old)),
+            sequences=ExactInt(words,signs,faults))
 
     def coordinate_result(self, original, root_fault):
         valid = root_fault == 0
