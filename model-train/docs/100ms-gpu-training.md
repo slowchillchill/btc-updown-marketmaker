@@ -967,3 +967,14 @@ hidden纯引用消费沿原`reduce_hidden_step_bucket_v1`：七类`ReferenceFact
 原到期义务、role时间和完整桶闭合。MarketFact保留游标等待其所属市场处理器，不能统一作noop。
 引用游标推进是device loop的实际进展；无处理进展时退出并保持原前沿。预读/分类不更新NOE公开门。
 当前市场生命周期、交易状态和Terminal消费者及完整多阶段宿主仍未交付。
+
+`BaseSimRuntime.install_hidden_market_controls`在冷边界安装SIM原默认None/未知控制状态，
+不读未来参考或公开市场状态来初始化。`hidden_reference.py`保留完整mapped生命周期值字典，
+包括UnknownUnmodeled的原raw值；active/closed/accepting分别保留None/false/true。
+FixedIdentity只在原完整目录/成员绑定后消费，InitialTick只设置tick而不初始化Book；
+生命周期转移与市场质量检查原前驱，资产质量继续复用原清外部簿/E段的候选。
+控制字段、资产候选和reference游标按同根fault/精确资源门共同提交。当前这些字段不替代
+真实初始化Active、接单准入或Terminal/结算状态，未装该控制后端的运行仍等待MarketFact。
+Terminal保留原来源并等待真实Resolution、义务与NOE输出协调；已批准政策仍是请求式
+RESOLUTION_REDEEM_ONLY，正式延迟/费用/失败查询参数未定不改变这个政策。
+当前mapped值ID借同一固定源页字典解释，跨页更换须承接完整原值/字典引用，不能直接复用局部ID。

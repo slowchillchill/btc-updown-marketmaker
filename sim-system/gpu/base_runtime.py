@@ -22,11 +22,23 @@ class BaseSimRuntime:
     fills: object
     calendars: object
     hidden_frontier: object = None
+    market_controls: object = None  # MarketFact映射/交易/质量；不冒充Terminal经济状态。
+
+    def install_hidden_market_controls(self):
+        """冷安装原市场默认状态，不从未来参考或公开市场读面初始化业务字段。"""
+        from hidden_reference import HiddenMarketControls
+        if self.market_controls is not None:
+            return self
+        source = self.hidden_frontier.columns.source
+        return replace(self, market_controls=HiddenMarketControls.empty(
+            self.orders.roots, source.market_count, self.account.asset_roots.device))
 
     def choose(self, hidden_source, hidden_eof, advance_until, enabled, *, settlement=None,gtd=None):
         from account_state import grouped_fault
         fault=self.account.fault | self.orders.fault | grouped_fault(
             self.hidden.fault,self.account.asset_roots,self.orders.roots)
+        if self.market_controls is not None:
+            fault = fault | self.market_controls.fault
         if self.hidden_frontier is not None:
             hidden_source,hidden_eof=self.hidden_frontier.scheduled()
         source=replace(hidden_source,fault=hidden_source.fault | fault)
@@ -143,20 +155,44 @@ class BaseSimRuntime:
     def hidden_reference_applied(self, index, committed, fault):
         return replace(self,hidden_frontier=self.hidden_frontier.reference_applied(index,committed,fault))
 
-    def apply_hidden_reference(self, choice, indices):
-        """原ReferenceEvent无SIM业务效果；MarketFact保留游标等待其真实处理器。"""
+    def apply_hidden_reference(self, choice, indices, source_assets=None):
+        """原ReferenceEvent/control MarketFact候选；Terminal等待真实经济共同处理器。"""
+        from account_state import grouped_fault
+        from hidden_market import rational_take
         self._source(choice)
-        tags = self.hidden_frontier.columns.source.reference_tags
-        selected = tags.index_select(0, indices.clamp(0, tags.numel()-1))
+        block = self.hidden_frontier.columns.source
+        rows = block.reference_rows.index_select(0, indices.clamp(0, block.reference_rows.size(0)-1))
+        tags = rows[:,0]
         enabled = choice.enabled(4) & self.hidden_frontier.reference_enabled(indices)
-        return self.hidden_reference_applied(indices, enabled & (selected == 1),
-            torch.zeros_like(self.hidden_frontier.fault))
+        if self.market_controls is None:
+            return self.hidden_reference_applied(indices, enabled & (tags == 1),
+                torch.zeros_like(self.hidden_frontier.fault))
+        source_assets = block.asset_axis if source_assets is None else source_assets
+        owner = self.account.asset_roots
+        if source_assets.dtype != torch.int64 or source_assets.device != owner.device or source_assets.shape != owner.shape:
+            raise TypeError('hidden参考源资产须为同设备完整int64绑定')
+        supported = enabled & (tags >= 1) & (tags <= 8)
+        control = self.market_controls.apply(rows, supported)
+        asset_event = supported & ((tags == 3) | (tags == 8))
+        selected = asset_event[owner] & (source_assets == rows[owner,2])
+        counts = torch.zeros_like(indices).scatter_add(0, owner, selected.to(torch.int64))
+        fault = control.fault | (asset_event & (counts != 1)).to(torch.int32)
+        hidden = self.hidden.initial_tick(selected & (tags == 3)[owner],
+            rational_take(block._values(rows[:,3]), owner))
+        hidden = hidden.quality_boundary(selected & (tags == 8)[owner],
+            rows[owner,9], rows[owner,10], rows[owner,11] != 0)
+        fault = fault | grouped_fault(hidden.fault, owner, self.orders.roots)
+        candidate = replace(self, hidden=hidden.coordinate_result(self.hidden, owner, fault),
+                            market_controls=control.coordinate_result(self.market_controls, fault))
+        return candidate.hidden_reference_applied(indices, supported & (fault == 0), fault)
 
     def finish_hidden_bucket(self):
         from account_state import grouped_fault
         fault=self.account.fault | self.orders.fault | self.fills.fault | self.requests.fault
         fault=fault | self.calendars.maker.fault | self.calendars.taker.fault
         fault=fault | grouped_fault(self.hidden.fault,self.account.asset_roots,self.orders.roots)
+        if self.market_controls is not None:
+            fault = fault | self.market_controls.fault
         frontier,closed=self.hidden_frontier.finish(fault)
         return replace(self,hidden_frontier=frontier),closed
 

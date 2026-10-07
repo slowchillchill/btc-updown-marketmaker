@@ -95,6 +95,7 @@ fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_eff
     let source = temp.path().join("public");
     let hidden = temp.path().join("hidden");
     let mut public = core();
+    let mut market_facts = BTreeMap::new();
     let mut writer = PublicCompactWriterV1::create(&source, public.header().clone()).unwrap();
     let reference = |window, sequence| {
         let mut input = twap_input(window);
@@ -120,6 +121,15 @@ fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_eff
         let prepared = prepare_public_ingress_v1(&public, &input, &BTreeMap::new(), &[]).unwrap();
         let applied = public.push_facts(&prepared).unwrap();
         writer.push_prepared(&input, &prepared, &applied).unwrap();
+        // 只复用原纯身份物化，不重跑归约；reference header继续用真实canonical ID。
+        for reduction in applied.reductions {
+            let materialized = data_pipeline_core::public_reduction::materialize_public_reduction_v1(reduction).unwrap();
+            for (binding, event) in materialized.bindings.into_iter().zip(materialized.records) {
+                if let CanonicalEventRecordV2::MarketFact(fact) = event {
+                    market_facts.insert(binding.position, fact);
+                }
+            }
+        }
     }
     writer.publish().unwrap();
     let assets = public.pm_context(CONDITION_ID).unwrap().assets.into_iter().map(|a| a.asset).collect::<Vec<_>>();
@@ -139,7 +149,44 @@ fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_eff
         CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::ReferenceFact(CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(_))))));
     assert!(buckets[2].references.iter().any(|r| matches!(r.payload,
         CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact { .. }))));
+    let scenario = sealed_scenario_for_markets(vec![crate::scenario::PlatformMarketV1::try_new(
+        market(), assets.clone().try_into().unwrap()).unwrap()]);
+    let mut original = crate::market::MarketStateStoreV2::new(scenario.initial_market_directory());
+    let mut controls = Vec::new();
+    let mut reference_index = 0;
+    let mut terminal_index = None;
+    for bucket in &buckets {
+        for reference in &bucket.references {
+            if let CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact { payload, .. }) = &reference.payload {
+                if matches!(payload, CanonicalMarketFactPayloadV1::Terminal(_)) {
+                    terminal_index = Some(reference_index);
+                    break;
+                }
+                let fact = &market_facts[&reference.position];
+                if let Some(normalized) = crate::market::normalize_public_market_fact_v1(payload, &fact.quality).unwrap() {
+                    let header = crate::market::MarketEventHeaderV1 {identity:&fact.event_id.0, market:&fact.market,
+                        time:&fact.dependency_time, quality:&fact.quality};
+                    original.apply_admitted_header(&header, &normalized, bucket.bucket.bucket_time_utc_ms, MARKET_END_AT).unwrap();
+                }
+                let (mapped, trading, quality) = original.control_state_for_gpu_tests(CONDITION_ID);
+                controls.push(serde_json::json!({"reference_index":reference_index, "mapped":mapped,
+                    "trading":trading, "quality":quality}));
+            }
+            reference_index += 1;
+        }
+        if terminal_index.is_some() { break; }
+        for (market, step) in &bucket.steps {
+            if let Some(normalized) = crate::market::normalize_pm_step_v1(step).unwrap() {
+                let header = crate::market::MarketEventHeaderV1 {identity:&step.derived_id.0, market,
+                    time:&step.dependency_time, quality:&step.quality};
+                original.apply_admitted_header(&header, &normalized, bucket.bucket.bucket_time_utc_ms, MARKET_END_AT).unwrap();
+            }
+        }
+    }
+    assert!(terminal_index.is_some());
+    assert!(!controls.is_empty(), "真实terminal源先产生控制事实，不能以人工read初始化");
     let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,
+        "original_controls":controls,"terminal_reference_index":terminal_index.unwrap(),
         "source_binding":{"binary":std::env::var("B_GPU_HIDDEN_CLI").unwrap(),"hidden":hidden,"public":source,
             "rows":1,"bytes":1048576,"max_batch_bytes":1048576}});
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())

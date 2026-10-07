@@ -265,9 +265,14 @@ class CapturedHiddenBuckets:
             storage.commit(opening.value,self.resources_fit)
             reference_indices = storage.runtime.hidden_frontier.next_reference.clone()
             reference_round = storage.runtime.hidden_frontier.reference_enabled(reference_indices)
-            runtime = storage.runtime
-            choice = runtime.choose(None, None, horizon, enabled & self.resources_fit)
-            storage.commit(runtime.apply_hidden_reference(choice, reference_indices), self.resources_fit)
+            def reference_candidate():
+                runtime = storage.runtime
+                choice = runtime.choose(None, None, horizon, enabled & self.resources_fit)
+                return runtime.apply_hidden_reference(choice, reference_indices, source_assets)
+            reference = Numbers.device_exact_batch(reference_candidate, word_capacity=word_capacity, device=horizon.device)
+            self.required_words.copy_(torch.maximum(self.required_words,reference.required_words))
+            self.resources_fit.logical_and_(reference.fits)
+            storage.commit(reference.value, self.resources_fit)
             self.reference_iterations.add_((storage.runtime.hidden_frontier.next_reference > reference_indices).to(torch.int64))
             indices = storage.runtime.hidden_frontier.next_step.clone()
             value = Numbers.device_exact_batch(lambda:candidate(indices, ~reference_round),

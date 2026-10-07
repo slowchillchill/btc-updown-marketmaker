@@ -541,6 +541,13 @@ impl MarketStateStoreV2 {
     }
 
     #[cfg(test)]
+    pub(crate) fn control_state_for_gpu_tests(&self, condition: &str)
+        -> (Option<MappedMarketLifecycleStateV1>, MarketTradingStateV2, MarketDataQuality) {
+        let market = &self.markets[condition];
+        (market.mapped_lifecycle_state.clone(), market.trading_state.clone(), market.market_quality)
+    }
+
+    #[cfg(test)]
     pub(crate) fn external_quantity_for_tests(
         &self,
         condition_id: &str,
