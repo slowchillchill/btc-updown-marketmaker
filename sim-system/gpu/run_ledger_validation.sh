@@ -30,6 +30,22 @@ run_test() {
     tail -4 "$artifact_dir/$log"
 }
 case "$case_name" in
+    main-public)
+        # 主线共同原归约提取，仅覆盖B使用的完整入口；不运行A研究。
+        for target in core-lib core-reference core-binance training-compact; do
+            case "$target" in
+                core-lib) command=(cargo test -p data-pipeline-core --lib --locked --offline) ;;
+                core-reference) command=(cargo test -p data-pipeline-core --test public_reference_contract --locked --offline) ;;
+                core-binance) command=(cargo test -p data-pipeline-core --test phase2_binance_reducer_contract --locked --offline) ;;
+                training-compact) command=(cargo test -p data-pipeline-training --lib compact_ --locked --offline) ;;
+            esac
+            printf '%q ' "${command[@]}" >> "$artifact_dir/commands.txt"
+            printf '\n' >> "$artifact_dir/commands.txt"
+            echo "stage=$target commit=$(git rev-parse HEAD) log=$artifact_dir/$target.log"
+            "${command[@]}" > "$artifact_dir/$target.log" 2>&1
+            tail -4 "$artifact_dir/$target.log"
+        done
+        ;;
     hidden-terminal-pending|hidden-terminal-orders|hidden-reference)
         export B_GPU_SORT_WORKER="$repo_root/data-pipeline/gpu/sort_worker.py"
         export B_GPU_HIDDEN_REFERENCE_VALIDATOR="$repo_root/sim-system/gpu/validate_hidden_references.py"
