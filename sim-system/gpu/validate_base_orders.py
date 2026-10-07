@@ -21,6 +21,7 @@ from hidden_market import HiddenAssetState,run_hidden_asset_batch
 from maker_days import MakerDays
 from taker_days import TakerDays
 from rebate_coordinator import RebateCoordinator
+from scheduling import ScheduledTime,next_sim_drive
 from validate_base_execution import setup, integers, rational, values, units, assert_checkpoint
 
 
@@ -88,6 +89,19 @@ def main():
     maker_rate = Numbers.run_exact_batch(lambda:rational([source['maker_rebate_rate']]))
     calendars = RebateCoordinator(MakerDays.empty(tensor([[0]]),tensor([[source['market_end']]]),
         tensor([[True]],torch.bool),fills=1,days=1),TakerDays.empty(1,'cuda',fills=1,days=1))
+    hidden_source=ScheduledTime(tensor([source['maker_at']]),active,zero_fault)
+    hidden_eof=tensor([False],torch.bool)
+    horizon=tensor([source['market_end']])
+    choose=lambda:next_sim_drive(requests,fills,calendars,hidden_source,hidden_eof,horizon,active)
+    choice=choose()
+    assert choice.enabled(5).cpu().tolist()==[True] and torch.equal(choice.at,requests.next_pending().effective_at)
+    # 源边界未知时不把公开grid当关闭证明；同ms完整hidden仍先于真实pending。
+    unavailable=next_sim_drive(requests,fills,calendars,
+        replace(hidden_source,present=tensor([False],torch.bool)),hidden_eof,horizon,active)
+    assert not unavailable.present.any().cpu().item()
+    collision=next_sim_drive(requests,fills,calendars,
+        replace(hidden_source,at=requests.next_pending().effective_at),hidden_eof,horizon,active)
+    assert collision.enabled(4).cpu().tolist()==[True] and not collision.enabled(5).any().cpu().item()
     held=run_pending_base_acceptance(requests,orders,queue,account,fills,terms,tensor([[0]]),
         fee_rate,source['fee_exponent'],torch.zeros((1,queue.capacity),dtype=torch.int64,device='cuda'),
         rebate,row_roots,tensor([0]),calendars=calendars,enabled=tensor([False],torch.bool))
@@ -96,7 +110,7 @@ def main():
     requests, orders, queue, account, fills, accepted = run_pending_base_acceptance(requests, orders, queue,
         account, fills, terms, tensor([[0]]), fee_rate, source['fee_exponent'],
         torch.zeros((1,queue.capacity), dtype=torch.int64, device='cuda'), rebate, row_roots, tensor([0]),
-        calendars=calendars)
+        calendars=calendars,enabled=choice.enabled(5))
     calendars = accepted.calendars
     noe,batch=Numbers.run_exact_batch(lambda:noe.pending_base_acceptance(sampler,orders,fills,accepted,asset_tokens))
     batches.append(batch)
@@ -121,15 +135,20 @@ def main():
     for checkpoint in source['checkpoints'][1:]:
         stage = checkpoint['stage']
         if stage in ('taker_finality', 'maker_finality'):
-            at = tensor([checkpoint['at']])
+            choice=choose()
+            at=choice.at
+            assert choice.enabled(2).cpu().tolist()==[True] and at.cpu().tolist()==[checkpoint['at']]
             fills, account, maker, taker, transition, market = Numbers.run_exact_batch(lambda:
-                fills.advance_mixed(account,calendars.maker,calendars.taker,at,maker_rate,rebate))
+                fills.advance_mixed(account,calendars.maker,calendars.taker,at,maker_rate,rebate,
+                    enabled=choice.enabled(2)))
             calendars = RebateCoordinator(maker,taker)
             noe,batch=Numbers.run_exact_batch(lambda:noe.fill_from_origin(sampler,orders,fills,transition,
                 asset_tokens,calendars,rebate,at,maker_results=(market,)))
             batches.append(batch)
             assert transition.origin.roles.cpu().tolist() == [int(stage=='maker_finality')]
         elif stage == 'hidden_step':
+            choice=choose()
+            assert choice.enabled(4).cpu().tolist()==[True] and choice.at.cpu().tolist()==[source['maker_at']]
             event = source['events'][checkpoint['ordinal']]['payload']['event']
             bid = event['side'] == 'BID'
             before = Numbers.run_exact_batch(lambda:rational([event['quantity_before_shares']]))
@@ -151,9 +170,12 @@ def main():
                 checked_bad_hidden_predecessor=True
             hidden_state,orders,account,fills,calendars,hidden = run_hidden_base_transition(hidden_state,orders,account,fills,
                 calendars,tensor([1 if bid else 0]),before,after,source_price,tensor([0]),
-                tensor([source['maker_at']]),active,active,tensor([[0]*queue.capacity]),row_roots,
+                choice.at,choice.enabled(4),active,tensor([[0]*queue.capacity]),row_roots,
                 fee_rate,source['fee_exponent'],rebate)
             queue=hidden_state.queues
+            if checkpoint['ordinal']==len(source['events'])-1:
+                hidden_source=replace(hidden_source,present=tensor([False],torch.bool))
+                hidden_eof=active
             assert hidden.fault.cpu().tolist() == [0]
             read = orders.read(slot)
             if values(read.quantity.pending_maker_depletion_base_units)[0] > 0:
@@ -177,8 +199,10 @@ def main():
             assert cancel_receipt.arrived_at.cpu().tolist()==[source['cancel_arrived_at']]
             from pending_cancel_execution import BaseCancelTarget,run_pending_base_cancel
             target=BaseCancelTarget(tensor([1]),read.sequence,zero_fault)
+            choice=choose()
+            assert choice.enabled(5).cpu().tolist()==[True] and choice.at.cpu().tolist()==[source['cancel_arrived_at']]
             requests,orders,queue,account,canceled=run_pending_base_cancel(requests,orders,queue,account,target,
-                row_roots,tensor([False],torch.bool),tensor([1]),active)
+                row_roots,tensor([False],torch.bool),tensor([1]),choice.enabled(5))
             assert canceled.delta.emitted.cpu().tolist()==[True] and canceled.response.emitted.cpu().tolist()==[True]
             from projection import CancelTargetFeedback
             from fields import RecordList
@@ -294,6 +318,8 @@ def main():
         'continuous_directory_bound_order_taker_maker_NOE_payload_and_positions_checked':True,
         'dynamic_NOE_records':len(by_row),
         'device_phase_gate_keeps_future_pending_without_submission_checked':True,
+        'next_SIM_drive_from_actual_obligation_sources_controls_phase_masks_checked':True,
+        'controlled_same_time_hidden_before_pending_and_unknown_source_pause_checked':True,
         'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
         'elapsed_seconds_with_reference_reads': time.perf_counter()-started,

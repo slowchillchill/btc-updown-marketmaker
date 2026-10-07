@@ -868,3 +868,11 @@ quality/resync和精确shares前驱。`apply_hidden_base_transition`在同一候
 任一错误或物理需求保留该条原step前的盘口、队列与经济状态；此前已成功源前缀不回滚。
 原Active/end的资产门和matching关闭门继续分开，公开观察前沿不从这次候选抬高。
 本入口仍处理每根一条已绑定价位的原step，不代替完整桶reference、运行关闭凭据和全局义务选择。
+
+`sim-system/gpu/scheduling.py`从实际请求、成交池和返佣日历选择设备上的下一时刻/阶段。
+同毫秒按原Settlement→GTD→Finality→Rebate→完整Hidden→Mutation选择，阶段内部继续使用各模块
+自己的原顺序键。Settlement/GTD下一义务由相应后端供给；缺失的后端不因此成为已交能力。
+合法推进上界、下一完整hidden桶/EOF来自宿主，源边界未知时不执行候选，也不使用公开grid证明闭毫秒。
+所选设备phase直接限制pending接纳/撤单、最终性和hidden入口；选择本身不推进任何运行前沿。
+原短链已接这一选择，但外层仍由工程源提供完整事件顺序和合法截止；全局循环、reference、
+跨块桶关闭、公开100ms冻结以及预分配NOE追加仍须接到同一持续宿主，不能以phase选择器代替。

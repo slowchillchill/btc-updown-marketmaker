@@ -30,6 +30,16 @@ run_test() {
     tail -4 "$artifact_dir/$log"
 }
 case "$case_name" in
+    hidden-asset)
+        export B_GPU_SORT_WORKER="$repo_root/data-pipeline/gpu/sort_worker.py"
+        export B_GPU_HIDDEN_ASSET_VALIDATOR="$repo_root/sim-system/gpu/validate_hidden.py"
+        export B_GPU_HIDDEN_CLI="$CARGO_TARGET_DIR/debug/dpt-compact-hidden"
+        command=(cargo build -p data-pipeline-training --bin dpt-compact-hidden --locked --offline)
+        printf '%q ' "${command[@]}" >> "$artifact_dir/commands.txt"
+        printf '\n' >> "$artifact_dir/commands.txt"
+        "${command[@]}" > "$artifact_dir/build.log" 2>&1
+        run_test gpu_compact_hidden_drives_exact_asset_state_and_queues tests.log
+        ;;
     base-directory)
         export B_GPU_ORDER_VALIDATOR="$repo_root/sim-system/gpu/validate_base_orders.py"
         run_test gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution tests.log
