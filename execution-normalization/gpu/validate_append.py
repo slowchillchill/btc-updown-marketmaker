@@ -26,6 +26,9 @@ def check_incremental_receive(bank,batches,delivered,start,expected,gates):
     assert private[7]!=private[8] or ordered.received_at[0,7].cpu().item()!=ordered.received_at[0,8].cpu().item()
     first=select_batch_columns(ordered,torch.arange(8,device=positions.device)[None,:])
     later=select_batch_columns(ordered,torch.arange(8,21,device=positions.device)[None,:])
+    # 真正闭合到下一页最早received之前，不能已关到10000再遗漏其间来源。
+    first_gates=replace(gates,closed_receive_at=later.received_at[:,0]-1)
+    assert (first.received_at<=first_gates.closed_receive_at[:,None]).all().cpu().item()
     first_columns=run(lambda:EconomicColumns.from_projection_batches([first]))
     # 开户/本地预留只初始化一次。旧身份目录可复用，后续仅追加记录列。
     initial=replace(start,columns=first_columns,
@@ -39,7 +42,7 @@ def check_incremental_receive(bank,batches,delivered,start,expected,gates):
         ExactInt.from_i64_tensor(torch.zeros(1,dtype=torch.int64,device=positions.device))))
     state=PublicLedgerState(pending,PublicRegistryState(PublicRegistryEvents.empty(1,positions.device)),
         ClosedAdmission.empty(first_columns),initial)
-    state,first_delivery=run(lambda:state.receive(bank,gates,torch.ones_like(first.emitted),passes=3))
+    state,first_delivery=run(lambda:state.receive(bank,first_gates,torch.ones_like(first.emitted),passes=3))
     waiting=state.waiting.received & ~state.waiting.consumed
     assert waiting.any().cpu().item() and not state.ledger.fault.any().cpu().item()
     prefix=values(state.ledger.current_entry_sequence)
