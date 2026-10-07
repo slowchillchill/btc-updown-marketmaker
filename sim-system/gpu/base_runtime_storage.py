@@ -206,16 +206,20 @@ class FinalityFeedbackPage(SimFeedbackPage):
 
 
 class CapturedHiddenBuckets:
-    """已验证页的冷类型序列固定捕获；原桶/步骤是否执行由设备游标决定。
+    """固定类型图按设备游标逐步消费原桶，图节点不随来源步骤数展开。
 
-    每轮只消费进入时选中的桶，各原步骤仍逐条共同提交。参考未完成时暂停，
-    不伪造reference完成。其它阶段或资源退出交还宿主，不代替完整driver。
+    每轮每根最多一个原step；参考等待、逐step共同提交与资源退出保持原义。
+    源页仍固定地址持有，换页和反馈消费尚在冷边界。
     """
     def __init__(self, storage, horizon, enabled, conditions, selected_paths,
                  fee_rate, fee_exponent, taker_rate, market_end, *, word_capacity, feedback_capacity,
-                 capture_progress=None):
+                 stage_progress=None, source_assets=None, level_sides=None):
         self.storage = storage
-        self._inputs = (horizon, enabled, conditions, selected_paths, fee_rate, taker_rate, market_end)
+        source = storage.runtime.hidden_frontier.columns.source
+        source_assets = source.asset_axis if source_assets is None else source_assets
+        level_sides = source.level_sides if level_sides is None else level_sides
+        self._inputs = (horizon, enabled, conditions, selected_paths, fee_rate, taker_rate,
+                        market_end, source_assets, level_sides)
         self.ready = torch.zeros((), device=horizon.device, dtype=torch.bool)
         self.resources_fit = torch.ones((), device=horizon.device, dtype=torch.bool)
         self.required_words = torch.zeros((), device=horizon.device, dtype=torch.int64)
@@ -225,21 +229,22 @@ class CapturedHiddenBuckets:
         self.required_maker_fills = torch.zeros_like(enabled,dtype=torch.int64)
         self.required_maker_days = torch.zeros_like(enabled,dtype=torch.int64)
         self.closed = torch.zeros_like(enabled)
-        source = storage.runtime.hidden_frontier.columns.source
-        level_indices = [index for index, operation in enumerate(source.operations) if operation['tag']=='LevelChange']
-        def candidate(index, permit):
+        self.iterations = torch.zeros_like(horizon)
+        def candidate(indices):
             runtime = storage.runtime
-            choice = runtime.choose(None, None, horizon, enabled & permit)
-            return runtime.apply_hidden_step(choice, index, conditions, selected_paths,
-                fee_rate, fee_exponent, taker_rate)
-        self.page = None
-        if level_indices:
-            layout = Numbers.device_exact_batch(lambda:candidate(level_indices[0],self.resources_fit),
-                word_capacity=word_capacity, device=horizon.device)
-            template = HiddenStepFeedback(horizon, torch.zeros_like(horizon), layout.value[1])
-            self.page = SimFeedbackPage(template, feedback_capacity)
+            choice = runtime.choose(None, None, horizon, enabled & self.resources_fit)
+            return runtime.apply_hidden_selected(choice, indices, conditions, selected_paths,
+                fee_rate, fee_exponent, taker_rate, source_assets, level_sides)
+        if stage_progress is not None:
+            stage_progress('cold_layout_begin')
+        layout = Numbers.device_exact_batch(lambda:candidate(storage.runtime.hidden_frontier.next_step),
+            word_capacity=word_capacity, device=horizon.device)
+        self.page = SimFeedbackPage(HiddenStepFeedback(horizon, torch.zeros_like(horizon), layout.value[1]),
+                                    feedback_capacity)
         def ready():
             return storage.runtime.choose(None, None, horizon, enabled).enabled(4).any()
+        if stage_progress is not None:
+            stage_progress('body_capture_begin')
         self.body = torch.cuda.CUDAGraph(keep_graph=True)
         with torch.cuda.graph(self.body):
             runtime = storage.runtime
@@ -254,47 +259,41 @@ class CapturedHiddenBuckets:
             self.required_words.copy_(torch.maximum(self.required_words,opening.required_words))
             self.resources_fit.logical_and_(opening.fits)
             storage.commit(opening.value,self.resources_fit)
-            for index, operation in enumerate(source.operations):
-                if capture_progress is not None:
-                    # 冷捕获物理人口，不读设备游标或已应用业务人口。
-                    capture_progress(index+1,len(source.operations))
-                same_bucket = storage.runtime.hidden_frontier.next_bucket == before_bucket
-                permit = self.resources_fit & same_bucket
-                value = Numbers.device_exact_batch(lambda:candidate(index,permit),
-                    word_capacity=word_capacity, device=horizon.device)
-                state, effect = value.value
-                self.required_words.copy_(torch.maximum(self.required_words,value.required_words))
-                fit = self.resources_fit & value.fits
-                if operation['tag']=='LevelChange':
-                    for name in ('required_segments','required_records','required_maker_fills','required_maker_days'):
-                        target=getattr(self,name)
-                        target.copy_(torch.maximum(target,getattr(effect,name)))
-                    population = torch.stack([frame.event.emitted for frame in effect.fills]).any()
-                    need = self.page.count+population.to(torch.int64)
-                    self.required_feedback.copy_(torch.maximum(self.required_feedback,need))
-                    fit = fit & (need <= self.page.capacity)
-                    fit = fit & (effect.required_segments <= storage.runtime.hidden.queues.capacity).all()
-                    fit = fit & (effect.required_records <= storage.runtime.fills.capacity).all()
-                    fit = fit & (effect.required_maker_fills <= storage.runtime.calendars.maker.fill_occupied.size(1)).all()
-                    fit = fit & (effect.required_maker_days <= storage.runtime.calendars.maker.occupied.size(1)).all()
-                    at = storage.runtime.hidden_frontier.columns.at[
-                        before_bucket.clamp(0,storage.runtime.hidden_frontier.columns.at.numel()-1)]
-                    output = HiddenStepFeedback(at,torch.full_like(horizon,index),effect)
-                    output = storage.commit(state,fit,output)
-                    self.page.append(output,fit,population)
-                else:
-                    storage.commit(state,fit)
-                self.resources_fit.logical_and_(fit)
+            indices = storage.runtime.hidden_frontier.next_step.clone()
+            value = Numbers.device_exact_batch(lambda:candidate(indices),
+                word_capacity=word_capacity, device=horizon.device)
+            state, effect = value.value
+            self.required_words.copy_(torch.maximum(self.required_words,value.required_words))
+            for name in ('required_segments','required_records','required_maker_fills','required_maker_days'):
+                target=getattr(self,name)
+                target.copy_(torch.maximum(target,getattr(effect,name)))
+            population = torch.stack([frame.event.emitted for frame in effect.fills]).any()
+            need = self.page.count+population.to(torch.int64)
+            self.required_feedback.copy_(torch.maximum(self.required_feedback,need))
+            fit = self.resources_fit & value.fits & (need <= self.page.capacity)
+            fit = fit & (effect.required_segments <= storage.runtime.hidden.queues.capacity).all()
+            fit = fit & (effect.required_records <= storage.runtime.fills.capacity).all()
+            fit = fit & (effect.required_maker_fills <= storage.runtime.calendars.maker.fill_occupied.size(1)).all()
+            fit = fit & (effect.required_maker_days <= storage.runtime.calendars.maker.occupied.size(1)).all()
+            # 原进入step的完整来源句柄随反馈保存，不能用迭代后的游标。
+            columns = storage.runtime.hidden_frontier.columns
+            at = columns.at[before_bucket.clamp(0,columns.at.numel()-1)] if columns.at.numel() else torch.zeros_like(horizon)
+            output = storage.commit(state,fit,HiddenStepFeedback(at,indices,effect))
+            self.page.append(output,fit,population)
+            self.iterations.add_((storage.runtime.hidden_frontier.next_step > indices).to(torch.int64))
+            self.resources_fit.logical_and_(fit)
             finishing = Numbers.device_exact_batch(lambda:storage.runtime.finish_hidden_bucket(),
                 word_capacity=word_capacity, device=horizon.device)
             self.required_words.copy_(torch.maximum(self.required_words,finishing.required_words))
             self.resources_fit.logical_and_(finishing.fits)
             storage.commit(finishing.value[0],self.resources_fit)
-            self.closed.copy_(finishing.value[1] & self.resources_fit)
+            self.closed.logical_or_(finishing.value[1] & self.resources_fit)
             frontier = storage.runtime.hidden_frontier
             progress = (frontier.next_bucket != before_bucket) | (frontier.next_step != before_step)
             progress = progress | (frontier.applying != before_applying)
             self.ready.copy_(ready() & self.resources_fit & progress.any())
+        if stage_progress is not None:
+            stage_progress('body_capture_end')
         self.entry = torch.cuda.CUDAGraph(keep_graph=True)
         with torch.cuda.graph(self.entry):
             self.required_words.zero_()
@@ -305,9 +304,14 @@ class CapturedHiddenBuckets:
             self.required_maker_days.zero_()
             self.resources_fit.fill_(True)
             self.closed.zero_()
+            self.iterations.zero_()
             self.ready.copy_(ready())
+        if stage_progress is not None:
+            stage_progress('native_instantiate_begin')
         self._loop = Numbers.public_extension().DeviceConditionalLoop(
             self.entry.raw_cuda_graph(),self.body.raw_cuda_graph(),self.ready)
+        if stage_progress is not None:
+            stage_progress('native_instantiate_end')
 
     def replay(self):
         self._loop.replay()

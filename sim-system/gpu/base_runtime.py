@@ -82,6 +82,62 @@ class BaseSimRuntime:
         # 原处理器完整提交的step才记进度；不能拿材料预读或公开前沿作committed。
         return replace(self,hidden_frontier=self.hidden_frontier.step_applied(index,committed,fault))
 
+    def apply_hidden_selected(self, choice, indices, condition_by_asset, selected_paths,
+                              fee_rate, fee_exponent, taker_rate, source_assets, level_sides):
+        """每根本轮只读取一个原源步；固定类型候选都使用同一进入游标。"""
+        from account_state import grouped_fault
+        from hidden_market import rational_take
+        self._source(choice)
+        block = self.hidden_frontier.columns.source
+        owner = self.account.asset_roots
+        roots = self.orders.roots
+        for binding, shape in ((source_assets, owner.shape), (level_sides, self.hidden.level_assets.shape),
+                               (condition_by_asset, owner.shape)):
+            if binding.dtype != torch.int64 or binding.device != owner.device or binding.shape != shape:
+                raise TypeError('hidden源资产、侧与condition绑定须为同设备完整int64列')
+        rows, tags, present = block.selected_rows(indices)
+        enabled = choice.enabled(4) & self.hidden_frontier.step_enabled(indices)
+        source_invalid = (source_assets < 0) | (source_assets >= len(block.assets))
+        source_fault = grouped_fault(source_invalid.to(torch.int32), owner, roots)
+        source_fault = source_fault | (enabled & ~present).to(torch.int32)
+        permitted = enabled & present & (source_fault == 0)
+        level_enabled = permitted & (tags == 2)
+        target, price_fault = block.selected_lookup(self.hidden, rows, owner, source_assets, level_sides)
+        level_roots = owner[self.hidden.level_assets]
+        counts = torch.zeros(roots, dtype=torch.int64, device=owner.device).scatter_add(
+            0, level_roots, target.to(torch.int64))
+        source_fault = source_fault | torch.where(level_enabled,
+            grouped_fault(self.hidden._asset_fault(price_fault), owner, roots) | (counts != 1).to(torch.int32), 0)
+        queue_rows = torch.full_like(counts, -1).scatter_reduce(0, level_roots,
+            torch.where(target, torch.arange(target.numel(), device=owner.device), -1), reduce='amax')
+        assets = (source_assets == rows[owner, 0])
+        conditions = torch.zeros(roots, dtype=torch.int64, device=owner.device).scatter_reduce(
+            0, owner, torch.where(assets, condition_by_asset, 0), reduce='amax')
+        level_choice = replace(choice, present=level_enabled & (source_fault == 0))
+        candidate, effect = self.hidden_base(level_choice, queue_rows,
+            block._values(rows[:, 3]), block._values(rows[:, 4]), block._values(rows[:, 2]),
+            conditions, rows[:, 9] != 0, selected_paths, level_roots, fee_rate, fee_exponent, taker_rate)
+        hidden = candidate.hidden
+        quantities, snapshot_counts, missing, snapshot_price_fault = block.snapshot_values(
+            hidden, indices, rows, owner, source_assets, level_sides)
+        snapshot_enabled = assets & (permitted & (tags == 1))[owner]
+        active_snapshot = snapshot_enabled & ~hidden.book_closed
+        tick = rational_take(block._values(rows[:, 5]), owner)
+        hidden, snapshot_required = hidden.initial_snapshot(snapshot_enabled, quantities, tick, rows[owner, 10])
+        snapshot_fault = hidden._asset_fault((snapshot_counts > 1).to(torch.int32) | snapshot_price_fault)
+        hidden = replace(hidden, fault=hidden.fault | (snapshot_fault | missing[owner]) * active_snapshot.to(torch.int32))
+        tick_enabled = assets & (permitted & (tags == 3))[owner]
+        hidden = hidden.tick_change(tick_enabled, rational_take(block._values(rows[:, 6]), owner),
+                                    rows[owner, 8] != 0, rational_take(block._values(rows[:, 7]), owner))
+        quality_enabled = assets & (permitted & (tags == 4))[owner]
+        hidden = hidden.quality_boundary(quality_enabled, rows[owner, 11], rows[owner, 12], rows[owner, 13] != 0)
+        fault = grouped_fault(hidden.fault, owner, roots) | source_fault | effect.fault
+        hidden = hidden.coordinate_result(self.hidden, owner, fault)
+        candidate = replace(candidate, hidden=hidden)
+        effect = replace(effect, fault=fault,
+                         required_segments=torch.maximum(effect.required_segments, snapshot_required))
+        return candidate.hidden_step_applied(indices, enabled & (fault == 0), fault), effect
+
     def hidden_reference_applied(self, index, committed, fault):
         return replace(self,hidden_frontier=self.hidden_frontier.reference_applied(index,committed,fault))
 

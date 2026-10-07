@@ -126,6 +126,7 @@ def main():
     choose=lambda:runtime.choose(hidden_source,hidden_eof,horizon,active)
     compact_index=0
     if block is not None:
+        initial_runtime = runtime
         choice=choose()
         assert choice.enabled(4).cpu().tolist()==[True] and choice.at.cpu().tolist()==[1100]
         runtime=runtime.advance_role_time(choice,tensor([source['market_end']]*2)).begin_hidden_bucket(choice)
@@ -137,6 +138,18 @@ def main():
         runtime,closed=runtime.finish_hidden_bucket()
         assert closed.cpu().tolist()==[True] and runtime.hidden.initialized.cpu().tolist()==[True,True]
         assert values(runtime.hidden_frontier.index_position)==[block.buckets[0]['bucket']['index_end']]
+        from base_runtime_storage import BaseRuntimeStorage,CapturedHiddenBuckets
+        initial_storage = BaseRuntimeStorage(initial_runtime, runtime)
+        initial_loop = CapturedHiddenBuckets(initial_storage,tensor([1100]),active,tensor([0,0]),
+            tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,source['fee_exponent'],rebate,
+            tensor([source['market_end']]*2),word_capacity=4,feedback_capacity=1,
+            stage_progress=lambda stage:progress('initial_page_'+stage))
+        initial_loop.replay()
+        torch.cuda.synchronize()
+        assert initial_loop.resources_fit.cpu().item() and initial_loop.page.count.cpu().item()==0
+        assert initial_loop.iterations.cpu().tolist()==[len(block.buckets[0]['steps'])]
+        compare(initial_storage.runtime,runtime,'device_selected_initial_complete_snapshots')
+        progress('device_selected_initial_snapshots_checked',actual_steps=len(block.buckets[0]['steps']))
         queue=runtime.hidden.queues
     choice=choose()
     assert choice.enabled(5).cpu().tolist()==[True] and torch.equal(choice.at,requests.next_pending().effective_at)
@@ -581,13 +594,13 @@ def check_captured_hidden_bucket(runtime,source,tensor,fee_rate,fee_exponent,reb
     progress('capture_complete_hidden_page',physical_source_steps=len(block.operations))
     loop=CapturedHiddenBuckets(storage,horizon,enabled,tensor([0,0]),
         tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,fee_exponent,rebate,end,
-        word_capacity=4,feedback_capacity=1,capture_progress=lambda n,total:progress(
-            'capture_hidden_source_types',processed_physical_steps=n,total_physical_steps=total))
+        word_capacity=4,feedback_capacity=1,stage_progress=lambda stage:progress('hidden_page_'+stage))
     loop.replay()
     progress('native_complete_bucket_launched')
     torch.cuda.synchronize()
     assert loop.resources_fit.cpu().item() and loop.closed.cpu().tolist()==[True]
     assert loop.page.count.cpu().item()==1
+    assert loop.iterations.cpu().tolist()==[len(block.operations)-first]
     compare(storage.runtime,reference,'complete_original_Maker_bucket')
     compare(loop.page.read(0),frames[0],'whole_bucket_actual_positive_quote')
     for name,expected in needs.items():
@@ -612,12 +625,12 @@ def check_captured_hidden_bucket(runtime,source,tensor,fee_rate,fee_exponent,reb
     progress('capture_hidden_page_actual_fill_shortage')
     blocked=CapturedHiddenBuckets(blocked_storage,horizon,enabled,tensor([0,0]),
         tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,fee_exponent,rebate,end,
-        word_capacity=4,feedback_capacity=1,capture_progress=lambda n,total:progress(
-            'capture_shortage_source_types',processed_physical_steps=n,total_physical_steps=total))
+        word_capacity=4,feedback_capacity=1,stage_progress=lambda stage:progress('shortage_page_'+stage))
     blocked.replay()
     torch.cuda.synchronize()
     assert not blocked.resources_fit.cpu().item() and blocked.required_records.cpu().tolist()==[2]
     assert blocked.page.count.cpu().item()==0 and not blocked.closed.cpu().item()
+    assert blocked.iterations.cpu().tolist()==[len(block.operations)-first-1]
     compare(blocked_storage.runtime,before_positive,'full_bucket_shortage_preserves_accepted_prefix')
     # 按设备需求只增长fill目录，其余状态来自该对象已提交前缀。
     expanded=replace(blocked_storage.snapshot(),fills=blocked_storage.runtime.fills.resized(
@@ -626,11 +639,11 @@ def check_captured_hidden_bucket(runtime,source,tensor,fee_rate,fee_exponent,reb
     progress('capture_hidden_page_after_required_growth')
     retry=CapturedHiddenBuckets(retry_storage,horizon,enabled,tensor([0,0]),
         tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,fee_exponent,rebate,end,
-        word_capacity=4,feedback_capacity=1,capture_progress=lambda n,total:progress(
-            'capture_retry_source_types',processed_physical_steps=n,total_physical_steps=total))
+        word_capacity=4,feedback_capacity=1,stage_progress=lambda stage:progress('retry_page_'+stage))
     retry.replay()
     torch.cuda.synchronize()
     assert retry.resources_fit.cpu().item() and retry.closed.cpu().item() and retry.page.count.cpu().item()==1
+    assert retry.iterations.cpu().tolist()==[1]
     compare(retry_storage.runtime,reference,'required_growth_completes_same_bucket')
     compare(retry.page.read(0),frames[0],'growth_retry_actual_feedback')
     progress('hidden_page_pool_demand_and_retry_checked',required_fill_records=2)
