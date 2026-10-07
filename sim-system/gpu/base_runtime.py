@@ -74,8 +74,8 @@ class BaseSimRuntime:
             fault=effect.fault | source_fault
         else:
             hidden,effect=block.apply(self.hidden,index,enabled_assets=enabled[owner])
-            candidate=replace(self,hidden=hidden)
             fault=grouped_fault(hidden.fault,owner,self.orders.roots) | source_fault
+            candidate=replace(self,hidden=hidden.coordinate_result(self.hidden,owner,fault))
         return candidate.hidden_step_applied(index,enabled & (fault == 0),fault),effect
 
     def hidden_step_applied(self, index, committed, fault):

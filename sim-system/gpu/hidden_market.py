@@ -82,6 +82,18 @@ class HiddenAssetState:
         reduced = reduced.scatter_reduce(0, self.level_assets[:, None].expand_as(values), values, reduce='amax')
         return (reduced.to(torch.int64) << bits).sum(1).to(torch.int32)
 
+    def coordinate_result(self, original, asset_roots, root_fault):
+        """所属运行根统一提交资产候选；错误根保留原业务前缀，仅携带fault。"""
+        from base_acceptance import _coordinate_queue
+        valid=(root_fault == 0)[asset_roots]
+        old_queue=original.queues.resized(self.queues.capacity)
+        updates={name:torch.where(valid,getattr(self,name),getattr(original,name))
+                 for name in ('initialized','quality','tick_present','matching_closed','book_closed')}
+        return replace(self,**updates,tick=rational_select(self.tick,valid,original.tick),
+            external_shares=rational_select(self.external_shares,valid[self.level_assets],original.external_shares),
+            queues=_coordinate_queue(self.queues,old_queue,asset_roots[self.level_assets],root_fault),
+            fault=self.fault | original.fault | root_fault[asset_roots])
+
     def advance_matching_time(self, now, end, *, enabled=None):
         """使用SIM实际处理时钟；冷预取时间或公开观察时钟不能替代此调用。"""
         for column in (now, end):

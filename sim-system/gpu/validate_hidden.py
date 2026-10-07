@@ -95,6 +95,7 @@ def main():
         'device_peak_allocated_bytes': torch.cuda.max_memory_allocated(),
         'verified_full_bucket_drives_SIM_runtime_and_only_complete_bucket_closes_frontier_checked': True,
         'prefetch_does_not_close_runtime_and_last_real_closure_controls_EOF_checked': True,
+        'original_snapshot_missing_one_bound_level_rolls_back_assets_queue_and_frontier_checked': True,
         'runtime_bucket_maker_order_or_reference_handler_covered': False,
         'full_request_noe_ledger_clock_delivered': False}))
 
@@ -122,18 +123,18 @@ def check_runtime_buckets(block, original):
     end=block.operations[0]['market']['window']['end_at_utc_ms']
     end_assets=tensor([end]*len(block.assets))
     columns=HiddenBucketColumns.from_block(block)
-    def open_runtime():
+    def open_runtime(source_block=block):
         zero=integers([0])
         quantity=BaseOrderQuantity.from_taker_plan(integers([1]),integers([1]),zero,zero)
         template=FillRecord.create(integers([1]),integers([1]),zero,tensor([0]),tensor([0]),
             tensor([False],torch.bool),{'steps':[{'state':'MATCHED','offset_ms':0},
                 {'state':'MINED','offset_ms':10},{'state':'CONFIRMED','offset_ms':20}],
                 'economic_application_ordinal':1})
-        return BaseSimRuntime(block.empty_state(segment_capacity=1),MutationRequests.empty(zero),
+        return BaseSimRuntime(source_block.empty_state(segment_capacity=1),MutationRequests.empty(zero),
             BaseOrders.empty(quantity),PlatformAccountState.open(integers([10_000_000]),tensor([0]*len(block.assets))),
             FillPool.empty(template),RebateCoordinator(
                 MakerDays.empty(tensor([[0]]),tensor([[end]]),tensor([[True]],torch.bool)),TakerDays.empty(1,'cuda')),
-            HiddenBucketFrontier.open(columns,1))
+            HiddenBucketFrontier.open(columns if source_block is block else HiddenBucketColumns.from_block(source_block),1))
     runtime=Numbers.run_exact_batch(open_runtime)
     assert runtime.hidden_frontier.has_closed.cpu().tolist()==[False]
     assert values(runtime.hidden_frontier.index_position)==[0]
@@ -174,6 +175,46 @@ def check_runtime_buckets(block, original):
         assert eof.cpu().tolist()==[bucket_index+1==len(block.buckets)]
     assert step_index==len(block.operations)
     assert runtime.hidden.matching_closed.cpu().tolist()==[True]*len(block.assets)
+    # 原真实快照有bid/ask；漏掉其中一个物理价位绑定，不得部分安装快照。
+    snapshot_index=next(i for i,v in enumerate(block.operations) if v['tag']=='InitialSnapshot' and len(v['levels'])>1)
+    snapshot=block.operations[snapshot_index]
+    asset_token=block.assets[snapshot['asset']]['token_id']
+    missing_slot=next(slot for slot in block.slots if slot[0]==asset_token and slot[1]=='ASK')
+    damaged=HiddenPmBlock(original['buckets'],original['assets'],[v for v in block.slots if v != missing_slot],
+                          source_binding=original['source_binding'])
+    failed=Numbers.run_exact_batch(lambda:open_runtime(damaged))
+    source,eof=failed.hidden_frontier.scheduled()
+    horizon=source.at
+    choice=failed.choose(source,eof,horizon,one)
+    failed=failed.begin_hidden_bucket(choice)
+    for index in range(snapshot_index):
+        source,eof=failed.hidden_frontier.scheduled()
+        choice=failed.choose(source,eof,horizon,one)
+        paths=torch.zeros((1,failed.hidden.queues.capacity),dtype=torch.int64,device='cuda')
+        failed,_=failed.apply_hidden_step(choice,index,tensor([0]*len(block.assets)),paths,
+            rational(['0.07']),1,rational(['0.08']))
+    prior=failed
+    source,eof=failed.hidden_frontier.scheduled()
+    choice=failed.choose(source,eof,horizon,one)
+    paths=torch.zeros((1,failed.hidden.queues.capacity),dtype=torch.int64,device='cuda')
+    failed,_=failed.apply_hidden_step(choice,snapshot_index,tensor([0]*len(block.assets)),paths,
+        rational(['0.07']),1,rational(['0.08']))
+    assert failed.hidden.fault.any().cpu().item()
+    assert torch.equal(failed.hidden.initialized,prior.hidden.initialized)
+    assert torch.equal(failed.hidden.quality,prior.hidden.quality)
+    assert torch.equal(failed.hidden.tick_present,prior.hidden.tick_present)
+    assert torch.equal(failed.hidden.matching_closed,prior.hidden.matching_closed)
+    assert torch.equal(failed.hidden.book_closed,prior.hidden.book_closed)
+    assert shares(failed.hidden.tick)==shares(prior.hidden.tick)
+    assert shares(failed.hidden.external_shares)==shares(prior.hidden.external_shares)
+    old_queue=prior.hidden.queues.resized(failed.hidden.queues.capacity)
+    assert torch.equal(failed.hidden.queues.kind,old_queue.kind)
+    assert torch.equal(failed.hidden.queues.order_ids,old_queue.order_ids)
+    for name in ('total_base','total_quote','consumed_base','account_remaining','debt'):
+        assert values(getattr(failed.hidden.queues,name))==values(getattr(old_queue,name))
+    assert torch.equal(failed.hidden_frontier.next_step,prior.hidden_frontier.next_step)
+    failed,closed=failed.finish_hidden_bucket()
+    assert closed.cpu().tolist()==[False] and values(failed.hidden_frontier.index_position)==[0]
 
 
 if __name__ == '__main__':
