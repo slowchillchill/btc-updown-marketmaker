@@ -22,6 +22,8 @@ fn snapshot(ledger: &LedgerWriterV1) -> serde_json::Value {
         "portfolio_reference":{"worst_case_maker_nav_pusd":account.worst_case_maker_nav_pusd,
             "other_account_residual_pusd":account.other_account_residual_pusd,
             "other_receivable_pusd":account.other_receivable_pusd,"other_liability_pusd":account.other_liability_pusd},
+        "nav_reference":{"conservative_nav_pusd":account.conservative_nav_pusd,
+            "directional_residual_pusd":account.directional_residual_pusd},
         "directional_cash":read.residual_cash().directional_cash_pusd,
         "other_cash":read.residual_cash().other_cash_pusd,
         "markets":read.market_totals().collect::<Vec<_>>(),

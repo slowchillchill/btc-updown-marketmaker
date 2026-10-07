@@ -600,7 +600,7 @@ sentinel/offset、精确整数与有理数 bank。公共 v2 页只保存预排 p
 另一份事实。合格原 compact 与旧页无需全部重做；新 v2 页不能交给仅支持 v1
 的旧程序。页引用及活动根恢复尚待所属步骤交付。
 
-公共估值列的本批候选使用 `public_pm_device_columns_v2` 与
+公共估值列使用 `public_pm_device_columns_v2` 与
 `public_device_page_v3`。原 compact 已保存的 epoch、Selection.version、
 AbsenceBaseline 和 PM 直接来源可转为共享版本表；完整 u64 准入序号保存为
 hi/lo 两个 u32，member 的 None 与 Some(0) 分别保存为 -1 与 0。
@@ -624,7 +624,8 @@ BBA；本价位删除只撤销本价位；低档数量更新不刷新整体首�
 安装所选前缀及价格排序，仍检查完整来源关联、成员和实际消费列边界。
 本批验证入口是 `gpu_public_valuation_versions_match_original_core`，覆盖原三个
 短选择反例、实际 u64/member 来源、到达 BBA、页兼容及同图旧快照。
-候选尚未运行；完整组合 NAV、连续宿主、活动恢复和正式训练仍开放。
+已在 AutoDL 完成三原 CPU 选择反例、三 GPU 短场景、公共链和既有首分钟的
+v3／旧 v1 兼容验证，准确证据见 #181。连续宿主、活动恢复和正式训练仍开放。
 
 `PreparedPublicPage.install` 直接安装 `PublicPmState`、市场、参考和 Binance
 预排列及精确 bank，不再解包原事件 JSON、解析十进制、GCD 或重排前缀。
@@ -1090,7 +1091,33 @@ WCM要求完整经济市场人口以及实际经济、成功、结算、返佣�
 既有费用切片的other值对照原AccountEconomicsRead；该切片未保留全部经济历史，仍不提供已知WCM。
 原FOK成熟日的实际Contribution/Day先到代表另核平台经济前缀0、ProjectedMarkets空时仍为已知现金加非零返佣；
 该代表为合法独立NOE归约次序，不称自然receive调度。
-Conservative NAV与Directional residual尚须全市场同前缀估值报价；本批不交付完整宿主或活动恢复。
+完整宿主与活动恢复仍开放。
+
+### 同冻结全账户NAV
+
+`shared-run/gpu/portfolio_nav.py` 冷绑定原Ledger资产token与所属根，读取同一
+公共前缀的 `valuation_bid`。冻结拥有精确价格、可用性、cutoff与prefix；
+共享DPT只读来源不复制。完整公共组的前缀不得越过该cutoff已可见的前沿。
+只有实际正净未判定孤腿需要Fresh估值；Fresh空买侧为已知零。没有该资产敞口
+时，缺价或非Fresh不污染NAV。已判定及实际兑付资产沿原净成功读面处理。
+
+Conservative NAV共用精确WCM，减Maker现金、加实际现金、赢家孤腿应收、
+减Directional未付结算费，再加未判定孤腿估值。WCM已包含全部市场保证、
+配对应收、确认返佣、taker费用和Maker未付结算费。Directional residual独立
+精确归约原各市场Directional现金、赢家孤腿应收与Directional未付结算费，
+再加同一孤腿估值；不依赖无关Maker返佣或taker负债完整性。
+两字段各按实际完整来源判定Known，缺历史不升级为零。
+
+Native只作末端投影到314:317与320:323。没有安装同冻结估值时保留这两个字段
+的 `provided=False`，不能用已有WCM冒充完整NAV。旧scope未知值从现有设备
+张量构造，数值与适用位不变，避免CPU常量进入完整账户CUDA图。
+
+`run_portfolio_nav_validation.sh` 复用原两个合法Native工程场景，从同一个Ledger
+的实际提交材料借用原NOE位置／可见性及同cutoff冷读面；PublicRecording经原严格
+准备入口冷转换compact，GPU使用新估值页。独立预期是原共享账户／Native读取。
+另沿原late false／true费用场景检查两类归属，Conservative缺历史仍Unknown，
+Directional用独立完整输入核已知金额。验证覆盖完整账户入口的同图重放及旧冻结。
+本候选尚未运行；有限冷安装验证不代表连续GPU账户、完整PPO或持久恢复。
 
 ### 累计接纳本金
 
@@ -1139,8 +1166,9 @@ Native 精确计算 current 的 Up−Down，末端才投影到 slow78:81；账�
 真实三种失败策略的原 V4 逐次尝试另对照这个读面；该有限验证由原尝试顺序供给，
 不是生产设备调度器，也不把成本补偿旧证据当成利润峰值验证。
 
-本段描述当时未判定普通成交/返佣切片；当前Resolved/payout读面见后文“公开 `Resolved`”。请求式结算费用和兑付、
-两类负债及完整 NAV 仍须沿原政策接入，不把这些缺口填成已知零或称完整账户冻结。
+本段描述原未判定普通成交／返佣切片；请求式结算费用、两类负债、净兑付及本批 NAV 组件见本文件前述相关章节，
+公开 `Resolved` 读面见后文同名章节。连续宿主、完整 PPO 与活动恢复仍开放；缺失的实际冷历史保持 Unknown，
+不把组件接线或有限验证称为完整账户冻结。
 冷前缀必须安装原利润与最大亏损，不能从当前余额补算历史峰值。
 
 ### 公开返佣分类读面

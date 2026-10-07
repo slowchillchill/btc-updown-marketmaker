@@ -1254,6 +1254,9 @@ fn native_execution(
     execution_with_rules_v4(path, core, policy, None, "e".repeat(64), "100")
 }
 
+#[path = "nav_gpu_tests.rs"]
+mod nav_gpu;
+
 #[tokio::test(flavor = "current_thread")]
 async fn same_cutoff_orphan_marks_freeze_all_markets_and_encode_true_zero_unknown() {
     let temp = tempfile::tempdir().unwrap();
@@ -1263,9 +1266,7 @@ async fn same_cutoff_orphan_marks_freeze_all_markets_and_encode_true_zero_unknow
         native_execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
     let mut ledger =
         LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
-    execution
-        .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
-        .unwrap();
+    let nav_materials=nav_gpu::bind(&mut execution,&mut ledger,&temp.path().join("ledger"));
     let mut shared = SharedExecutionV2::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
@@ -1320,12 +1321,17 @@ async fn same_cutoff_orphan_marks_freeze_all_markets_and_encode_true_zero_unknow
     }
     let mut old = None;
     let mut seen = std::collections::BTreeSet::new();
+    let mut nav_checkpoints=Vec::new();
     while driver.next_group().unwrap().is_some() {
         let group = native.consume(&mut shared, &mut driver).unwrap().unwrap();
         let Some(before) = group.action_before.as_ref() else {
             continue;
         };
         let at = before.cutoff().decision_time().logical_time_utc_ms();
+        if std::env::var_os("B_GPU_NAV_VALIDATOR").is_some()
+            && [36_000,37_000,38_000,40_000,42_000,66_000,71_000].contains(&at) {
+            nav_checkpoints.push(nav_gpu::checkpoint(&shared,before,Some(&group),&nav_materials));
+        }
         let a = before.economics();
         let known = |v: &ExecutionReadValueV1<ExactRationalV1>| match v {
             ExecutionReadValueV1::Known(v) => EconomicRational::try_from(v).unwrap(),
@@ -1426,6 +1432,7 @@ async fn same_cutoff_orphan_marks_freeze_all_markets_and_encode_true_zero_unknow
             .collect()
     );
     driver.stop_and_drain().unwrap();
+    nav_gpu::validate("all-market-orphans",&root,nav_checkpoints);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1437,9 +1444,7 @@ async fn missing_quote_without_that_market_exposure_does_not_poison_nav() {
         native_execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
     let mut ledger =
         LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
-    execution
-        .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
-        .unwrap();
+    let nav_materials=nav_gpu::bind(&mut execution,&mut ledger,&temp.path().join("ledger"));
     let mut shared = SharedExecutionV2::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
@@ -1467,11 +1472,15 @@ async fn missing_quote_without_that_market_exposure_does_not_poison_nav() {
         )
         .await
         .unwrap();
+    let mut nav_checkpoints=Vec::new();
     loop {
         driver.next_group().unwrap().unwrap();
         let before = shared.action_before(&mut driver).unwrap().unwrap();
         let at = before.cutoff().decision_time().logical_time_utc_ms();
         if at == 40_000 || at == 71_000 {
+            if std::env::var_os("B_GPU_NAV_VALIDATOR").is_some() {
+                nav_checkpoints.push(nav_gpu::checkpoint(&shared,&before,None,&nav_materials));
+            }
             let read = shared.ledger().economic_read().unwrap();
             let old = AccountEconomicsReadV1::from_ledger(&read);
             let mark =
@@ -1500,4 +1509,5 @@ async fn missing_quote_without_that_market_exposure_does_not_poison_nav() {
         }
     }
     driver.stop_and_drain().unwrap();
+    nav_gpu::validate("unrelated-missing-without-exposure",&root,nav_checkpoints);
 }

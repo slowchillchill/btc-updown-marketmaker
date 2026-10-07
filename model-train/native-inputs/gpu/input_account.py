@@ -18,9 +18,11 @@ class FrozenAccountInputs:
     fault: torch.Tensor
 
 
-def frozen_account_inputs(account, scope_members, scope_known, scope_applicable, *, scope_conditions=None, scope_present=None, asset_outcomes=None, executed_prefix_known=None, success_prefix_known=None, rebate_prefix_known=None,settlement_prefix_known=None,ledger_prefix_known=None,economic_liability_prefix_known=None,economic_prefix_known=None,row_role=None):
+def frozen_account_inputs(account, scope_members, scope_known, scope_applicable, *, scope_conditions=None, scope_present=None, asset_outcomes=None, executed_prefix_known=None, success_prefix_known=None, rebate_prefix_known=None,settlement_prefix_known=None,ledger_prefix_known=None,economic_liability_prefix_known=None,economic_prefix_known=None,row_role=None,valuation=None):
     """消费一次真实冻结值；当前/旧scope由根权威选择器传入，不按订单猜scope。"""
     numbers = _numbers()
+    if valuation is not None and economic_prefix_known is None:
+        raise ValueError('同冻结NAV不能脱离实际账户经济历史')
     roots = account.cutoff.numel()
     device = account.cutoff.device
     orders = order_inputs(account.orders, account.order_sources, account.cutoff, scope_members, scope_known)
@@ -32,7 +34,7 @@ def frozen_account_inputs(account, scope_members, scope_known, scope_applicable,
     if economic_prefix_known is not None:
         from input_portfolio import portfolio_inputs,write_portfolio_fields
         absent=torch.zeros((roots,),dtype=torch.bool,device=device)
-        portfolio=portfolio_inputs(account.ledger,economic_prefix_known=economic_prefix_known,
+        portfolio=portfolio_inputs(account.ledger,valuation=valuation,cutoff=account.cutoff,economic_prefix_known=economic_prefix_known,
             success_prefix_known=absent if success_prefix_known is None else success_prefix_known,
             settlement_prefix_known=absent if settlement_prefix_known is None else settlement_prefix_known,
             rebate_prefix_known=absent if rebate_prefix_known is None else rebate_prefix_known,
@@ -40,6 +42,9 @@ def frozen_account_inputs(account, scope_members, scope_known, scope_applicable,
         slow=write_portfolio_fields(slow,portfolio)
         provided[:,317:320]=True
         provided[:,323:332]=True
+        if valuation is not None:
+            provided[:,314:317]=True
+            provided[:,320:323]=True
         fault|=portfolio.fault
     if scope_conditions is not None:
         from input_reservations import reservation_inputs, write_reservation_fields
@@ -181,7 +186,7 @@ class NativeAccountAtPrefix:
 
 
 def account_inputs_at_prefix(account, market, condition_slots, prefixes, root_started_at,
-                             order_conditions, order_condition_known, asset_outcomes, *, executed_prefix_known=None, success_prefix_known=None, rebate_prefix_known=None,settlement_prefix_known=None,ledger_prefix_known=None,economic_liability_prefix_known=None,economic_prefix_known=None,row_role=None):
+                             order_conditions, order_condition_known, asset_outcomes, *, executed_prefix_known=None, success_prefix_known=None, rebate_prefix_known=None,settlement_prefix_known=None,ledger_prefix_known=None,economic_liability_prefix_known=None,economic_prefix_known=None,row_role=None,valuation=None):
     """同一实际cutoff：设备选原current/old，再装配已交付账户字段。
 
     market只含当前完整公共前缀；order_conditions沿已冻结原意图/订单关联，
@@ -208,27 +213,29 @@ def account_inputs_at_prefix(account, market, condition_slots, prefixes, root_st
         scope_conditions=scopes.conditions,scope_present=scopes.present,asset_outcomes=asset_outcomes,
         executed_prefix_known=executed_prefix_known,success_prefix_known=success_prefix_known,rebate_prefix_known=rebate_prefix_known,
         settlement_prefix_known=settlement_prefix_known,ledger_prefix_known=ledger_prefix_known,
-        economic_liability_prefix_known=economic_liability_prefix_known,economic_prefix_known=economic_prefix_known,row_role=row_role)
+        economic_liability_prefix_known=economic_liability_prefix_known,economic_prefix_known=economic_prefix_known,row_role=row_role,valuation=valuation)
     slow = inputs.slow.clone()
+    unknown_value=torch.zeros_like(slow[:,:3])
+    unknown_value[:,2]=1
     # 没有完整old人口时，已有成员之和不能冒充整个old作用域；保留适用Unknown。
     for first,last in [(0,27),(54,66),(81,87),(98,104),(122,128),(134,140),(146,155),(176,194),(212,248)]:
         width = last-first
         value = slow[:,first:first+2*width].reshape(roots,2,width//3,3)
         unknown = scopes.applicable & ~population_known
-        value = torch.where(unknown[:,:,None,None],torch.tensor([0.,0.,1.],device=device),value)
+        value = torch.where(unknown[:,:,None,None],unknown_value[:,None,None,:],value)
         slow[:,first:first+2*width] = value.reshape(roots,2*width)
     # 这两scope相隔15个槽位，不能套连续current/old字段段。
     if economic_liability_prefix_known is not None:
         unknown_old=scopes.applicable[:,1]&~population_known[:,1]
-        slow[:,308:311]=torch.where(unknown_old[:,None],torch.tensor([0.,0.,1.],device=device),slow[:,308:311])
+        slow[:,308:311]=torch.where(unknown_old[:,None],unknown_value,slow[:,308:311])
     if account.ledger.settlement_costs is not None:
         unknown_old=scopes.applicable[:,1]&~population_known[:,1]
-        slow[:,311:314]=torch.where(unknown_old[:,None],torch.tensor([0.,0.,1.],device=device),slow[:,311:314])
+        slow[:,311:314]=torch.where(unknown_old[:,None],unknown_value,slow[:,311:314])
     if economic_prefix_known is not None:
         unknown_old=scopes.applicable[:,1]&~population_known[:,1]
         for first,last in [(299,308),(344,356),(364,382)]:
             value=slow[:,first:last].reshape(roots,-1,3)
             slow[:,first:last]=torch.where(unknown_old[:,None,None],
-                torch.tensor([0.,0.,1.],device=device),value).flatten(1)
+                unknown_value[:,None,:],value).flatten(1)
     return NativeAccountAtPrefix(FrozenAccountInputs(slow,inputs.provided,inputs.order_fields,
         inputs.cutoff,inputs.fault | scopes.fault),scopes)

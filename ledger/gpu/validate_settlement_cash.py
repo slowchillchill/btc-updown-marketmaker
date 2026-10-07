@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import importlib.util
 import json
 import math
+import os
 import sys
 import time
 sys.path=[p for p in sys.path if Path(p).resolve()!=Path(__file__).resolve().parent]
@@ -328,6 +329,21 @@ def main(source):
         packed=run(lambda:frozen_account_inputs(frozen,tensor([[[],[]]],torch.bool),applicable,applicable,
             scope_conditions=scopes,scope_present=present,**economic_args))
         if kind=='Cost':check_economics(packed,m)
+        if kind=='Cost' and os.environ.get('B_GPU_NAV_FEE_VALIDATION')=='1':
+            from portfolio_nav import FrozenPortfolioValuation,read_portfolio_nav
+            from projected_markets import ProjectedMarkets
+            # 原单市场费用切片的完整实际人口与typed结算来源；不借当前/old筛账户。
+            assert {v['condition_id'] for v in after['projection']['market_projections']}=={condition}
+            nav_ledger=replace(frozen.ledger,projected_markets=ProjectedMarkets.open(zero,yes[:,None],yes))
+            quote=run(lambda:FrozenPortfolioValuation(frozen.cutoff,zero,rational(['0']*len(tokens)),
+                tensor([False]*len(tokens),torch.bool),tensor([0],torch.int32)))
+            args=dict(economic_args,rebate_prefix_known=no,economic_liability_prefix_known=no)
+            read=run(lambda:read_portfolio_nav(nav_ledger,quote,frozen.cutoff,**args))
+            # 该切片缺自开户负债/返佣历史，Conservative保留Unknown；Directional
+            # 用独立完整输入，可核原首次归属、付款、未付及晚成功，不被无关门污染。
+            assert read.fault.cpu().tolist()==[0] and read.known.cpu().tolist()==[[False,True]]
+            expected=after['nav_reference']['directional_residual_pusd']
+            assert exact(read.directional)==[Fraction(int(expected['numerator']),int(expected['denominator']))]
         # 此实际冷切片未保留开户起全部Economic，不能宣称WCM已知；other由真实before连续推进。
         check_portfolio(packed,after['portfolio_reference'],wcm_known=False)
         if kind=='Cost' and block_index==0:
