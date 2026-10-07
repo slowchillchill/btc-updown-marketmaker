@@ -600,6 +600,32 @@ sentinel/offset、精确整数与有理数 bank。公共 v2 页只保存预排 p
 另一份事实。合格原 compact 与旧页无需全部重做；新 v2 页不能交给仅支持 v1
 的旧程序。页引用及活动根恢复尚待所属步骤交付。
 
+公共估值列的本批候选使用 `public_pm_device_columns_v2` 与
+`public_device_page_v3`。原 compact 已保存的 epoch、Selection.version、
+AbsenceBaseline 和 PM 直接来源可转为共享版本表；完整 u64 准入序号保存为
+hi/lo 两个 u32，member 的 None 与 Some(0) 分别保存为 -1 与 0。
+当前 epoch 按实际市场读取，不把一个市场换代应用到其它市场。
+Selection/Absence 复用原公共归约结果。独立 BBA 保留每个实际候选与来源坐标，
+新增同 epoch 版本前沿由 GPU 冷批量排序与独立归约选择，页只保存选中前缀。
+CPU 仅处理原严格 reader、身份字典与字段装列；不新增 CPU 逐观察业务选择。
+价格按原 SourceDecimal 域在 GPU 精确排序，公共估值与 Native 盘口共用准备函数，
+不转 float 决定最优价，也不通过缩小价格或准入序号域适配设备。
+
+`PublicPmState.valuation_bid` 沿同一合法前缀复用原价格/来源 bank，保留原
+`PublicObservationCoreV1::valuation_bid` 的选择规则：非 Fresh L2 可使用独立
+BBA；本价位删除只撤销本价位；低档数量更新不刷新整体首档来源。Fresh 空买侧
+是已知零买价，缺失与非 Fresh 的最终估值保持原质量/不可用语义。原到达
+`observation.bba` 不由估值回写。本读面只交本批实际需要的价格、可用性与质量，
+原完整直接来源、版本与合法前缀仍由共享列拥有，不另造单一来源代替完整来源集合。
+
+旧 v1/v2 页继续验收并消费原列，缺估值版本时 `valuation_bid` 明确不可用；
+不从 anchor 时间、最新 BBA 或数量猜版本。合格 compact 可直接补建 v3 页，
+不要求重新准备全部 raw 材料，也不改变 hidden 桶格式/关联合同。v3 加载直接
+安装所选前缀及价格排序，仍检查完整来源关联、成员和实际消费列边界。
+本批验证入口是 `gpu_public_valuation_versions_match_original_core`，覆盖原三个
+短选择反例、实际 u64/member 来源、到达 BBA、页兼容及同图旧快照。
+候选尚未运行；完整组合 NAV、连续宿主、活动恢复和正式训练仍开放。
+
 `PreparedPublicPage.install` 直接安装 `PublicPmState`、市场、参考和 Binance
 预排列及精确 bank，不再解包原事件 JSON、解析十进制、GCD 或重排前缀。
 数字和 ragged 列保留只读数组视图，首次上传使用 pinned staging，同页设备列共享。

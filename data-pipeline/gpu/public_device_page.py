@@ -17,26 +17,33 @@ from reference_state import PublicReferenceState
 from binance_state import PublicBinanceState
 
 
-VERSION = 'public_device_page_v2'
+VERSION = 'public_device_page_v3'
+PREVIOUS_VERSION = 'public_device_page_v2'
 LEGACY_VERSION = 'public_device_page_v1'
-PM_PREFIXES = ('quantities','selections','resets','initialized','ready','ticks',
+BASE_PM_PREFIXES = ('quantities','selections','resets','initialized','ready','ticks',
     'level_anchors','book_quality','book_anchors','bba','trades','observed_ticks')
+from valuation_state import PREFIXES as VALUATION_PREFIXES
+PM_PREFIXES = BASE_PM_PREFIXES + VALUATION_PREFIXES
 MARKET_PREFIXES = ('market_admitted','market_lifecycle','market_trading','market_terminal')
 REFERENCE_PREFIXES = ('global_references','reference_rules','reference_official','reference_temporary')
 BINANCE_PREFIXES = ('binance_quantities','binance_resets','binance_depth','binance_trades')
 PREFIXES = PM_PREFIXES + MARKET_PREFIXES + REFERENCE_PREFIXES + BINANCE_PREFIXES
-TABLES = {'slots':3,'market_assets':3,'groups':3,'bba_values':8,'trade_values':7,
+BASE_PREFIXES = BASE_PM_PREFIXES + MARKET_PREFIXES + REFERENCE_PREFIXES + BINANCE_PREFIXES
+BASE_TABLES = {'slots':3,'market_assets':3,'groups':3,'bba_values':8,'trade_values':7,
     'observed_tick_values':4,'facts':4,'fact_sources':5,'raw_trades':11,
     'lifecycle_values':4,'trading_values':8,'terminal_values':5,'reference_values':4,
     'reference_rule_values':3,'reference_official_values':4,'reference_temporary_values':4,
     'binance_slots':3,'binance_depth_values':3,'binance_trade_values':5}
+TABLES = {**BASE_TABLES,'pm_versions':5}
 EXACTS = ('coefficient','decimal_denominator','numerator','denominator')
-DERIVED = {'causal_visible_at':1,'anchor_times':2,'unique_anchor_ids':1,
+BASE_DERIVED = {'causal_visible_at':1,'anchor_times':2,'unique_anchor_ids':1,
     'condition_order':1,'asset_pairs':2,'market_times':2,'market_payouts':3}
+DERIVED = {**BASE_DERIVED,'valuation_price_order':1,'valuation_price_rank':1,'valuation_price_fault':1}
 DTYPES = {'i8':np.dtype('<i8'),'i4':np.dtype('<i4'),'i1':np.dtype('i1'),'u1':np.dtype('u1')}
-BANKS = ('assets','markets','anchors','lifecycle_states','group_ids',
+BASE_BANKS = ('assets','markets','anchors','lifecycle_states','group_ids',
     'group_members','fact_types','binance_symbols')
-TEXT_BANKS = ('group_ids','fact_types','binance_symbols')
+BANKS = BASE_BANKS + ('pm_epochs',)
+TEXT_BANKS = ('group_ids','fact_types','binance_symbols','pm_epochs')
 
 
 class IdentityBank:
@@ -148,6 +155,9 @@ def build_public_device_page(binary, material, destination, *, device='cuda', pr
             tensor(name+'.padded',prefix.padded); tensor(name+'.offsets',prefix.offsets)
     tensor('causal_visible_at',pm.causal_visible_at)
     tensor('anchor_times',pm.anchor_times); tensor('unique_anchor_ids',pm.unique_anchor_ids)
+    tensor('valuation_price_order',pm.valuation.price_order)
+    tensor('valuation_price_rank',pm.valuation.price_rank)
+    tensor('valuation_price_fault',pm.valuation.price_fault.to(torch.int64))
     tensor('condition_order',market.condition_order); tensor('asset_pairs',market.asset_pairs)
     tensor('market_times',market.times); tensor('market_payouts',market.payouts)
     exact_values=(pm.decimal_columns.coefficient,pm.decimal_columns.denominator,
@@ -189,32 +199,39 @@ class PreparedPublicPage:
         manifest_bytes=(self.directory/'manifest.json').read_bytes()
         manifest=json.loads(manifest_bytes)
         legacy=manifest['version']==LEGACY_VERSION
-        if manifest['version'] not in (VERSION,LEGACY_VERSION): raise ValueError('公共设备页版本错误')
+        current=manifest['version']==VERSION
+        if manifest['version'] not in (VERSION,PREVIOUS_VERSION,LEGACY_VERSION): raise ValueError('公共设备页版本错误')
+        tables = TABLES if current else BASE_TABLES
+        prefixes = PREFIXES if current else BASE_PREFIXES
+        banks = BANKS if current else BASE_BANKS
+        derived = DERIVED if current else BASE_DERIVED
         original=(Path(material)/'manifest.json').read_bytes(); source=json.loads(original)
         if (hashlib.sha256(original).hexdigest()!=manifest['source_manifest_sha256']
                 or source['applied_prefix']!=manifest['source_applied_prefix']
                 or source['files']!=manifest['source_members'] or not source['normal_end']):
             raise ValueError('公共设备页原材料绑定错误')
         self.columns=manifest['metadata']
+        if self.columns['version'] != ('public_pm_device_columns_v2' if current else 'public_pm_device_columns_v1'):
+            raise ValueError('公共设备页与消费列语义版本不一致')
         if self.columns['input_stream_id']!=source['header']['input_stream_id']:
             raise ValueError('公共设备页输入身份错误')
-        expected=set(TABLES)|set(DERIVED)|{'decimal_scale','decimal_present','decimal_text','decimal_offsets'}
-        expected|={name+'.'+field for name in PREFIXES for field in ('padded','offsets')}
+        expected=set(tables)|set(derived)|{'decimal_scale','decimal_present','decimal_text','decimal_offsets'}
+        expected|={name+'.'+field for name in prefixes for field in ('padded','offsets')}
         expected|={name+'.'+field for name in EXACTS for field in ('words','sign','fault')}
         expected|={name+'.'+field for name in ('anchor_sets','terminal_payouts') for field in ('values','offsets')}
-        expected|={name+'.'+field for name in BANKS for field in ('utf8','offsets')}
+        expected|={name+'.'+field for name in banks for field in ('utf8','offsets')}
         if legacy:
-            expected|=set(PREFIXES)|{'fact_records.utf8','fact_records.offsets'}
+            expected|=set(BASE_PREFIXES)|{'fact_records.utf8','fact_records.offsets'}
         if set(manifest['members'])!=expected: raise ValueError('公共设备页列人口错误')
         self.arrays=load_array_members(self.directory,manifest['members'])
-        for name,width in TABLES.items():
+        for name,width in tables.items():
             value=self._array(name,'i8',2)
             if value.shape[1]!=width: raise ValueError('公共设备页表列宽错误')
             self.columns[name]=value
-        for name in BANKS:
+        for name in banks:
             raw=self._array(name+'.utf8','u1',1); offsets=self._offsets(name+'.offsets',len(raw))
             self.columns[name]=IdentityBank(raw,offsets,text=name in TEXT_BANKS)
-        for name,ndim in DERIVED.items(): self._array(name,'i8',ndim)
+        for name,ndim in derived.items(): self._array(name,'i8',ndim)
         groups=self.arrays['groups']; count=len(groups)
         if (len(self.columns['group_ids'])!=count or len(self.columns['group_members'])!=count
                 or count!=source['groups'] or len(self.columns['facts'])!=source['facts']
@@ -259,7 +276,7 @@ class PreparedPublicPage:
             if (not np.array_equal(dense[index,:len(values)],values)
                     or np.any(dense[index,len(values):,0]!=-1) or np.any(dense[index,len(values):,1]!=0)):
                 raise ValueError('公共设备页payout成员绑定错误')
-        for name in PREFIXES:
+        for name in prefixes:
             padded=self._array(name+'.padded','i8',2)
             if padded.shape[1]!=4 or len(padded)<1 or np.any(padded[0]):
                 raise ValueError('公共设备页prefix sentinel错误')
@@ -274,6 +291,13 @@ class PreparedPublicPage:
             # 唯一消费表示；现公共消费者继续检查序号、group、值域和来源引用。
             self.columns[name]=rows
         n=len(self.columns['decimals']); exact={}
+        if current:
+            order=self.arrays['valuation_price_order']; rank=self.arrays['valuation_price_rank']
+            if (order.shape!=(n,) or rank.shape!=(n,) or len(set(order.tolist()))!=n
+                    or np.any((order<0)|(order>=n)) or not np.array_equal(rank[order],np.arange(n))
+                    or self.arrays['valuation_price_fault'].shape!=(n,)
+                    or np.any(self.arrays['valuation_price_fault']!=0)):
+                raise ValueError('公共设备页估值价格排序布局错误')
         for name in EXACTS:
             words=self._array(name+'.words','i4',2); sign=self._array(name+'.sign','i1',1)
             fault=self._array(name+'.fault','i4',1)
@@ -304,7 +328,8 @@ class PreparedPublicPage:
 
     def _targets(self,name):
         c=self.columns
-        if name in ('quantities','selections','level_anchors'): return len(c['slots'])
+        if name=='current_pm_epoch': return len(c['markets'])
+        if name in ('quantities','selections','level_anchors','selection_versions'): return len(c['slots'])
         if name in PM_PREFIXES: return len(c['assets'])
         if name=='global_references': return 3
         if name in MARKET_PREFIXES+REFERENCE_PREFIXES: return len(c['markets'])

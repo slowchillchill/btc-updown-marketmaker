@@ -1,7 +1,7 @@
 //! 紧凑公共PM步骤到共享设备列。只转已有事实，不重新计算public/hidden归约。
 use crate::{compact_public::{CompactPmChangeV1, PublicCompactReaderV1}, public_recording::RecordingResult};
 use contracts::*;
-use data_pipeline_core::{pm_reduction::PmStepChangeV1, public_input::{DptIngressV1, TypedRawRowV2},
+use data_pipeline_core::{pm_reduction::{PmStepChangeV1,PmL2SelectionVersionV1}, public_input::{DptIngressV1, TypedRawRowV2},
     typed_raw::{TypedRawRow, PolymarketOrderbookEvent, PolymarketOrderbookRow, normalize_decimal_text}};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -37,6 +37,16 @@ pub struct PublicPmDeviceColumnsV1 {
     /// [bidPresent,bidId,askPresent,askId,spreadPresent,spreadId,anchorSet,quality]。
     pub bba_values: Vec<[i64;8]>,
     pub bba: Vec<[i64;4]>,
+    /// 原版本字典：[epochId,sourceMs,admissionHi32,admissionLo32,member(-1=None)]。
+    /// 行0仅为缺版本sentinel，u64 admission未缩域。
+    pub pm_versions: Vec<[i64;5]>,
+    pub pm_epochs: Vec<String>,
+    pub current_pm_epoch: Vec<[i64;4]>,
+    pub selection_versions: Vec<[i64;4]>,
+    pub absence_versions: Vec<[i64;4]>,
+    /// 独立于到达BBA的原来源所选读面；价格/来源集合复用bba_values。
+    pub valuation_bba: Vec<[i64;4]>,
+    pub valuation_bba_versions: Vec<[i64;4]>,
     /// [priceId,quantityId,buy=0/sell=1,feePresent,feeId,anchorSet,quality]。
     pub trade_values: Vec<[i64;7]>,
     pub trades: Vec<[i64;4]>,
@@ -152,8 +162,43 @@ struct Builder {
     last_bba: BTreeMap<i64,i64>, last_tick: BTreeMap<i64,i64>,
     last_terminal: BTreeMap<i64,i64>,
     binance_symbols: BTreeMap<String,i64>, binance_slots: BTreeMap<(i64,i64,i64),i64>,
+    epochs:BTreeMap<String,i64>,versions:BTreeMap<(String,i64,u64,Option<u32>),i64>,
 }
 impl Builder {
+    fn epoch(&mut self,text:&str) -> RecordingResult<i64> {
+        if let Some(id)=self.epochs.get(text) {return Ok(*id);}
+        let id=i64::try_from(self.columns.pm_epochs.len())?;
+        self.columns.pm_epochs.push(text.into());self.epochs.insert(text.into(),id);Ok(id)
+    }
+    fn version(&mut self,value:&PmL2SelectionVersionV1) -> RecordingResult<i64> {
+        let key=(value.source_sequence_epoch_id.clone(),value.source_at_utc_ms,
+            value.collector_admission_sequence,value.member_index);
+        if let Some(id)=self.versions.get(&key) {return Ok(*id);}
+        let epoch=self.epoch(&value.source_sequence_epoch_id)?;
+        let id=i64::try_from(self.columns.pm_versions.len())?;
+        self.columns.pm_versions.push([epoch,value.source_at_utc_ms,
+            (value.collector_admission_sequence>>32) as i64,(value.collector_admission_sequence&0xffffffff) as i64,
+            value.member_index.map(i64::from).unwrap_or(-1)]);
+        self.versions.insert(key,id);Ok(id)
+    }
+    fn valuation_bba(&mut self,asset:&AssetIdentityV1,source:&SourceEvidenceRefV3,member:Option<u32>,
+        sequence:i64,group:i64,position:&PublicFactPositionV1,group_id:&Sha256Hex,quality:i64) -> RecordingResult<()> {
+        let admission=source.collector_admission.as_ref().ok_or("估值BBA缺原PM准入坐标")?;
+        let version=PmL2SelectionVersionV1 {source_sequence_epoch_id:admission.source_sequence_epoch_id.clone(),
+            source_at_utc_ms:source.source_event_at_utc_ms.ok_or("估值BBA缺原来源时刻")?,
+            collector_admission_sequence:admission.collector_admission_sequence,member_index:member};
+        let a=self.asset(asset);
+        let id=if let Some(&old)=self.last_bba.get(&a) {old} else {
+            // 原PublicConfirmation即使没有买价，也保存Fresh空买侧及真实直接来源。
+            let anchors=self.anchor_set(std::slice::from_ref(source),position,group_id)?;
+            let id=i64::try_from(self.columns.bba_values.len())?;
+            self.columns.bba_values.push([0,0,0,0,0,0,anchors,quality]);id
+        };
+        let version_id=self.version(&version)?;
+        self.columns.valuation_bba.push([a,sequence,group,id]);
+        self.columns.valuation_bba_versions.push([a,sequence,group,version_id]);
+        Ok(())
+    }
     fn binance_symbol(&mut self, symbol:&str) -> RecordingResult<i64> {
         if let Some(id) = self.binance_symbols.get(symbol) {return Ok(*id);}
         let id = i64::try_from(self.columns.binance_symbols.len())?;
@@ -259,14 +304,16 @@ impl Builder {
 pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
     mut progress: impl FnMut(u64)) -> RecordingResult<PublicPmDeviceColumnsV1> {
     let mut builder = Builder { columns: PublicPmDeviceColumnsV1 {
-        version:"public_pm_device_columns_v1",input_stream_id:reader.manifest.header.input_stream_id.clone(),
+        version:"public_pm_device_columns_v2",input_stream_id:reader.manifest.header.input_stream_id.clone(),
+        pm_versions:vec![[-1,0,0,0,-1]],
         bba_values:vec![[0,0,0,0,0,0,0,3]],trade_values:vec![[0,0,0,0,0,0,3]],
         observed_tick_values:vec![[0,0,0,3]],anchor_sets:vec![vec![]],
         lifecycle_values:vec![[0,0,0,3]],trading_values:vec![[0,0,0,0,0,0,0,3]],
         terminal_values:vec![[0,0,0,0,3]],terminal_payouts:vec![vec![]],..Default::default()
     }, assets:BTreeMap::new(), markets:BTreeMap::new(), decimals:BTreeMap::new(), slots:BTreeMap::new(),
         last_bba:BTreeMap::new(),last_tick:BTreeMap::new(),last_terminal:BTreeMap::new(),
-        binance_symbols:BTreeMap::new(),binance_slots:BTreeMap::new() };
+        binance_symbols:BTreeMap::new(),binance_slots:BTreeMap::new(),
+        epochs:BTreeMap::new(),versions:BTreeMap::new() };
     // 零值占位不是已知零；设备查询另带initialized/selected/present。
     builder.decimal(&ExactDecimal("0".into()))?;
     // 原typed/canonical来源合同固定BTCUSDT；已知symbol不代表已观察盘口或价格。
@@ -551,18 +598,23 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
             }
         }
         for pm in &packet.pm {
-            let group = i64::try_from(packet.groups.iter()
+            let pm_group = packet.groups.iter()
                 .find(|group| group.records.iter().any(|fact| fact.position == pm.position))
-                .ok_or("设备PM步骤缺公共事实组关联")?.group_position)?;
+                .ok_or("设备PM步骤缺公共事实组关联")?;
+            let group = i64::try_from(pm_group.group_position)?;
             // 同事实内各价位Selection共享完全相同的直接源，不逐档复制其身份文本。
             let mut shared_anchors: Vec<(SourceEvidenceRefV3, i64)> = Vec::new();
-            let group_id = packet.groups.iter().find(|g| g.group_position as i64 == group)
-                .ok_or("设备PM观察字段缺原闭组")?.group_id.clone();
-            let input_position = packet.groups.iter().flat_map(|g|&g.records).find(|fact|fact.position==pm.position)
-                .and_then(|fact|match &fact.payload {
-                    crate::compact_public::CompactFactPayloadV1::PmFromInput(header)=>Some(header.input_record.input_position),
-                    _=>None,
-                }).ok_or("设备PM字段缺原规范消息输入引用")?;
+            let group_id = pm_group.group_id.clone();
+            let fact = pm_group.records.iter().find(|fact|fact.position==pm.position)
+                .ok_or("设备PM字段缺原事实")?;
+            let crate::compact_public::CompactFactPayloadV1::PmFromInput(header) = &fact.payload else {
+                return Err("设备PM字段缺原规范消息输入引用".into());
+            };
+            let input_position = header.input_record.input_position;
+            let original_source = fact.direct_sources.first()
+                .ok_or("设备PM估值缺原事实直接来源")?;
+            let market = builder.markets.get(&header.market.condition_id.0).copied()
+                .ok_or("设备PM epoch缺原市场身份")?;
             for step in &pm.steps {
                 let sequence = builder.columns.original_pm_steps;
                 builder.columns.original_pm_steps = sequence.checked_add(1).ok_or("设备步骤位置溢出")?;
@@ -575,10 +627,8 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                         *id
                     } else {
                         let id = i64::try_from(builder.columns.anchors.len())?;
-                        let group_id = packet.groups.iter().find(|g| g.group_position as i64 == group)
-                            .ok_or("设备锚点缺原闭组")?.group_id.clone();
                         builder.columns.anchors.push(PublicLevelAnchorV1 {
-                            direct:step.direct.clone(),position:pm.position.clone(),group_id,
+                            direct:step.direct.clone(),position:pm.position.clone(),group_id:group_id.clone(),
                         });
                         shared_anchors.push((step.direct.clone(), id));
                         id
@@ -607,6 +657,10 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                         }
                     }
                     CompactPmChangeV1::Inline(change) => match change {
+                        PmStepChangeV1::Epoch {source_sequence_epoch_id} => {
+                            let epoch=builder.epoch(source_sequence_epoch_id)?;
+                            builder.columns.current_pm_epoch.push([market,sequence,group,epoch]);
+                        }
                         PmStepChangeV1::ResetAsset {asset,..} => {
                             let a = builder.asset(asset);
                             builder.columns.resets.push([a,sequence,group,0]);
@@ -620,14 +674,18 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                             let slot = builder.slot(asset,*side,price)?;
                             builder.columns.selections.push([slot,sequence,group,i64::from(selected.present)]);
                             builder.columns.level_anchors.push([slot,sequence,group,anchor]);
+                            let version=builder.version(&selected.version)?;
+                            builder.columns.selection_versions.push([slot,sequence,group,version]);
                         }
                         PmStepChangeV1::BookReady {asset} => {
                             let a = builder.asset(asset); builder.columns.ready.push([a,sequence,group,1]);
                             builder.columns.book_quality.push([a,sequence,group,0]);
                         }
-                        PmStepChangeV1::AbsenceBaseline {asset,selected,..} if selected.is_some() => {
+                        PmStepChangeV1::AbsenceBaseline {asset,selected,..} => {
                             let a = builder.asset(asset);
-                            builder.columns.book_anchors.push([a,sequence,group,anchor]);
+                            let version=selected.as_ref().map(|s|builder.version(&s.version)).transpose()?.unwrap_or(0);
+                            builder.columns.absence_versions.push([a,sequence,group,version]);
+                            if selected.is_some() {builder.columns.book_anchors.push([a,sequence,group,anchor]);}
                         }
                         PmStepChangeV1::Tick {tick,..} => {
                             let a = builder.asset(&tick.asset); let value = builder.decimal(&tick.new_tick_size_pusd_per_share)?;
@@ -645,6 +703,8 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                             });
                             let anchors = builder.anchor_set(std::slice::from_ref(&step.direct),&pm.position,&group_id)?;
                             builder.observed_bba(&quote.asset,&value,anchors,quality_code(step.quality.availability),group)?;
+                            builder.valuation_bba(&quote.asset,original_source,step.member_index,sequence,group,
+                                &pm.position,&group_id,quality_code(step.quality.availability))?;
                         }
                         PmStepChangeV1::PublicConfirmation {asset,kind} => {
                             let a = builder.asset(asset);
@@ -679,6 +739,8 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                                         builder.columns.bba.push(row);
                                         builder.last_bba.insert(a,id);
                                     }
+                                    builder.valuation_bba(asset,original_source,step.member_index,sequence,group,
+                                        &pm.position,&group_id,quality_code(step.quality.availability))?;
                                 }
                             }
                         }

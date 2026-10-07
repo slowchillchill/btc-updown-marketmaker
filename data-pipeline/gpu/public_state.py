@@ -12,11 +12,20 @@ def _take(value, indices):
 class PrefixColumn:
     def __init__(self, rows, targets, device):
         rows = torch.tensor(rows, dtype=torch.int64).reshape(-1, 4).pin_memory().to(device, non_blocking=True)
+        self._install_rows(rows,targets)
+
+    def _install_rows(self, rows, targets):
         ordered = rows[torch.argsort(rows[:, 0], stable=True)].contiguous()
         self.padded = torch.cat((ordered.new_zeros((1, 4)), ordered))
         self.rows = self.padded[1:]  # 与sentinel共享存储；热查询不复制整段历史。
         counts = torch.bincount(self.rows[:, 0], minlength=targets)
         self.offsets = torch.cat((counts.new_zeros(1), counts.cumsum(0))).contiguous()
+
+    @classmethod
+    def from_device_rows(cls,rows,targets):
+        result=cls.__new__(cls)
+        result._install_rows(rows,targets)
+        return result
 
     @classmethod
     def from_prepared(cls, padded, offsets):
@@ -77,7 +86,7 @@ class PublicPmState:
     本入口包含PM盘口、直接BBA/trade/tick；生命周期/参考/Binance仍由后续公共后端衔接。
     """
     def __init__(self, columns, *, device='cuda', prepared=None):
-        if columns['version'] != 'public_pm_device_columns_v1':
+        if columns['version'] not in ('public_pm_device_columns_v1','public_pm_device_columns_v2'):
             raise ValueError('设备列版本错误')
         self.input_stream_id = columns['input_stream_id']
         self.assets = columns['assets']  # 只在冷身份边界使用。
@@ -168,6 +177,11 @@ class PublicPmState:
                 previous[target] = (sequence,group)
             setattr(self,name,PrefixColumn(columns[name],assets,device) if prepared is None else prepared.prefix(name))
             setattr(self,table_name,torch.tensor(table,dtype=torch.int64,device=device).reshape(-1,width) if prepared is None else prepared.tensor(table_name))
+        from valuation_state import PublicValuationState
+        self.valuation = PublicValuationState(self,columns,prepared=prepared)
+        if self.valuation.complete:
+            from valuation_state import PREFIXES
+            for name in PREFIXES: setattr(self,name,getattr(self.valuation,name))
 
     def prefix_at(self, observation_ms):
         """UTC观察选择完整合法前缀；后组必须同时等到全部前组可见。"""
@@ -224,3 +238,7 @@ class PublicPmState:
             present = found & values[:,:,0].bool() if name == 'observed_ticks' else found
             fields.append(ObservedPmField(values,present,fault))
         return PublicPmObservation(*fields,invalid_prefix)
+
+    def valuation_bid(self, prefixes, *, frame=None):
+        """公共Core同前缀估值；不改变原到达BBA或Native盘口特征。"""
+        return self.valuation.query(prefixes,frame=frame)

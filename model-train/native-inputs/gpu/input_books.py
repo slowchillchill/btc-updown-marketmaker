@@ -1,7 +1,7 @@
 """Native盘口9字段的GPU实现。公共事实归DPT，特征/排序/模型装箱归Native。"""
 from dataclasses import dataclass
 import torch
-from prepare import _numbers
+from prepare import _numbers, decimal_price_order
 from public_state import _take
 from input_projection import price_value, t5
 
@@ -23,26 +23,7 @@ class PmBookInputs:
         if outcomes not in (1,2): raise ValueError('原PM两资产或Binance一个symbol')
         self.state, self.pm, self.outcomes = state, pm, outcomes
         self.capacity = initial_capacity
-        numbers = _numbers()
-        # SourceDecimal最多96位、scale<=28；统一10^28整数排序保持全部源精度。
-        # 这仅是已证明的源十进制域，经济运算仍使用公共可增长arena。
-        def keys():
-            source = state.decimal_columns
-            scale = source.scale
-            factor = source.coefficient.constant(1)
-            for exponent in range(1, 29):
-                factor = factor.constant(10**exponent).select(28-scale == exponent, factor)
-            return source.coefficient * factor
-        key = numbers.run_exact_batch(keys)
-        order = torch.arange(state.slots.shape[0], device=state.slots.device)
-        price_keys = key.words[state.slots[:, 2]].to(torch.int64) & 0xffffffff
-        # 字典中PM价格由原准入保证合法；仍保留错误供调用方禁止提交。
-        self.sort_fault = key.fault[state.slots[:, 2]]
-        signs = key.sign[state.slots[:, 2]]
-        for word in range(price_keys.shape[1]):
-            digit = torch.where(signs < 0, 0xffffffff-price_keys[:, word], price_keys[:, word])
-            order = order[torch.argsort(digit[order], stable=True)]
-        order = order[torch.argsort(signs[order], stable=True)]
+        order, self.sort_fault = decimal_price_order(state.decimal_columns, state.slots[:,2])
         self.ask_order = order
         self.bid_order = order.flip(0)
 

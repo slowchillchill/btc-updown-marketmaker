@@ -59,3 +59,21 @@ def stable_source_order(key_bytes, key_lengths):
 def independent_tag_counts(tags, kinds):
     """独立类别归约供一次材料准备统计，不产生窗口或公共业务状态。"""
     return torch.bincount(tags, minlength=kinds)
+
+
+def decimal_price_order(source, price_ids):
+    """冷准备精确源价格排序；SourceDecimal的96位、scale<=28原域不转float。"""
+    def keys():
+        factor = source.coefficient.constant(1)
+        for exponent in range(1, 29):
+            factor = factor.constant(10**exponent).select(28-source.scale == exponent, factor)
+        return source.coefficient * factor
+    key = _numbers().run_exact_batch(keys)
+    digits = key.words[price_ids].to(torch.int64) & 0xffffffff
+    signs = key.sign[price_ids]
+    order = torch.arange(price_ids.numel(), device=price_ids.device)
+    for word in range(digits.shape[1]):
+        digit = torch.where(signs < 0, 0xffffffff-digits[:, word], digits[:, word])
+        order = order[torch.argsort(digit[order], stable=True)]
+    order = order[torch.argsort(signs[order], stable=True)]
+    return order, key.fault[price_ids]

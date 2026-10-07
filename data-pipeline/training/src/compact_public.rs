@@ -757,6 +757,10 @@ pub fn repack_public_compact_v1(
 }
 
 #[cfg(test)]
+#[path = "public_valuation_gpu_tests.rs"]
+mod valuation_gpu_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;

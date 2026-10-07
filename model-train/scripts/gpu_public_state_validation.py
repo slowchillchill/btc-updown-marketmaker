@@ -84,6 +84,117 @@ def validate_binance_received_day(args,root):
     args.output.write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report),flush=True)
 
 
+def validate_valuation(args,root):
+    """三个原选择反例的实际来源prefix；不建立训练root或以GPU自产预期。"""
+    sys.path.insert(0,str(root/'data-pipeline/gpu'))
+    from public_state import PublicPmState
+    from public_device_page import (PreparedPublicPage,build_public_device_page,
+        BASE_PREFIXES,BASE_TABLES,BASE_BANKS,BASE_DERIVED,PREVIOUS_VERSION)
+    from dataclasses import fields
+    import numpy as np
+    import tempfile
+    import public_state as public_module
+    wire=json.loads(subprocess.check_output([str(args.binary),'--pm-device-columns',str(args.material),'268435456']))
+    raw=PublicPmState(wire)
+    built=build_public_device_page(args.binary,args.material,args.device_page)
+    saved=(torch.argsort,torch.bincount,public_module.decimal_columns,public_module.PrefixColumn.__init__)
+    def forbidden(*a,**kw): raise AssertionError('prepared估值加载不得重排或恢复原numeric')
+    try:
+        torch.argsort=torch.bincount=public_module.decimal_columns=public_module.PrefixColumn.__init__=forbidden
+        page=PreparedPublicPage(args.device_page,args.material);state=page.install()[0]
+    finally:
+        torch.argsort,torch.bincount,public_module.decimal_columns,public_module.PrefixColumn.__init__=saved
+    reference=json.loads(args.valuation_reference.read_text())
+    assert reference and raw.valuation.complete and state.valuation.complete
+    ids={asset['token_id']:i for i,asset in enumerate(page.columns['assets'])}
+    prefixes=torch.tensor([row['prefix'] for row in reference],dtype=torch.int64,device='cuda')
+    original=raw.valuation_bid(prefixes);actual=state.valuation_bid(prefixes)
+    for field in fields(actual): assert torch.equal(getattr(original,field.name),getattr(actual,field.name)),field.name
+    assert not actual.fault.any().cpu().item()
+    prices=actual.price_ids.cpu().tolist();known=actual.value_present.cpu().tolist()
+    bids=actual.bid_present.cpu().tolist();qualities=actual.quality.cpu().tolist()
+    arrival=state.observation(prefixes).bba
+    values=arrival.values.cpu().tolist();present=arrival.present.cpu().tolist()
+    quality_names=['fresh','stale','missing','unknown_not_observed','confirmed_gap','invalid']
+    for root_index,row in enumerate(reference):
+        for position,asset in enumerate(row['observation']['assets']):
+            index=ids[asset['asset']['token_id']];expected=asset['valuation_best_bid']
+            assert known[root_index][index] == row['valuation_presence'][position],row['phase']
+            assert qualities[root_index][index] == quality_names.index(expected['quality']),row['phase']
+            assert bids[root_index][index] == (expected['value'] is not None),row['phase']
+            if expected['value'] is not None:
+                assert Fraction(page.columns['decimals'][prices[root_index][index]]) == Fraction(expected['value']),row['phase']
+            # 相同来源内原到达BBA仍按原observer，独立估值不回写其值。
+            bba=asset['best_bid_ask'];v=values[root_index][index]
+            assert present[root_index][index] == (bba['value'] is not None),row['phase']
+            if bba['value'] is not None:
+                for p,d,name in ((0,1,'best_bid_pusd_per_share'),(2,3,'best_ask_pusd_per_share')):
+                    assert bool(v[p]) == (bba['value'][name] is not None),row['phase']
+                    if v[p]: assert Fraction(page.columns['decimals'][v[d]]) == Fraction(bba['value'][name]),row['phase']
+    # 同图沿所有实际prefix重放；旧冻结所有权快照不被下一估值读取覆盖。
+    prefix=prefixes[:1].clone()
+    stream=torch.cuda.Stream();stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(2): state.valuation_bid(prefix)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph=torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph,stream=stream): captured=state.valuation_bid(prefix)
+    frozen=None;frozen_expected=None
+    for index,row in enumerate(reference):
+        prefix.copy_(prefixes[index:index+1]);graph.replay()
+        for field in fields(captured):
+            wanted=getattr(actual,field.name)[index:index+1]
+            torch.testing.assert_close(getattr(captured,field.name),wanted,rtol=0,atol=0)
+        if frozen is None and (actual.bid_present[index] & actual.value_present[index]).any().cpu().item():
+            frozen={field.name:getattr(captured,field.name).clone() for field in fields(captured)}
+            frozen_expected={field.name:getattr(actual,field.name)[index:index+1].clone() for field in fields(captured)}
+    assert frozen is not None
+    for name,value in frozen.items(): torch.testing.assert_close(value,frozen_expected[name],rtol=0,atol=0)
+    # 旧v2确有原消费者；格式投影仅用于兼容边界，缺版本不能提供估值。
+    with tempfile.TemporaryDirectory(prefix='valuation-old-v2-',dir=args.device_page.parent) as temporary:
+        legacy=Path(temporary);manifest=json.loads((args.device_page/'manifest.json').read_text())
+        keep=set(BASE_TABLES)|set(BASE_DERIVED)|{'decimal_scale','decimal_present','decimal_text','decimal_offsets'}
+        keep|={n+'.'+f for n in BASE_PREFIXES for f in ('padded','offsets')}
+        keep|={n+'.'+f for n in ('coefficient','decimal_denominator','numerator','denominator') for f in ('words','sign','fault')}
+        keep|={n+'.'+f for n in ('anchor_sets','terminal_payouts') for f in ('values','offsets')}
+        keep|={n+'.'+f for n in BASE_BANKS for f in ('utf8','offsets')}
+        manifest['version']=PREVIOUS_VERSION;manifest['metadata']['version']='public_pm_device_columns_v1'
+        manifest['members']={n:e for n,e in manifest['members'].items() if n in keep}
+        for entry in manifest['members'].values(): os.link(args.device_page/entry['file'],legacy/entry['file'])
+        (legacy/'manifest.json').write_text(json.dumps(manifest))
+        old=PreparedPublicPage(legacy,args.material).install()[0]
+        assert not old.valuation_bid(prefixes).value_present.any().cpu().item()
+        for field in fields(old.frame(prefixes)):
+            before=getattr(old.frame(prefixes),field.name);after=getattr(state.frame(prefixes),field.name)
+            if isinstance(before,torch.Tensor): assert torch.equal(before,after),field.name
+        for name in ('numerator','denominator'):
+            for field in ('words','sign','fault'):
+                assert torch.equal(getattr(getattr(old.frame(prefixes).quantity,name),field),
+                    getattr(getattr(state.frame(prefixes).quantity,name),field)),(name,field)
+        assert torch.equal(old.observation(prefixes).bba.values,arrival.values)
+    # 一个新版本成员越界：合法摘要不能替代真实消费边界。
+    with tempfile.TemporaryDirectory(prefix='valuation-invalid-',dir=args.device_page.parent) as temporary:
+        broken=Path(temporary);manifest=json.loads((args.device_page/'manifest.json').read_text())
+        entry=manifest['members']['pm_versions'];target=broken/entry['file']
+        import shutil
+        shutil.copyfile(args.device_page/entry['file'],target)
+        versions=np.memmap(target,dtype='<i8',mode='r+',shape=tuple(entry['shape']))
+        assert len(versions)>1
+        versions[1,3]=1<<32;versions.flush();del versions
+        entry['sha256']=hashlib.sha256(target.read_bytes()).hexdigest()
+        for other in manifest['members'].values():
+            if other['file']!=entry['file']: os.link(args.device_page/other['file'],broken/other['file'])
+        (broken/'manifest.json').write_text(json.dumps(manifest))
+        try: PreparedPublicPage(broken,args.material).install()
+        except ValueError as error: assert '版本坐标错误' in str(error)
+        else: raise AssertionError('完整u64分字越界必须拒绝')
+    report={'actual_prefixes':len(reference),'phases':[r['phase'] for r in reference],
+        'compact_original_observer_and_prepared_v3_equal':True,'arrival_bba_unchanged':True,
+        'capture_replay_and_old_snapshot':True,'old_v2_valuation_unavailable':True,
+        'new_version_member_boundary':True,'full_portfolio_NAV':False}
+    args.output.write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report),flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary',type=Path,required=True)
@@ -91,12 +202,16 @@ def main():
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--original-reference',type=Path)
     parser.add_argument('--binance-received-day-reference',type=Path,help='原producer短接收日链，只核实际公共BN前缀')
+    parser.add_argument('--valuation-reference',type=Path,help='原producer有限来源估值反例与完整版本')
     parser.add_argument('--legacy-device-page',type=Path,help='现有v1页的消费列兼容核对')
     parser.add_argument('--device-page',type=Path,help='原reader一次构建并两次直接加载固定二进制列')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     if args.binance_received_day_reference is not None:
         validate_binance_received_day(args,root)
+        return
+    if args.valuation_reference is not None:
+        validate_valuation(args,root)
         return
     sys.path.insert(0,str(root/'data-pipeline/gpu'))
     from public_state import PublicPmState
@@ -213,14 +328,21 @@ def main():
             legacy=PreparedPublicPage(args.legacy_device_page,args.material)
             legacy_states=legacy.install()
             assert 'fact_records' not in legacy.columns
-            for name in TABLES:
-                assert np.array_equal(legacy.columns[name],prepared.columns[name]),name
-            for old,new in zip(legacy_states,installed):
-                for name in PREFIXES:
-                    if hasattr(old,name):
-                        assert torch.equal(getattr(old,name).padded,getattr(new,name).padded),name
-                        assert torch.equal(getattr(old,name).offsets,getattr(new,name).offsets),name
-            page_progress('legacy_public_v1_consumption_checked')
+            # 新版本加入来源表会改变bank物理编号；核原消费者值而非要求旧编号等于新编号。
+            sample=torch.tensor([-1,0,len(columns['groups'])-1],dtype=torch.int64,device='cuda')
+            old_frame,new_frame=legacy_states[0].frame(sample),state.frame(sample)
+            for name in ('present','initialized','ready','tick_ids','tick_present','quality','fault'):
+                assert torch.equal(getattr(old_frame,name),getattr(new_frame,name)),name
+            for name in ('numerator','denominator'):
+                for field in ('words','sign','fault'):
+                    assert torch.equal(getattr(getattr(old_frame.quantity,name),field),
+                        getattr(getattr(new_frame.quantity,name),field)),(name,field)
+            old_bba,new_bba=legacy_states[0].observation(sample).bba,state.observation(sample).bba
+            assert torch.equal(old_bba.present,new_bba.present)
+            assert torch.equal(old_bba.values[:,:,:6],new_bba.values[:,:,:6])
+            assert torch.equal(old_bba.values[:,:,-1],new_bba.values[:,:,-1])
+            assert not legacy_states[0].valuation_bid(sample).value_present.any().cpu().item()
+            page_progress('legacy_public_original_consumption_checked_valuation_unavailable')
         wire=b''
         member_sizes=sorted(((p.name,p.stat().st_size) for p in args.device_page.iterdir()),key=lambda entry:entry[1],reverse=True)
         page_report={'build_seconds':build_seconds,'load_seconds':loads,
