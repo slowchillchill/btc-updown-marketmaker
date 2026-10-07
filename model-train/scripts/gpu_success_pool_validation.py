@@ -60,6 +60,26 @@ def main():
     for row,value in zip(source['trace'],fractions(trade.unpaired_contribution)):
         fact=row['fact']
         assert value==(expected_contribution[fact['fill_sequence']] if fact['token_id']==source['up_token'] else Fraction(0))
+    sys.path[:0]=[str(Path(__file__).resolve().parents[1]/'native-inputs/gpu'),
+                  str(Path(__file__).resolve().parents[2]/'data-pipeline/gpu')]
+    from input_success import success_inputs,write_success_fields
+    native=Numbers.run_exact_batch(lambda:success_inputs(pool,torch.tensor([[[0],[-1]]],device='cuda'),
+        torch.tensor([[[True],[False]]],device='cuda'),torch.ones((1,2),dtype=torch.bool,device='cuda'),
+        torch.tensor([0,1],device='cuda'),prefix_known=torch.ones(1,dtype=torch.bool,device='cuda')))
+    assert native.fault.cpu().tolist()==[0]
+    slow=write_success_fields(torch.zeros((1,433),device='cuda'),native)
+    import math
+    def project(value):
+        value=float(value)
+        return [math.copysign(math.log1p(abs(value)),value),1.,1.]
+    for first,source_values in [(122,[Fraction(market['success_shares'][i]) for i in [up,1-up]]),
+        (134,[ratio(market['success_principal_cost_pusd'][i]) for i in [up,1-up]]),
+        (149,[Fraction(market['orphan_shares'][i]) for i in [up,1-up]])]:
+        torch.testing.assert_close(slow[0,first:first+6].cpu(),torch.tensor([v for amount in source_values for v in project(amount)]),
+            rtol=1e-6,atol=1e-7)
+    torch.testing.assert_close(slow[0,146:149].cpu(),torch.tensor(project(Fraction(market['paired_shares']))),rtol=1e-6,atol=1e-7)
+    for first,last in [(128,134),(140,146),(155,164)]:
+        assert slow[0,first:last].cpu().tolist()==[0.,1.,1.]*((last-first)//3)
     identifiers=[1,10,2,(1<<64)-1]
     keys=Numbers.run_exact_batch(lambda:sim_trade_order_key(integers(identifiers)))
     assert keys.fault.cpu().tolist()==[0]*len(identifiers)
@@ -67,7 +87,7 @@ def main():
     assert encoded==[str(value) for value in identifiers]
     assert sorted(range(len(encoded)),key=lambda i:encoded[i])==[0,1,3,2]
     print(json.dumps({'actual_success_population':len(source['trace']),'fractional':source['fractional'],
-        'paired_cost_and_source_tail_checked':True,'elapsed_seconds':time.perf_counter()-started,
+        'paired_cost_and_source_tail_checked':True,'Native_actual_success_pair_orphan_fields_122_to_163_checked':True,'elapsed_seconds':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),'actual_finite_contribution_checked':True,'full_u64_legacy_string_order_checked':True,'rebate_day_policy_delivered':False}))
 
 

@@ -30,6 +30,16 @@ run_test() {
     tail -4 "$artifact_dir/$log"
 }
 case "$case_name" in
+    native-success-pool)
+        export B_GPU_SUCCESS_POOL_VALIDATOR="$repo_root/model-train/scripts/gpu_success_pool_validation.py"
+        command=(cargo test -p shared-run --test economic_settlement --locked --offline
+            real_partial_makers_fix_average_cost_and_nonterminating_fraction -- --nocapture)
+        printf '%q ' "${command[@]}" > "$artifact_dir/commands.txt"
+        printf '\n' >> "$artifact_dir/commands.txt"
+        echo "stage=original_two_leg_success_population_to_Native commit=$(git rev-parse HEAD)"
+        "${command[@]}" > "$artifact_dir/success-pool.log" 2>&1
+        tail -4 "$artifact_dir/success-pool.log"
+        ;;
     native-account-reference)
         export NATIVE_ACCOUNT_SOURCE_OUTPUT="$artifact_dir/original-native-account.json"
         command=(cargo test --manifest-path model-train/native-inputs/Cargo.toml --lib --locked --offline

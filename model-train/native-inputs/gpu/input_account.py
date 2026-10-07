@@ -18,7 +18,7 @@ class FrozenAccountInputs:
     fault: torch.Tensor
 
 
-def frozen_account_inputs(account, scope_members, scope_known, scope_applicable, *, scope_conditions=None, scope_present=None, asset_outcomes=None, executed_prefix_known=None):
+def frozen_account_inputs(account, scope_members, scope_known, scope_applicable, *, scope_conditions=None, scope_present=None, asset_outcomes=None, executed_prefix_known=None, success_prefix_known=None):
     """消费一次真实冻结值；当前/旧scope由根权威选择器传入，不按订单猜scope。"""
     numbers = _numbers()
     roots = account.cutoff.numel()
@@ -48,6 +48,13 @@ def frozen_account_inputs(account, scope_members, scope_known, scope_applicable,
             slow = write_position_fields(slow,positions)
             provided[:,54:78] = True
             fault |= positions.fault
+            if success_prefix_known is not None:
+                from input_success import success_inputs,write_success_fields
+                success = success_inputs(account.ledger.success_pools,scope_conditions,scope_present,scope_applicable,
+                    asset_outcomes,prefix_known=success_prefix_known)
+                slow = write_success_fields(slow,success)
+                provided[:,122:164] = True
+                fault |= success.fault
     elif scope_present is not None or asset_outcomes is not None:
         raise ValueError('scope存在位不能脱离原condition人口')
     for start, value in [(110, account.funds.actual_available), (113, account.funds.actual_reserved),
@@ -95,7 +102,7 @@ class NativeAccountAtPrefix:
 
 
 def account_inputs_at_prefix(account, market, condition_slots, prefixes, root_started_at,
-                             order_conditions, order_condition_known, asset_outcomes, *, executed_prefix_known=None):
+                             order_conditions, order_condition_known, asset_outcomes, *, executed_prefix_known=None, success_prefix_known=None):
     """同一实际cutoff：设备选原current/old，再装配已交付账户字段。
 
     market只含当前完整公共前缀；order_conditions沿已冻结原意图/订单关联，
@@ -120,10 +127,10 @@ def account_inputs_at_prefix(account, market, condition_slots, prefixes, root_st
     scope_known = population_known & ~(unknown_order[:,None] & scopes.present.any(2))
     inputs = frozen_account_inputs(account,members,scope_known,scopes.applicable,
         scope_conditions=scopes.conditions,scope_present=scopes.present,asset_outcomes=asset_outcomes,
-        executed_prefix_known=executed_prefix_known)
+        executed_prefix_known=executed_prefix_known,success_prefix_known=success_prefix_known)
     slow = inputs.slow.clone()
     # 没有完整old人口时，已有成员之和不能冒充整个old作用域；保留适用Unknown。
-    for first,last in [(0,27),(54,66),(176,194)]:
+    for first,last in [(0,27),(54,66),(122,128),(134,140),(146,155),(176,194)]:
         width = last-first
         value = slow[:,first:first+2*width].reshape(roots,2,width//3,3)
         unknown = scopes.applicable & ~population_known
