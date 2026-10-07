@@ -532,6 +532,23 @@ def check_family(source):
         legs_view=Numbers.run_exact_batch(leg_freeze)
         assert legs_view.fault.cpu().tolist()==[0]
         assert binding_state.received.size(1)<=len(leg_keys), '关联目录按请求腿保留，不累计版本/padding'
+        # 真实已领取关联不因中途历史未装而被覆盖为Unknown；无关联腿仍未知。
+        def incomplete_binding_freeze():
+            registered=torch.tensor([[request in receipts for request,_,_ in leg_keys]],dtype=torch.bool,device='cuda')
+            submitted=SubmittedLegs(torch.ones_like(registered),registered,
+                torch.tensor([[buy_ids[request] for request,_,_ in leg_keys]],device='cuda'),
+                torch.tensor([[item for _,item,_ in leg_keys]],device='cuda'),
+                rational([target for _,_,target in leg_keys]),torch.ones_like(registered))
+            return freeze_leg_commitments(submitted,replace(binding_state,prefix_known=torch.zeros(1,dtype=torch.bool,device='cuda')),
+                directory(frame),view)
+        incomplete=Numbers.run_exact_batch(incomplete_binding_freeze)
+        actual_bindings={(int(request),int(item)) for request,item,received in zip(
+            binding_state.request_slots.cpu().tolist()[0],binding_state.item_ordinals.cpu().tolist()[0],
+            binding_state.received.cpu().tolist()[0]) if received}
+        for index,(request,item,_) in enumerate(leg_keys):
+            if (buy_ids[request],item) in actual_bindings:
+                assert incomplete.known.cpu().tolist()[0][index]==legs_view.known.cpu().tolist()[0][index]
+
         included=legs_view.present.cpu().tolist()[0]
         assert {(request,item) for (request,item,_),active_leg in zip(leg_keys,included) if active_leg}=={
             (item['request'],item['item']) for item in frame['commitments']},(frame['stage'],'完整逐腿承诺人口')

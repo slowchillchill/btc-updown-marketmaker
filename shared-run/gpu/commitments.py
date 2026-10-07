@@ -131,6 +131,7 @@ def freeze_leg_commitments(legs,bindings,order_directory,order_read):
     remaining=legs.target
     known=legs.target_known
     has_order=torch.zeros_like(registered)
+    has_binding=torch.zeros_like(registered)
     order=legs.target.numerator.constant(0)
     if width:
         member=registered[:,:,None] & bindings.received[:,None,:] & (
@@ -164,7 +165,7 @@ def freeze_leg_commitments(legs,bindings,order_directory,order_read):
         prefix_known = torch.zeros(roots,dtype=torch.bool,device=device)
     if prefix_known.shape!=(roots,) or prefix_known.dtype!=torch.bool or prefix_known.device!=device:
         raise TypeError('Submission完整前缀known需同设备bool[roots]')
-    known = known & prefix_known[:,None]
+    known = known & (prefix_known[:,None] | has_binding)
     fault=fault | Numbers.combine_fault_rows(torch.where(registered,remaining.fault.reshape(roots,count),0))
     population=registered & ~(known & (remaining.numerator.sign==0).reshape(roots,count))
     return LegCommitmentsRead(population,has_order,order,remaining,known,fault,
