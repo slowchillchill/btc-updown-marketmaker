@@ -430,6 +430,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert values(duplicate_ledger.current_entry_sequence)==[26] and duplicate_ledger.fault.cpu().tolist()==[0]
     # 真实原Ledger同一经济先到，没有Submission绑定不能Convert另一笔未发送预留。
     early=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,integers([3]),integers([0]),pools,
+        position_costs=PositionCosts.empty(1,columns.row_refs.size(1),'cuda'),
         order_funds=open_prefix(1,columns.row_refs.size(1),columns.row_refs.size(1),columns.row_refs.size(1),source['reservation_checkpoints'][0]),
         unresolved_markets=open_markets(pools,source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id']),
         accepted_principal=open_principal(pools,source['reservation_checkpoints'][0]),
