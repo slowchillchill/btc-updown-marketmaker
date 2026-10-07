@@ -81,7 +81,7 @@ class LifecycleColumns:
                 masks=[torch.nn.functional.pad(value.present,(0,capacity-old))
                     for value,old in zip([left,right],capacities)]
                 present=torch.cat([masks[0].reshape(roots,width,capacity),
-                    masks[1].reshape(roots,extra,capacity)],dim=1).reshape(-1,capacity)
+                    masks[1].reshape(roots,extra,capacity)],dim=1).reshape(roots*(width+extra),capacity)
                 def join(a,b):
                     a=padded(a,roots*width,capacities[0],capacity)
                     b=padded(b,roots*extra,capacities[1],capacity)
