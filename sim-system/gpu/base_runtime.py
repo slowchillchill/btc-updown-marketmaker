@@ -147,6 +147,11 @@ class BaseSimRuntime:
             source_resolutions=candidate.source_resolutions.coordinate_result(self.source_resolutions,fault),
             resolution_obligations=candidate.resolution_obligations.coordinate_result(self.resolution_obligations,fault))
         committed = permitted & self.hidden_frontier.reference_enabled(indices) & (rows[:,0]==9) & (fault==0)
+        events = tuple(replace(event,effect=replace(event.effect,closed=event.effect.closed & committed,
+            delta=candidate.account.coordinate_delta(event.effect.delta,committed,fault),fault=fault))
+            for event in effect.orders.events)
+        effect = replace(effect,orders=replace(effect.orders,events=events,fault=fault),
+            resolved=effect.resolved & committed,fault=fault)
         return candidate.hidden_reference_applied(indices,committed,fault),projected,batch,effect
 
     def install_hidden_market_controls(self):

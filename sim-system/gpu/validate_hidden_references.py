@@ -115,6 +115,17 @@ def main():
     condition,end=tensor([[0]]),tensor([[source['market_end']]])
     original_projection=projection
     choice=storage.runtime.choose(None,None,horizon,enabled)
+    exhausted=replace(projection,emitter=replace(projection.emitter,
+        next_private_sequence=integers([(1<<64)-1])))
+    failed,unchanged,failed_batch,failed_effect=Numbers.run_exact_batch(lambda:
+        storage.runtime.apply_hidden_terminal_without_orders(choice,storage.runtime.hidden_frontier.next_reference,
+            condition,end,exhausted,sampler))
+    assert failed_effect.fault.cpu().tolist()==[1]
+    assert not failed_effect.resolved.any().cpu().item() and not failed_batch.emitted.any().cpu().item()
+    assert not failed.source_resolutions.present.any().cpu().item()
+    assert failed.resolution_obligations.reference_indices.cpu().tolist()==[[-1]]
+    assert failed.hidden_frontier.next_reference.cpu().tolist()==terminal_before.hidden_frontier.next_reference.cpu().tolist()
+    assert values(unchanged.emitter.next_private_sequence)==[(1<<64)-1]
     candidate,projected,batch,effect=Numbers.run_exact_batch(lambda:storage.runtime.apply_hidden_terminal_without_orders(
         choice,storage.runtime.hidden_frontier.next_reference,condition,end,projection,sampler))
     assert effect.fault.cpu().tolist()==[0] and effect.resolved.cpu().tolist()==[True]
@@ -150,6 +161,9 @@ def main():
     identity=json.loads(original_result['resolution_identity'].split(':',1)[1])[-1]['Resolution']['source_resolution_id']
     assert identity==reference['event_id'] and original_result['payout_vector']==reference['terminal']
     actual_row=batch.rows.flatten()
+    assert projection.normalizer.bank.payload_schemas[actual_row].cpu().tolist()==[17]
+    sys.path.insert(0,str(root/'shared-run/gpu'))
+    from cancel_projection import cancellation_rows_from_closed
     decoded,error=Numbers.run_exact_batch(lambda:decode_fields(projection.normalizer.bank.semantic[actual_row],
         ['scalar']*4,batch.emitted.flatten()))
     assert error.cpu().tolist()==[0] and [value.cpu().item() for value in decoded]==[0,0,column[3],column[2]]
@@ -169,6 +183,10 @@ def main():
     gates=gates.set_public(tensor([source['resolved_close_at']]),enabled)
     pending,closed=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
     assert closed.emitted.cpu().tolist()==[[True]]
+    targets,completions=Numbers.run_exact_batch(lambda:
+        cancellation_rows_from_closed(projection.normalizer.bank,[batch],closed))
+    assert targets.fault.cpu().tolist()==[0] and completions.fault.cpu().tolist()==[0]
+    assert not targets.emitted.any().cpu().item() and not completions.emitted.any().cpu().item()
     pending,repeated=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
     assert not repeated.emitted.any().cpu().item()
     # 同一固定图接后继真实Lifecycle；此前从未提前安装它。
@@ -198,6 +216,8 @@ def main():
         'actual_control_facts_consumed_after_terminal':len(source['original_controls']),
         'actual_first_Resolved_canonical_identity_full_payout_source_and_NOE_metadata_checked':True,
         'Terminal_resource_exit_withholds_state_and_Resolved_feedback_checked':True,
+        'Terminal_private_sequence_overflow_reverts_candidate_and_withholds_Resolved_checked':True,
+        'Resolved_schema_is_distinct_from_CancelCompleted_at_actual_consumer_checked':True,
         'no_orders_or_pending_fills_in_original_Terminal_population':True,
         'cold_projection_prefix_initialization':True,
         'Resolved_Ledger_consumer_and_request_settlement_complete':False,

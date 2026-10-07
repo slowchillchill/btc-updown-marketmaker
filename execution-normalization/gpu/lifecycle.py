@@ -70,7 +70,7 @@ def map_resolved_position(account,condition,resolution_identity,terminal_identit
     fault |= ((account<0)|(condition<0)|(resolution_identity<0)|(terminal_identity<0)).to(torch.int32)
     logical=encode_fields([account,torch.full_like(account,9),private])
     semantic=encode_fields([account,condition,resolution_identity,terminal_identity])
-    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,16)
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,17)
 
 
 def map_taker_contribution(record,frame,rebate_rate,private,ordinal,account,condition):
