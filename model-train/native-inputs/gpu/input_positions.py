@@ -10,6 +10,7 @@ from trade_success import sum_rows
 @dataclass(frozen=True)
 class PositionInputs:
     values: torch.Tensor  # [roots,2scopes,2fields,2sides,3]，原54—77。
+    difference: torch.Tensor  # [roots,3]，原current实际余额Up−Down，78—80。
     fault: torch.Tensor
 
 
@@ -60,12 +61,20 @@ def position_inputs(ledger, conditions, present, applicable, asset_outcomes):
             integer = numbers.ExactInt.from_i64_tensor(torch.zeros(roots*4,dtype=torch.int64,device=device))
             total = numbers.ExactRational(integer,integer.constant(1))
         known = binding_known & ~(member & ~source_known[None,None,None,:]).any(3)
+        if len(fields)==0:
+            current=torch.arange(roots,device=device)*4
+            difference=take_ratio(total,current)-take_ratio(total,current+1)
+            difference_value,difference_error=difference.project(operation=1)
+            difference_known=known[:,0].all(1)&applicable[:,0]
+            difference_fields=torch.stack((torch.where(difference_known,difference_value,0.),
+                difference_known.float(),applicable[:,0].float()),-1)
+            fault|=torch.where(applicable[:,0],difference_error,0)
         value, error = total.project(operation=1)
         fields.append(torch.stack((torch.where(known & applicable[:,:,None],value.reshape(roots,2,2),0.0),
             (known & applicable[:,:,None]).float(),applicable[:,:,None].expand(roots,2,2).float()),-1))
         fault |= numbers.combine_fault_rows(torch.where(applicable[:,:,None],error.reshape(roots,4).reshape(roots,2,2),0).reshape(roots,-1))
     fault |= numbers.combine_fault_rows(torch.where(scope,costs.fault[None,None,:],0).reshape(roots,-1))
-    return PositionInputs(torch.stack(fields,2),fault)
+    return PositionInputs(torch.stack(fields,2),difference_fields,fault)
 
 
 def write_position_fields(slow, inputs):
@@ -73,4 +82,5 @@ def write_position_fields(slow, inputs):
         raise TypeError('持仓字段写入同设备float32 slow433')
     result = slow.clone()
     result[:,54:78] = inputs.values.reshape(slow.size(0),24)
+    result[:,78:81] = inputs.difference
     return result

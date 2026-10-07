@@ -27,6 +27,7 @@ def check(source,noe,batches,order,receipt,target,cancel_batch):
     from transport import compact_committed_batches
     from validate_order_funds import check as check_funds
     from validate_market_economics import check as check_markets
+    from validate_market_account import origin as market_origin,check as check_market_account
     run=Numbers.run_exact_batch
     tensor=lambda value,dtype=torch.int64:torch.tensor(value,dtype=dtype,device='cuda')
     zero=tensor([0])
@@ -53,7 +54,8 @@ def check(source,noe,batches,order,receipt,target,cancel_batch):
         integers([initial['ledger_entry_seq']]),integers([initial['ledger_local_prefix']]),pools,
         position_costs=PositionCosts.empty(1,max(1,width),'cuda'),
         order_funds=OrderFunds.empty(1,max(1,width),max(1,width),width,'cuda'),
-        unresolved_markets=UnresolvedMarkets.open(pools,zero)))
+        unresolved_markets=UnresolvedMarkets.open(pools,zero),
+        market_balance_origin=market_origin(source['opening_ledger'],source['initial'][0]['market']['condition_id'])))
     pending=run(lambda:PendingRecords.from_columns(first.emitted,first.received_at,first.private_sequences,
         Numbers.ExactInt.from_i64_tensor(noe.normalizer.bank.source_order[first.rows.flatten(),3]),first.rows,integers([0])))
     state=PublicLedgerState(pending,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),
@@ -80,6 +82,7 @@ def check(source,noe,batches,order,receipt,target,cancel_batch):
     assert amounts(state.ledger.platform.outcomes)==[Fraction(assets.get(token,'0')) for token in ['1','2']]
     assert check_funds(state.ledger,source['cancel_ledger_before'])
     assert check_markets(state.ledger,source['cancel_ledger_before'],source['initial'][0]['market']['condition_id'])
+    check_market_account(state.ledger,source['cancel_ledger_before'],source['initial'][0]['market']['condition_id'])
     # 本场景订单来源与receipt来自实际设备请求/接纳，不从oracle派生承诺初始化。
     intents=FrozenIntentOrders(order.present[:,None],order.sequence,active[:,None],target,
         torch.zeros((1,1),dtype=torch.bool,device='cuda'),(receipt.registered|receipt.duplicate)[:,None])
@@ -132,6 +135,7 @@ def check(source,noe,batches,order,receipt,target,cancel_batch):
     original=expected['platform_confirmed_projection']
     assert amounts(state.ledger.platform.balances)==[Fraction(original[name]) for name in names]
     assert check_funds(state.ledger,source['cancel_ledger_after'])
+    check_market_account(state.ledger,source['cancel_ledger_after'],source['initial'][0]['market']['condition_id'])
     canceled=run(lambda:state.freeze_account(intents,at))
     assert canceled.fault.cpu().tolist()==[0] and canceled.orders.cancellable.cpu().tolist()==[[False]]
     assert amounts(canceled.funds.actual_available)==[Fraction(source['cancel_ledger_after']['cash']['actual_available_pusd'])]

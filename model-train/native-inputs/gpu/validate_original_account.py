@@ -21,6 +21,9 @@ from input_account import account_inputs_at_prefix
 from reservation import ReservationBook
 from trade_success import TradeSuccess
 from registry import PublicRegistryState, PublicRegistryEvents, FrozenIntentOrders
+from memory import EconomicColumns
+from admission_lifecycle import LifecycleDirectory
+from account_read import MarketBalanceOrigin
 
 
 def validate(groups):
@@ -74,14 +77,22 @@ def validate(groups):
     intents = FrozenIntentOrders(empty,zero,empty,ratio,empty,empty)
     registry = PublicRegistryState(PublicRegistryEvents.empty(1,'cuda'))
     checked = 0
+    roles=set()
     for index,g in enumerate(groups):
         original = g['frozen_account_source']
         if original['ledger']['market_projections'] or not g['rows']:
             continue
+        roles.add(g['rows'][0]['role'])
         cash = original['economics']['cash']
         cutoff = torch.tensor([g['cutoff']['decision_time']['logical_time_utc_ms']],device='cuda')
         ledger.reservations = ReservationBook.empty(1)
         ledger.trade_success = TradeSuccess.open(1,1,'cuda')
+        ledger.columns=EconomicColumns.empty(1,'cuda')
+        ledger.orders=LifecycleDirectory.empty(1,1,device='cuda')
+        ledger.trades=LifecycleDirectory.empty(1,1,device='cuda')
+        ledger.platform.platform_source_prefix=integers([original['ledger']['platform_source_prefix']])
+        ledger.market_balance_origin=MarketBalanceOrigin.zero_opening(ledger.platform.platform_source_prefix,
+            known=torch.ones(1,dtype=torch.bool,device='cuda'))
         frozen = SimpleNamespace(ledger=ledger,cutoff=cutoff,fault=ledger.fault,
             orders=registry.freeze_orders(intents,cutoff),order_sources=registry.freeze_order_sources(intents,cutoff),
             funds=SimpleNamespace(**{name:rational([cash[source]]) for name,source in [
@@ -91,19 +102,23 @@ def validate(groups):
         packed = Numbers.run_exact_batch(lambda:account_inputs_at_prefix(frozen,market_prefix,
             torch.arange(len(identities),device='cuda'),torch.tensor([index],device='cuda'),
             torch.tensor([-10_000],device='cuda'),torch.empty((1,0),dtype=torch.int64,device='cuda'),
-            empty,torch.tensor([a['outcome']['index'] for a in assets],device='cuda')))
+            empty,torch.tensor([a['outcome']['index'] for a in assets],device='cuda'),
+            ledger_prefix_known=torch.ones(1,dtype=torch.bool,device='cuda'),
+            row_role=torch.tensor([{'ContextOnly':0,'DecisionRequired':1}[g['rows'][0]['role']]],device='cuda')))
         expected_current = -1 if g['current'] is None else slots[g['current']]
         assert packed.scopes.current_market.cpu().tolist() == [expected_current]
         assert packed.inputs.fault.cpu().tolist() == [0]
         expected = torch.tensor(g['rows'][0]['slow'],dtype=torch.float32)
-        torch.testing.assert_close(packed.inputs.slow[0,:78].cpu(),expected[:78],rtol=0,atol=0)
+        torch.testing.assert_close(packed.inputs.slow[0,:98].cpu(),expected[:98],rtol=0,atol=0)
+        assert packed.inputs.provided[0,:98].all().cpu().item()
         checked += 1
-    assert checked >= 2
+    assert checked >= 2 and roles=={'ContextOnly','DecisionRequired'}
     return {'original_NativeInputRoot_encoder_invoked': True,
-        'actual_public_bound_prefix_scope_selector_and_native_0_to_77_checked': checked,
+        'actual_public_bound_prefix_scope_selector_and_native_0_to_97_checked': checked,
         'same_ActionBeforeRead_source_used': True,
         'public_current_without_Ledger_market_cold_cost_unknown_still_Known_zero_checked': True,
-        'checked_native_fields': [0, 77], 'continuous_GPU_account_or_full_slow433_checked': False}
+        'actual_state_row_ContextOnly_DecisionRequired_roles_checked': True,
+        'checked_native_fields': [0, 97], 'continuous_GPU_account_or_full_slow433_checked': False}
 
 
 if __name__ == '__main__':

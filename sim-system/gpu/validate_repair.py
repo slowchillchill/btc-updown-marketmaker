@@ -101,12 +101,15 @@ def check(source,start,complete,*,bank,pending,waiting,delivered):
     def encode_frozen(account):
         return frozen_account_inputs(account,tensor([[[],[]]],torch.bool),applicable,applicable,
             scope_conditions=conditions,scope_present=present,asset_outcomes=outcomes,
-            executed_prefix_known=yes,settlement_prefix_known=yes)
+            executed_prefix_known=yes,settlement_prefix_known=yes,ledger_prefix_known=yes)
     native=Numbers.run_exact_batch(lambda:encode_frozen(frozen_account))
     final_gap=[expected(source['reservation_checkpoints'][-1])[outcomes.cpu().tolist().index(i)] for i in range(2)]
     final_cap=[max(value-(Fraction(target) if i==side else Fraction(0)),Fraction(0)) for i,value in enumerate(final_gap)]
     assert final_cap[side]<final_gap[side]
     assert native.provided[0,164:176].all().cpu().item() and native.fault.cpu().tolist()==[0]
+    assert native.provided[0,78:93].all().cpu().item() and native.provided[0,95:98].all().cpu().item()
+    original_market=next(row for row in source['reservation_checkpoints'][-1]['projection']['market_projections'] if row['condition_id']==condition)
+    torch.testing.assert_close(native.slow[0,95:98].cpu(),torch.tensor(triples([Fraction(original_market['current_all_in_commitment_pusd'])])),rtol=1e-6,atol=1e-7)
     torch.testing.assert_close(native.slow[0,164:176].cpu(),torch.tensor(triples(final_gap)+triples(final_cap)),rtol=1e-6,atol=1e-7)
     incomplete=Numbers.run_exact_batch(lambda:encode_frozen(replace(frozen_account,commitments=None)))
     assert torch.equal(incomplete.slow[:,164:170],native.slow[:,164:170])

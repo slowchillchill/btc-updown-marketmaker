@@ -264,6 +264,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     from validate_market_economics import open_prefix as open_markets,check as check_markets
     from validate_rebate_read import check as check_rebates
     from validate_accepted_principal import open_prefix as open_principal,check as check_principal,check_growth as check_principal_growth
+    from validate_market_account import origin as market_origin,check as check_market_account,check_nonzero_origin
     from success_pool import SuccessPools
     pools=Numbers.run_exact_batch(lambda:SuccessPools.open(torch.tensor([0,0],device='cuda'),
         torch.tensor([0,0],device='cuda'),torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1))
@@ -280,7 +281,8 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         order_funds=open_prefix(1,capacity,capacity,columns.row_refs.size(1),source['reservation_checkpoints'][0]),
         unresolved_markets=open_markets(pools,source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id']),
         projected_markets=initial_population,lifecycle_capacity=capacity,
-        accepted_principal=open_principal(pools,source['reservation_checkpoints'][0])))
+        accepted_principal=open_principal(pools,source['reservation_checkpoints'][0]),
+        market_balance_origin=market_origin(source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id'])))
     admission=open_initial()
     cost=Numbers.run_exact_batch(lambda:limit_buy_cost(integers([500]),rational(['0.3']),rational([source['fee_rate']]),
         source['fee_exponent'],post_only=torch.tensor([False],device='cuda'),minimum_principal_micro=integers([1_000_000])))
@@ -299,6 +301,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     admission=Numbers.run_exact_batch(lambda:admission.submission_started(zero,zero,zero,zero,torch.tensor([True],device='cuda')))
     assert values(admission.current_entry_sequence)==[5] and values(admission.current_local_prefix)==[2]
     append_start=admission
+    check_market_account(admission,source['reservation_checkpoints'][2],source['initial'][0]['market']['condition_id'])
     # 消费实际Submission Accepted，尚未消费任何economic；不能把接纳计数拖到经济到达。
     submitted_reference=next(row for row in source['reservation_checkpoints']
         if row['request'] and row['request']['status']=='PlatformConfirmedPendingEconomicFact')
@@ -312,6 +315,8 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert values(submission_only.platform.platform_source_prefix)==[0]
     assert not (submission_only.applied&columns.enabled).any().cpu().item()
     assert check_principal(submission_only,submitted_reference)>0
+    check_market_account(submission_only,submitted_reference,source['initial'][0]['market']['condition_id'])
+    assert next(m for m in submitted_reference['projection']['market_projections'] if m['condition_id']==source['initial'][0]['market']['condition_id'])['open_order_count']>0
     assert submission_only.orders.accepted_principal_counted.sum().cpu().item()==1
     from closed import ClosedAdmission
     cache=ClosedAdmission.empty(columns)
@@ -386,6 +391,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert check_markets(admission,source['reservation_checkpoints'][-1],source['initial'][0]['market']['condition_id'])
     assert check_rebates(admission,source['reservation_checkpoints'][-1],source['initial'][0]['market']['condition_id'])
     check_principal(admission,source['reservation_checkpoints'][-1])
+    check_market_account(admission,source['reservation_checkpoints'][-1],source['initial'][0]['market']['condition_id'])
     from validate_repair import check as check_repair
     repair_checked=check_repair(source,append_start,admission,bank=state.normalizer.bank,
         pending=pending,waiting=cache,delivered=delivered)
@@ -426,7 +432,8 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     early=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,integers([3]),integers([0]),pools,
         order_funds=open_prefix(1,columns.row_refs.size(1),columns.row_refs.size(1),columns.row_refs.size(1),source['reservation_checkpoints'][0]),
         unresolved_markets=open_markets(pools,source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id']),
-        accepted_principal=open_principal(pools,source['reservation_checkpoints'][0])))
+        accepted_principal=open_principal(pools,source['reservation_checkpoints'][0]),
+        market_balance_origin=market_origin(source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id'])))
     early,_=Numbers.run_exact_batch(lambda:early.reserve_action(zero[:,None],zero[:,None],rational(['1.5']),rational(['0']),
         torch.ones((1,1),dtype=torch.bool,device='cuda')))
     early=Numbers.run_exact_batch(lambda:early.submission_started(zero,zero,zero,zero,torch.tensor([True],device='cuda')))
@@ -438,6 +445,8 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     enabled=torch.tensor([True],device='cuda')
     early,used=Numbers.run_exact_batch(lambda:early.apply_record(torch.tensor([first_economic],device='cuda'),enabled,torch.tensor([10000],device='cuda'),enabled))
     reference=source['economic_first_reference']
+    check_market_account(early,reference['before'],source['initial'][0]['market']['condition_id'])
+    economic_before_submission=early
     assert check_order_funds(early,reference['before'])
     assert check_markets(early,reference['before'],source['initial'][0]['market']['condition_id'])
     early_cumulative=check_principal(early,reference['before'])
@@ -453,6 +462,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert check_order_funds(early,reference['after'])
     assert check_markets(early,reference['after'],source['initial'][0]['market']['condition_id'])
     assert check_principal(early,reference['after'])==early_cumulative
+    nonzero_origin_checked=check_nonzero_origin(economic_before_submission,early,reference,source['initial'][0]['market']['condition_id'])
     assert values(early.reservations.last_sequences)[:2]==[reference['after']['request']['last_ledger_entry_seq'],reference['unsent']['last_ledger_entry_seq']]
     fill_economic=next(i for i in range(columns.row_refs.size(1)) if columns.enabled[0,i].cpu().item() and sequence[i]==2)
     fill_sequence=values(early.lifecycle.fills)
@@ -464,6 +474,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert not early.trade_success.has_fact.any().cpu().item()
     assert check_order_funds(early,reference['economic_before_trade'])
     assert check_markets(early,reference['economic_before_trade'],source['initial'][0]['market']['condition_id'])
+    check_market_account(early,reference['economic_before_trade'],source['initial'][0]['market']['condition_id'])
     early,used=Numbers.run_exact_batch(lambda:early.apply_record(torch.tensor([pending_trade],device='cuda'),enabled,torch.tensor([10000],device='cuda'),enabled))
     assert used.cpu().tolist()==[True] and early.fault.cpu().tolist()==[0]
     assert int(early.trades.flags.sum().cpu())==reference['pending_after_economic']['projection']['platform_confirmed_projection']['pending_fill_count']==1
@@ -471,6 +482,8 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert not early.trade_success.success_applied.any().cpu().item()
     assert check_order_funds(early,reference['pending_after_economic'])
     assert check_markets(early,reference['pending_after_economic'],source['initial'][0]['market']['condition_id'])
+    check_market_account(early,reference['pending_after_economic'],source['initial'][0]['market']['condition_id'])
+    assert next(m for m in reference['pending_after_economic']['projection']['market_projections'] if m['condition_id']==source['initial'][0]['market']['condition_id'])['pending_fill_count']>0
     funds=Numbers.run_exact_batch(lambda:admission.funds())
     assert admission.projected_markets.present.cpu().tolist()==[[True]], 'Converted和归零不移除市场人口'
     expected_cash=source['reservation_checkpoints'][-1]['cash']
@@ -614,7 +627,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert ledger.available_at[ledger.received].cpu().tolist()==[10000]*7
     from validate_two_root_projection import validate_two_root_projection
     two_root_report=validate_two_root_projection(source)
-    return {'repair_fields':repair_checked,'two_root_projection':two_root_report,'device_generated_NOE_records':checked,'device_batches':len(batches),'original_positions_and_receive_order_checked':True,
+    return {'nonzero_market_origin_all_in_and_counts':nonzero_origin_checked,'repair_fields':repair_checked,'two_root_projection':two_root_report,'device_generated_NOE_records':checked,'device_batches':len(batches),'original_positions_and_receive_order_checked':True,
         'bank_physical_rows':state.normalizer.bank.kinds.numel(),'masked_or_unemitted_rows':state.normalizer.bank.kinds.numel()-checked,
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,

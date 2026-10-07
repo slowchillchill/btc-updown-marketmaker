@@ -93,6 +93,7 @@ def main():
     from market_economics import UnresolvedMarkets
     from resolution import ResolutionSources,MarketResolutions
     from closed import ClosedAdmission
+    from validate_market_account import origin as market_origin,check as check_market_account
     spec=importlib.util.spec_from_file_location('pair_redemption_platform',root/'ledger/gpu/platform.py')
     module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
     columns=EconomicColumns.from_projection_batches([batch])
@@ -127,13 +128,17 @@ def main():
                 if trade['fact']['token_id']==token),Fraction(0)) for token in tokens]))
         ledger=AdmissionLifecycle.open(platform,projection.normalizer.bank,columns,
             integers([before['projection']['ledger_entry_seq']]),integers([before['projection']['ledger_local_prefix']]),pools,
-            position_costs=costs,order_funds=OrderFunds.empty(1,2,2,2,'cuda',known=True),resolutions=resolutions)
+            position_costs=costs,order_funds=OrderFunds.empty(1,2,2,2,'cuda',known=True),resolutions=resolutions,
+            market_balance_origin=market_origin(before,before['markets'][0]['condition_id']))
         # before为成功Request已实际消费、Economic尚未消费的原提交前缀。
         return replace(ledger,applied=tensor([[True,False]],torch.bool),
             applied_sequences=integers([source['request_record']['ledger_entry_seq'],0]),
             maker_cash=rational([Fraction(before['cash']['maker_available_pusd'])+Fraction(before['cash']['maker_reserved_pusd'])]))
     ledger=Numbers.run_exact_batch(initialize_ledger)
     old=ledger
+    assert before['projection']['platform_confirmed_projection']['open_order_count']==0
+    assert before['projection']['platform_confirmed_projection']['pending_fill_count']==0
+    check_market_account(old,before,before['markets'][0]['condition_id'])
     assert old.resolutions.requests.present.cpu().tolist()==[True]
     assert old.resolutions.requests.outcomes.cpu().tolist()==[2]
     assert old.resolutions.requests.observations.cpu().tolist()==[9]
@@ -170,7 +175,7 @@ def main():
         inputs=frozen_account_inputs(frozen,order_members,applicable,applicable,
             scope_conditions=scopes,scope_present=present,asset_outcomes=outcomes,
             success_prefix_known=enabled,settlement_prefix_known=enabled,
-            executed_prefix_known=~enabled)
+            executed_prefix_known=~enabled,ledger_prefix_known=enabled)
         return frozen,inputs
     before_frozen,before_native=Numbers.run_exact_batch(lambda:frozen_inputs(old,original_waiting))
     ledger,waiting=Numbers.run_exact_batch(lambda:waiting.drain(ledger,torch.ones_like(columns.enabled)))
@@ -178,6 +183,7 @@ def main():
     assert values(ledger.current_entry_sequence)==[after['projection']['ledger_entry_seq']]
     assert values(ledger.platform.platform_source_prefix)==[after['projection']['platform_source_prefix']]
     assert values(ledger.current_local_prefix)==[after['projection']['ledger_local_prefix']]
+    check_market_account(ledger,after,after['markets'][0]['condition_id'])
     assert values(ledger.applied_sequences)==[source['request_record']['ledger_entry_seq'],after['projection']['ledger_entry_seq']]
     assert ledger.available_at.cpu().tolist()[0][1]==visible
     ratio=lambda value:[Fraction(n,d) for n,d in zip(values(value.numerator),values(value.denominator))]
@@ -197,6 +203,7 @@ def main():
     after_frozen,after_native=Numbers.run_exact_batch(lambda:frozen_inputs(ledger,waiting))
     def source_cost(value):return Fraction(value['numerator'])/Fraction(value['denominator'])
     def triple(value):return [math.copysign(math.log1p(abs(float(value))),float(value)),1.,1.]
+    differences=[]
     for current,reference,native in [(old,before,before_native),(ledger,after,after_native)]:
         expected=reference['markets'][0]
         read=Numbers.run_exact_batch(lambda:net_success(current.success_pools,current.resolutions,prefix_known=enabled))
@@ -215,8 +222,17 @@ def main():
         # 本冷前缀没有完整Trade详情；实际typed Resolved仍使current gap/cap为NA。
         assert native.provided[0,164:176].all().cpu().item()
         assert native.slow[0,164:176].cpu().tolist()==[0.]*12
+        original_market=reference['projection']['market_projections'][0]
+        balances_by_token={item['token_id']:Fraction(item['balance_shares']) for item in original_market['outcome_balances']}
+        balances_by_side={asset['outcome']['index']:balances_by_token.get(asset['token_id'],Fraction(0)) for asset in assets}
+        difference=balances_by_side[0]-balances_by_side[1]
+        differences.append(difference)
+        torch.testing.assert_close(native.slow[0,78:81].cpu(),torch.tensor(triple(difference)),rtol=1e-6,atol=1e-7)
+        torch.testing.assert_close(native.slow[0,95:98].cpu(),torch.tensor(triple(Fraction(original_market['current_all_in_commitment_pusd']))),rtol=1e-6,atol=1e-7)
+        assert native.provided[0,78:93].all().cpu().item() and native.provided[0,95:98].all().cpu().item()
         for start,end in [(128,134),(140,146),(155,164)]:
             assert native.slow[0,start:end].cpu().tolist()==[0.,1.,1.]*((end-start)//3)
+    assert differences[0]!=0 and differences[1]==0
     # 缺结算历史不是已知Unresolved；完整空scope仍为Known零。
     unavailable=replace(after_frozen,ledger=replace(ledger,resolutions=None))
     unknown=Numbers.run_exact_batch(lambda:frozen_account_inputs(unavailable,order_members,applicable,applicable,

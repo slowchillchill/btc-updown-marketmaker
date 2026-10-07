@@ -81,10 +81,14 @@ class AdmissionLifecycle:
     projected_markets: object | None = None
     resolutions: object | None = None
     accepted_principal: object | None = None
+    market_balance_origin: object | None = None  # 原冷起点市场余额及经济prefix，None是Unknown。
 
     @classmethod
-    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None,projected_markets=None,resolutions=None,lifecycle_capacity=None,accepted_principal=None):
+    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None,projected_markets=None,resolutions=None,lifecycle_capacity=None,accepted_principal=None,market_balance_origin=None):
         roots,width=columns.row_refs.shape
+        if market_balance_origin is not None and (market_balance_origin.known.shape!=(roots,)
+                or market_balance_origin.conditions.device!=columns.row_refs.device):
+            raise TypeError('市场冷余额起点须与Ledger同根同设备')
         capacity=max(1,width) if lifecycle_capacity is None else lifecycle_capacity
         if type(capacity) is not int or capacity<1:
             raise ValueError('身份目录物理容量须为正整数，可从资源退出边界增长')
@@ -107,7 +111,7 @@ class AdmissionLifecycle:
             current_entry_sequence,current_local_prefix,empty,empty.clone(),torch.zeros_like(columns.enabled),
             ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=empty.device)),
             torch.zeros(roots,dtype=torch.int64,device=empty.device),torch.zeros(roots,dtype=torch.bool,device=empty.device),
-            torch.zeros_like(columns.row_refs),platform.fault | accepted_principal.fault | (0 if projected_markets is None else projected_markets.fault),projected_markets,resolutions,accepted_principal)
+            torch.zeros_like(columns.row_refs),platform.fault | accepted_principal.fault | (0 if projected_markets is None else projected_markets.fault),projected_markets,resolutions,accepted_principal,market_balance_origin)
 
     def funds(self):
         roots=self.fault.numel()

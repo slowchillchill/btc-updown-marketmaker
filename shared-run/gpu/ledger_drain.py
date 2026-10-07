@@ -12,7 +12,7 @@ from resolution import MarketResolutions
 
 
 def _shared(value, name):
-    return ((isinstance(value, AdmissionLifecycle) and name in ('columns','lifecycle'))
+    return ((isinstance(value, AdmissionLifecycle) and name in ('columns','lifecycle','market_balance_origin'))
         or (isinstance(value, MarketResolutions) and name == 'sources')
         or (isinstance(value, ClosedDrainCursor) and name == 'order'))
 

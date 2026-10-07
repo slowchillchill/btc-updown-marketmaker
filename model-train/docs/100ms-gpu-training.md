@@ -996,7 +996,24 @@ Native `input_success` 只按同冻结 scope 精确归约这个公共读面，�
 定向验证复用真实三成交的正常接纳和 CPU Ledger 合法 economic→迟到 Submission 归约，
 核原累计金额、另一未发送预留、分页续跑、资源增长及旧冻结。
 后者是合法 NOE 乱序归约证据，不代表自然 public 调度经济先公开；本批未新增 OrderQuery 生产路径。
-完整账户输入与当前 all-in 读面仍继续接线。
+当前 all-in 读面见下文；完整账户输入仍继续接线。
+
+### 市场余额差、账本计数与当前 all-in
+
+`ledger/gpu/account_read.py` 按同一已提交 Ledger 前缀读取开放订单、待成交计数及市场 all-in。
+计数来自原订单／成交目录的 occupied 和开放标志，不取 Registry 订单人口。
+all-in 精确合计实际市场本金与即时费占款、PlatformPending、本地未发送／发送未知预留、
+实际持仓成本及已付费用。它与累计接纳本金独立。
+实际市场冷余额和经济起始序一起安装为只读 `MarketBalanceOrigin`，后续只加已应用且晚于
+该起始序的原经济列；未安装的非空市场历史保持 Unknown，不能从空目录推零。
+下一根须安装新来源，活动候选不能替换来源，旧冻结保留其实际来源对象。
+
+Native 精确计算 current 的 Up−Down，末端才投影到 slow78:81；账本 current/old 计数写81:93，
+实际状态行角色写93:95，current all-in 写95:98。行角色须由原状态行传入，未传入就不标 provided。
+实际 scope 无 current 时保留 NA，完整账本图中没有市场记录时按原 lsum 为 Known0。
+有限验证沿实际接纳、经济先到、迟到 Submission、成交待定、取消及双腿兑付 checkpoint，
+核独立 CPU 金额／计数、非零冷经济起点去重、固定图重放与旧冻结。
+原 Native 真实两种行角色及零市场完整前缀另核0:98；这些组件能力不是完整账户或活动根恢复。
 
 ### 未判定市场利润与最大历史亏损
 
