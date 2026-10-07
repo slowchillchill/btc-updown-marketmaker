@@ -218,6 +218,9 @@ def validate_actual_cancel(source,delta):
     assert native.slow[0,60:66].cpu().tolist()==[0.,0.,1.]*2, '未安装中途持仓成本不冒充已知零'
     assert native.slow[0,66:78].cpu().tolist()==[0.,1.,1.]*4, '空旧scope是Known零'
     assert native.provided[0,:78].all().cpu().item()
+    assert native.provided[0,98:110].all().cpu().item()
+    torch.testing.assert_close(native.slow[0,98:110].cpu(),
+        torch.tensor([0.,1.,1.,log(2),1.,1.,0.,1.,1.,0.,1.,1.]),rtol=1e-6,atol=1e-7)
     assert native.slow[0,412:415].cpu().tolist()==[0.,1.,1.]
     assert native.slow[0,415:418].cpu().tolist()==[0.,1.,1.]
     for offset,count in [(418,1),(421,0),(424,0)]:

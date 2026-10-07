@@ -658,7 +658,7 @@ slow433/cancel184，也不负责选择current/old市场或推进根时钟。
 Registry、原订单来源、资金、已领取待消费NOE人口和已登记撤单请求完成读面。
 `native-inputs/gpu/input_account.py` 从该快照写资金110—121、订单382—411、
 待NOE412—414和完整全局请求415—432，并共同携带故障。输出的`provided`显式标明
-已写字段；未接入持仓、承诺、其它经济/结算/NAV字段前，不能把剩余零槽送作完整账户433。
+已写字段；其它经济/结算/NAV字段接齐前，不能把剩余零槽送作完整账户433。
 请求目录尚未绑定时保留None，不解释为已知空请求集合。旧冻结不随后续Ledger重试改写。
 显式提供原current/old condition作用域时，`input_reservations.py` 写0—53预留字段，
 分别读取发送前、发送未知、平台确认等待的本金、费用和人口。当前市场不存在为NA，
@@ -676,7 +676,7 @@ Converted/Released或余额归零不清除。共享condition物理目录未包�
 账户装配现可按同一冻结作用域写入54—77：真实平台资产份额和实际持仓成本。
 成本未安装的中途前缀保持Unknown，不用成功池成本替代；缺少真实资产绑定也保持Unknown。
 空旧作用域保持Known零，当前作用域的适用位仍由原选择器提供。
-当前有限验证对照原Ledger份额读数，尚未升级为完整原Native433编码对照。
+原Native真实consume/encode的五个冷冻结前缀已对照0—77；完整433仍未验收。
 
 `account_inputs_at_prefix` 将原公开前缀、根起点、condition字典序和实际Ledger市场人口
 接到同一次冻结账户的current/old选择及已交付字段装配。验证器复用原Native真实
@@ -684,3 +684,16 @@ consume/encode的五个冷冻结前缀核对0—77；尚未证明连续GPU账户
 `input_executed.py` 复用原公开Trade执行量、本金和净费读面写176—211；它需要显式
 完整Trade前缀known。未传该能力时不标provided，中途未知人口不以空目录冒充零。
 这些可选装配入口保留各自能力边界，完整根仍须统一提供真实时钟、公开前沿和全部账户状态。
+
+
+`input_success.py` 写122—163：原成功量/本金、市场级配对和未配对孤腿。
+逐腿字段需要原outcome绑定；市场级配对按(root,condition)只取一次，不因一侧outcome缺失
+变Unknown。完整成功前缀known仍须显式安装。原公共两腿三成交的整量/分量成本池验证
+已对照非零配对、孤腿及精确1/3尾差；这条直接池接口不替代Admission成功事务或恢复。
+
+`freeze_account(...,submitted_legs=...)` 可共同冻结完整receipt逐腿承诺；Native
+`input_commitments.py` 从原condition/token绑定写98—109。没有订单关联的已发送腿仍保留
+原target，不能从可撤对象人口推断责任。中途未安装公开Submission历史时，无明确结果的
+腿保持Unknown；实际收到的明确结果仍优先，Rejected的Known零不留人口。
+当前取消入口中未绑定腿是有限组件输入；原21前缀的真实receipt腿另有连续来源对照。
+尚未接全部请求登记、FOK与模型全根，因此不称完整slow433或合法Actor已交付。

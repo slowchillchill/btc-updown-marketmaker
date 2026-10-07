@@ -35,6 +35,13 @@ def frozen_account_inputs(account, scope_members, scope_known, scope_applicable,
         slow = write_reservation_fields(slow, reservations)
         provided[:, :54] = True
         fault |= reservations.fault
+        frozen_commitments = getattr(account,'commitments',None)
+        if frozen_commitments is not None and frozen_commitments.condition_slots is not None:
+            from input_commitments import commitment_inputs,write_commitment_fields
+            commitments = commitment_inputs(frozen_commitments,scope_conditions,scope_present,scope_applicable)
+            slow = write_commitment_fields(slow,commitments)
+            provided[:,98:110] = True
+            fault |= commitments.fault
         if executed_prefix_known is not None:
             from input_executed import executed_inputs, write_executed_fields
             executed = executed_inputs(account.ledger.trade_success,scope_conditions,scope_present,scope_applicable,
@@ -130,7 +137,7 @@ def account_inputs_at_prefix(account, market, condition_slots, prefixes, root_st
         executed_prefix_known=executed_prefix_known,success_prefix_known=success_prefix_known)
     slow = inputs.slow.clone()
     # 没有完整old人口时，已有成员之和不能冒充整个old作用域；保留适用Unknown。
-    for first,last in [(0,27),(54,66),(122,128),(134,140),(146,155),(176,194)]:
+    for first,last in [(0,27),(54,66),(98,104),(122,128),(134,140),(146,155),(176,194)]:
         width = last-first
         value = slow[:,first:first+2*width].reshape(roots,2,width//3,3)
         unknown = scopes.applicable & ~population_known
