@@ -394,13 +394,17 @@ fn failures_do_not_publish_partial_input_or_index_and_old_prefix_remains() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("recording");
         let mut core = core();
-        let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+        let mut writer =
+            PublicRecordingWriterV1::create_historical(&root, core.header(), config()).unwrap();
         let input = meta(0);
         let result = apply(&mut core, &input);
         writer.record(input, result).unwrap();
         writer.stabilize().unwrap();
         let old = serde_json::to_value(all_rows(&root, 1)).unwrap();
-        let input = pm(1, 1, 21_000, book("100"));
+        let input = record(
+            1,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot("depth", 100, 1))),
+        );
         let result = apply(&mut core, &input);
         faults::set(fault);
         if fault == "after_input" {
@@ -435,10 +439,36 @@ fn malformed_stable_parquet_is_an_error_not_finite_eof() {
 #[test]
 fn hidden_buckets_cross_pages_and_reference_only_buckets_close_globally() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("recording");
-    let mut core = core();
-    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
-    for input in [
+    let mut snapshot = snapshot("depth", 100, 1);
+    snapshot.timestamp_received = 26_000;
+    snapshot.collector_admission_time_utc_ms = 26_001;
+    let mut first = update(
+        "depth",
+        101,
+        101,
+        2,
+        Some(100),
+        None,
+        BinanceDepthStitchVerdict::Applied,
+        vec![level("64100", "0.2")],
+    );
+    first.timestamp_received = 26_002;
+    first.collector_admission_time_utc_ms = 26_003;
+    first.event_time = 24_000;
+    let mut second = update(
+        "depth",
+        102,
+        102,
+        3,
+        Some(100),
+        Some(101),
+        BinanceDepthStitchVerdict::Applied,
+        vec![level("64100", "0.3")],
+    );
+    second.timestamp_received = 26_004;
+    second.collector_admission_time_utc_ms = 26_005;
+    second.event_time = 23_000;
+    let inputs = [
         meta(0),
         pm(1, 1, 21_000, book("100")),
         pm(
@@ -450,152 +480,232 @@ fn hidden_buckets_cross_pages_and_reference_only_buckets_close_globally() {
             },
         ),
         twap_record(3, 60, 25_002, "65000000000000000000000"),
-        end(4),
-    ] {
-        let result = apply(&mut core, &input);
-        writer.record(input, result).unwrap();
-    }
-    writer.stabilize().unwrap();
-    let reader = PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap();
-    let prepared = prepare_hidden_v1(
-        core,
-        reader,
-        &temp.path().join("hidden"),
-        &config(),
-        "hidden-test".into(),
-    )
-    .unwrap();
-    let mut index = HiddenIndexReaderV1::open(&prepared, 1, 1 << 20).unwrap();
-    let mut reference_indices = Vec::new();
-    while let Some((position, entry)) = index.next_entry().unwrap() {
-        if let HiddenIndexEntryV1::Reference {
-            canonical_position, ..
-        } = entry
-        {
-            reference_indices.push(position);
-            assert_eq!(canonical_position, 7);
+        record(
+            4,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot)),
+        ),
+        record(
+            5,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(first)),
+        ),
+        record(
+            6,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(second)),
+        ),
+        end(7),
+    ];
+    let mut all_indices = Vec::new();
+    let mut all_buckets = Vec::new();
+    for historical in [false, true] {
+        let root = temp
+            .path()
+            .join(if historical { "compact" } else { "legacy" });
+        let mut core = core();
+        let mut writer = if historical {
+            PublicRecordingWriterV1::create_historical(&root, core.header(), config())
+        } else {
+            PublicRecordingWriterV1::create(&root, core.header(), config())
         }
-    }
-    let mut snapshots = Vec::new();
-    for page in [1, 2, 20] {
-        let mut reader = HiddenBucketReaderV1::open(&prepared, page, 1 << 20).unwrap();
-        let mut buckets = Vec::new();
-        while let Some(bucket) = reader.next_bucket().unwrap() {
-            buckets.push(bucket)
+        .unwrap();
+        for input in &inputs {
+            let result = apply(&mut core, input);
+            writer.record(input.clone(), result).unwrap();
         }
-        snapshots.push(buckets);
-    }
-    assert_eq!(snapshots[0], snapshots[1]);
-    assert_eq!(snapshots[0], snapshots[2]);
-    let buckets = &snapshots[0];
-    assert!(
-        buckets
+        writer.stabilize().unwrap();
+        let rows = all_rows(&root, 1);
+        let expected_descriptions: Vec<_> = rows
             .iter()
-            .any(|b| b.bucket_time_utc_ms == 21_000 && b.steps.len() > 2)
-    );
-    let last = buckets.last().unwrap();
-    assert!(last.steps.is_empty());
-    assert_eq!(last.reference_positions, reference_indices);
-    assert_eq!(last.closure, ReplayIndexClosureV1::EndOfInput);
-    let mut material = HiddenMaterialReaderV1::open(&prepared, &root, 2, 1 << 20).unwrap();
-    assert_eq!(material.metrics(), &HiddenMaterialReadMetricsV1::default());
-    let mut positions = Vec::new();
-    let mut actual_references = Vec::new();
-    loop {
-        let page = material.next_page().unwrap();
-        if page.is_empty() {
-            break;
-        }
-        for (position, record) in page {
-            positions.push(position);
-            if let ResolvedHiddenRecordV1::Reference {
+            .filter_map(|row| match row {
+                PublicStoredRowV1::BinanceDepthReference {
+                    canonical_position,
+                    binding,
+                    time,
+                } if time.source_event_at_utc_ms.is_some() => {
+                    Some((*canonical_position, binding.clone(), time.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let expected_references: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                PublicStoredRowV1::Canonical {
+                    canonical_position,
+                    record: CanonicalEventRecordV2::ReferenceEvent(event),
+                    ..
+                } if event.time.source_event_at_utc_ms.is_some() => Some((
+                    *canonical_position,
+                    serde_json::to_value(CanonicalEventRecordV2::ReferenceEvent(event.clone()))
+                        .unwrap(),
+                )),
+                _ => None,
+            })
+            .collect();
+        let reader = PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap();
+        let prepared = prepare_hidden_v1(
+            core,
+            reader,
+            &temp.path().join(if historical {
+                "hidden-compact"
+            } else {
+                "hidden-legacy"
+            }),
+            &config(),
+            "hidden-test".into(),
+        )
+        .unwrap();
+        let mut index = HiddenIndexReaderV1::open(&prepared, 1, 1 << 20).unwrap();
+        let mut indices = Vec::new();
+        let mut references = Vec::new();
+        while let Some((position, entry)) = index.next_entry().unwrap() {
+            if let HiddenIndexEntryV1::Reference {
                 canonical_position,
-                record,
-            } = record
+                source_at_utc_ms,
+                derivation_position,
+            } = &entry
             {
-                actual_references.push((canonical_position, serde_json::to_value(record).unwrap()));
+                references.push((
+                    position,
+                    *canonical_position,
+                    *source_at_utc_ms,
+                    *derivation_position,
+                ));
             }
+            indices.push(serde_json::to_value(entry).unwrap());
         }
-    }
-    assert_eq!(positions, (0..last.index_end).collect::<Vec<_>>());
-    assert_eq!(material.metrics().index_entries, last.index_end);
-    assert_eq!(material.metrics().peak_page_entries, 2);
-    assert!(material.metrics().decoded_derived_rows > 0);
-    assert!(material.metrics().decoded_recording_rows > 0);
-    // 原位置递增且同一消息跨页时，不应反复读取已经消费的历史。
-    let mut all = PublicRecordingReaderV1::recover(&root, 2, 1 << 20).unwrap();
-    let mut recording_rows = 0;
-    let mut expected_references = Vec::new();
-    while let Some(row) = all.next_row().unwrap() {
-        recording_rows += 1;
-        if let PublicStoredRowV1::Canonical {
-            canonical_position: 7,
-            record,
-            ..
-        } = row
-        {
-            expected_references.push((7, serde_json::to_value(record).unwrap()));
+        assert_eq!(
+            references
+                .iter()
+                .map(|r| (r.1, r.2, r.3))
+                .collect::<Vec<_>>(),
+            [(9, 24_000, 1), (10, 24_000, 2), (7, 25_000, 0)],
+            "源时间归并须保留原规范位置和派生顺序"
+        );
+        let mut snapshots = Vec::new();
+        for page in [1, 2, 20] {
+            let mut reader = HiddenBucketReaderV1::open(&prepared, page, 1 << 20).unwrap();
+            let mut buckets = Vec::new();
+            while let Some(bucket) = reader.next_bucket().unwrap() {
+                buckets.push(bucket);
+            }
+            snapshots.push(buckets);
         }
-    }
-    assert_eq!(actual_references, expected_references);
-    let mut all = HiddenStepReaderV1::open(&prepared, 2, 1 << 20).unwrap();
-    let mut derived_rows = 0;
-    while all.next_row().unwrap().is_some() {
-        derived_rows += 1;
-    }
-    assert!(
-        material.metrics().decoded_recording_rows <= recording_rows,
-        "原序跨页重复扫描: {:?}, 原文件行数 {recording_rows}",
-        material.metrics()
-    );
-    assert!(material.metrics().decoded_derived_rows <= derived_rows);
-    let completed = material.metrics().clone();
-    assert!(material.next_page().unwrap().is_empty());
-    assert_eq!(material.metrics(), &completed);
-    // derivation_position相同不足以配对：实际索引与派生步骤的完整引用必须一致。
-    let candidate = temp.path().join("mixed-index");
-    let mut writer = crate::gate_a::SequentialCaptureWriter::create(
-        "mixed-index",
-        &candidate,
-        std::sync::Arc::new(std::sync::Mutex::new(0)),
-        &config(),
-    )
-    .unwrap();
-    let mut original_index = crate::RunCursor::open(&prepared.index_path, 2, 1 << 20).unwrap();
-    let mut changed = false;
-    let mut sequence = 0;
-    while let Some(row) = original_index.next_row().unwrap() {
-        let mut entry: HiddenIndexEntryV1 = serde_json::from_slice(row.payload()).unwrap();
-        if !changed && let HiddenIndexEntryV1::Step(reference) = &mut entry {
-            reference.step_index += 1;
-            changed = true;
-        }
-        writer
-            .push(
-                sequence,
-                row.sort_key_bytes().to_vec(),
-                &serde_json::to_vec(&entry).unwrap(),
-            )
+        assert_eq!(snapshots[0], snapshots[1]);
+        assert_eq!(snapshots[0], snapshots[2]);
+        let buckets = &snapshots[0];
+        assert!(
+            buckets
+                .iter()
+                .any(|b| b.bucket_time_utc_ms == 21_000 && b.steps.len() > 2)
+        );
+        let depth = buckets
+            .iter()
+            .find(|b| b.bucket_time_utc_ms == 24_000)
             .unwrap();
-        sequence += 1;
+        assert!(depth.steps.is_empty());
+        assert_eq!(depth.reference_positions.len(), 2, "纯参考桶不能丢失");
+        assert_eq!(
+            depth.closure,
+            ReplayIndexClosureV1::NextGlobalEventAt(25_000)
+        );
+        let last = buckets.last().unwrap();
+        assert!(last.steps.is_empty());
+        assert_eq!(last.reference_positions, vec![references.last().unwrap().0]);
+        assert_eq!(last.closure, ReplayIndexClosureV1::EndOfInput);
+        for page_rows in [1, 2, 20] {
+            let mut material =
+                HiddenMaterialReaderV1::open(&prepared, &root, page_rows, 1 << 20).unwrap();
+            let mut positions = Vec::new();
+            let mut descriptions = Vec::new();
+            let mut actual_references = Vec::new();
+            loop {
+                let page = material.next_page().unwrap();
+                if page.is_empty() {
+                    break;
+                }
+                for (position, record) in page {
+                    positions.push(position);
+                    match record {
+                        ResolvedHiddenRecordV1::BinanceDepthReference {
+                            canonical_position,
+                            binding,
+                            time,
+                        } => descriptions.push((canonical_position, binding, time)),
+                        ResolvedHiddenRecordV1::Reference {
+                            canonical_position,
+                            record,
+                        } => actual_references
+                            .push((canonical_position, serde_json::to_value(record).unwrap())),
+                        _ => {}
+                    }
+                }
+            }
+            assert_eq!(positions, (0..last.index_end).collect::<Vec<_>>());
+            assert_eq!(descriptions, expected_descriptions);
+            actual_references.sort_by_key(|r| r.0);
+            assert_eq!(actual_references, expected_references);
+            assert!(material.metrics().decoded_derived_rows > 0);
+            assert!(material.metrics().decoded_recording_rows > 0);
+            assert_eq!(material.metrics().index_entries, last.index_end);
+            assert!(material.metrics().peak_page_entries <= page_rows);
+            let completed = material.metrics().clone();
+            assert!(material.next_page().unwrap().is_empty());
+            assert_eq!(material.metrics(), &completed);
+        }
+        // derivation_position相同不足以配对：实际索引与派生步骤的完整引用必须一致。
+        let candidate = temp.path().join(if historical {
+            "mixed-compact-index"
+        } else {
+            "mixed-legacy-index"
+        });
+        let mut writer = crate::gate_a::SequentialCaptureWriter::create(
+            "mixed-index",
+            &candidate,
+            std::sync::Arc::new(std::sync::Mutex::new(0)),
+            &config(),
+        )
+        .unwrap();
+        let mut original_index = crate::RunCursor::open(&prepared.index_path, 2, 1 << 20).unwrap();
+        let mut changed = false;
+        let mut sequence = 0;
+        while let Some(row) = original_index.next_row().unwrap() {
+            let mut entry: HiddenIndexEntryV1 = serde_json::from_slice(row.payload()).unwrap();
+            if !changed && let HiddenIndexEntryV1::Step(reference) = &mut entry {
+                reference.step_index += 1;
+                changed = true;
+            }
+            writer
+                .push(
+                    sequence,
+                    row.sort_key_bytes().to_vec(),
+                    &serde_json::to_vec(&entry).unwrap(),
+                )
+                .unwrap();
+            sequence += 1;
+        }
+        assert!(changed);
+        let mut mixed = prepared.clone();
+        mixed.index_path = writer.close_segment().unwrap();
+        let mut reader = HiddenMaterialReaderV1::open(&mixed, &root, 2, 1 << 20).unwrap();
+        let error = match reader.next_page() {
+            Err(error) => error,
+            Ok(_) => panic!("完整隐藏引用不同不能消费成功"),
+        };
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            error.to_string(),
+            "隐藏步骤完整引用或consumer身份与索引不符"
+        );
+        all_indices.push(indices);
+        all_buckets.push(snapshots.remove(0));
     }
-    assert!(changed);
-    let mut mixed = prepared.clone();
-    mixed.index_path = writer.close_segment().unwrap();
-    let mut reader = HiddenMaterialReaderV1::open(&mixed, &root, 2, 1 << 20).unwrap();
-    let error = match reader.next_page() {
-        Err(error) => error,
-        Ok(_) => panic!("完整隐藏引用不同不能消费成功"),
-    };
-    assert_eq!(
-        error.downcast_ref::<std::io::Error>().unwrap().kind(),
-        std::io::ErrorKind::InvalidData
-    );
-    assert_eq!(
-        error.to_string(),
-        "隐藏步骤完整引用或consumer身份与索引不符"
-    );
+    assert_eq!(all_indices[0], all_indices[1]);
+    assert_eq!(all_buckets[0], all_buckets[1]);
 }
+
 #[test]
 fn source_heads_preserve_real_within_source_order_before_receive_ties() {
     let temp = tempfile::tempdir().unwrap();
@@ -1013,6 +1123,185 @@ pub(crate) fn update(
         source_endpoint: "wss://stream.binance.com:9443/ws/btcusdt@depth".to_owned(),
         schema_version: "binance_depth_update_v4".to_owned(),
     }
+}
+
+#[test]
+fn historical_depth_description_preserves_complete_input_and_replay_through_gap_and_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut inputs = vec![meta(0)];
+    for row in [
+        TypedRawRow::BinanceDepthSnapshot(snapshot("depth-a", 100, 1)),
+        TypedRawRow::BinanceDepthUpdate(update(
+            "depth-a",
+            101,
+            101,
+            2,
+            Some(100),
+            None,
+            BinanceDepthStitchVerdict::Applied,
+            vec![level("64100", "0.2")],
+        )),
+        TypedRawRow::BinanceDepthUpdate(update(
+            "depth-a",
+            104,
+            104,
+            3,
+            Some(100),
+            Some(101),
+            BinanceDepthStitchVerdict::NotAppliedConfirmedHole,
+            vec![level("64100", "0.9")],
+        )),
+        TypedRawRow::BinanceDepthSnapshot(snapshot("depth-b", 200, 1)),
+    ] {
+        inputs.push(record(inputs.len() as u64, TypedRawRowV2::Existing(row)));
+    }
+    inputs.push(end(inputs.len() as u64));
+    let mut recordings = Vec::new();
+    let mut prefixes = Vec::new();
+    for historical in [false, true] {
+        let root = temp.path().join(if historical {
+            "historical"
+        } else {
+            "online-old-format"
+        });
+        let mut core = core();
+        let mut writer = if historical {
+            PublicRecordingWriterV1::create_historical(&root, core.header(), config())
+        } else {
+            PublicRecordingWriterV1::create(&root, core.header(), config())
+        }
+        .unwrap();
+        let mut expected = Vec::new();
+        let mut states = Vec::new();
+        for input in &inputs {
+            let result = apply(&mut core, input);
+            for group in &result.applied.closed_groups {
+                for observation in &group.observations {
+                    states.push(observation.binance_depth.value.as_ref().map(|depth| {
+                        (
+                            depth.last_update_id,
+                            depth
+                                .bids
+                                .iter()
+                                .map(|l| (l.price_usdt_per_btc.0.clone(), l.quantity_btc.0.clone()))
+                                .collect::<Vec<_>>(),
+                        )
+                    }));
+                }
+            }
+            expected.push(fingerprint(&result));
+            writer.record(input.clone(), result).unwrap();
+        }
+        assert_eq!(states[1].as_ref().unwrap().0, 100);
+        assert!(
+            states[2]
+                .as_ref()
+                .unwrap()
+                .1
+                .contains(&("64100".into(), "0.2".into()))
+        );
+        assert!(states[3].is_none(), "确认缺口必须使深度未知");
+        assert_eq!(states[4].as_ref().unwrap().0, 200);
+        prefixes.push(writer.stabilize().unwrap().unwrap());
+        let rows = all_rows(&root, 1);
+        let saved_inputs: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                PublicStoredRowV1::Input(i) => Some(i.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(saved_inputs, inputs, "原始快照/增量和全部来源时序必须完整");
+        for page in [1, 3] {
+            let mut replay = PublicReplayV1::open(&root, page, 1 << 20).unwrap();
+            let mut actual = Vec::new();
+            while let Some((_, result)) = replay.next_applied().unwrap() {
+                actual.push(fingerprint(&result));
+            }
+            assert_eq!(actual, expected, "公共事实、观察、数量、质量与来源时序");
+        }
+        recordings.push(rows);
+    }
+    assert_eq!(prefixes[0], prefixes[1]);
+    let mut compact_count = 0;
+    for (old, new) in recordings[0].iter().zip(&recordings[1]) {
+        match (old, new) {
+            (
+                PublicStoredRowV1::Canonical {
+                    canonical_position,
+                    binding,
+                    record: CanonicalEventRecordV2::ReferenceEvent(event),
+                },
+                PublicStoredRowV1::BinanceDepthReference {
+                    canonical_position: new_position,
+                    binding: new_binding,
+                    time,
+                },
+            ) => {
+                assert!(matches!(
+                    event.payload,
+                    CanonicalReferenceEventPayloadV2::BinanceDepthState(_)
+                ));
+                assert_eq!(canonical_position, new_position);
+                assert_eq!(binding, new_binding);
+                assert_eq!(&event.time, time);
+                let bytes = serde_json::to_value(new).unwrap();
+                let fields = bytes["BinanceDepthReference"].as_object().unwrap();
+                assert_eq!(
+                    fields.len(),
+                    3,
+                    "只保存位置、完整绑定和时间，不保存深度或谱系"
+                );
+                compact_count += 1;
+            }
+            _ => assert_eq!(
+                serde_json::to_value(old).unwrap(),
+                serde_json::to_value(new).unwrap()
+            ),
+        }
+    }
+    assert_eq!(recordings[0].len(), recordings[1].len());
+    assert_eq!(compact_count, 4);
+}
+
+#[test]
+fn compact_depth_original_position_mismatch_is_rejected_by_stable_reader() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("recording");
+    let mut core = core();
+    let input = record(
+        0,
+        TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot("depth", 100, 1))),
+    );
+    let result = apply(&mut core, &input);
+    let mut writer =
+        PublicRecordingWriterV1::create_historical(&root, core.header(), config()).unwrap();
+    writer.record(input, result).unwrap();
+    writer.stabilize().unwrap();
+    let mut description = all_rows(&root, 1)
+        .into_iter()
+        .find(|r| matches!(r, PublicStoredRowV1::BinanceDepthReference { .. }))
+        .unwrap();
+    if let PublicStoredRowV1::BinanceDepthReference {
+        canonical_position, ..
+    } = &mut description
+    {
+        *canonical_position += 1;
+    }
+    let bad_root = temp.path().join("wrong-position");
+    let mut writer =
+        PublicRecordingWriterV1::create_historical(&bad_root, core.header(), config()).unwrap();
+    writer.write(description).unwrap();
+    writer.pending.next_canonical_position = 1;
+    writer.stabilize().unwrap();
+    let mut reader = PublicRecordingReaderV1::recover(&bad_root, 1, 1 << 20).unwrap();
+    assert!(
+        reader
+            .next_row()
+            .unwrap_err()
+            .to_string()
+            .contains("原序或流身份")
+    );
 }
 
 #[test]

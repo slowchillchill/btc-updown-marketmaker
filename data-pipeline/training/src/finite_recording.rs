@@ -40,7 +40,7 @@ pub fn record_historical_merge_v1(
     mut before_stabilize: impl FnMut(),
 ) -> RecordingResult<(PublicObservationCoreV1, Option<CommittedIngressPrefixV1>)> {
     let mut core = PublicObservationCoreV1::new(header.clone())?;
-    let mut writer = PublicRecordingWriterV1::create(public_root, &header, recording)?;
+    let mut writer = PublicRecordingWriterV1::create_historical(public_root, &header, recording)?;
     while let Some(mut input) = merge.next_input()? {
         let binding = merge.initialization_binding();
         if let Some(binding) = binding {
