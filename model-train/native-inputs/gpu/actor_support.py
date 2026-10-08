@@ -62,6 +62,11 @@ class DeviceNativeActor:
         from actor_features import prefix_features
         return prefix_features(self,state)
 
+    def price_fee_features(self,state,support=None):
+        """同前缀FOK市场候选估费的999全局列；不用于资金预留。"""
+        from actor_price_fee import price_fee_features
+        return price_fee_features(self,state,self.support(state) if support is None else support)
+
     def _side(self,state):
         return torch.where(state.stage==3,1,torch.where(state.stage==5,1,0))
 

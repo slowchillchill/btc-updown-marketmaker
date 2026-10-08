@@ -1983,7 +1983,18 @@ fn export_gpu_exact_buy_reference_v1() {
     assert!(!mask[19]);
     let a_price_coordinates = actor.price_indices().unwrap();
     let a_price_prefix_path = actor.path.clone();
+    let fee_case = |value: &NativeActor| serde_json::json!({
+        "prefix_path":value.path,"prefix_features":value.prefix_features().to_vec(),
+        "price_indices":value.price_indices().unwrap(),
+        "price_fee_features":value.price_fee_features().unwrap(),
+        "price_support":value.support().unwrap()});
+    let mut price_fee_cases = vec![fee_case(&actor)];
+    let mut alternative = NativeActor::new(actor.group.clone(),0).unwrap();
+    for &choice in &a_price_prefix_path { alternative.choose(choice).unwrap(); }
+    alternative.choose(0).unwrap();
+    price_fee_cases.push(fee_case(&alternative));
     actor.choose(18).unwrap();
+    price_fee_cases.push(fee_case(&actor));
     let b_price_prefix_features = actor.prefix_features();
     let b_price_coordinate = actor.price_indices().unwrap()[0];
     assert_eq!(b_price_coordinate, 19);
@@ -2042,6 +2053,7 @@ fn export_gpu_exact_buy_reference_v1() {
             "prefix_path": a_price_prefix_path,
         },
         "b_price_prefix_features": b_price_prefix_features.to_vec(),
+        "price_fee_cases": price_fee_cases,
         "selected_path": actor.path,
         "selected_intent": {
             "condition_id": condition_id.0,
@@ -2078,7 +2090,9 @@ pub(crate) fn gpu_actor_paths(group: Arc<NativeInputGroup>, families: &[usize]) 
         loop {
             let mask=actor.support().unwrap();
             steps.push(serde_json::json!({"stage":format!("{:?}",actor.state.stage),"mask":mask,
-                "choice":choice,"prefix_features":actor.prefix_features().to_vec()}));
+                "choice":choice,"prefix_features":actor.prefix_features().to_vec(),
+                "price_indices":if matches!(actor.state.stage,Stage::Price(_)) {actor.price_indices().unwrap()} else {vec![]},
+                "price_fee_features":if matches!(actor.state.stage,Stage::Price(_)) {actor.price_fee_features().unwrap()} else {vec![]}}));
             actor.choose(choice).unwrap();
             if actor.is_complete() { break; }
             choice=actor.support().unwrap().iter().position(|enabled|*enabled).unwrap();
