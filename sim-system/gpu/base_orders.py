@@ -128,8 +128,8 @@ class BaseOrders:
         roots, device = template.accepted_base_units.sign.numel(), template.fault.device
         zero = template.accepted_base_units.constant(0)
         flat = _repeat(zero, capacity)
-        quantities = BaseOrderQuantity(**{field.name: torch.zeros_like(flat.fault)
-            if field.name == 'fault' else flat for field in fields(template)})
+        quantities = BaseOrderQuantity(**{field.name: torch.zeros_like(flat.fault, dtype=getattr(template, field.name).dtype)
+            if isinstance(getattr(template, field.name), torch.Tensor) else flat for field in fields(template)})
         shape = (roots, capacity)
         absent = torch.full(shape, -1, dtype=torch.int64, device=device)
         return cls(quantities, flat, zero.constant(1), ExactRational(flat, flat.constant(1)),

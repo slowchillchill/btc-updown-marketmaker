@@ -1,4 +1,4 @@
-"""已准入GTC请求的设备接纳装配：请求、订单目录、队列、填单与账户共同候选。
+"""原Base/QuoteBudget设备接纳：请求、订单目录、队列、填单与账户共同候选。
 
 源SDK terms、隐藏资产准入和sealed selector仍由原所属入口供给；本模块不
 把公开末盘口当hidden，不自行推进双门或生成独立的经济/反馈序号。
@@ -6,7 +6,7 @@
 from dataclasses import dataclass, fields, replace
 import torch
 from queues import Numbers, ExactInt
-from base_execution import prepare_base_order, append_base_remainder
+from base_execution import prepare_base_order, prepare_buy_order, append_base_remainder
 from base_acceptance import accept_base_with_fills, _coordinate_queue, _coordinate_pool
 from base_orders import put_quantity
 from account_state import grouped_fault
@@ -22,6 +22,11 @@ class FrozenBaseTerms:
     bid_rows: torch.Tensor
     fault: torch.Tensor
     conditions: object = None  # 冷目录稳定坐标；来源仍为原实际SDK市场身份。
+    quantity_kind: object = None
+    encoding_rejection: object = None
+    post_only: object = None
+    limit_minimum: object = None
+    unknown_reason: object = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +40,8 @@ class PendingBaseEffects:
     required_day_fills: object = None
     required_days: object = None
     prepared: object = None  # 同次纯候选计量/逐段计划，供真实反馈装配，不从原oracle反造。
+    post_results: object = None
+    required_results: object = None
 
 
 def _coordinate_orders(candidate, original, fault):
@@ -60,7 +67,7 @@ def _coordinate_orders(candidate, original, fault):
 
 def accept_pending_base(requests, pending, orders, queue, account, fills, terms, ask_rows,
                         fee_rate, fee_exponent, selected_paths, taker_rebate_rate, row_roots, result_refs,
-                        *, calendars=None, enabled=None):
+                        *, calendars=None, enabled=None, post_results=None):
     """从当前pending的原item引用规划。result_refs为本次原Post结果材料的预留引用。
 
     返回候选仍须与结果正文/反馈共同安装。整root某项故障只回退本动作，保留先前
@@ -73,8 +80,13 @@ def accept_pending_base(requests, pending, orders, queue, account, fills, terms,
     active = pending.exists if enabled is None else pending.exists & enabled
     source_fault = requests.fault | orders.fault | terms.fault*active.to(torch.int32)
     source_fault = source_fault | (active & (terms.item_refs != pending.item_ref)).to(torch.int32)
-    prepared = prepare_base_order(queue, account, ask_rows, terms.accepted_base, terms.accepted_quote,
-        terms.limit_price, fee_rate, fee_exponent, terms.assets, active & (source_fault == 0))
+    if terms.quantity_kind is None:
+        prepared = prepare_base_order(queue, account, ask_rows, terms.accepted_base, terms.accepted_quote,
+            terms.limit_price, fee_rate, fee_exponent, terms.assets, active & (source_fault == 0))
+    else:
+        prepared = prepare_buy_order(queue, account, ask_rows, terms.accepted_base, terms.accepted_quote,
+            terms.limit_price, fee_rate, fee_exponent, terms.assets, active & (source_fault == 0),
+            terms.quantity_kind, terms.encoding_rejection, terms.post_only, terms.limit_minimum)
     # 不存在pending的padding terms不是新的业务错误；实际人口仍保存全部原故障。
     prepared = replace(prepared, fault=source_fault | prepared.fault*active.to(torch.int32),
         quantity=replace(prepared.quantity, fault=prepared.quantity.fault*active.to(torch.int32)))
@@ -120,6 +132,14 @@ def accept_pending_base(requests, pending, orders, queue, account, fills, terms,
     segment_fault = (remainder.required_segments > queue.capacity).to(torch.int32)*2
     root_fault = root_fault | grouped_fault(segment_fault, row_roots.clamp(0, orders.roots-1), orders.roots)
     outcome = active & (accepted.submission_delta.emitted | accepted.rejected)
+    original_results = post_results
+    required_results = None
+    if post_results is not None:
+        from post_results import PostResults
+        item=PostResults.item(pending,terms,PendingBaseEffects(accepted,insertion,None,
+            remainder.required_segments,root_fault,prepared=prepared))
+        post_results,required_results,result_fault=post_results.store(result_refs,item,outcome & (root_fault==0))
+        root_fault |= result_fault
     requests, response = requests.complete(pending, result_refs, outcome, root_fault)
     root_fault = root_fault | response.fault
     requests = replace(requests, fault=requests.fault | root_fault)
@@ -133,6 +153,10 @@ def accept_pending_base(requests, pending, orders, queue, account, fills, terms,
         calendars = replace(calendars,
             maker=coordinate_calendar(calendars.maker,original_calendars.maker,committed,root_fault),
             taker=coordinate_calendar(calendars.taker,original_calendars.taker,committed,root_fault))
+    if post_results is not None:
+        from base_orders import put_quantity
+        from post_results import coordinate_results
+        post_results=coordinate_results(post_results,original_results,committed)
     insertion = replace(insertion, emitted=insertion.emitted & committed, fault=root_fault)
     acceptance_events = []
     for frame in accepted.fills:
@@ -147,18 +171,19 @@ def accept_pending_base(requests, pending, orders, queue, account, fills, terms,
         rejected=accepted.rejected & committed, fills=tuple(acceptance_events), fault=root_fault)
     response = replace(response, emitted=response.emitted & committed, fault=root_fault)
     return requests, orders, queue, account, fills, PendingBaseEffects(accepted, insertion, response,
-        remainder.required_segments, root_fault, calendars, required_day_fills, required_days, prepared)
+        remainder.required_segments, root_fault, calendars, required_day_fills, required_days, prepared,
+        post_results,required_results)
 
 
 def run_pending_base_acceptance(requests, orders, queue, account, fills, terms, ask_rows,
                                 fee_rate, fee_exponent, selected_paths, taker_rebate_rate, row_roots, result_refs,
-                                *, calendars=None, enabled=None):
+                                *, calendars=None, enabled=None, post_results=None):
     """仅在物理边界读取三个容量请求；原input/RNG/队列/账户不推进就重算。"""
     while True:
         pending = requests.next_pending()
         result = Numbers.run_exact_batch(lambda: accept_pending_base(requests, pending, orders, queue, account,
             fills, terms, ask_rows, fee_rate, fee_exponent, selected_paths, taker_rebate_rate, row_roots, result_refs,
-            calendars=calendars,enabled=enabled))
+            calendars=calendars,enabled=enabled,post_results=post_results))
         effects = result[-1]
         required_orders = int(effects.order.required_orders.max().cpu())
         required_fills = int(effects.acceptance.required_records.max().cpu())
@@ -167,8 +192,13 @@ def run_pending_base_acceptance(requests, orders, queue, account, fills, terms, 
         required_days = int(effects.required_days.max().cpu()) if calendars is not None else 0
         calendar_fits = calendars is None or (required_day_fills <= calendars.taker.fill_occupied.size(1) and
                                               required_days <= calendars.taker.occupied.size(1))
-        if required_orders <= orders.capacity and required_fills <= fills.capacity and required_segments <= queue.capacity and calendar_fits:
+        result_capacity = int(effects.required_results.max().cpu()) if post_results is not None else 0
+        result_fills = effects.prepared.maximum_fills if post_results is not None else 0
+        results_fit = post_results is None or (result_capacity <= post_results.capacity and result_fills <= post_results.fill_capacity)
+        if required_orders <= orders.capacity and required_fills <= fills.capacity and required_segments <= queue.capacity and calendar_fits and results_fit:
             return result
+        if post_results is not None:
+            post_results = post_results.resized(1 << (max(1,result_capacity)-1).bit_length(),result_fills)
         orders = orders.resized(1 << (max(1, required_orders)-1).bit_length())
         fills = fills.resized(1 << (max(1, required_fills)-1).bit_length())
         old_capacity = queue.capacity

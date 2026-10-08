@@ -2594,3 +2594,73 @@ async fn paired_commitment_snapshot_retains_closed_leg_without_reopening_order_o
     );
     h.driver.stop_and_drain().unwrap();
 }
+
+
+#[cfg(feature="python")]
+#[tokio::test(flavor="current_thread")]
+#[ignore="locked GPU; real Captured FOK target and publicly received CPU Registry prefixes"]
+async fn device_fok_target_and_public_registry_prefixes() {
+    use pyo3::prelude::*;
+    use crate::public_input_tests::account_registry_sources_for_tests;
+    use sim_system::latency_profile::{load_embedded_proxy_latency_profile,DelaySampleDomainV1};
+    let policy=br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10000},{"state":"CONFIRMED","offset_ms":20000}],"economic_application_ordinal":1},"failure_overrides":[]}"#;
+    let latency=load_embedded_proxy_latency_profile().unwrap();
+    // 有限工程投递安排仅建立可达的公开前缀，不改变任何生产默认时延。
+    let seed=(0..65_536u64).map(|n|format!("{n:064x}")).find(|seed| {
+        latency.sample_delay_ms(seed.as_bytes(),"4",DelaySampleDomainV1::LifecycleFeedbackInbound)>=1000
+            && latency.sample_delay_ms(seed.as_bytes(),"quote-registry",DelaySampleDomainV1::DirectResponseInbound)<100
+    }).expect("原profile中需要Accepted先于Matched的有限投递来源");
+    let (mut h,_,observation)=fixture_with_execution("10",["0.01","0.01"],24_999,
+        &[35_000,45_000,55_000],["100","100"],"5",&[],Some((policy,seed.clone())));
+    let group=Arc::new(ready(&mut h));let read=h.shared.ledger().economic_read().unwrap();
+    let source=serde_json::json!({"actor_context":NativeActor::new(group.clone(),0).unwrap().gpu_context_reference(),
+        "pair_upper":NativeActor::new(group.clone(),0).unwrap().root_upper(Family::SubmitPairedBuy).unwrap().to_string(),
+        "cutoff":group.cutoff.decision_time().logical_time_utc_ms(),"condition_id":group.rows[0].hidden_state_key.condition_id,
+        "tokens":group.rows[0].action_context.as_ref().unwrap().tokens,
+        "checkpoint":{"projection":read.base(),"cash":read.cash(),"records":[],"successful_trades":[],"resolutions":[],"costs":[],"rebate_days":[],
+        "residual":{"other_cash_pusd":read.residual_cash().other_cash_pusd,"directional_cash_pusd":read.residual_cash().directional_cash_pusd}}});
+    let (choices,selected): (Vec<usize>,Py<PyAny>)=Python::attach(|py| {
+        let module=py.import("model_train.quote_registry_validation").unwrap();
+        let native=Py::new(py,crate::python::PythonGroup {group:group.clone()}).unwrap();
+        let result=module.getattr("select").unwrap().call1((native,crate::python::value(py,source.clone()).unwrap())).unwrap();
+        (result.get_item("choices").unwrap().extract().unwrap(),result.unbind())
+    });
+    let mut actor=NativeActor::new(group.clone(),0).unwrap();for choice in &choices {actor.choose(*choice).unwrap();}
+    let intent=actor.intent().unwrap().unwrap();
+    let ModelIntentV1::SubmitPairedBuy {orders,..}=&intent else {panic!("真实Pair");};
+    assert!(orders.iter().all(|leg|matches!(leg.order,BuyOrderIntentV1::FokMarket {..})));
+    let receipt=actor.execute(&mut h.shared,&mut h.driver.decision().unwrap(),context("quote-registry")).await.unwrap().unwrap();
+    let rule=&group.rows[0].action_context.as_ref().unwrap().rules;
+    let processing=receipt.platform_arrived_at_utc_ms()+i64::try_from(rule.taker_delay_ms).unwrap();
+    fn advance(h:&mut Harness,at:i64) {
+        while h.driver.next_group_at().unwrap().is_some_and(|next|next<at) {h.next().unwrap();}
+        h.driver.observe_at(at).unwrap().unwrap();
+        h.native.consume(&mut h.shared,&mut h.driver).unwrap().unwrap();
+    }
+    advance(&mut h,processing+1);h.driver.stabilize_recording().unwrap();
+    let raw=observation.result_references().iter().map(|r|serde_json::to_value(::execution_normalization::read_noe_result_v4(r).unwrap().record).unwrap()).collect::<Vec<_>>();
+    let accepted=raw.iter().filter_map(|r| {
+        let body=r.get("Evidence")?;let direct=body["source_reference"]["record"].get("DirectResponse")?;
+        (direct["association"]["SubmissionItem"]["global_request_id"]=="quote-registry").then(||direct["response_received_at_utc_ms"].as_i64().unwrap())
+    }).max().unwrap();
+    let matched=raw.iter().filter_map(|r|r.get("Evidence")?["source_reference"]["record"].get("TradeLifecycle")?["feedback_received_at_utc_ms"].as_i64()).max().unwrap();
+    assert!(accepted<matched && matched<processing+10_000,"实际原投递应建立所需窗口");
+    let mut frames=Vec::new();
+    for (stage,at) in [("accepted_incomplete_coverage",accepted+1),("covered_pending_finality",matched+1),
+        ("covered_pending_applied",processing+12_000),("confirmed_final_success",processing+22_000)] {
+        advance(&mut h,at);
+        let registry=h.shared.registry();
+        let orders=registry.orders().map(|o|serde_json::json!({"identity":o.order_identity,"base_applicability":o.base_quantity_applicability,
+            "matched":o.matched_shares,"active":o.active_unfilled_shares,
+            "commitment":registry.all_commitments().find(|c|c.order_identity==Some(o.order_identity)).map(|c|c.remaining_target_shares)})).collect::<Vec<_>>();
+        frames.push(serde_json::json!({"stage":stage,"at":at,"orders":orders,"raw_orders":account_registry_sources_for_tests(registry)}));
+    }
+    let data=serde_json::json!({"source":source,"intent":crate::support::gpu_intent_reference(&intent),"frames":frames,"choices":choices,"engineering_seed":seed,
+        "profile_sha256":latency.file_sha256(),"processing":processing,"accepted_received":accepted,"matched_received":matched});
+    let directory=std::path::PathBuf::from(std::env::var("B_GPU_QUOTE_REGISTRY_DIR").unwrap());
+    std::fs::create_dir_all(&directory).unwrap();std::fs::write(directory.join("original-quote-registry.json"),serde_json::to_vec_pretty(&data).unwrap()).unwrap();
+    let report:String=Python::attach(|py|py.import("model_train.quote_registry_validation").unwrap().getattr("check").unwrap()
+        .call1((selected,crate::python::value(py,data).unwrap())).unwrap().extract().unwrap());
+    std::fs::write(directory.join("quote-registry-report.json"),&report).unwrap();eprintln!("quote_registry={report}");
+    h.driver.stop_and_drain().unwrap();
+}

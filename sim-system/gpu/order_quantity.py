@@ -1,4 +1,4 @@
-"""原SIM Base订单完整计量的设备候选；撮合段、账户与NOE各由原所属状态维护。"""
+"""原SIM Base/QuoteBudget计量共用订单目录；撮合段、账户与NOE各自维护。"""
 from dataclasses import dataclass, replace
 import torch
 from queues import ExactInt
@@ -32,6 +32,33 @@ class BaseOrderQuantity:
     market_resolved_released_quote_units: object
     fault: object
 
+    quantity_kind: object = None  # 原OrderQuantityProjectionV2：Base/QuoteBudget=0/1。
+    accepted_quote_budget_units: object = None
+    released_or_unspent_quote_units: object = None
+    actual_matched_base_units: object = None
+    sdk_taker_amount_audit_base_units: object = None
+
+    def __post_init__(self):
+        zero = self.accepted_base_units.constant(0)
+        if self.quantity_kind is None:
+            object.__setattr__(self, 'quantity_kind', torch.zeros_like(self.fault, dtype=torch.int64))
+        for name in ('accepted_quote_budget_units', 'released_or_unspent_quote_units',
+                     'actual_matched_base_units', 'sdk_taker_amount_audit_base_units'):
+            if getattr(self, name) is None:
+                object.__setattr__(self, name, zero)
+
+    @classmethod
+    def from_quote_plan(cls, budget, audit_base, matched_base, matched_quote):
+        zero = budget.constant(0)
+        fault = budget.fault | audit_base.fault | matched_base.fault | matched_quote.fault
+        released = budget-matched_quote
+        fault |= released.fault | ((budget.sign <= 0) | (audit_base.sign < 0) |
+            (matched_base.sign < 0) | (matched_quote.sign < 0) | (released.sign < 0)).to(torch.int32)
+        values = [zero]*16
+        values[9] = matched_quote
+        return cls(*values, fault, torch.ones_like(fault, dtype=torch.int64),
+            budget, released, matched_base, audit_base)
+
     @classmethod
     def from_taker_plan(cls, accepted_base, accepted_quote, matched_base, matched_quote):
         zero = accepted_base.constant(0)
@@ -52,7 +79,9 @@ class BaseOrderQuantity:
             matched_quote,encumbered,improvement,zero,zero,zero,zero,fault)
 
     def initial_principal(self):
-        value = self.matched_quote_units+self.open_encumbered_quote_units
+        base_principal = self.matched_quote_units+self.open_encumbered_quote_units
+        quote_principal = self.accepted_quote_budget_units-self.released_or_unspent_quote_units
+        value = quote_principal.select(self.quantity_kind == 1, base_principal)
         return ExactInt(value.words,value.sign,value.fault | self.fault)
 
     def _enabled(self,enabled):

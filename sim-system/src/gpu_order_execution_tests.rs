@@ -1415,3 +1415,5 @@ fn gpu_finite_attribution_matches_original_exact_source_contract() {
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     eprintln!("gpu_finite_attribution={}",String::from_utf8(output.stdout).unwrap());
 }
+
+include!("gpu_pending_post_tests.rs");

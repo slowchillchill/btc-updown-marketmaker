@@ -1786,6 +1786,7 @@ None与zero梯度的区别，以及原AdamW已有状态；不能把未调用头�
 `native-inputs/gpu/actor_intent.py` 从原合法终态装配公共 `SubmittedLegs`、
 `SubmittedBuyTerms` 和 `CancellationScopes`，不复制ModelIntent或ReserveIntent合同。
 数量百份数转原shares，价格使用原冻结tick和价格坐标，FOK正文是原spend和worst-price。
+`SubmittedLegs.target` 对FOK仍是原目标份数 `spend/worst_price=q`，预算另由terms.spend保存。
 Actor变体1映射公共条款变体2（FOK）；两腿保原ordinal0／1。本金保原精确金额，
 GTC费用复用SIM的LIMIT最大即时费，FOK预留即时费为0。价格头的市场估费不替代预留费。
 
@@ -1823,8 +1824,60 @@ Market正文保原condition，后续处理时展开仍归Mutation处理层，不
 完整概率／梯度／AdamW入口保持独立，受影响联合验证仍复用 `run_actor_path_validation.sh`
 已有actual-joint阶段和全部必需开关，exit0不能替代实际1500／1600覆盖。
 
-本切片交付发布和原公共预留接口及真实消费者，未交付SDK发送、submission_started／
-Registry／MutationRequests完整生产接线、FOK平台处理、CancelMarket处理时展开、
-统一时钟、持续OrderFormation宿主、完整连续SIM→NOE→Ledger、PPO或活动恢复。
+选择发布切片交付原公共预留接口及真实消费者；有界FOK处理和请求反馈见下一节。
+完整Actor到发送／Registry／MutationRequests的总入口、CancelMarket处理时展开、
+统一时钟、持续OrderFormation宿主、完整连续SIM→NOE→Ledger、PPO或活动恢复仍未交付。
 OrderFormation的真实处理时点、receipt input sequence、formed private sequence及市场
 关联仍须由完整宿主接入；有限来源验证不证明这条持续来源已经完成。
+
+### 有界pending-FOK与完整混合Post响应
+
+`shared-run/gpu/post_submission.py::submit_post_orders` 消费控制面提供的原请求、逐腿
+预留关联、发送事件、send时刻和input sequence，协调原MutationRequests登记与Ledger
+`submission_started`。它不生成这些身份或时刻，也不代替完整Actor发送桥。
+活动请求保原 `(effective_at,input_sequence,ordinal)` 顺序及首次receipt；重复请求不重新
+抽样延迟，不新增本地前缀、占款、订单或成交。选择发布时的业务RNG边界保持上一节语义。
+
+`BaseSimRuntime.post_pending` 在实际阶段5读取当时hidden市场资格和tick。
+`PendingPostIntents` 拥有原PostOrderItemV1正文及必要坐标。市场结束、preload和资产归属
+使用原请求condition及hidden.asset_markets；未知或跨市场token不能借clamp后的资产资格。
+设备选定当前处理根后，
+整批搬运SDK编码所需材料。`sim-system::order_encoding` 由原CPU处理器和native Python
+薄桥共用原SDK纯编码函数；原编码拒绝原因直接保留。GPU入口当前绑定普通GTC/FOK，
+不把观察时tick、旧FrozenBaseTerms或CPU参考成交结果当作新订单条款。
+
+FOK按原QuoteBudget完整预算跨档规划，随后逐原fill计算实际费用，再检查平台可用资金。
+`FokNotFullyFilled` 和 `InsufficientAvailablePusd` 不消耗队列或成功订单序。
+正式QuoteBudget计量保实际matched base和quote、原accepted budget、released/unspent及
+SDK audit base；audit base不作为实际成交目标。Base和QuoteBudget共用原订单身份、
+订单目录、账户、成交池、最终性日历及Query读面，不建立另一套FOK权威。
+
+每个当前pending项的接纳、队列、账户、订单、fill、逐项Post正文与反馈共同提交。
+物理容量不足保同一进入前缀，按需求增长后重算该项；已经成功的前一腿不回滚。
+`PostResults` 保各腿真实完整结果，最后一项按原ordinal封口Submission响应。
+Accepted和fill沿各腿原反馈时点公开；完整Post响应沿原末项时点公开，不因等待封口
+改变先前腿的可见时点。共同预留不等于平台原子，两腿处理时刻和tick可以不同。
+
+NOE保原DirectResponse逻辑身份、private sequence、batch/record ordinal和接收时点。
+QuoteBudget的schema27映射原SourceNeutralSubmissionMeasurementV1，Registry和Ledger
+沿既有Submission关联及订单资金路径消费，不复制本金或预留合同。Registry将schema27
+Accepted按QuoteBudget读取：FOK active为NotApplicable，成交覆盖或最终性未齐时保留原
+目标份数，全部覆盖且全最终化才归零；MINED已应用仍不是最终成功。SDK首腿拒绝且请求
+未封口时可以没有公开反馈，仍保自己的原拒绝正文；后一腿继续处理并形成完整结果。
+
+原有限来源入口 `pending_fok_and_mixed_post_preserve_original_results` 从真实原请求和
+接单前状态开始，SDK／SIM完整Post／NOE／CPU Ledger只作独立参考。
+设备入口 `gpu_pending_fok_and_mixed_post_match_original_submission` 显式ignored，需在
+锁定CUDA环境以 `--ignored --nocapture` 执行，提供 `B_GPU_PYTHON`、
+`B_GPU_PENDING_POST_VALIDATOR`、`B_GPU_NATIVE_SDK_LIBRARY` 和仓库外
+`B_GPU_ORDER_ARTIFACT_DIR`。七个场景覆盖FOK成功、预算未满、完整预算后实际费用资金
+不足、混合末腿拒绝／两腿成功／首腿SDK拒绝，以及发送后处理前tick变化。
+三个混合场景核容量1续接、完整旧正文、不同处理时刻及重复请求；全部核真实NOE和
+连续公共Ledger，既有GTC→Maker→Cancel→Query对照核受影响Base路径。
+
+定向入口 `device_fok_target_and_public_registry_prefixes` 用真实Captured双FOK、原Native
+正文及实际已领取CPU Registry前缀，对照生产public_rows_from_closed→freeze_orders的
+数量适用性和承诺。`gpu_pending_post_uses_request_market_for_asset_admission` 用原双市场
+请求核未知／跨市场token的AssetNotInMarket及无副作用，并保合法token的SDK／接纳对照。
+这些有限原来源不是MINED后态冷装，也不证明连续订单形成或完整Actor发送已交付。
+本批不增加默认延迟、生产发送时间、逐条件CPU业务推进、统一全时钟、PPO或正式训练。

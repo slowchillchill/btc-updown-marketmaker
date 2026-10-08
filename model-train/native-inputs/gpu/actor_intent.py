@@ -43,7 +43,7 @@ def selected_action(candidate,context,control):
     fee_units=cost.fee_1e5_units.select((variants==0).flatten()&present.flatten(),cost.fee_1e5_units.constant(0))
     fee=ExactRational.ratio(fee_units,fee_units.constant(100000))
     quoted=(variants==1).flatten()
-    target=ExactRational(spend.numerator.select(quoted,size.numerator),spend.denominator.select(quoted,size.denominator))
+    target=size  # 原模型本金P=q*p；FOK目标仍为q份，预算单独保留在terms.spend。
     zero=spend.numerator.constant(0)
     terms=SubmittedBuyTerms(torch.where(variants==1,2,0),torch.zeros_like(present),price,
         ExactRational(spend.numerator.select(quoted,zero),spend.denominator),torch.zeros_like(variants))

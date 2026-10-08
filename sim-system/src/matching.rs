@@ -751,7 +751,7 @@ impl ExecutionQueueStateV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum BuyOrderTermsV2 {
     Gtc {
         limit_price_pusd_per_share: Decimal,

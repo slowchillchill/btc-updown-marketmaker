@@ -125,7 +125,7 @@ class LifecycleColumns:
         outcomes=(torch.cat([batch.normalized.outcomes for batch in columns.projection_batches],dim=1).flatten()
             if columns.projection_batches else torch.zeros_like(rows))
         material=active & ((outcomes==OUT_EVIDENCE)|(outcomes==OUT_FACT))
-        enabled={tag:material&(schemas==tag) for tag in [3,7,8,9,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26]}
+        enabled={tag:material&(schemas==tag) for tag in [3,7,8,9,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]}
         layouts={
             3:['scalar']*4+['integer','scalar','integer','integer','scalar'],
             7:['scalar']*3+['integer','scalar','scalar'],
@@ -146,6 +146,7 @@ class LifecycleColumns:
             23:['scalar']*2+['rational']+['scalar']*3,
             24:['scalar']*7+['rational']*8+[('record_list',('scalar','rational'))]+['rational']*2,
             25:['scalar']*4+['integer']+['scalar']*3+['rational']*2+['scalar']*2+['integer']*2,
+            27:['scalar']*4+['integer','scalar','integer','scalar'],
             26:['scalar']*4+['integer','scalar','scalar'],  # 原V1无数量；Unknown raw保原字典。
         }
         decoded={}
@@ -215,7 +216,9 @@ class LifecycleColumns:
             return right.select(mask,left)
         decoded[11]=[merge(a,b,enabled[18]) for a,b in zip(decoded[11],decoded[18])]
         for at in range(6):decoded[3][at]=merge(decoded[3][at],decoded[26][at],enabled[26])
-        enabled[3]|=enabled[26]
+        for at in range(7):decoded[3][at]=merge(decoded[3][at],decoded[27][at],enabled[27])
+        decoded[3][8]=torch.where(enabled[27],decoded[27][7],decoded[3][8])
+        enabled[3]|=enabled[26]|enabled[27]
         decoded[7]=[merge(a,b,enabled[19]) for a,b in zip(decoded[7],decoded[19])]
         enabled[11] |= enabled[18]
         enabled[7] |= enabled[19]

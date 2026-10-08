@@ -77,7 +77,8 @@ def query_pending_base(requests,orders,target,retained_from,has_retained,result_
     candidate,response=requests.complete(pending,result_refs,processed,fault)
     fault|=response.fault
     processed&=fault==0
-    matched=ExactRational.ratio(quantity.matched_base_units,quantity.matched_base_units.constant(1_000_000))
+    matched_units=quantity.actual_matched_base_units.select(quantity.quantity_kind==1,quantity.matched_base_units)
+    matched=ExactRational.ratio(matched_units,matched_units.constant(1_000_000))
     unfilled=ExactRational.ratio(remainder,remainder.constant(1_000_000))
     return candidate,PendingOrderQuery(pending,read,outcome,state,matched,unfilled,retained_from,
         processed,replace(response,emitted=response.emitted&(fault==0),fault=fault),fault)

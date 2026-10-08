@@ -351,7 +351,7 @@ class AdmissionLifecycle:
             fault |= torch.where(cash_economic & result.applied,other_cash.fault,0)
         fault=fault | torch.where(result.applied,maker_cash.fault,0)
         applicable=((outcome_kind==OUT_EVIDENCE)&((tag==3)|(tag==7)|(tag==8)|(tag==9)|
-            (tag==12)|(tag==13)|(tag==14)|(tag==15)|(tag==16)|(tag==17)|(tag==19)|(tag==20)|(tag==22)|(tag==23)|(tag==25)|(tag==26))) | (outcome_kind==OUT_PENDING)
+            (tag==12)|(tag==13)|(tag==14)|(tag==15)|(tag==16)|(tag==17)|(tag==19)|(tag==20)|(tag==22)|(tag==23)|(tag==25)|(tag==26)|(tag==27))) | (outcome_kind==OUT_PENDING)
         query_control=requested&(outcome_kind==OUT_EVIDENCE)&(tag==25)
         query_request=torch.full_like(local,-1)
         query_bound=torch.zeros_like(enabled)
@@ -370,7 +370,7 @@ class AdmissionLifecycle:
         canceled=(tag==15)&self.lifecycle.canceled_orders[root,local]
         is_order_release=economic&(((self.lifecycle.economic_tags[root,local]==2)|(self.lifecycle.economic_tags[root,local]==5)))&result.applied
         order_at,found,lookup_fault=self.orders.lookup(order)
-        submission=(tag==3)|(tag==26)
+        submission=(tag==3)|(tag==26)|(tag==27)
         fault=fault | torch.where(use&(submission|(tag==7)|(tag==19)|query_definitive|canceled|is_order_release|(economic&(self.lifecycle.economic_tags[root,local]==0))),
             Numbers.combine_fault_rows(lookup_fault),0)
         old_open=self.orders.flags[root,order_at]

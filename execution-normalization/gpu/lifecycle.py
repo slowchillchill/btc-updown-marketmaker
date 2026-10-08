@@ -103,15 +103,16 @@ def input_fault(sequences,columns,ordinal):
     return fault | ((ordinal<0)|(ordinal>0xffffffff)).to(torch.int32)
 
 
-def map_base_accepted(quantity,order_sequence,private,ordinal,account,condition,token,request,item,at,active,accepted):
+def map_base_accepted(quantity,order_sequence,private,ordinal,account,condition,token,request,item,at,active,accepted,*,outcome=None):
     """真实Accepted输出两个不同证据：OrderLifecycle与Submission，private分别传入。"""
-    fault=input_fault([order_sequence,private],[account,condition,token,request,item,at],ordinal) | quantity.fault
-    fault=fault | ((account<0)|(condition<0)|(token<0)|(request<0)|(item<0)|(item>65535)).to(torch.int32)
+    fault=input_fault([order_sequence,private],[account,condition,token,request,item,at],ordinal) | torch.where(accepted,quantity.fault,0)
+    fault=fault | ((account<0)|(request<0)|(item<0)|(item>65535)|
+        (accepted & ((condition<0)|(token<0)))).to(torch.int32)
     state=torch.where(quantity.open_base_units.sign>0,0,1)  # 原Open/Matched
     logical=encode_fields([account,torch.full_like(account,3),request,item])
     # 原Control::Submission Accepted/Base：不夹带预留或原始提交terms。
     zero=quantity.matched_base_units.constant(0)
-    semantic=encode_fields([account,(~accepted).to(torch.int64),torch.where(accepted,condition,0),
+    semantic=encode_fields([account,(~accepted).to(torch.int64) if outcome is None else outcome,torch.where(accepted,condition,0),
         torch.where(accepted,token,0),order_sequence.select(accepted,zero),torch.where(accepted,state,0),
         quantity.matched_base_units.select(accepted,zero),quantity.open_base_units.select(accepted,zero),
         torch.where(accepted,at,0)])
@@ -277,3 +278,17 @@ def map_order_canceled(order_sequence,private,ordinal,account,condition,token,ac
     logical=encode_fields([account,torch.full_like(account,7),order_sequence,private])
     semantic=encode_fields([account,condition,token,order_sequence,torch.full_like(account,4),torch.zeros_like(account)])
     return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active&(fault==0),fault,7)
+
+
+def map_quote_submission(quantity,order_sequence,private,ordinal,account,condition,token,request,item,at,active,outcome):
+    """原SourceNeutralSubmissionMeasurementV1::QuoteBudget；SDK audit量不替代actual。"""
+    accepted=outcome==0
+    fault=input_fault([order_sequence,private],[account,condition,token,request,item,at,outcome],ordinal)
+    fault |= ((account<0)|(request<0)|(item<0)|(item>65535)|(outcome<0)|(outcome>2)).to(torch.int32)
+    fault |= torch.where(accepted,quantity.fault|((condition<0)|(token<0)).to(torch.int32),0)
+    zero=quantity.actual_matched_base_units.constant(0)
+    logical=encode_fields([account,torch.full_like(account,3),request,item])
+    semantic=encode_fields([account,outcome,torch.where(accepted,condition,0),torch.where(accepted,token,0),
+        order_sequence.select(accepted,zero),torch.where(accepted,torch.ones_like(account),0),
+        quantity.actual_matched_base_units.select(accepted,zero),torch.where(accepted,at,0)])
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active&(fault==0),fault,27)

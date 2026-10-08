@@ -41,7 +41,7 @@ def assert_checkpoint(reference, quantity, account):
     expected = reference['quantities']['Base']
     assert not quantity.fault.any().cpu().item()
     for field in fields(quantity):
-        if field.name != 'fault':
+        if field.name in expected:
             assert values(getattr(quantity,field.name)) == [expected[field.name]],(field.name,values(getattr(quantity,field.name)),expected[field.name])
     for name in ('cash','available','principal','fee'):
         assert values(getattr(account,name)) == [units(reference[name])],(name,values(getattr(account,name)),reference[name])
@@ -190,7 +190,7 @@ def main():
         'public_integer_kernel_launches':sum(event.name.startswith('integer_kernel') for event in kernels),
         'public_floor_sum_kernel_launches':sum(event.name.startswith('floor_sum_kernel') for event in kernels),
         'queue_rows':queue.rows,'segment_capacity':queue.capacity,'fill_pool_capacity':pool.capacity,'retained_fill_records':2,
-        'maximum_exact_words':max(getattr(quantity,field.name).words.shape[1] for field in fields(quantity) if field.name!='fault'),
+        'maximum_exact_words':max(getattr(quantity,field.name).words.shape[1] for field in fields(quantity) if hasattr(getattr(quantity,field.name),'words')),
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'public_clock_NOE_Ledger_actor_delivered':False}))
 

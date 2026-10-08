@@ -1,7 +1,7 @@
 """持续Base SIM运行状态：唯一hidden队列与请求/订单/账户/义务的装配。
 
 保留各原模块的状态和纯候选边界；本装配不持有公共Ledger或推进NOE公开门。
-已准入GTC/单target与原单条hidden入口先接通，FOK/完整桶/selector继续由原后端补齐。
+支持原GTC/FOK pending接单、逐腿结果和末项完整响应；完整Actor发送桥与持续宿主仍未交付。
 """
 from dataclasses import dataclass,replace
 import torch
@@ -27,6 +27,8 @@ class BaseSimRuntime:
     resolution_obligations: object = None
     settlement_registrations: object = None  # 显式Registered/成功与有限查询场景；不代表完整结算后端。
     order_query_history: object = None  # 显式原订单保留水位；不代表列表查询RootSnapshot退役。
+
+    post_results: object = None  # 原逐项Post正文，末项封口前保留真实第一结果。
 
     def install_order_query_history(self,history):
         if self.order_query_history is not None:
@@ -451,6 +453,65 @@ class BaseSimRuntime:
             selected_paths,taker_rate,row_roots,result_refs,calendars=self.calendars,enabled=choice.enabled(5))
         return replace(self,requests=requests,orders=orders,hidden=replace(self.hidden,queues=queue),
             account=account,fills=fills,calendars=effects.calendars),effects
+
+    def post_pending(self,choice,intents,rule,codec,ask_rows,selected_paths,taker_rate,row_roots,
+                     result_refs,projection,sampler,asset_tokens):
+        """实际阶段5：处理时准入/SDK、共同接单候选、各腿feedback与末项完整响应。"""
+        from pending_base_execution import _coordinate_orders
+        from base_acceptance import _coordinate_queue,_coordinate_pool
+        from taker_days import coordinate_calendar
+        from post_results import coordinate_results
+        from asset_buy import take_ratio
+        self._source(choice)
+        if self.market_controls is None or self.post_results is None:
+            raise ValueError('Post处理须有原hidden控制与逐项正文资源')
+        pending=self.requests.next_pending()
+        terms=intents.encode(pending,self.hidden,self.market_controls,rule,codec,choice.enabled(5))
+        requests,orders,queue,account,fills,effects=run_pending_base_acceptance(self.requests,self.orders,
+            self.hidden.queues,self.account,self.fills,terms,ask_rows,take_ratio(rule.values,
+                torch.full((self.orders.roots,),2,dtype=torch.int64,device=ask_rows.device)),
+            rule.context['fee_exponent'],selected_paths,taker_rate,row_roots,result_refs,
+            calendars=self.calendars,enabled=choice.enabled(5),post_results=self.post_results)
+        # Resource growth preserves earlier legs. Coordinate against the same expanded predecessor.
+        original_orders=self.orders.resized(orders.capacity)
+        original_queue=self.hidden.queues.resized(queue.capacity)
+        original_fills=self.fills.resized(fills.capacity)
+        original_results=self.post_results.resized(effects.post_results.capacity,effects.post_results.fill_capacity)
+        original_calendars=replace(self.calendars,taker=self.calendars.taker.resized(
+            fills=effects.calendars.taker.fill_occupied.size(1),days=effects.calendars.taker.occupied.size(1)))
+        projected,batch=projection.pending_base_acceptance(sampler,orders,fills,effects,asset_tokens,
+            post_results=effects.post_results)
+        fault=effects.fault|batch.fault|choice.fault
+        committed=fault==0
+        # NOE故障只回退本项候选，不回退此前原成功前缀。
+        requests=requests.coordinate_result(self.requests,committed,fault)
+        orders=_coordinate_orders(orders,original_orders,fault)
+        queue=_coordinate_queue(queue,original_queue,row_roots,fault)
+        account=account.coordinate_result(self.account,fault)
+        fills=_coordinate_pool(fills,original_fills,fault)
+        calendars=replace(effects.calendars,
+            maker=coordinate_calendar(effects.calendars.maker,original_calendars.maker,committed,fault),
+            taker=coordinate_calendar(effects.calendars.taker,original_calendars.taker,committed,fault))
+        results=coordinate_results(effects.post_results,original_results,committed)
+        # Each Projection batch retains its own wanted masks and real source time.
+        batch=replace(batch,emitted=batch.emitted&committed[:,None],economic_enabled=batch.economic_enabled&committed[:,None],fault=fault)
+        emitter=replace(projected.emitter,
+            next_private_sequence=projected.emitter.next_private_sequence.select(committed,projection.emitter.next_private_sequence),
+            next_batch_sequence=projected.emitter.next_batch_sequence.select(committed,projection.emitter.next_batch_sequence),fault=fault)
+        # Grow only physical storage; failed roots retain the original logical/economic directories.
+        normalizer=projected.normalizer
+        if projection.normalizer is None:
+            original_logical=torch.full_like(normalizer.logical_rows,-1)
+            original_economic=torch.full_like(normalizer.economic_rows,-1)
+        else:
+            addition=normalizer.logical_rows.size(1)-projection.normalizer.logical_rows.size(1)
+            original_logical=torch.nn.functional.pad(projection.normalizer.logical_rows,(0,addition),value=-1)
+            original_economic=torch.nn.functional.pad(projection.normalizer.economic_rows,(0,addition),value=-1)
+        normalizer=replace(normalizer,logical_rows=torch.where(committed[:,None],normalizer.logical_rows,original_logical),
+            economic_rows=torch.where(committed[:,None],normalizer.economic_rows,original_economic),fault=fault)
+        projected=replace(projected,emitter=emitter,normalizer=normalizer)
+        return replace(self,requests=requests,orders=orders,hidden=replace(self.hidden,queues=queue),account=account,
+            fills=fills,calendars=calendars,post_results=results),projected,batch,replace(effects,fault=fault)
 
     def cancel_base(self, choice, target, row_roots, result_refs):
         self._source(choice)

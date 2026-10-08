@@ -1,3 +1,6 @@
+use crate::order_encoding::post_terms_v2;
+#[cfg(test)]
+use crate::matching::BuyOrderTermsV2;
 #[cfg(feature = "measurement")]
 use crate::matching::{order_projection_owned_bytes_v2, trade_projection_owned_bytes_v2};
 use crate::public_consumption::*;
@@ -32,7 +35,7 @@ use crate::event_log::{
 };
 use crate::execution::{
     CancelOrderItemV1, OrdersFilterV1, PostOrderItemV1, SIM_QUERY_PAGE_SIZE_V1, SimBuyOrderKindV1,
-    TradesFilterV1, limit_buy_encoding, market_buy_encoding, normalize_gtd_expiration,
+    TradesFilterV1, normalize_gtd_expiration,
     strict_millisecond_interval,
 };
 use crate::finality::TradeFinalityPolicyV2;
@@ -44,9 +47,9 @@ use crate::market::{
 };
 use crate::market_directory::{SessionMarketDirectoryErrorV1, SessionMarketDirectoryV1};
 use crate::matching::{
-    BuyOrderActionV2, BuyOrderDispositionV2, BuyOrderRejectedReasonV2, BuyOrderTermsV2,
+    BuyOrderActionV2, BuyOrderDispositionV2, BuyOrderRejectedReasonV2,
     CallerCancelDispositionV2, ExecutionMarketEventEffectsV2, ExecutionStateV2,
-    LifecycleFeedbackEffectV2, MatchingStateErrorV1, micro_units_v1,
+    LifecycleFeedbackEffectV2, MatchingStateErrorV1,
 };
 #[cfg(feature = "measurement")]
 use crate::measurement_probe::{
@@ -4434,126 +4437,6 @@ fn map_buy_rejection_v2(reason: BuyOrderRejectedReasonV2) -> SubmissionRejectedR
     }
 }
 
-fn post_terms_v2(
-    item: &PostOrderItemV1,
-    normalized_gtd_expires_at_utc_ms: Option<Option<i64>>,
-    current_tick_size_pusd_per_share: rust_decimal::Decimal,
-    rules: &PlatformRuleSnapshotV3,
-) -> Result<Result<BuyOrderTermsV2, SubmissionRejectedReasonV2>, SimRunActorErrorV2> {
-    let minimum_shares = rules
-        .synchronized_platform_rules
-        .minimum_order_size_shares
-        .value();
-    let terms = match &item.order.kind {
-        SimBuyOrderKindV1::GtcLimit {
-            limit_price_pusd_per_share,
-            size_shares,
-            post_only,
-        } => {
-            let Some(encoding) = limit_buy_encoding(
-                *limit_price_pusd_per_share,
-                *size_shares,
-                current_tick_size_pusd_per_share,
-            ) else {
-                return Ok(Err(SubmissionRejectedReasonV2::OrderEncodingRejected));
-            };
-            if encoding.taker_amount < minimum_shares {
-                return Ok(Err(SubmissionRejectedReasonV2::BelowMinimumShares));
-            }
-            BuyOrderTermsV2::Gtc {
-                limit_price_pusd_per_share: encoding.price,
-                accepted_base_units: micro_units_v1(encoding.taker_amount)
-                    .map_err(MatchingStateErrorV1::from)
-                    .map_err(SimRunActorErrorV2::Matching)?,
-                accepted_quote_units: micro_units_v1(encoding.maker_amount)
-                    .map_err(MatchingStateErrorV1::from)
-                    .map_err(SimRunActorErrorV2::Matching)?,
-                post_only: *post_only,
-            }
-        }
-        SimBuyOrderKindV1::GtdLimit {
-            limit_price_pusd_per_share,
-            size_shares,
-            post_only,
-            ..
-        } => {
-            let Some(encoding) = limit_buy_encoding(
-                *limit_price_pusd_per_share,
-                *size_shares,
-                current_tick_size_pusd_per_share,
-            ) else {
-                return Ok(Err(SubmissionRejectedReasonV2::OrderEncodingRejected));
-            };
-            if encoding.taker_amount < minimum_shares {
-                return Ok(Err(SubmissionRejectedReasonV2::BelowMinimumShares));
-            }
-            BuyOrderTermsV2::Gtd {
-                limit_price_pusd_per_share: encoding.price,
-                accepted_base_units: micro_units_v1(encoding.taker_amount)
-                    .map_err(MatchingStateErrorV1::from)
-                    .map_err(SimRunActorErrorV2::Matching)?,
-                accepted_quote_units: micro_units_v1(encoding.maker_amount)
-                    .map_err(MatchingStateErrorV1::from)
-                    .map_err(SimRunActorErrorV2::Matching)?,
-                post_only: *post_only,
-                expires_at_utc_ms: normalized_gtd_expires_at_utc_ms.flatten(),
-            }
-        }
-        SimBuyOrderKindV1::FokMarket {
-            spend_pusd,
-            worst_price_pusd_per_share,
-        } => {
-            let Some(encoding) = market_buy_encoding(
-                *worst_price_pusd_per_share,
-                *spend_pusd,
-                current_tick_size_pusd_per_share,
-            ) else {
-                return Ok(Err(SubmissionRejectedReasonV2::OrderEncodingRejected));
-            };
-            if *spend_pusd < crate::platform_rules::MARKET_BUY_MINIMUM_PRINCIPAL_PUSD {
-                return Ok(Err(
-                    SubmissionRejectedReasonV2::BelowMarketBuyMinimumPrincipal,
-                ));
-            }
-            BuyOrderTermsV2::Fok {
-                worst_price_pusd_per_share: encoding.price,
-                accepted_quote_budget_units: micro_units_v1(encoding.maker_amount)
-                    .map_err(MatchingStateErrorV1::from)
-                    .map_err(SimRunActorErrorV2::Matching)?,
-                sdk_taker_amount_audit_base_units: micro_units_v1(encoding.taker_amount)
-                    .map_err(MatchingStateErrorV1::from)
-                    .map_err(SimRunActorErrorV2::Matching)?,
-            }
-        }
-        SimBuyOrderKindV1::FakMarket {
-            spend_pusd,
-            worst_price_pusd_per_share,
-        } => {
-            let Some(encoding) = market_buy_encoding(
-                *worst_price_pusd_per_share,
-                *spend_pusd,
-                current_tick_size_pusd_per_share,
-            ) else {
-                return Ok(Err(SubmissionRejectedReasonV2::OrderEncodingRejected));
-            };
-            if *spend_pusd < crate::platform_rules::MARKET_BUY_MINIMUM_PRINCIPAL_PUSD {
-                return Ok(Err(
-                    SubmissionRejectedReasonV2::BelowMarketBuyMinimumPrincipal,
-                ));
-            }
-            BuyOrderTermsV2::Fak {
-                worst_price_pusd_per_share: encoding.price,
-                accepted_quote_budget_units: micro_units_v1(encoding.maker_amount)
-                    .map_err(MatchingStateErrorV1::from)
-                    .map_err(SimRunActorErrorV2::Matching)?,
-                sdk_taker_amount_audit_base_units: micro_units_v1(encoding.taker_amount)
-                    .map_err(MatchingStateErrorV1::from)
-                    .map_err(SimRunActorErrorV2::Matching)?,
-            }
-        }
-    };
-    Ok(Ok(terms))
-}
 
 fn apply_post_action_v2(
     session: UniqueSessionStateV2,
@@ -4609,8 +4492,8 @@ fn apply_post_action_v2(
                     &item,
                     normalized_gtd_expires_at_utc_ms,
                     current_tick_size_pusd_per_share,
-                    rules,
-                )? {
+                    rules.synchronized_platform_rules.minimum_order_size_shares.value(),
+                ).map_err(SimRunActorErrorV2::Matching)? {
                     Err(reason) => PostOrderItemOutcomeV2::RejectedNoEffect(reason),
                     Ok(terms) => {
                         let input = BuyOrderActionV2 {

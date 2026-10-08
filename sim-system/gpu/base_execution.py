@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 import torch
 from queues import _take
 from account_state import grouped_fault
-from asset_buy import plan_asset_limit, apply_asset_limit, take_ratio
+from asset_buy import plan_asset_limit, plan_asset_quote, apply_asset_limit, take_ratio
 from taker_fee import allocate_taker_fee
 from order_quantity import BaseOrderQuantity
 
@@ -25,18 +25,22 @@ class PreparedBaseOrder:
     taker_prices: object  # 同逐fill人口的真实来源价，不用quote/base倒推
     maximum_fills: int
     fault: torch.Tensor
+    rejection_reason: object = None
 
     def accept(self, queue, account):
         if account is not self.source_account:
             raise ValueError('订单计划须与规划时的同一账户候选绑定')
         principal = self.quantity.initial_principal()
-        required = self.quantity.accepted_quote_units+self.fee.total_micro
+        quote = self.quantity.accepted_quote_budget_units.select(
+            self.quantity.quantity_kind == 1, self.quantity.accepted_quote_units)
+        required = quote+self.fee.total_micro
+        legal = torch.ones_like(self.requested) if self.rejection_reason is None else self.rejection_reason == -1
         account, delta, rejected = account.accept_order(principal,self.fee.total_micro,required,
-            self.requested & (self.fault == 0))
+            self.requested & legal & (self.fault == 0))
         # 原接纳失败不消耗盘口；纯候选重试仍从同一source_queue/source_account开始。
         queue = apply_asset_limit(queue,self.asset_plan,delta.emitted)
         fault = self.fault | delta.fault
-        return queue,account,delta,rejected,fault
+        return queue,account,delta,rejected | (self.requested & ~legal & (fault == 0)),fault
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,63 @@ def prepare_base_order(queue, account, ask_rows, accepted_base, accepted_quote, 
     return PreparedBaseOrder(account,plan,quantity,fee,asset_indices,requested,base,quote,price,maximum_fills,fault)
 
 
+
+def prepare_buy_order(queue, account, ask_rows, accepted_base, accepted_quote, maximum_price,
+                      fee_rate, fee_exponent, asset_indices, requested, quantity_kind,
+                      encoding_rejection, post_only, limit_minimum):
+    """同一订单候选支持原Base/QuoteBudget；FOK先完整预算再逐fill费用与资金。"""
+    from dataclasses import fields
+    from queues import ExactInt, ExactRational, _repeat
+    def choose(left, right, mask):
+        if isinstance(left, ExactInt):
+            return right.select(mask, left)
+        if isinstance(left, ExactRational):
+            return ExactRational(choose(left.numerator,right.numerator,mask),
+                                 choose(left.denominator,right.denominator,mask))
+        if isinstance(left, torch.Tensor):
+            return torch.where(mask,right,left)
+        return replace(left, **{f.name:choose(getattr(left,f.name),getattr(right,f.name),mask)
+            for f in fields(left) if f.name != 'source'}) if hasattr(left,'__dataclass_fields__') else left
+    fok = quantity_kind == 1
+    base = prepare_base_order(queue,account,ask_rows,accepted_base,accepted_quote,maximum_price,
+        fee_rate,fee_exponent,asset_indices,requested)
+    plan = plan_asset_quote(queue,ask_rows,accepted_quote,maximum_price)
+    # row owners convert the root discriminator to the queue plan's physical row axis.
+    rows = fok[plan.row_owners.clamp(0,fok.numel()-1)]
+    # QueuePlan contains both row and segment fields.
+    queue_plan = replace(base.asset_plan.queue_plan, **{f.name:choose(getattr(base.asset_plan.queue_plan,f.name),
+        getattr(plan.queue_plan,f.name), rows if (getattr(plan.queue_plan,f.name).sign.shape if isinstance(getattr(plan.queue_plan,f.name),ExactInt)
+        else getattr(plan.queue_plan,f.name).shape) == rows.shape else rows.repeat_interleave(queue.capacity))
+        for f in fields(plan.queue_plan) if f.name != 'source'})
+    selected_plan = replace(plan,queue_plan=queue_plan,
+        matched_base=choose(base.asset_plan.matched_base,plan.matched_base,fok),
+        used_quote=choose(base.asset_plan.used_quote,plan.used_quote,fok),
+        complete=torch.where(fok,plan.complete,base.asset_plan.complete),
+        fault=torch.where(fok,plan.fault,base.asset_plan.fault))
+    safe=ask_rows.clamp(0,max(queue.rows-1,0))
+    if queue.rows == 0 or ask_rows.size(1) == 0:
+        fill_base=accepted_base.constant(0); fill_quote=accepted_quote.constant(0)
+    else:
+        indices=(safe[:,:,None]*queue.capacity+torch.arange(queue.capacity,device=ask_rows.device)).flatten()
+        present=(ask_rows>=0).repeat_interleave(queue.capacity,1).flatten()
+        fill_base=_take(queue_plan.delta_base,indices).select(present,_repeat(accepted_base.constant(0),base.maximum_fills))
+        fill_quote=_take(queue_plan.delta_quote,indices).select(present,_repeat(accepted_quote.constant(0),base.maximum_fills))
+    fee=allocate_taker_fee(fill_base,base.taker_prices,fee_rate,fee_exponent,
+        requested.numel(),base.maximum_fills)
+    quote_quantity=BaseOrderQuantity.from_quote_plan(accepted_quote,accepted_base,plan.matched_base,plan.used_quote)
+    quantity=choose(base.quantity,quote_quantity,fok)
+    # CPU precedence：post-only、FOK完整预算、marketable LIMIT最低本金。
+    rejection=torch.where((encoding_rejection == -1)&post_only&(selected_plan.matched_base.sign>0),7,encoding_rejection)
+    rejection=torch.where((rejection == -1)&fok&~plan.complete,11,rejection)
+    below=accepted_quote.compare(limit_minimum)
+    rejection=torch.where((rejection == -1)&~fok&(selected_plan.matched_base.sign>0)&(below.order<0),8,rejection)
+    fault=selected_plan.fault | torch.where(rejection==-1,fee.fault | quantity.fault | below.fault,0)
+    fault |= ((quantity_kind<0)|(quantity_kind>1)).to(torch.int32)
+    fault = torch.where(requested & (encoding_rejection == -1),fault,torch.zeros_like(fault))
+    return replace(base,asset_plan=selected_plan,quantity=quantity,fee=fee,
+        taker_bases=fill_base,taker_quotes=fill_quote,fault=fault,rejection_reason=rejection)
+
+
 def reduce_order_maker(quantity, queue_effects, order_ids):
     """按原账户段身份接入实际maker depletion；不丢掉QueueEffects。"""
     roots = order_ids.numel()
@@ -103,7 +164,8 @@ def append_base_remainder(queue, quantity, bid_rows, order_ids, row_roots, accep
     root_mapping_valid = (row_roots >= 0) & (row_roots < roots)
     safe_roots = row_roots.clamp(0,roots-1)
     coordinate_valid = (bid_rows >= 0) & (bid_rows < queue.rows) & (order_ids >= 0)
-    error = quantity.fault | (accepted & (quantity.open_base_units.sign > 0) & ~coordinate_valid).to(torch.int32)
+    # SDK拒绝没有Accepted计量；它不进入余量挂单，也不传播占位quantity的fault。
+    error = torch.where(accepted, quantity.fault, 0) | (accepted & (quantity.open_base_units.sign > 0) & ~coordinate_valid).to(torch.int32)
     error = error | (~root_mapping_valid).any().to(torch.int32) | grouped_fault(queue.fault,safe_roots,roots)
     valid = coordinate_valid & accepted & (error == 0)
     # 一个记录批次的冷映射必须对每个队列行唯一；坐标重复保留工程fault。
@@ -191,6 +253,8 @@ def _close_base_order(queue, quantity, account, row_order_ids, row_roots, matchi
     # 纯候选错误不提交其订单数量或队列；原已形成经济成功前缀由上层保留。
     from dataclasses import fields
     quantity = replace(quantity,**{field.name:getattr(quantity,field.name).select(committed,getattr(original,field.name))
+        if not isinstance(getattr(quantity,field.name),torch.Tensor) else torch.where(
+            committed,getattr(quantity,field.name),getattr(original,field.name))
         for field in fields(quantity) if field.name != 'fault'},fault=quantity.fault | account.fault)
     selected = valid_rows & committed[safe_roots]
     queue = replace(queue,

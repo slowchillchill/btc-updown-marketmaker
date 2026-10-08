@@ -86,7 +86,9 @@ def compare_selected(native,source,publication,*,expected_variants=None,order_ca
             assert terms.variants[0,ordinal].cpu().item()=={'GtcLimit':0,'FokMarket':2}[variant]
             assert exact(terms.price)[ordinal]==Fraction(body.get('limit_price_pusd_per_share',body.get('worst_price_pusd_per_share')))
             if variant=='GtcLimit':assert exact(action.legs.target)[ordinal]==Fraction(body['size_shares'])
-            else:assert exact(terms.spend)[ordinal]==Fraction(body['spend_pusd'])
+            else:
+                assert exact(terms.spend)[ordinal]==Fraction(body['spend_pusd'])
+                assert exact(action.legs.target)[ordinal]==Fraction(body['spend_pusd'])/Fraction(body['worst_price_pusd_per_share'])
         if expected_variants is not None:assert action.legs.terms.variants.cpu().tolist()==expected_variants
     elif 'CancelMarketOrders' in wanted:
         assert wanted['CancelMarketOrders']['condition_id']==source['condition_id']

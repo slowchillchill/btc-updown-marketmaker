@@ -104,7 +104,7 @@ class OrderFunds:
         tag = lifecycle.schemas[root, local]
         economic_tag = lifecycle.economic_tags[root, local]
         trade = evidence & (tag == 8)
-        accepted = evidence & ((tag == 3)|(tag==26)) & lifecycle.accepted[root, local]
+        accepted = evidence & ((tag == 3)|(tag==26)|(tag==27)) & lifecycle.accepted[root, local]
         observed = trade | accepted | (evidence & ((tag == 7) | (tag == 19)))
         order_economic = economic & ((economic_tag == 0) | (economic_tag == 2) | (economic_tag == 5))
         fill_economic = economic & (economic_tag >= 6) & (economic_tag <= 8)

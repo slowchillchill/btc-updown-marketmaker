@@ -17,6 +17,7 @@ class BaseAcceptanceEffects:
     fills: tuple
     required_records: torch.Tensor
     fault: torch.Tensor
+    rejection_reason: object = None
 
 
 def _coordinate_queue(candidate,original,row_roots,fault):
@@ -94,7 +95,9 @@ def accept_base_with_fills(prepared,queue,account,pool,matched_at,selected_paths
         events.append(replace(frame,event=event))
     pool = _coordinate_pool(pool,original_pool,fault)
     queue = _coordinate_queue(queue,original_queue,safe_roots,fault)
-    return queue,account,pool,BaseAcceptanceEffects(submission,rejected & (fault == 0),tuple(events),demanded,fault)
+    return queue,account,pool,BaseAcceptanceEffects(submission,rejected & (fault == 0),tuple(events),demanded,fault,
+        torch.where(rejected, torch.full_like(rejected,10,dtype=torch.int64) if prepared.rejection_reason is None
+        else torch.where(prepared.rejection_reason!=-1,prepared.rejection_reason,10),-1))
 
 
 def run_base_acceptance_batch(prepared,queue,account,pool,matched_at,selected_paths,taker_rebate_rate,row_roots):

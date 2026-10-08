@@ -480,7 +480,9 @@ def main(source=None):
     assert values(orders.next_sequence) == [3] and values(fills.next_sequence) == [3]
     from dataclasses import fields
     for field in fields(old_quantity):
-        if field.name != 'fault':
+        if isinstance(getattr(old_quantity,field.name),torch.Tensor):
+            assert torch.equal(getattr(orders.read(slot).quantity,field.name),getattr(old_quantity,field.name))
+        else:
             assert values(getattr(orders.read(slot).quantity, field.name)) == values(getattr(old_quantity, field.name))
     assert values(orders.read(next_effect.order.slots).sequence) == [2]
     orders = orders.resized(4)

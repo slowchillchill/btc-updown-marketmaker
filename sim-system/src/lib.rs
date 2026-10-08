@@ -1,5 +1,6 @@
 mod account;
 pub mod buy_cost;
+pub mod order_encoding;
 
 // 提交撮合与确认式交付驱动器在后续组合根接线前必须保持 crate-private，不能为消除告警扩成第九公开操作。
 #[allow(dead_code)]

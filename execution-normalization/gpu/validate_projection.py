@@ -107,7 +107,17 @@ def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=
         if 'CancellationRequestCompleted' in value:
             result=value['CancellationRequestCompleted']['result']
             return encode_fields([zero,*[integers([result[name]]) for name in ['canceled_count','not_canceled_no_effect_count','evidence_unknown_no_effect_count']]])
-        value=value['Submission']['outcome']['Accepted']
+        outcome=value['Submission']['outcome']
+        if not isinstance(outcome,dict) or 'Accepted' not in outcome:
+            return encode_fields([zero,torch.full_like(zero,1 if outcome=='RejectedNoEffect' else 2),
+                zero,zero,integers([0]),zero,integers([0]),integers([0]),zero])
+        value=outcome['Accepted']
+        if 'QuoteBudget' in value['measurement']:
+            return encode_fields([zero,zero,zero,torch.full_like(zero,token_index),
+                integers([entity_sequence(value['order']['order_identity'],'Order')]),
+                torch.full_like(zero,{'Open':0,'Matched':1}[value['order']['state']]),
+                integers([units(value['measurement']['QuoteBudget']['actual_matched_base_quantity_shares'])]),
+                torch.tensor([value['effective_processing_at_utc_ms']],device='cuda')])
         return encode_fields([zero,zero,zero,torch.full_like(zero,token_index),integers([entity_sequence(value['order']['order_identity'],'Order')]),
             torch.full_like(zero,{'Open':0,'Matched':1}[value['order']['state']]),
             integers([units(value['measurement']['Base']['matched_base_quantity_shares'])]),

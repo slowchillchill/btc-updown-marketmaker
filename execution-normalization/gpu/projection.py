@@ -209,7 +209,7 @@ class Projection:
         zeros=torch.zeros_like(response.request_key)
         sequence=order.sequence.constant(0)
         result=OrderQueryResult(effects.outcome,order.sequence,order.conditions,tokens,effects.state,
-            torch.full_like(zeros,-1),zeros,effects.matched,effects.active_quantity,zeros,
+            torch.full_like(zeros,-1),order.quantity.quantity_kind,effects.matched,effects.active_quantity,zeros,
             effects.retained_from,sequence,sequence)
         emitter,emission=working.emitter.emit(sampler,active[:,None],torch.ones_like(active[:,None]),
             response.responded_at[:,None],response.responded_at[:,None],response.received_at[:,None],fault[:,None])
@@ -219,7 +219,7 @@ class Projection:
             emission.batch_sequences,emission.received_at[:,0],zeros,response.responded_at,active)],
             fault|emission.root_fault)
 
-    def pending_base_acceptance(self,sampler,orders,pool,effects,asset_tokens):
+    def pending_base_acceptance(self,sampler,orders,pool,effects,asset_tokens,*,post_results=None):
         """已完成的单项Base接单来源；完整Pair响应仍须原请求封口协调。
 
         当前入口只映射本次接受的订单/成交。未接受项须由独立原拒绝producer装配。
@@ -227,7 +227,44 @@ class Projection:
         order=orders.read(effects.order.slots)
         bound=self.bind_base_order(order,asset_tokens,effects.order.emitted)
         return bound.acceptance(sampler,effects.prepared,effects.acceptance,pool,
-            order.accepted_at,effects.response.received_at,direct_completed=effects.response.emitted)
+            order.accepted_at,effects.response.received_at,direct_completed=effects.response.emitted,
+            completed_post=effects.response if post_results is not None else None,
+            post_results=post_results,asset_tokens=asset_tokens)
+
+    def _post_response_records(self,response,results,asset_tokens,private,batch,time,active,first_ordinal):
+        """原末项封口时一次完整Submission；此前Order/fill仍按各处理时刻发射。"""
+        from queues import _take
+        from lifecycle import map_base_accepted,map_quote_submission
+        roots,width=response.present.shape
+        source_fault=response.fault.clone()
+        items=[]
+        for column in range(width):
+            item=results.read(response.result_refs[:,column])
+            wanted=active & response.present[:,column]
+            source_fault |= torch.where(wanted,item.fault|(~item.present|
+                (item.requests!=response.request_key)|(item.items!=response.item_refs[:,column])|
+                (item.ordinals!=response.ordinals[:,column])).to(torch.int32),0)
+            items.append(item)
+        records=[];requests=[];ordinals=[]
+        for column,item in enumerate(items):
+            accepted=item.outcomes==0
+            wanted=active & response.present[:,column]
+            safe=item.assets.clamp(0,asset_tokens.numel()-1)
+            token=asset_tokens[safe]
+            invalid=(item.assets<0)|(item.assets>=asset_tokens.numel())|(self.asset_roots[safe]!=torch.arange(roots,device=active.device))
+            source_fault |= torch.where(wanted&accepted,invalid.to(torch.int32),0)
+            source_ordinal=first_ordinal+column
+            quote=(item.quantity.quantity_kind==1)&accepted
+            for is_quote in (False,True):
+                enabled=wanted & (quote if is_quote else ~quote)
+                arguments=(item.quantity,item.order_sequence,private,source_ordinal,self.account_slots,
+                    item.conditions,token,response.request_key,item.ordinals,item.processed_at,enabled)
+                mapped=map_quote_submission(*arguments,item.outcomes) if is_quote else map_base_accepted(
+                    *arguments,accepted,outcome=item.outcomes)
+                records.append((mapped,EVIDENCE,private,batch,time,torch.zeros_like(item.ordinals),
+                    response.responded_at,enabled))
+                requests.append(response.request_key);ordinals.append(item.ordinals)
+        return records,source_fault,requests,ordinals
 
     def fill_from_origin(self,sampler,orders,pool,frame,asset_tokens,calendars,rebate_rate,at,*,maker_results=()):
         """首Maker反馈或后续唯一最终性义务均取同一实际fill来源，不读取冷结果正文。"""
@@ -342,7 +379,7 @@ class Projection:
             (economic,ECONOMIC,*common,active&economic_present)],fault | frame.root_fault | ordinals.fault |
                 torch.where(active&economic_present,economic.fault,0),record_ordinal_base=record_ordinal)
 
-    def _finish(self,emitter,records,source_fault,*,record_ordinal_base=None):
+    def _finish(self,emitter,records,source_fault,*,record_ordinal_base=None,record_requests=None,record_items=None):
         from queues import ExactInt,ExactRational
         def cat_integer(values):
             width=max(value.words.size(1) for value in values)
@@ -441,8 +478,8 @@ class Projection:
             next_batch_sequence=emitter.next_batch_sequence.select(committed,original.emitter.next_batch_sequence),fault=fault)
         categories=torch.stack([record[5] for record in records],dim=1).gather(1,order)
         platforms=torch.stack([record[6] for record in records],dim=1).gather(1,order)
-        requests=torch.where(categories==0,self.request_slots[:,None],-1)
-        items=torch.where(categories==0,self.item_ordinals[:,None],-1)
+        requests=torch.where(categories==0,self.request_slots[:,None],-1) if record_requests is None else record_requests.gather(1,order)
+        items=torch.where(categories==0,self.item_ordinals[:,None],-1) if record_items is None else record_items.gather(1,order)
         return replace(working,emitter=coordinated,normalizer=candidate),ProjectionBatch(normalized,
             private_values,batch_values,ordinals,times,normalized.rows,normalized.emitted,fault,
             categories,platforms,requests,items,self.context_slots[:,None].expand_as(rows),self.run_slots[:,None].expand_as(rows),
@@ -507,7 +544,8 @@ class Projection:
         return candidate,replace(batch,cancellation_method=torch.where(batch.source_categories==0,
             method[:,None],torch.full_like(batch.source_categories,-1)))
 
-    def acceptance(self,sampler,prepared,effects,pool,at,direct_received,*,direct_completed=None):
+    def acceptance(self,sampler,prepared,effects,pool,at,direct_received,*,direct_completed=None,
+                   completed_post=None,post_results=None,asset_tokens=None):
         """已真实接纳Base产生Order/逐fill/直接响应；其它结果须对应producer。"""
         from queues import _take,ExactRational
         from fill_pool import _take_record
@@ -515,13 +553,17 @@ class Projection:
         roots=self.account_slots.numel()
         width=len(effects.fills)+2
         direct_active=effects.submission_delta.emitted | effects.rejected
-        if direct_completed is not None:
+        if completed_post is not None:
+            direct_active=completed_post.emitted
+        elif direct_completed is not None:
             direct_active=direct_active & direct_completed
         active=torch.stack([effects.submission_delta.emitted,*[frame.event.emitted for frame in effects.fills],
             direct_active],dim=1)
         direct=torch.zeros_like(active)
         direct[:,-1]=True
-        platform=at[:,None].expand(roots,width)
+        platform=at[:,None].expand(roots,width).clone()
+        if completed_post is not None:
+            platform[:,-1]=completed_post.responded_at
         received=torch.zeros_like(platform)
         received[:,-1]=direct_received
         source_fault=effects.fault[:,None].expand(roots,width)
@@ -560,6 +602,14 @@ class Projection:
                 torch.full_like(at,6),frame.fill_sequence,frame.event.ordinal)
             records.append((mapped,ECONOMIC,private,batch,time,torch.full_like(at,2),at,frame.event.economic_delta.emitted))
         private,batch,time=sequence(width-1)
+        if completed_post is not None:
+            direct_records,error,requests,items=self._post_response_records(completed_post,post_results,asset_tokens,
+                private,batch,time,emission.emitted[:,-1],ordinals.first_ordinals[:,-1])
+            normal_count=len(records)
+            request_columns=[torch.full_like(at,-1)]*normal_count+requests
+            item_columns=[torch.full_like(at,-1)]*normal_count+items
+            return self._finish(emitter,records+direct_records,emission.root_fault | ordinals.fault | error,
+                record_requests=torch.stack(request_columns,1),record_items=torch.stack(item_columns,1))
         mapped=map_base_accepted(prepared.quantity,self.order_sequence,private,ordinals.first_ordinals[:,-1],
             self.account_slots,self.condition_slots,self.token_slots,self.request_slots,self.item_ordinals,at,
             emission.emitted[:,-1],effects.submission_delta.emitted)

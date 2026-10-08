@@ -292,8 +292,14 @@ impl PythonActor {
         })
     }
 }
+#[pyfunction]
+fn post_terms_batch_v2(input: &str) -> PyResult<String> {
+    sim_system::order_encoding::post_terms_batch_v2(input).map_err(error)
+}
+
 #[pymodule]
 fn model_native_inputs(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(post_terms_batch_v2, module)?)?;
     module.add_class::<PythonGroup>()?;
     module.add_class::<PythonActor>()?;
     Ok(())
