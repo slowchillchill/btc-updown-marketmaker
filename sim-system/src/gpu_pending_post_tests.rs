@@ -1,15 +1,21 @@
 // 原CPU请求登记前状态/处理时SDK/完整响应与NOE是独立oracle，不提供GPU编码terms。
 #[cfg(feature="shared-execution")]
 async fn pending_post_original_sources() -> Vec<serde_json::Value> {
+    pending_post_original_sources_for(&["fok_success","fok_incomplete","fok_fee_funds","mixed_reject_last",
+        "mixed_accept_last","mixed_reject_first","processing_tick"],false).await
+}
+
+#[cfg(feature="shared-execution")]
+async fn pending_post_original_sources_for(names:&[&str],include_cancels:bool) -> Vec<serde_json::Value> {
     let mut cases=Vec::new();
-    for name in ["fok_success","fok_incomplete","fok_fee_funds","mixed_reject_last",
-        "mixed_accept_last","mixed_reject_first","processing_tick"] {
+    for &name in names {
         let cash=if name=="fok_fee_funds" {"92"} else {"2000"};
         let saved=Rc::new(RefCell::new(None));let capture=Rc::clone(&saved);
         let normalization=Rc::new(RefCell::new(Vec::new()));let normalized=Rc::clone(&normalization);
         let policy=successful_policy_v2_for_tests();
         let run_id=format!("gpu-pending-{name}");
-        let (_directory,mut actor)=active_market_actor_with_projection_and_cash(
+        let scenario=if include_cancels {sealed_scenario_for_markets(vec![market_with_window('1',"123","1","2",1000,300000)])} else {sealed_scenario()};
+        let (_directory,mut actor)=active_market_actor_with_projection_cash_and_scenario(
             SimCallerRoleV1::ModelTrain,&run_id,policy.clone(),move |path,opened| {
                 opened.projection_version=crate::runtime_v2::BusinessProjectionVersionV1::V4;
                 let reference=contracts::execution_normalization::DurableSourceReferenceV1 {
@@ -20,13 +26,28 @@ async fn pending_post_original_sources() -> Vec<serde_json::Value> {
                 let durable=noe_projection::SimV2NoeProjectionPortV4::new(path.parent().unwrap().join("noe-durable"),
                     opened.clone(),reference.clone(),reference,"gpu-pending-create".into(),"gpu-pending-source".into());
                 Box::new(GpuNoeReferencePort {memory,durable,normalization_reference:normalized,normalization_core:None})
-            },cash).await;
+            },cash,scenario).await;
+        if include_cancels {
+            actor.enroll_market(MarketEnrollmentRequestV1 {enrollment_request_id:"cancel-other-market".into(),
+                market:market_with_window('e',"456","301","302",1_000,300_000)}).unwrap();
+        }
         let observation=saved.borrow_mut().take().unwrap();
         let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
         ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
         for record in observation.take_closed_records() {ledger.apply_noe_memory_v2(&record).unwrap();}
         let opening=gpu_ledger_reservation_checkpoint(&ledger,"before_request");
         let mut initial=decoded_maker_initial_events();
+        if include_cancels {
+            for event in &mut initial {
+                event.market=actor.scenario.initial_market_directory().markets().next().unwrap().market().clone();
+                event.event_id=data_pipeline_core::derive_execution_market_event_v3_id(event).unwrap();
+                *event=data_pipeline_core::decode_execution_market_event_v3(&data_pipeline_core::encode_execution_market_event_v3(event).unwrap()).unwrap();
+            }
+        }
+        if include_cancels {
+            let market=market_with_window('e',"456","301","302",1_000,300_000);
+            initial.extend(decoded_initial_events_for_market_with_quantity(&market,1100,1110,3,"10"));
+        }
         let (price,quantity)=match name {
             "fok_success"=>("0.5","1000.001"),"fok_incomplete"=>("0.5","10"),
             "fok_fee_funds"=>("0.9","100"),"mixed_reject_last"=>("0.2","1.000001"),
@@ -36,7 +57,13 @@ async fn pending_post_original_sources() -> Vec<serde_json::Value> {
         if name=="processing_tick" {book.initial_tick_size_pusd_per_share=ExactDecimal("0.001".into());}
         initial[0].event_id=data_pipeline_core::derive_execution_market_event_v3_id(&initial[0]).unwrap();
         initial[0]=data_pipeline_core::decode_execution_market_event_v3(&data_pipeline_core::encode_execution_market_event_v3(&initial[0]).unwrap()).unwrap();
-        let condition=initial[0].market.condition_id.clone();let token=TokenId("1".into());
+        if include_cancels {
+            let ExecutionMarketEventPayloadV3::InitialL2Snapshot(book)=&mut initial[1].payload else {unreachable!()};
+            book.asks=vec![contracts::PriceLevelV1 {price_pusd_per_share:ExactDecimal("0.2".into()),quantity_shares:ExactDecimal("10".into())}];
+            initial[1].event_id=data_pipeline_core::derive_execution_market_event_v3_id(&initial[1]).unwrap();
+            initial[1]=data_pipeline_core::decode_execution_market_event_v3(&data_pipeline_core::encode_execution_market_event_v3(&initial[1]).unwrap()).unwrap();
+        }
+        let condition=initial[0].market.condition_id.clone();let token=TokenId("1".into());let other_token=TokenId("2".into());
         let (state,_)=reduce_market_event_slice_v2(actor.state.take().unwrap(),MarketEventPathV1::HiddenPlatform,1100,
             &initial,actor._rule_snapshot.snapshot(),policy.as_ref()).unwrap_or_else(|_|panic!("原初始化 {name}"));
         let fok=|spend:&str,worst:&str|SimBuyOrderKindV1::FokMarket {
@@ -48,11 +75,13 @@ async fn pending_post_original_sources() -> Vec<serde_json::Value> {
             "fok_incomplete"=>vec![(0,fok("6","0.6"))],
             "fok_fee_funds"=>vec![(0,fok("90","0.9"))],
             "mixed_reject_last"=>vec![(7,gtc("0.3","5")),(1,fok("3.6","0.6"))],
-            "mixed_accept_last"=>vec![(7,gtc("0.3","5")),(1,fok("1","0.6"))],
+            "mixed_accept_last"=>vec![(7,gtc(if include_cancels {"0.1"} else {"0.3"},"5")),(1,fok("1","0.6"))],
             "mixed_reject_first"=>vec![(7,gtc("0.5","1")),(1,fok("2","0.5"))],
             _=>vec![(0,gtc("0.123","10"))]};
         let posts=kinds.into_iter().enumerate().map(|(i,(ordinal,kind))|PostOrderBatchItemV2 {
-            batch_item_ordinal:ordinal,item:post_item(&format!("pending-{name}-{i}"),&condition,&token,kind)}).collect::<Vec<_>>();
+            batch_item_ordinal:if include_cancels {i as u16} else {ordinal},
+            item:post_item(&format!("pending-{name}-{i}"),&condition,
+                if include_cancels && i==1 {&other_token} else {&token},kind)}).collect::<Vec<_>>();
         let request_id=format!("pending-post-{name}");
         let reserve_intents=posts.iter().map(|post| {
             let identity=ledger::LedgerSubmissionItemIdentityV1 {global_request_id:request_id.clone(),batch_item_ordinal:post.batch_item_ordinal};
@@ -158,7 +187,7 @@ async fn pending_post_original_sources() -> Vec<serde_json::Value> {
         }
         let received_ledger=gpu_ledger_reservation_checkpoint(&ledger,"after_received_actual_noe");
         let rules=actor._rule_snapshot.snapshot();
-        let source=serde_json::json!({"name":name,"opening_ledger":opening,"cash":cash,"initial":initial,"changed":changed,
+        let mut source=serde_json::json!({"name":name,"opening_ledger":opening,"cash":cash,"initial":initial,"changed":changed,
             "posts":posts,"reserve_intents":reserve_intents,"sent_ledger":sent_ledger,"received_ledger":received_ledger,
             "records":original_records,"closed_at":closed_at,"request_id":request_id,"sent_at":1200,"input_sequence":11,"pending":pending,
             "receipt":{"arrived_at":receipt.platform_arrived_at_utc_ms,"count":receipt.scheduled_action_count},
@@ -169,6 +198,9 @@ async fn pending_post_original_sources() -> Vec<serde_json::Value> {
             "finality_path":policy.normal_path(),"taker_rebate_rate":rules.project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
             "next_private":state.session.as_ref().unwrap().next_private_feedback_sequence,
             "next_batch":state.session.as_ref().unwrap().next_projection_batch_sequence});
+        if include_cancels {
+            source["cancellation"]=pending_cancel_original_extension(&mut actor,state,&observation,&mut ledger,closed_at);
+        }
         cases.push(source);
     }
     cases

@@ -77,20 +77,58 @@ def checkpoint(ledger,original):
         assert amounts(getattr(funds,name))==[Fraction(original['cash'][key])],(key,amounts(getattr(funds,name)),original['cash'][key])
 
 
+def asset_layout(source):
+    initial=source['initial'];conditions=list(dict.fromkeys(event['market']['condition_id'] for event in initial))
+    markets=[conditions.index(event['market']['condition_id']) for event in initial]
+    tokens={event['payload']['event']['asset']['token_id']:i for i,event in enumerate(initial)}
+    return conditions,markets,tokens
+
+
+def original_semantic(record,source):
+    conditions,_,tokens=asset_layout(source)
+    locations={}
+    def scan(value):
+        if isinstance(value,dict):
+            if 'order_identity' in value and 'token_id' in value and 'condition_id' in value:
+                locations[value['order_identity']]=(value['condition_id'],value['token_id'])
+                if 'trade_identity' in value:locations[value['trade_identity']]=(value['condition_id'],value['token_id'])
+            for member in value.values():scan(member)
+        elif isinstance(value,list):
+            for member in value:scan(member)
+    all_records=[*source['records'],*source.get('cancellation',{}).get('records',[])]
+    for value in all_records:scan(value['record'])
+    found=[]
+    def locate(value):
+        if isinstance(value,dict):
+            if 'condition_id' in value and 'token_id' in value:
+                found.append((value['condition_id'],value['token_id']))
+            elif value.get('order_identity') in locations:
+                found.append(locations[value['order_identity']])
+            elif value.get('trade_identity') in locations:
+                found.append(locations[value['trade_identity']])
+            for member in value.values():locate(member)
+        elif isinstance(value,list):
+            for member in value:locate(member)
+    body=next(iter(record['record'].values()));locate(body.get('evidence') or body['fact']['disposition'])
+    condition,token=found[0] if found else (conditions[0],next(iter(tokens)))
+    return expected_semantic(record,token_index=tokens[token],condition_index=conditions.index(condition))
+
+
 def public_open(source):
     opening=source['opening_ledger'];p=opening['projection'];balance=p['platform_confirmed_projection']
+    conditions,markets,tokens=asset_layout(source);assets=len(markets);count_markets=len(conditions)
     assert p['platform_source_prefix']==0 and not opening['order_funds'] and not opening['trades']
     spec=importlib.util.spec_from_file_location('pending_post_ledger_platform',ROOT/'ledger/gpu/platform.py')
     module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
     def build():
-        platform=module.PlatformBalances.open(rational([balance[name] for name in BALANCES]),rational(['0','0']),T([0,0]),integers([0]))
-        pools=SuccessPools.open(T([0,0]),T([0,0]),T([0,1]),T([1,0]),1)
+        platform=module.PlatformBalances.open(rational([balance[name] for name in BALANCES]),rational(['0']*assets),T([0]*assets),integers([0]))
+        pools=SuccessPools.open(T([0]*assets),T(markets),T([i%2 for i in range(assets)]),T([i^1 for i in range(assets)]),1)
         columns=EconomicColumns.empty(1,'cuda')
         ledger=AdmissionLifecycle.open(platform,EvidenceBank.empty('cuda'),columns,integers([p['ledger_entry_seq']]),
-            integers([p['ledger_local_prefix']]),pools,position_costs=PositionCosts.empty(1,1,'cuda'),
-            order_funds=OrderFunds.empty(1,1,1,0,'cuda'),rebate_days=RebateDays.empty(T([[0]]),1),
+            integers([p['ledger_local_prefix']]),pools,position_costs=PositionCosts.empty(1,count_markets,'cuda'),
+            order_funds=OrderFunds.empty(1,1,1,0,'cuda'),rebate_days=RebateDays.empty(T([list(range(count_markets))]),1),
             accepted_principal=AcceptedPrincipal.open(1,T([0]),known=True),
-            projected_markets=ProjectedMarkets.open(T([0]),T([[False]],torch.bool),T([True],torch.bool)))
+            projected_markets=ProjectedMarkets.open(T(list(range(count_markets))),T([[False]*count_markets],torch.bool),T([True],torch.bool)))
         count=len(source['posts'])
         ledger=replace(ledger,reservations=ledger.reservations.resized(count),global_requests=T([[-1]*count]),item_ordinals=T([[-1]*count]))
         empty=T([[]]);integer=integers([])
@@ -130,8 +168,9 @@ def full_item(item,original):
     assert actual==expected,(actual,expected)
 
 
-def check(source,codec,progress):
+def check(source,codec,progress,after_posts=None):
     started=time.perf_counter();yes=T([True],torch.bool);zero=T([0]);posts=source['posts'];count=len(posts)
+    conditions,markets,tokens=asset_layout(source);asset_count=len(markets);market_count=len(conditions)
     sampler=EmpiricalDelaySampler.build((ROOT/'sim-system/config/latency-profiles'/source['profile_sha256']/'profile.json').read_bytes(),
         source['profile_sha256'],[source['session_seed'].encode('ascii')])
     rule=PublicRuleGpu(source['rule'])
@@ -142,25 +181,30 @@ def check(source,codec,progress):
             for level in event['payload']['event'][side]:slots.add((asset,side,Fraction(level['price_pusd_per_share'])))
     for post in posts:
         kind=post['item']['order']['kind']
-        if 'GtcLimit' in kind:slots.add((0,'bids',Fraction(kind['GtcLimit']['limit_price_pusd_per_share'])))
+        if 'GtcLimit' in kind:slots.add((tokens[post['item']['order']['token_id']],'bids',Fraction(kind['GtcLimit']['limit_price_pusd_per_share'])))
     for event in source['changed']:
         if event['payload']['event_type']=='level_execution_transition':
             value=event['payload']['event'];slots.add((0,'asks' if value['side']=='ASK' else 'bids',Fraction(value['price_pusd_per_share'])))
+    for stage in source.get('cancellation',{}).get('stages',[]):
+        if stage['late'] is not None:
+            for post in stage['late']['request']['request']['items']:
+                kind=post['item']['order']['kind']
+                slots.add((tokens[post['item']['order']['token_id']],'bids',Fraction(kind['GtcLimit']['limit_price_pusd_per_share'])))
     slots=sorted(slots);prices=[str(price) for _,_,price in slots];owners=T([0]*len(slots));assets=T([s[0] for s in slots])
     def build():
-        hidden=HiddenAssetState.empty(assets,rational(prices),T([0,0]),1,segment_capacity=1)
+        hidden=HiddenAssetState.empty(assets,rational(prices),T(markets),market_count,segment_capacity=1)
         for asset,event in enumerate(source['initial']):
             book=event['payload']['event'];quantities=['0']*len(slots)
             for side in ('bids','asks'):
                 for level in book[side]:quantities[slots.index((asset,side,Fraction(level['price_pusd_per_share'])))]=level['quantity_shares']
-            hidden,_=hidden.initial_snapshot(T([asset==0,asset==1],torch.bool),rational(quantities),
-                rational([book['initial_tick_size_pusd_per_share']]*2),T([0,0]))
+            hidden,_=hidden.initial_snapshot(T([i==asset for i in range(asset_count)],torch.bool),rational(quantities),
+                rational([book['initial_tick_size_pusd_per_share']]*asset_count),T([0]*asset_count))
         blank=integers([0]);quantity=BaseOrderQuantity.from_taker_plan(integers([1]),integers([1]),blank,blank)
         record=FillRecord.create(integers([1]),integers([1]),blank,zero,zero,~yes,source['finality_path'])
         return BaseSimRuntime(hidden,MutationRequests.empty(blank,capacity=1,action_capacity=count),BaseOrders.empty(quantity,capacity=1),
-            PlatformAccountState.open(integers([units(source['cash'])]),T([0,0])),FillPool.empty(record,capacity=1),
+            PlatformAccountState.open(integers([units(source['cash'])]),T([0]*asset_count)),FillPool.empty(record,capacity=1),
             RebateCoordinator(MakerDays.empty(T([[0]]),T([[source['market_end']]]),yes[:,None],fills=1,days=1),TakerDays.empty(1,'cuda',fills=1,days=1)),
-            market_controls=HiddenMarketControls.empty(1,1,'cuda'),post_results=PostResults.empty(quantity,1,1))
+            market_controls=HiddenMarketControls.empty(1,market_count,'cuda'),post_results=PostResults.empty(quantity,1,1))
     runtime=run(build);ledger=public_open(source)
     principal=[intent['requested_principal_pusd'] for intent in source['reserve_intents']]
     fee=[intent['immediate_fee_reserve_pusd'] for intent in source['reserve_intents']]
@@ -178,17 +222,19 @@ def check(source,codec,progress):
     assert receipt.arrived_at.cpu().tolist()==[source['receipt']['arrived_at']]
     checkpoint(ledger.ledger,source['sent_ledger'])
     emitter=replace(FeedbackEmitter.open(1),next_private_sequence=run(lambda:integers([source['first_private']])),next_batch_sequence=run(lambda:integers([source['first_batch']])))
-    noe=run(lambda:Projection.open(emitter,zero,zero,zero,zero,T([0,0]),integers([0]),T([-1]),T([-1]),zero,zero))
+    noe=run(lambda:Projection.open(emitter,zero,zero,zero,zero,T([0]*asset_count),integers([0]),T([-1]),T([-1]),zero,zero))
     bids=[]
     for post in posts:
-        kind=post['item']['order']['kind'];price=Fraction(kind['GtcLimit']['limit_price_pusd_per_share']) if 'GtcLimit' in kind else next(p for a,s,p in slots if a==0 and s=='bids')
-        bids.append(slots.index((0,'bids',price)))
-    intents=PendingPostIntents((tuple(json.dumps(p['item']) for p in posts),),T([[0]*count]),T([[0]*count]),T([bids]),T([[source['market_end']]*count]),T([0],torch.int32))
-    ask_rows=T([[i for i,(a,s,_) in enumerate(slots) if a==0 and s=='asks']])
+        kind=post['item']['order']['kind'];price=Fraction(kind['GtcLimit']['limit_price_pusd_per_share']) if 'GtcLimit' in kind else next(p for a,s,p in slots if a==tokens[post['item']['order']['token_id']] and s=='bids')
+        bids.append(slots.index((tokens[post['item']['order']['token_id']],'bids',price)))
+    intents=PendingPostIntents((tuple(json.dumps(p['item']) for p in posts),),T([[tokens[p['item']['order']['token_id']] for p in posts]]),T([[conditions.index(p['item']['order']['condition_id']) for p in posts]]),T([bids]),T([[source['market_end']]*count]),T([0],torch.int32))
+    ask_lists=[[i for i,(a,s,_) in enumerate(slots) if a==asset and s=='asks'] for asset in range(asset_count)]
+    ask_width=max(map(len,ask_lists));ask_directory=T([row+[-1]*(ask_width-len(row)) for row in ask_lists])
+    ask_rows=ask_directory[T([0])]
     taker,maker=run(lambda:(rational([source['taker_rebate_rate']]),rational([source['maker_rebate_rate']])))
     batches=[];timeline=[];effect_index=0;changed=False;capacity_checked=False
     horizon=runtime.requests.effective_at.flatten(1).max(1).values+max(step['offset_ms'] for step in source['finality_path']['steps'])
-    end=T([source['market_end']]*2)
+    end=T([e['market']['window']['end_at_utc_ms'] for e in source['initial']])
     # 测试驱动只提供实际有限hidden消息和EOF；CPU预期不参与下一事件选择。
     for _ in range(32):
         change_at=source['changed'][0]['time']['source_event_at_utc_ms'] if source['changed'] and not changed else None
@@ -218,10 +264,11 @@ def check(source,codec,progress):
         if phase==2:
             timeline.append({'phase':'finality','at':at})
             runtime,frame,_=run(lambda:runtime.finality(choice,maker,taker,end))
-            noe,batch=run(lambda:noe.fill_from_origin(sampler,runtime.orders,runtime.fills,frame,T([0,1]),runtime.calendars,taker,choice.at))
+            noe,batch=run(lambda:noe.fill_from_origin(sampler,runtime.orders,runtime.fills,frame,T(list(range(asset_count))),runtime.calendars,taker,choice.at))
         elif phase==5:
             timeline.append({'phase':'post','at':at});pending=runtime.requests.next_pending()
             refs=pending.item_ref
+            ask_rows=ask_directory[intents.assets.gather(1,refs[:,None])[:,0]]
             paths=T([[0]*(ask_rows.size(1)*runtime.hidden.queues.capacity)])
             terms=intents.encode(pending,runtime.hidden,runtime.market_controls,rule,codec,choice.enabled(5))
             if not capacity_checked and count==2 and effect_index==1:
@@ -242,7 +289,7 @@ def check(source,codec,progress):
                 capacity_checked=True
             runtime=runtime.advance_role_time(choice,end)
             choice=runtime.choose(hidden_source,yes,horizon,yes)
-            runtime,noe,batch,effects=runtime.post_pending(choice,intents,rule,codec,ask_rows,paths,taker,owners,refs,noe,sampler,T([0,1]))
+            runtime,noe,batch,effects=runtime.post_pending(choice,intents,rule,codec,ask_rows,paths,taker,owners,refs,noe,sampler,T(list(range(asset_count))))
             if effects.fault.cpu().tolist()!=[0]:
                 progress({'stage':'post_failure','case':source['name'],'at':at,'fault':effects.fault.cpu().tolist(),
                     'prepared_fault':effects.prepared.fault.cpu().tolist(),'quantity_fault':effects.prepared.quantity.fault.cpu().tolist(),
@@ -272,7 +319,7 @@ def check(source,codec,progress):
             if not on:continue
             key=values(batch.batch_sequences)[column],values(batch.record_ordinals)[column]
             original=expected[key];row=int(batch.rows[0,column].cpu());seen[row]=original
-            wanted=run(lambda:expected_semantic(original));actual=noe.normalizer.bank.semantic[row:row+1]
+            wanted=run(lambda:original_semantic(original,source));actual=noe.normalizer.bank.semantic[row:row+1]
             width=max(wanted.size(1),actual.size(1))
             assert torch.equal(torch.nn.functional.pad(actual,(0,width-actual.size(1))),torch.nn.functional.pad(wanted,(0,width-wanted.size(1)))),key
             body=next(iter(original['record'].values()));ref=body.get('source_reference') or body['fact']['source_reference']
@@ -307,6 +354,8 @@ def check(source,codec,progress):
     report={'name':source['name'],'actual_pending_count':count,'actual_NOE_records':len(seen),
         'processing_times':[e['key']['at'] for e in source['effects']],'capacity_one_original_prefix_retry':capacity_checked,
         'original_full_post_and_NOE_Ledger_checked':True,'elapsed_seconds':time.perf_counter()-started}
+    if after_posts is not None:
+        report['cancellation']=after_posts(source,runtime,ledger,noe,sampler,rule,slots,owners,receipt,progress)
     progress(report);return report
 
 

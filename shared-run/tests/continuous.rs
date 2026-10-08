@@ -1121,7 +1121,7 @@ async fn real_same_arrival_delayed_batch_forms_r1_s0_r0_without_reordering_origi
     for _ in 4..=6 {
         driver.next_group().unwrap().unwrap();
     }
-    shared.action_before(&mut driver).unwrap();
+    let view=shared.action_before(&mut driver).unwrap();
     let source_seq = |record: &::execution_normalization::NoeConsumedRecordRefV1| match record
         .record()
         .source_reference()
@@ -1223,6 +1223,20 @@ async fn real_same_arrival_delayed_batch_forms_r1_s0_r0_without_reordering_origi
             .map(|(_, id, ordinal)| (id, ordinal))
             .collect::<Vec<_>>()
     );
+    if let Ok(artifact)=std::env::var("B_GPU_FORMATION_REFERENCE_DIR") {
+        let receipts=vec![gpu_registry_receipt(&r,"paired",&r_receipt),gpu_registry_receipt(&s,"single",&s_receipt)];
+        let view=view.as_ref().unwrap();
+        let record=|r:&::execution_normalization::NoeConsumedRecordRefV1|serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()});
+        let raw_orders=shared.registry().orders().map(|order|serde_json::json!({"identity":order.order_identity,
+            "condition":order.condition_id,"token":order.token_id,"origin":order.origin.map(|origin|serde_json::json!({
+                "request":origin.intent.global_request_id(),"item":origin.batch_item_ordinal})),
+            "accepted":order.accepted.map(record),"formed":order.formed.map(record),
+            "trades":shared.registry().order_trades(order.order_identity).map(record).collect::<Vec<_>>() })).collect::<Vec<_>>();
+        let value=serde_json::json!({"logical_at":view.cutoff().decision_time().logical_time_utc_ms(),"raw_orders":raw_orders,"buy_source_receipts":receipts});
+        std::fs::create_dir_all(&artifact).unwrap();
+        std::fs::write(std::path::Path::new(&artifact).join("original-formation.json"),serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    }
+
 }
 #[tokio::test(flavor = "current_thread")]
 async fn real_late_query_cannot_reopen_closed_leg_and_paired_cancel_disappears() {

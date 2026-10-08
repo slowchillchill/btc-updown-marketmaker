@@ -163,8 +163,8 @@ enum MutationMethodV2 {
     Trades,
 }
 
-#[derive(Debug)]
-struct CancelTargetRegistrationV2 {
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct CancelTargetRegistrationV2 {
     target_ordinal: u64,
     action_ordinal: u16,
     platform_order_id: String,
@@ -3894,6 +3894,62 @@ fn existing_mutation_request_receipt_v2(
 }
 
 #[allow(clippy::result_large_err)]
+pub(crate) fn cancel_single_registration_v2(request: &crate::runtime_v2::CancelOrderRequestV2)
+    -> Result<Vec<CancelTargetRegistrationV2>, SimRunActorErrorV2> {
+    validate_cancel_item_v2(&request.item)?;
+    Ok(vec![CancelTargetRegistrationV2 {
+                    target_ordinal: 0,
+                    action_ordinal: 0,
+                    platform_order_id: request.item.platform_order_id.clone(),
+                    input_item_refs: vec![CancelInputItemRefV2 {
+                        item_id: request.item.item_id.clone(),
+                        batch_item_ordinal: 0,
+                    }],
+                }])
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) fn cancel_targets_registration_v2(request: &crate::runtime_v2::CancelOrdersRequestV2)
+    -> Result<Vec<CancelTargetRegistrationV2>, SimRunActorErrorV2> {
+    if request.items.is_empty() {
+        return Err(SimRunActorErrorV2::InvalidBusinessRequest("批量撤单不能为空"));
+    }
+    let mut ordinals = BTreeSet::new();
+    let mut target_indexes: BTreeMap<String, usize> = BTreeMap::new();
+    let mut targets: Vec<CancelTargetRegistrationV2> = Vec::new();
+    for item in &request.items {
+        if !ordinals.insert(item.batch_item_ordinal) {
+            return Err(SimRunActorErrorV2::InvalidBusinessRequest("批量撤单 ordinal 重复"));
+        }
+        if let Err(error) = validate_cancel_item_v2(&item.item) {
+            return Err(error);
+        }
+        if let Some(index) = target_indexes.get(&item.item.platform_order_id).copied() {
+            targets[index].action_ordinal =
+                targets[index].action_ordinal.min(item.batch_item_ordinal);
+            targets[index].input_item_refs.push(CancelInputItemRefV2 {
+                item_id: item.item.item_id.clone(),
+                batch_item_ordinal: item.batch_item_ordinal,
+            });
+        } else {
+            let index = targets.len();
+            let target_ordinal = index as u64;
+            target_indexes.insert(item.item.platform_order_id.clone(), index);
+            targets.push(CancelTargetRegistrationV2 {
+                target_ordinal,
+                action_ordinal: item.batch_item_ordinal,
+                platform_order_id: item.item.platform_order_id.clone(),
+                input_item_refs: vec![CancelInputItemRefV2 {
+                    item_id: item.item.item_id.clone(),
+                    batch_item_ordinal: item.batch_item_ordinal,
+                }],
+            });
+        }
+    }
+    Ok(targets)
+}
+
+#[allow(clippy::result_large_err)]
 fn register_new_request_v2(
     mut state: BusinessReducerStateV2,
     cutoff: &TrustedDecisionCutoffV2,
@@ -3960,68 +4016,18 @@ fn register_new_request_v2(
             }
         }
         BusinessRequestV2::CancelOrder(request) => {
-            if let Err(error) = validate_cancel_item_v2(&request.item) {
-                return Err((state, error));
-            }
-            NewMutationItemsV2::Cancel {
-                method: MutationMethodV2::CancelOrder,
-                targets: vec![CancelTargetRegistrationV2 {
-                    target_ordinal: 0,
-                    action_ordinal: 0,
-                    platform_order_id: request.item.platform_order_id.clone(),
-                    input_item_refs: vec![CancelInputItemRefV2 {
-                        item_id: request.item.item_id.clone(),
-                        batch_item_ordinal: 0,
-                    }],
-                }],
-            }
+            let targets = match cancel_single_registration_v2(request) {
+                Ok(targets) => targets,
+                Err(error) => return Err((state, error)),
+            };
+            NewMutationItemsV2::Cancel { method: MutationMethodV2::CancelOrder, targets }
         }
         BusinessRequestV2::CancelOrders(request) => {
-            if request.items.is_empty() {
-                return Err((
-                    state,
-                    SimRunActorErrorV2::InvalidBusinessRequest("批量撤单不能为空"),
-                ));
-            }
-            let mut ordinals = BTreeSet::new();
-            let mut target_indexes: BTreeMap<String, usize> = BTreeMap::new();
-            let mut targets: Vec<CancelTargetRegistrationV2> = Vec::new();
-            for item in &request.items {
-                if !ordinals.insert(item.batch_item_ordinal) {
-                    return Err((
-                        state,
-                        SimRunActorErrorV2::InvalidBusinessRequest("批量撤单 ordinal 重复"),
-                    ));
-                }
-                if let Err(error) = validate_cancel_item_v2(&item.item) {
-                    return Err((state, error));
-                }
-                if let Some(index) = target_indexes.get(&item.item.platform_order_id).copied() {
-                    targets[index].action_ordinal =
-                        targets[index].action_ordinal.min(item.batch_item_ordinal);
-                    targets[index].input_item_refs.push(CancelInputItemRefV2 {
-                        item_id: item.item.item_id.clone(),
-                        batch_item_ordinal: item.batch_item_ordinal,
-                    });
-                } else {
-                    let index = targets.len();
-                    let target_ordinal = index as u64;
-                    target_indexes.insert(item.item.platform_order_id.clone(), index);
-                    targets.push(CancelTargetRegistrationV2 {
-                        target_ordinal,
-                        action_ordinal: item.batch_item_ordinal,
-                        platform_order_id: item.item.platform_order_id.clone(),
-                        input_item_refs: vec![CancelInputItemRefV2 {
-                            item_id: item.item.item_id.clone(),
-                            batch_item_ordinal: item.batch_item_ordinal,
-                        }],
-                    });
-                }
-            }
-            NewMutationItemsV2::Cancel {
-                method: MutationMethodV2::CancelOrders,
-                targets,
-            }
+            let targets = match cancel_targets_registration_v2(request) {
+                Ok(targets) => targets,
+                Err(error) => return Err((state, error)),
+            };
+            NewMutationItemsV2::Cancel { method: MutationMethodV2::CancelOrders, targets }
         }
         BusinessRequestV2::CancelMarketOrders(request) => NewMutationItemsV2::CancelMarket {
             condition_id: request.condition_id.clone(),
@@ -7279,10 +7285,20 @@ mod tests {
         make_port: impl FnOnce(&std::path::Path,&mut RunOpenedV2) -> Box<dyn BusinessProjectionPortV2>,
         opening_cash: &str,
     ) -> (tempfile::TempDir, SimRunActorV2) {
+        active_market_actor_with_projection_cash_and_scenario(role,run_id,finality_policy,make_port,opening_cash,sealed_scenario()).await
+    }
+
+    async fn active_market_actor_with_projection_cash_and_scenario(
+        role: SimCallerRoleV1,
+        run_id: &str,
+        finality_policy: Arc<TradeFinalityPolicyV2>,
+        make_port: impl FnOnce(&std::path::Path,&mut RunOpenedV2) -> Box<dyn BusinessProjectionPortV2>,
+        opening_cash: &str,
+        scenario: Arc<SealedPlatformScenarioV1>,
+    ) -> (tempfile::TempDir, SimRunActorV2) {
         let directory = tempfile::tempdir().expect("创建市场事件测试目录");
         let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
         let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
-        let scenario = sealed_scenario();
         let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
         let mut run_opened = opened(
             run_id,

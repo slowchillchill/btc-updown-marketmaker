@@ -5,7 +5,7 @@
 """
 from dataclasses import dataclass
 import torch
-from queues import ExactInt,ExactRational,Numbers,_take
+from queues import ExactInt,ExactRational,Numbers,_take,_repeat
 from asset_buy import take_ratio
 from success_pool import select
 from registry import choose_latest,source_priority,identity_matches
@@ -23,6 +23,22 @@ class SubmittedLegs:
     outcome_indices: torch.Tensor | None = None
     association_known: torch.Tensor | None = None
     terms: object | None = None  # 原冻结ModelIntent共享逐腿正文；receipt不建立订单origin。
+    input_sequences: object | None = None  # 原已收到receipt的完整u64，非SIM私有序号。
+    input_sequence_known: torch.Tensor | None = None  # 旧冷前缀未装原receipt序号时保持未知。
+
+
+def bind_submission_receipt(legs, request_keys, receipt):
+    """将实际首次/重复receipt绑定原腿；后来回执不能覆盖首次输入序。"""
+    from dataclasses import replace
+    roots,width=legs.present.shape
+    matches=legs.present & (legs.request_slots==request_keys[:,None])
+    known=matches & (receipt.registered|receipt.duplicate)[:,None]
+    sequence=_repeat(receipt.input_sequence,width)
+    prior=legs.input_sequence_known if legs.input_sequence_known is not None else torch.zeros_like(known)
+    if legs.input_sequences is not None:
+        sequence=sequence.select((known & ~prior).flatten(),legs.input_sequences)
+    return replace(legs,receipt_known=legs.receipt_known|known,input_sequences=sequence,
+        input_sequence_known=prior|known)
 
 
 @dataclass(frozen=True)

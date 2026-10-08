@@ -29,6 +29,7 @@ class BaseSimRuntime:
     order_query_history: object = None  # 显式原订单保留水位；不代表列表查询RootSnapshot退役。
 
     post_results: object = None  # 原逐项Post正文，末项封口前保留真实第一结果。
+    cancel_results: object = None  # 原逐目标取消正文，完整末项封口后仍保原决定。
 
     def install_order_query_history(self,history):
         if self.order_query_history is not None:
@@ -521,6 +522,16 @@ class BaseSimRuntime:
         requests,orders,queue,account,effects=run_pending_base_cancel(self.requests,self.orders,
             self.hidden.queues,self.account,target,row_roots,closed,result_refs,choice.enabled(5))
         return replace(self,requests=requests,orders=orders,hidden=replace(self.hidden,queues=queue),account=account),effects
+
+    def prepare_cancel(self,choice,intents):
+        self._source(choice)
+        return intents.expand(self.requests.next_pending(),self.orders,choice.enabled(5))
+
+    def cancel_pending(self,choice,work,row_roots,result_refs,projection,sampler,asset_tokens,scenario=None):
+        from pending_cancel_request import run_cancel_pending_request
+        self._source(choice)
+        return run_cancel_pending_request(self,work,row_roots,result_refs,projection,sampler,asset_tokens,
+            choice.enabled(5),scenario)
 
     def query_base(self,choice,target,result_refs,projection,sampler,asset_tokens):
         """实际阶段5的Query完成与NOE发射共同提交；未完成不消耗请求。"""

@@ -26,8 +26,9 @@ def entity_sequence(identity,kind):
     return int(value[kind]['source_'+kind.lower()+'_id'].removeprefix('sim-'))
 
 
-def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=0, token_slots=None):
+def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=0, token_slots=None, condition_index=0):
     zero=torch.zeros(1,dtype=torch.int64,device='cuda')
+    condition=torch.full_like(zero,condition_index)
     body=next(iter(record['record'].values()))
     if 'fact' in body:
         fact=body['fact']
@@ -48,7 +49,7 @@ def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=
                 rational([e['balance_shares_delta'] for e in vector])),torch.ones((1,len(vector)),dtype=torch.bool,device='cuda'))
             names=['cash_pusd_delta','available_pusd_delta','principal_encumbrance_pusd_delta','immediate_taker_fee_encumbrance_pusd_delta',
                 'maker_rebate_receivable_pusd_delta','taker_rebate_receivable_pusd_delta','maker_rebate_locked_remainder_pusd_delta','taker_rebate_locked_remainder_pusd_delta']
-            return encode_fields([zero,zero,torch.tensor([value['economic_effective_at_utc_ms']],device='cuda'),
+            return encode_fields([zero,condition,torch.tensor([value['economic_effective_at_utc_ms']],device='cuda'),
                 torch.full_like(zero,resolution_index),zero,*[rational([existing[n]]) for n in names],vector_fields,
                 rational([balance['settlement_fee_liability_pusd_delta']]),rational([balance['actual_taker_fee_liability_pusd_delta']])])
         tag={'OrderAcceptedEncumbranceApplied' :0,'CallerCancellationEncumbranceReleased':2,'MarketResolutionEncumbranceReleased':5,'FillFinalityEconomicApplied':6,'TakerRebateAccrualApplied':10,
@@ -70,7 +71,7 @@ def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=
         names=['cash_pusd_delta','available_pusd_delta','principal_encumbrance_pusd_delta','immediate_taker_fee_encumbrance_pusd_delta',
             'maker_rebate_receivable_pusd_delta','taker_rebate_receivable_pusd_delta','maker_rebate_locked_remainder_pusd_delta','taker_rebate_locked_remainder_pusd_delta']
         outcomes=balance['outcome_balance_deltas']
-        semantic=[zero,torch.full_like(zero,-1) if value['condition_id'] is None else zero,torch.tensor([value['economic_effective_at_utc_ms']],device='cuda'),
+        semantic=[zero,torch.full_like(zero,-1) if value['condition_id'] is None else condition,torch.tensor([value['economic_effective_at_utc_ms']],device='cuda'),
             torch.full_like(zero,tag),integers([sequence]),torch.full_like(zero,fields.get('path_ordinal',0)),
             *[rational([balance[name]]) for name in names],torch.tensor([bool(outcomes)],device='cuda'),torch.full_like(zero,token_index if outcomes else 0),
             rational([outcomes[0]['balance_shares_delta'] if outcomes else '0']),rational([settlement_liability]),rational([taker_liability])]
@@ -86,7 +87,7 @@ def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=
         value=value['result']
         state={'MatchedNotBroadcasted':0,'Matched':1,'Retrying':2,'Mined':3,'Confirmed':4,'Failed':5}[value['state']]
         disposition={'PendingUnapplied':0,'PendingApplied':1,'FinalSuccess':2,'FinalFailureUnapplied':3,'FinalFailureCompensated':4}[value['economic_disposition']]
-        return encode_fields([zero,zero,torch.full_like(zero,token_index),integers([value['fill_sequence']]),integers([entity_sequence(value['order_identity'],'Order')]),
+        return encode_fields([zero,condition,torch.full_like(zero,token_index),integers([value['fill_sequence']]),integers([entity_sequence(value['order_identity'],'Order')]),
             torch.full_like(zero,state),torch.full_like(zero,disposition),torch.tensor([value['matched_at_utc_ms']],device='cuda'),
             torch.full_like(zero,{'Taker':0,'MakerInferred':1}[value['liquidity_role']]),rational([value['source_price_pusd_per_share']]),integers([units(value['base_quantity_shares'])]),
             integers([units(value['quote_amount_pusd'])]),integers([units(value['immediate_taker_fee_pusd'])]),
@@ -94,10 +95,10 @@ def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=
             integers([value['economic_application_account_transition_seq'] or 0]),torch.full_like(zero,maker_kind),rational([maker_value])])
     if kind=='OrderLifecycle':
         if isinstance(value['event'],dict) and 'MarketResolvedCanceled' in value['event']:
-            return encode_fields([zero,zero,torch.full_like(zero,token_index),integers([entity_sequence(value['order_identity'],'Order')]),torch.full_like(zero,5),zero,torch.full_like(zero,resolution_index)])
+            return encode_fields([zero,condition,torch.full_like(zero,token_index),integers([entity_sequence(value['order_identity'],'Order')]),torch.full_like(zero,5),zero,torch.full_like(zero,resolution_index)])
         if value['event']=='CallerCanceled':
-            return encode_fields([zero,zero,torch.full_like(zero,token_index),integers([entity_sequence(value['order_identity'],'Order')]),torch.full_like(zero,4),zero])
-        return encode_fields([zero,zero,torch.full_like(zero,token_index),integers([entity_sequence(value['order_identity'],'Order')]),zero,
+            return encode_fields([zero,condition,torch.full_like(zero,token_index),integers([entity_sequence(value['order_identity'],'Order')]),torch.full_like(zero,4),zero])
+        return encode_fields([zero,condition,torch.full_like(zero,token_index),integers([entity_sequence(value['order_identity'],'Order')]),zero,
             torch.full_like(zero,{'Open':0,'Matched':1}[value['event']['Accepted']['state']])])
     if kind=='Control':
         if 'Cancellation' in value:
@@ -113,12 +114,12 @@ def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=
                 zero,zero,integers([0]),zero,integers([0]),integers([0]),zero])
         value=outcome['Accepted']
         if 'QuoteBudget' in value['measurement']:
-            return encode_fields([zero,zero,zero,torch.full_like(zero,token_index),
+            return encode_fields([zero,zero,condition,torch.full_like(zero,token_index),
                 integers([entity_sequence(value['order']['order_identity'],'Order')]),
                 torch.full_like(zero,{'Open':0,'Matched':1}[value['order']['state']]),
                 integers([units(value['measurement']['QuoteBudget']['actual_matched_base_quantity_shares'])]),
                 torch.tensor([value['effective_processing_at_utc_ms']],device='cuda')])
-        return encode_fields([zero,zero,zero,torch.full_like(zero,token_index),integers([entity_sequence(value['order']['order_identity'],'Order')]),
+        return encode_fields([zero,zero,condition,torch.full_like(zero,token_index),integers([entity_sequence(value['order']['order_identity'],'Order')]),
             torch.full_like(zero,{'Open':0,'Matched':1}[value['order']['state']]),
             integers([units(value['measurement']['Base']['matched_base_quantity_shares'])]),
             integers([units(value['measurement']['Base']['open_base_quantity_shares'])]),
@@ -130,10 +131,10 @@ def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=
             outcomes={'Registered':0,'Pending':1,'FinalSuccess':2,'FinalFailureNoEffect':3}
             observations=['Registered','SubmissionUnknown','ObservationTimeout','QueryUnknown','QueryAcceptedPending','QueryFinalSuccess',
                 'QueryConfirmedNoTransaction','RetryAuthorized','RetryNotAuthorized','TerminalSuccess','TerminalFailureNoEffect']
-            return encode_fields([zero,zero,torch.full_like(zero,resolution_index),zero,torch.ones_like(zero),torch.full_like(zero,2),
+            return encode_fields([zero,condition,torch.full_like(zero,resolution_index),zero,torch.ones_like(zero),torch.full_like(zero,2),
                 torch.full_like(zero,outcomes[request['outcome']]),torch.full_like(zero,observations.index(request['observation']))])
         if 'Resolved' in value:
-            return encode_fields([zero,zero,torch.full_like(zero,resolution_index),torch.full_like(zero,terminal_index)])
+            return encode_fields([zero,condition,torch.full_like(zero,resolution_index),torch.full_like(zero,terminal_index)])
         if 'MakerAccrualFinalized' in value:
             from fields import RecordList
             value=value['MakerAccrualFinalized']
@@ -142,7 +143,7 @@ def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=
                 torch.zeros(len(items),dtype=torch.int64,device='cuda'),torch.zeros(len(items),dtype=torch.int64,device='cuda'),
                 torch.tensor([item['attribution_day_start_utc_ms'] for item in items],dtype=torch.int64,device='cuda'),
                 rational([item['contribution_pusd'] for item in items])),torch.ones((1,len(items)),dtype=torch.bool,device='cuda'))
-            return encode_fields([zero,zero,torch.full_like(zero,{'Calculated':0,'ZeroNoEligibleMakerFill':1,'UnknownIncomplete':2}[value['status']]),vector])
+            return encode_fields([zero,condition,torch.full_like(zero,{'Calculated':0,'ZeroNoEligibleMakerFill':1,'UnknownIncomplete':2}[value['status']]),vector])
         if 'DayFinalized' in value:
             from fields import IntegerList
             value=value['DayFinalized']

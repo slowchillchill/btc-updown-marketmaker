@@ -140,6 +140,8 @@ class PublicLedgerState:
         if requests is not None:
             fault |= requests.fault
         directory=objects=None
+        if order_formation is None and cancel_markets is not None and submitted_legs is not None:
+            order_formation=self.registry.freeze_order_formation(intents,submitted_legs,cutoff,cancel_markets.market_present)
         if order_formation is not None:
             if submitted_legs is None or cancel_markets is None or request_identity_order is None:
                 raise ValueError('撤单冻结需要原腿、公开形成来源、市场列和请求身份字典序')

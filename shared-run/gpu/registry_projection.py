@@ -128,7 +128,13 @@ def public_rows_from_closed(bank,batches,closed,receive_rank,*,source_rows=None)
     bindings=SubmissionBindings(submission.reshape(roots,width),requests,items,_take(private,coordinates),receive_rank,
         decoded[3][4],accepted.reshape(roots,width),fault)
     from dataclasses import replace
-    return replace(events,fault=fault),bindings
+    # Accepted保存逐腿原处理时刻；Order/Trade/Query只保实际公开归属。
+    condition=torch.where(accepted,decoded[3][2],-1)
+    condition=torch.where(order_life,decoded[7][1],condition)
+    condition=torch.where(trades,decoded[8][1],condition)
+    condition=torch.where(queries,decoded[25][2],condition)
+    return replace(events,fault=fault,processing_at=torch.where(accepted,decoded[3][8],-1).reshape(roots,width),
+        condition_slots=condition.reshape(roots,width)),bindings
 
 
 def order_events_from_closed(bank,batches,closed,receive_rank):

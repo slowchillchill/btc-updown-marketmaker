@@ -66,6 +66,8 @@ class CancelTargetFeedback:
     active: torch.Tensor
     delta: object  # 原SIM实际释放delta；Control本身不重复释放资金。
     fault: torch.Tensor
+    order: object | None = None  # 实际SIM目标原归属；不能用批首资产代替。
+    processed_at: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -485,34 +487,37 @@ class Projection:
             categories,platforms,requests,items,self.context_slots[:,None].expand_as(rows),self.run_slots[:,None].expand_as(rows),
             economic_sequence,economic_balance,economic_outcome,torch.stack(economic_assets,1).gather(1,order),economic_mask,vectors)
 
-    def cancellation(self,sampler,targets,at,direct_received,method,completed):
-        """已处理完整单资产请求的真实取消效果，保原双重顺序。
+    def cancellation(self,sampler,targets,at,direct_received,method,completed,*,lifecycle_targets=None,asset_tokens=None):
+        """已处理目标的真实取消效果及末项完整响应，保原双重顺序。
 
-        SIM完成所有target之后提供原冻结人口，包含NoEffect。private按各正取消
-        CallerCanceled→最终Direct分配；mapper source ordinal按全部Target→Completed
-        →各CallerCanceled/Economic分配。未完成请求须在SIM保留，不能提前调用。
+        每个已处理pending立即提供自己的lifecycle_targets，保各目标处理时点。
+        只有末项完成时completed才为真，targets提供含NoEffect的完整原响应人口。
+        private按本次CallerCanceled→最终Direct分配；mapper source ordinal保持
+        Target→Completed→CallerCanceled/Economic顺序。未完成请求保留原pending。
         """
         from queues import _take,ExactInt
         roots=self.account_slots.numel()
-        width=len(targets)+1
+        lifecycle_targets=targets if lifecycle_targets is None else lifecycle_targets
+        width=len(lifecycle_targets)+1
         zero=torch.zeros_like(at)
         for value in [at,direct_received,method]:
             if value.shape!=(roots,) or value.dtype!=torch.int64 or value.device!=self.account_slots.device:
                 raise TypeError('取消完成时点/method需同设备int64[roots]')
         if completed.shape!=(roots,) or completed.dtype!=torch.bool or completed.device!=at.device:
             raise TypeError('完整取消请求完成需同设备bool[roots]')
-        lives=[target.active&(target.outcome==0) for target in targets]
+        lives=[target.active&(target.outcome==0) for target in lifecycle_targets]
         active=torch.stack([*lives,completed],1)
         error=torch.zeros_like(at,dtype=torch.int32)
-        for target in targets:error=error|torch.where(target.active,target.fault|target.delta.fault,0)
+        for target in (*targets,*lifecycle_targets):
+            error=error|torch.where(target.active,target.fault|(0 if target.delta is None else target.delta.fault),0)
         error=error|((method<0)&completed).to(torch.int32)
         direct=torch.zeros_like(active);direct[:,-1]=True
-        platforms=at[:,None].expand(roots,width)
+        platforms=torch.stack([*(at if target.processed_at is None else target.processed_at for target in lifecycle_targets),at],1)
         received=torch.zeros_like(platforms);received[:,-1]=direct_received
         emitter,emission=self.emitter.emit(sampler,active,direct,platforms,platforms,received,error[:,None].expand_as(active))
-        categories=torch.tensor([1]*len(targets)+[0],device=at.device).expand(roots,width)
+        categories=torch.tensor([1]*len(lifecycle_targets)+[0],device=at.device).expand(roots,width)
         direct_count=sum((target.active.to(torch.int64) for target in targets),torch.zeros_like(at))+1
-        counts=torch.stack([*[1+target.delta.emitted.to(torch.int64) for target in targets],direct_count],1)
+        counts=torch.stack([*[1+target.delta.emitted.to(torch.int64) for target in lifecycle_targets],direct_count],1)
         ordinals=map_source_ordinals(emission.emitted,categories,counts,error[:,None].expand_as(active))
         def sequence(column):
             positions=torch.arange(roots,device=at.device)*width+column
@@ -531,18 +536,37 @@ class Projection:
         mapped=map_cancellation_completed(total(0),total(1),total(2),private,source_ordinal,
             self.account_slots,self.request_slots,emission.emitted[:,-1])
         records.append((mapped,EVIDENCE,private,batch,time,zero,at,emission.emitted[:,-1]))
-        for column,target in enumerate(targets):
+        for column,target in enumerate(lifecycle_targets):
             private,batch,time=sequence(column)
+            working=self if target.order is None else self.bind_base_order(target.order,asset_tokens,emission.emitted[:,column])
+            event_at=at if target.processed_at is None else target.processed_at
             mapped=map_order_canceled(target.order_sequence,private,ordinals.first_ordinals[:,column],
-                self.account_slots,self.condition_slots,self.token_slots,emission.emitted[:,column])
-            records.append((mapped,EVIDENCE,private,batch,time,torch.ones_like(at),at,emission.emitted[:,column]))
-            mapped=map_economic(target.delta,self.account_slots,self.condition_slots,self.token_slots,
-                self.asset_indices,self.asset_roots,private,ordinals.first_ordinals[:,column]+1,at,
+                working.account_slots,working.condition_slots,working.token_slots,emission.emitted[:,column])
+            records.append((mapped,EVIDENCE,private,batch,time,torch.ones_like(at),event_at,emission.emitted[:,column]))
+            mapped=map_economic(target.delta,working.account_slots,working.condition_slots,working.token_slots,
+                working.asset_indices,working.asset_roots,private,ordinals.first_ordinals[:,column]+1,event_at,
                 torch.full_like(at,2),target.order_sequence,zero)
-            records.append((mapped,ECONOMIC,private,batch,time,torch.ones_like(at),at,target.delta.emitted&emission.emitted[:,column]))
+            records.append((mapped,ECONOMIC,private,batch,time,torch.ones_like(at),event_at,target.delta.emitted&emission.emitted[:,column]))
         candidate,batch=self._finish(emitter,records,emission.root_fault|ordinals.fault)
         return candidate,replace(batch,cancellation_method=torch.where(batch.source_categories==0,
             method[:,None],torch.full_like(batch.source_categories,-1)))
+
+    def coordinate_result(self,original,committed,fault):
+        """映射候选失败保原发射序及规范位置；原不可变bank只增长物理存储。"""
+        emitter=replace(self.emitter,
+            next_private_sequence=self.emitter.next_private_sequence.select(committed,original.emitter.next_private_sequence),
+            next_batch_sequence=self.emitter.next_batch_sequence.select(committed,original.emitter.next_batch_sequence),fault=fault)
+        normalizer=self.normalizer
+        if original.normalizer is None:
+            logical=torch.full_like(normalizer.logical_rows,-1)
+            economic=torch.full_like(normalizer.economic_rows,-1)
+        else:
+            addition=normalizer.logical_rows.size(1)-original.normalizer.logical_rows.size(1)
+            logical=torch.nn.functional.pad(original.normalizer.logical_rows,(0,addition),value=-1)
+            economic=torch.nn.functional.pad(original.normalizer.economic_rows,(0,addition),value=-1)
+        normalizer=replace(normalizer,logical_rows=torch.where(committed[:,None],normalizer.logical_rows,logical),
+            economic_rows=torch.where(committed[:,None],normalizer.economic_rows,economic),fault=fault)
+        return replace(self,emitter=emitter,normalizer=normalizer)
 
     def acceptance(self,sampler,prepared,effects,pool,at,direct_received,*,direct_completed=None,
                    completed_post=None,post_results=None,asset_tokens=None):

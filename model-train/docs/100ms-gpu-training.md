@@ -1299,7 +1299,7 @@ order/request/item/condition/asset，从成交池取得原角色和原价，并�
 `pending_cancel_execution.py`从原pending item的完整order序号查同一动态Base目录，
 组合队列撤段、订单剩量、本金释放和该item完成的共同候选。不存在订单或没有可撤余量
 返回NoEffect，不造账户delta。反馈映射仍须保留所有target，直至原请求完成后统一封口。
-当前真实短链只覆盖单target成功取消，不代表CancelMarket展开、多target累计或场景失败已接通。
+此旧Base短链只覆盖单target成功取消；完整请求、CancelMarket展开和场景失败的生产入口见“完整取消请求与公开订单形成”。
 pending接单和取消入口接受设备phase许可；未选中的未来动作不提交完成或资金。
 完整宿主仍须按原义务/hidden/public前沿选择该许可，不能只因请求exists便处理未来动作。
 
@@ -1806,7 +1806,8 @@ GTC费用复用SIM的LIMIT最大即时费，FOK预留即时费为0。价格头�
 不能把旧执行Ledger快照装回账户。多Family抽到NoTrade仍提交Family一次随机数，
 但无预留或请求；Cancel也无买入预留；NoAct不评分、不抽样、不发布。
 
-`freeze_account` 可接原 `submitted_legs`、`order_formation`、公开市场列及原request字典序。
+`freeze_account` 接原 `submitted_legs`、公开市场列及原request字典序；未显式提供
+`order_formation` 时，从已领取Registry、原冻结意图和真实receipt生成同cutoff形成读面。
 `assemble_cancel_directory` 使用首次领取维护的 `SubmissionBindings`，将原完整双腿请求
 的ordinal0／1匹配到实际Accepted订单和同cutoff的 `FrozenIntentOrders` 身份轴。
 它不按两个Accepted猜Pair，不以物理slot排序原请求。随后复用 `freeze_cancel_objects`，
@@ -1832,10 +1833,9 @@ Market正文保原condition，后续处理时展开仍归Mutation处理层，不
 已有actual-joint阶段和全部必需开关，exit0不能替代实际1500／1600覆盖。
 
 选择发布切片交付原公共预留接口及真实消费者；有界FOK处理和请求反馈见下一节。
-完整Actor到发送／Registry／MutationRequests的总入口、CancelMarket处理时展开、
-统一时钟、持续OrderFormation宿主、完整连续SIM→NOE→Ledger、PPO或活动恢复仍未交付。
-OrderFormation的真实处理时点、receipt input sequence、formed private sequence及市场
-关联仍须由完整宿主接入；有限来源验证不证明这条持续来源已经完成。
+完整Actor到发送／Registry／MutationRequests的总入口、统一时钟、持续OrderFormation宿主、
+完整连续SIM→NOE→Ledger、PPO或活动恢复仍未交付。公共取消处理和公开形成读面已接通，
+见“完整取消请求与公开订单形成”；有限真实来源验证不证明持续宿主已经完成。
 
 ### 有界pending-FOK与完整混合Post响应
 
@@ -1888,3 +1888,49 @@ Accepted按QuoteBudget读取：FOK active为NotApplicable，成交覆盖或最�
 请求核未知／跨市场token的AssetNotInMarket及无副作用，并保合法token的SDK／接纳对照。
 这些有限原来源不是MINED后态冷装，也不证明连续订单形成或完整Actor发送已交付。
 本批不增加默认延迟、生产发送时间、逐条件CPU业务推进、统一全时钟、PPO或正式训练。
+
+
+### 完整取消请求与公开订单形成
+
+`shared-run/gpu/cancel_submission.py::submit_cancellation` 消费控制面提供的原Single、
+Pair或Market请求、身份、真实send时刻及input sequence，登记原MutationRequests和首次
+receipt。整批冷解码复用SIM原取消去重函数及Native薄桥，保原input item引用、ordinal和
+Pair腿序。该入口不生成身份、发送时间或业务延迟，也不代替完整Actor发送消费者。
+
+`BaseSimRuntime.prepare_cancel` 在实际pending处理时读取唯一BaseOrders。
+CancelMarket发送时仅保存condition，处理时按该condition和原active条件
+（open大于0或pending maker depletion大于0）展开目标。目标按完整原平台ID字符串
+字典序排列，不能用Actor cutoff名单、数字槽或截断列表代替。
+调用者持有一次展开的 `ExpandedCancel`；结果、NOE或其他物理资源不足时增长原资源，
+只续接同一pending及同一人口，不重新展开、抽业务失败或重复已提交效果。
+
+`BaseSimRuntime.cancel_pending` 以原单个pending为共同资源事务边界。
+不同处理时刻的Single／Pair目标分别提交；前项已生效的订单、队列及经济事实不会被
+后项失败或容量不足撤销。原 `TemporaryFailureNoEffect` 是完成的业务失败，不自动重试。
+每项CallerCanceled及Economic沿自己的处理时刻立即投影；末项才封口完整原Submission，
+保逐目标结果、失败原因和全部原引用。空市场正常完成。取消释放仍经NOE→Ledger，
+不直接修改Actor余额。
+
+`PublicRegistryState.freeze_order_formation` 从同cutoff已领取NOE生成公共读面，
+不是另一份持久订单权威。Accepted的processing来自自身effective_processing_at；
+整响应responded_at不能替代混合两腿的处理时刻。`bind_submission_receipt` 将实际
+receipt的完整input sequence接到原SubmittedLegs。processing key须同时具有原Accepted、
+冻结origin和实际receipt；formed顺序只来自已领取OrderLifecycle::Accepted的private sequence。
+Query／Trade先到时保原公开身份和位置，不补造origin、条款或processing key。
+原condition已知但公开市场未出现时，market仍Unknown；此判断复用同冻结市场人口。
+Pair装配继续按原请求ordinal0／1关联，形成排序不能重排原正文腿，旧冻结保有原值。
+
+有限真实来源验证覆盖同一账户的混合接单、两腿不同处理时刻及其后Single、Pair、Market、
+失败后显式新Single和空Market五个取消请求。Market发送后、处理前有真实订单加入，
+另市场占款保留；实际部分失败、原字符串字典序、重复请求和容量续接均与原CPU对照。
+生产取消全链比较初始12条及取消62条NOE，并连续领取至Ledger实际结果。
+领取首次执行Registry一次，后续使用返回的waiting和Ledger按passes=1分轮排空；
+一轮无退出时只按实际required_principal_conditions续接原本金目录。
+真实genesis无订单且无占款，才为新市场建立已知零本金；不把尚缺历史事实通用归零。
+
+独立短入口使用原V1反序形成来源r1→s0→r0，对照三订单的原processing、receipt sequence、
+formed private sequence及公开市场未知状态；另沿真实Query先到、迟到Accepted／Trade前缀
+核原可知边界。GPU输入来自实际原请求和已领取NOE，CPU Registry只作独立后验参考。
+旧单目标Base取消接口保持兼容，原FOK、Actor概率及发布证据按未变范围复用。
+执行与失败记录见[100ms任务记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6059645688)。
+这些有限入口不证明完整Actor实际发送、统一连续宿主、PPO、活动恢复或正式训练已交付。

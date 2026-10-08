@@ -46,9 +46,12 @@ class PublicRegistryEvents:
     query_states: torch.Tensor | None = None
     query_quantity_kinds: torch.Tensor | None = None
 
+    processing_at: torch.Tensor | None = None  # 原Accepted自身effective_processing_at，不是完整响应时刻。
+    condition_slots: torch.Tensor | None = None  # 原公开condition共享字典坐标；未知为-1。
+
     def __post_init__(self):
         # 原非Query构造者不新增业务成员；新增列只在ORDER_QUERY人口内有意义。
-        for name in ('query_states','query_quantity_kinds'):
+        for name in ('query_states','query_quantity_kinds','processing_at','condition_slots'):
             value=getattr(self,name)
             if value is None:
                 object.__setattr__(self,name,torch.full_like(self.kinds,-1))
@@ -346,6 +349,12 @@ class PublicRegistryState:
             raise TypeError('冻结cutoff需要同设备int64[roots]可信公开逻辑时刻')
         visible=self.events.received & (self.events.available_at<=cutoff[:,None])
         return frozen_order_sources(replace(self.events,received=visible),intents)
+
+    def freeze_order_formation(self, intents, legs, cutoff, market_present):
+        from dataclasses import replace
+        from cancel_objects import order_formation_from_public
+        visible=self.events.received & (self.events.available_at<=cutoff[:,None])
+        return order_formation_from_public(replace(self.events,received=visible),intents,legs,market_present)
 
     def freeze_orders(self, intents, cutoff):
         from dataclasses import replace

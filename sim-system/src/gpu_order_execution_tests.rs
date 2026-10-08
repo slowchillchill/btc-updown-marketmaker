@@ -1417,3 +1417,5 @@ fn gpu_finite_attribution_matches_original_exact_source_contract() {
 }
 
 include!("gpu_pending_post_tests.rs");
+
+include!("gpu_pending_cancel_tests.rs");

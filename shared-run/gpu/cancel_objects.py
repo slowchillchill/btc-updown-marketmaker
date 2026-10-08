@@ -22,6 +22,61 @@ class OrderFormation:
     fault: torch.Tensor
 
 
+def order_formation_from_public(events,intents,legs,market_present):
+    """只从已领取原证据、原Submit腿及实际receipt派生，未公开信息保持未知。"""
+    from registry import identity_matches,choose_latest,source_priority,query_selection,BASE_ACCEPTED,QUOTE_ACCEPTED,ORDER_LIFECYCLE,TRADE,ORDER_QUERY
+    from queues import _take
+    roots,count=intents.present.shape; width=events.received.size(1)
+    device=intents.present.device
+    blank=torch.zeros_like(intents.present); columns=torch.zeros_like(intents.present,dtype=torch.int64)
+    zero=events.orders.constant(0)
+    zero=_take(zero,torch.zeros(roots*count,dtype=torch.int64,device=device)) if zero.sign.numel() else \
+        Numbers.ExactInt.from_i64_tensor(columns.flatten())
+    ranks,rank_fault=sim_identity_order(intents.identities,intents.present)
+    fault=events.fault|rank_fault
+    if width==0 or count==0:
+        return OrderFormation(blank,ranks,torch.full_like(columns,-1),blank,columns,zero,columns,blank,zero,fault)
+    equal,error=identity_matches(intents.identities,events.orders,roots,count,width)
+    member=equal & events.received[:,None,:] & intents.present[:,:,None]
+    fault |= Numbers.combine_fault_rows(torch.where(member,error,0).reshape(roots,-1))
+    priority=source_priority(events.private_sequences,events.receive_rank)
+    def source(population):
+        at,known=choose_latest(member & population[:,None,:],priority)
+        return at,known,(torch.arange(roots,device=device)[:,None]*width+at).flatten()
+    accepted_at,accepted,coordinates=source((events.kinds==BASE_ACCEPTED)|(events.kinds==QUOTE_ACCEPTED))
+    formed_at,formed,formed_coordinates=source((events.kinds==ORDER_LIFECYCLE)&events.formation)
+    # 原location_records优先formed/lifecycle/Accepted/Trade/known_query，非接收末项。
+    markets=torch.full_like(columns,-1)
+    for population in [(events.kinds==ORDER_LIFECYCLE)&events.formation,events.kinds==ORDER_LIFECYCLE,
+            (events.kinds==BASE_ACCEPTED)|(events.kinds==QUOTE_ACCEPTED),events.kinds==TRADE]:
+        location_at,location,_=source(population & (events.condition_slots>=0))
+        markets=torch.where((markets<0)&location,events.condition_slots.gather(1,location_at),markets)
+    query_at,query_known,_=query_selection(events,member)
+    markets=torch.where((markets<0)&query_known,events.condition_slots.gather(1,query_at),markets)
+    # condition身份已知不证明公开市场目录已出现；沿同冻结原市场人口。
+    if market_present.size(1):
+        valid=(markets>=0)&(markets<market_present.size(1))
+        valid &= market_present.gather(1,markets.clamp(0,market_present.size(1)-1))
+        markets=torch.where(valid,markets,-1)
+    else:markets=torch.full_like(markets,-1)
+    request=events.request_slots.gather(1,accepted_at);ordinal=events.item_ordinals.gather(1,accepted_at)
+    processing=events.processing_at.gather(1,accepted_at)
+    match=(request[:,:,None]==legs.request_slots[:,None,:]) & (ordinal[:,:,None]==legs.item_ordinals[:,None,:])
+    match &= legs.present[:,None,:] & legs.receipt_known[:,None,:] & accepted[:,:,None]
+    leg_at=match.to(torch.int32).argmax(2) if legs.present.size(1) else columns
+    known=accepted & intents.origin_known & match.any(2) if legs.present.size(1) else blank
+    sequence=zero
+    if legs.input_sequences is None:
+        known=blank
+    elif legs.present.size(1):
+        if legs.input_sequence_known is not None:
+            known &= legs.input_sequence_known.gather(1,leg_at)
+        sequence=_take(legs.input_sequences,(torch.arange(roots,device=device)[:,None]*legs.present.size(1)+leg_at).flatten())
+        fault |= Numbers.combine_fault_rows(torch.where(known,sequence.fault.reshape(roots,count),0))
+    return OrderFormation(member.any(2),ranks,markets,known,processing,sequence,ordinal,
+        formed,_take(events.private_sequences,formed_coordinates),fault)
+
+
 @dataclass(frozen=True)
 class CancelObjectDirectory:
     market_present: torch.Tensor  # [roots,markets]，仅当前公开identity。

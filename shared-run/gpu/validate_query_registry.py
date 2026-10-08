@@ -155,6 +155,17 @@ def validate(source,artifact):
         intents=run(lambda:FrozenIntentOrders(present,integers([identities[o] for o in orders]),origin,
             rational([actual.get(o,{}).get('original_target') or '0' for o in orders]),torch.zeros_like(present),origin))
         cutoff=t([frame['cutoff']])
+        if reordered:
+            from commitments import SubmittedLegs
+            empty=t([[]],torch.bool);columns=t([[]])
+            legs=SubmittedLegs(empty,empty,columns,columns,rational([]),empty)
+            formation=run(lambda:state.freeze_order_formation(intents,legs,cutoff,t([[True]],torch.bool)))
+            assert formation.fault.cpu().tolist()==[0]
+            assert not formation.processing_known.any().cpu().item(),frame['stage']
+            assert not formation.source_known.any().cpu().item(),frame['stage']
+            for slot,identity in enumerate(orders):
+                if identity in actual:assert formation.market.cpu().tolist()[0][slot]==catalog['conditions'][actual[identity]['condition']]
+
         compute=lambda:(state.freeze_orders(intents,cutoff),state.freeze_order_sources(intents,cutoff))
         Numbers.device_exact_batch(compute,word_capacity=16,device='cuda')
         graph=torch.cuda.CUDAGraph()
