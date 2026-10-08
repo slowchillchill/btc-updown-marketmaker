@@ -1,5 +1,6 @@
 //! 有限布局试验，只由 cfg(test) 父模块编译；不成为生产准入或恢复入口。
 use super::*;
+use crate::PartCursor;
 use serde_json::{Value, json};
 use std::{
     io::{Read, Seek, SeekFrom},
@@ -99,43 +100,54 @@ struct ColumnLayout {
     codecs: std::collections::BTreeSet<String>,
     encodings: std::collections::BTreeSet<String>,
 }
-fn file_layout(path: &Path) -> RecordingResult<Value> {
+fn file_layout(paths: &[PathBuf]) -> RecordingResult<Value> {
     // footer/文件元数据读取，不为容量统计遍历正文。
-    let mut file = File::open(path)?;
-    let stat = file.metadata()?;
-    file.seek(SeekFrom::End(-8))?;
-    let mut tail = [0; 8];
-    file.read_exact(&mut tail)?;
-    let footer_bytes = u32::from_le_bytes(tail[..4].try_into()?) as u64;
-    let metadata = crate::ArrowReaderMetadata::load(&file, Default::default())?;
-    let groups = metadata.metadata().row_groups();
+    let mut logical_file_bytes = 0u64;
+    let mut allocated_file_bytes = 0u64;
+    let mut footer_bytes = 0u64;
+    let mut row_groups = 0usize;
+    let mut rows = 0i64;
     let mut compressed = 0i64;
     let mut uncompressed = 0i64;
     let mut columns = BTreeMap::<String, ColumnLayout>::new();
-    for g in groups {
-        for col in g.columns() {
-            compressed += col.compressed_size();
-            uncompressed += col.uncompressed_size();
-            let entry = columns.entry(col.column_path().string()).or_default();
-            entry.compressed_bytes += col.compressed_size();
-            entry.uncompressed_bytes += col.uncompressed_size();
-            // footer只保存codec，不保存压缩级别；不能将getter恢复的默认级别当实际级别。
-            entry.codecs.insert(
-                format!("{:?}", col.compression())
-                    .split('(')
-                    .next()
-                    .unwrap()
-                    .to_owned(),
-            );
-            entry
-                .encodings
-                .extend(col.encodings().map(|e| format!("{e:?}")));
+    for path in paths {
+        let mut file = File::open(path)?;
+        let stat = file.metadata()?;
+        logical_file_bytes += stat.len();
+        allocated_file_bytes += stat.blocks() * 512;
+        file.seek(SeekFrom::End(-8))?;
+        let mut tail = [0; 8];
+        file.read_exact(&mut tail)?;
+        footer_bytes += u32::from_le_bytes(tail[..4].try_into()?) as u64;
+        let metadata = crate::ArrowReaderMetadata::load(&file, Default::default())?;
+        let groups = metadata.metadata().row_groups();
+        row_groups += groups.len();
+        rows += metadata.metadata().file_metadata().num_rows();
+        for g in groups {
+            for col in g.columns() {
+                compressed += col.compressed_size();
+                uncompressed += col.uncompressed_size();
+                let entry = columns.entry(col.column_path().string()).or_default();
+                entry.compressed_bytes += col.compressed_size();
+                entry.uncompressed_bytes += col.uncompressed_size();
+                // footer只保存codec，不保存压缩级别；不能将getter恢复的默认级别当实际级别。
+                entry.codecs.insert(
+                    format!("{:?}", col.compression())
+                        .split('(')
+                        .next()
+                        .unwrap()
+                        .to_owned(),
+                );
+                entry
+                    .encodings
+                    .extend(col.encodings().map(|e| format!("{e:?}")));
+            }
         }
     }
     Ok(
-        json!({"logical_file_bytes":stat.len(),"allocated_file_bytes":stat.blocks()*512,
-        "footer_bytes":footer_bytes,"row_groups":groups.len(),
-        "rows":metadata.metadata().file_metadata().num_rows(),
+        json!({"physical_files":paths.len(),"logical_file_bytes":logical_file_bytes,"allocated_file_bytes":allocated_file_bytes,
+        "footer_bytes":footer_bytes,"row_groups":row_groups,
+        "rows":rows,
         "compressed_column_bytes":compressed,"uncompressed_column_bytes":uncompressed,"columns":columns}),
     )
 }
@@ -169,7 +181,7 @@ fn recode(c: &LayoutConfig) -> (Value, RecordingResult<()>) {
         copy_descriptor(&c.original_root, &c.candidate_root, "stream.json")?;
         File::open(&c.candidate_root)?.sync_all()?;
         let quota = Arc::new(Mutex::new(0));
-        for (ordinal, (path, committed)) in reader.segments.enumerate() {
+        for (ordinal, (path, committed)) in reader.stable_segments().into_iter().enumerate() {
             let name = &committed.stable_storage_ref;
             let stage = c.candidate_root.join(format!("pending-{ordinal:020}"));
             current.segment = Some(name.clone());
@@ -182,7 +194,7 @@ fn recode(c: &LayoutConfig) -> (Value, RecordingResult<()>) {
                     &c.recording,
                 )?
             } else {
-                SequentialCaptureWriter::create(
+                SequentialCaptureWriter::create_segment(
                     "public_recording_v1",
                     &stage,
                     quota.clone(),
@@ -190,8 +202,8 @@ fn recode(c: &LayoutConfig) -> (Value, RecordingResult<()>) {
                 )?
             };
             writer.defer_batch_sync();
-            let mut cursor = RunCursor::open(
-                &path.join("captured.parquet"),
+            let mut cursor = PartCursor::open(
+                &segment_run(&path)?,
                 c.read_page_rows,
                 c.max_read_batch_bytes,
             )?;
@@ -220,7 +232,7 @@ fn recode(c: &LayoutConfig) -> (Value, RecordingResult<()>) {
             fs::copy(path.join("prefix.json"), stage.join("prefix.json"))?;
             sync_tree(&stage)?;
             commit_public_segment(stage, name)?;
-            let layout = file_layout(&c.candidate_root.join(name).join("captured.parquet"))?;
+            let layout = file_layout(&segment_run(&c.candidate_root.join(name))?.parts)?;
             segments.push(json!({"stable_storage_ref":name,"rows":count,
                 "writer_peak_write_buffer_rows":peak_rows,"writer_peak_write_buffer_bytes":peak_bytes,"layout":layout}));
         }
@@ -287,8 +299,8 @@ fn compare(c: &LayoutConfig) -> (Value, RecordingResult<()>) {
                 return Err(invalid(format!("布局对照描述文件字节不相等：{name}")));
             }
         }
-        let old_segments = original.segments.as_slice().to_vec();
-        let new_segments = candidate.segments.as_slice().to_vec();
+        let old_segments = original.stable_segments();
+        let new_segments = candidate.stable_segments();
         if old_segments.len() != new_segments.len() {
             return Err(invalid("布局对照稳定分片数量不相等"));
         }
@@ -298,16 +310,10 @@ fn compare(c: &LayoutConfig) -> (Value, RecordingResult<()>) {
             {
                 return Err(invalid("布局对照分片前缀字节不相等"));
             }
-            let mut a = RunCursor::open(
-                &old.join("captured.parquet"),
-                c.read_page_rows,
-                c.max_read_batch_bytes,
-            )?;
-            let mut b = RunCursor::open(
-                &new.join("captured.parquet"),
-                c.read_page_rows,
-                c.max_read_batch_bytes,
-            )?;
+            let mut a =
+                PartCursor::open(&segment_run(old)?, c.read_page_rows, c.max_read_batch_bytes)?;
+            let mut b =
+                PartCursor::open(&segment_run(new)?, c.read_page_rows, c.max_read_batch_bytes)?;
             let mut count = 0u64;
             current.segment = Some(old_prefix.stable_storage_ref.clone());
             loop {
@@ -452,7 +458,7 @@ fn missing_row_and_same_length_payload_change_are_precise_errors() {
         fixture(&c);
         recode(&c).1.unwrap();
         let reader = PublicRecordingReaderV1::recover(&c.candidate_root, 1, 1 << 20).unwrap();
-        let (segment, _) = &reader.segments.as_slice()[0];
+        let (segment, _) = &reader.stable_segments()[0];
         let path = segment.join("captured.parquet");
         let mut cursor = RunCursor::open(&path, 1, 1 << 20).unwrap();
         // 仅小夹具破坏准备，真实试验不保留第二流水。
@@ -462,7 +468,7 @@ fn missing_row_and_same_length_payload_change_are_precise_errors() {
         }
         drop(cursor);
         let replacement = temp.path().join("replacement");
-        let mut writer = SequentialCaptureWriter::create(
+        let mut writer = SequentialCaptureWriter::create_segment(
             "public_recording_v1",
             &replacement,
             Arc::new(Mutex::new(0)),

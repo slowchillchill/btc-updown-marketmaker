@@ -314,9 +314,15 @@ impl Write for SharedQuotaWriter {
 pub(crate) struct SequentialCaptureWriter {
     stream_name: &'static str,
     sync_batches: bool,
+    split_parts: bool,
     logical_digest: Option<Sha256>,
+    base_path: PathBuf,
     path: PathBuf,
-    writer: ArrowWriter<SharedQuotaWriter>,
+    parts: Vec<PathBuf>,
+    properties: WriterProperties,
+    total_bytes: Arc<Mutex<u64>>,
+    max_total_bytes: u64,
+    writer: Option<ArrowWriter<SharedQuotaWriter>>,
     rows: Vec<SortRow>,
     row_inner_bytes: usize,
     max_payload_bytes: usize,
@@ -358,6 +364,18 @@ impl SequentialCaptureWriter {
         })
     }
 
+    // 仅已有多片消费者的公共/隐藏段出口使用物理轮换；旧门A保持单文件合同。
+    pub(crate) fn create_segment(
+        stream_name: &'static str,
+        directory: &Path,
+        total_bytes: Arc<Mutex<u64>>,
+        output_config: &GateAOutputConfig,
+    ) -> Result<Self, GateAError> {
+        let mut writer = Self::create(stream_name, directory, total_bytes, output_config)?;
+        writer.split_parts = true;
+        Ok(writer)
+    }
+
     #[cfg(test)]
     pub(crate) fn create_payload_page_trial(
         stream_name: &'static str,
@@ -365,9 +383,15 @@ impl SequentialCaptureWriter {
         total_bytes: Arc<Mutex<u64>>,
         output_config: &GateAOutputConfig,
     ) -> Result<Self, GateAError> {
-        Self::create_with_properties(stream_name, directory, total_bytes, output_config, || {
-            payload_page_trial_properties(output_config.sort.batch_rows)
-        })
+        let mut writer = Self::create_with_properties(
+            stream_name,
+            directory,
+            total_bytes,
+            output_config,
+            || payload_page_trial_properties(output_config.sort.batch_rows),
+        )?;
+        writer.split_parts = true;
+        Ok(writer)
     }
 
     fn create_with_properties(
@@ -388,19 +412,25 @@ impl SequentialCaptureWriter {
         let writer = ArrowWriter::try_new(
             SharedQuotaWriter {
                 file,
-                total_bytes,
+                total_bytes: Arc::clone(&total_bytes),
                 max_total_bytes: output_config.max_capture_output_bytes,
             },
             schema,
-            Some(properties),
+            Some(properties.clone()),
         )
         .map_err(|error| GateAError::Io(io::Error::other(error)))?;
         Ok(Self {
             stream_name,
             sync_batches: true,
+            split_parts: false,
             logical_digest: Some(logical_hasher()),
+            base_path: path.clone(),
             path,
-            writer,
+            parts: vec![],
+            properties,
+            total_bytes,
+            max_total_bytes: output_config.max_capture_output_bytes,
+            writer: Some(writer),
             rows: Vec::with_capacity(output_config.sort.batch_rows),
             row_inner_bytes: 0,
             max_payload_bytes: output_config.max_artifact_payload_bytes,
@@ -475,12 +505,24 @@ impl SequentialCaptureWriter {
         if self.rows.is_empty() {
             return Ok(());
         }
+        if self.split_parts
+            && self
+                .writer
+                .as_ref()
+                .expect("当前捕获writer")
+                .flushed_row_groups()
+                .len()
+                == crate::PARQUET_ROW_GROUPS_PER_FILE
+        {
+            self.rotate_part()?;
+        }
         let batch = batch_from_rows(&self.rows).map_err(io::Error::other)?;
-        self.writer.write(&batch).map_err(io::Error::other)?;
-        self.writer.flush().map_err(io::Error::other)?;
+        let writer = self.writer.as_mut().expect("当前捕获writer");
+        writer.write(&batch).map_err(io::Error::other)?;
+        writer.flush().map_err(io::Error::other)?;
         if sync {
-            self.writer.sync()?;
-            self.writer.inner_mut().sync_data_and_drop_cache()?;
+            writer.sync()?;
+            writer.inner_mut().sync_data_and_drop_cache()?;
         }
         if let Some(digest) = &mut self.logical_digest {
             for row in &self.rows {
@@ -511,27 +553,71 @@ impl SequentialCaptureWriter {
             self.metrics.peak_write_buffer_bytes,
         )
     }
+    fn rotate_part(&mut self) -> io::Result<()> {
+        self.close_part()?;
+        self.path = crate::part_path(&self.base_path, self.parts.len());
+        let file = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)?;
+        self.writer = Some(
+            ArrowWriter::try_new(
+                SharedQuotaWriter {
+                    file,
+                    total_bytes: Arc::clone(&self.total_bytes),
+                    max_total_bytes: self.max_total_bytes,
+                },
+                crate::trial_schema(),
+                Some(self.properties.clone()),
+            )
+            .map_err(io::Error::other)?,
+        );
+        Ok(())
+    }
+    #[cfg(test)]
+    pub(crate) fn split_part_for_test(&mut self) -> io::Result<()> {
+        self.flush_batch()?;
+        self.rotate_part()
+    }
+    fn close_part(&mut self) -> io::Result<()> {
+        self.writer
+            .take()
+            .expect("当前捕获writer")
+            .close()
+            .map_err(io::Error::other)?;
+        self.parts.push(self.path.clone());
+        Ok(())
+    }
     pub(crate) fn close_segment(mut self) -> Result<PathBuf, GateAError> {
         self.write_batch(false)?;
-        self.writer
-            .close()
-            .map_err(|e| GateAError::Io(io::Error::other(e)))?;
-        Ok(self.path)
+        self.close_part()?;
+        let run = crate::SortedRun { parts: self.parts };
+        if run.parts.len() == 1 {
+            return Ok(run.parts[0].clone());
+        }
+        let (path, bytes) = run.parts_description()?;
+        SharedQuotaWriter {
+            file: File::options().write(true).create_new(true).open(&path)?,
+            total_bytes: self.total_bytes,
+            max_total_bytes: self.max_total_bytes,
+        }
+        .write_all(&bytes)?;
+        Ok(path)
     }
 
     fn finish(mut self) -> Result<SortOutcome, GateAError> {
         self.flush_batch()?;
-        self.writer
-            .close()
-            .map_err(|error| GateAError::Io(io::Error::other(error)))?;
-        File::open(&self.path)?.sync_all()?;
+        self.close_part()?;
+        for path in &self.parts {
+            File::open(path)?.sync_all()?;
+        }
         let mut digest = self
             .logical_digest
             .expect("offline capture maintains its output digest");
         digest.update(self.metrics.output_rows.to_be_bytes());
         let logical_sha256 = bytes_to_hex(&digest.finalize());
         Ok(SortOutcome {
-            output_run: crate::SortedRun::single(self.path),
+            output_run: crate::SortedRun { parts: self.parts },
             logical_sha256,
             metrics: self.metrics,
         })
@@ -2124,6 +2210,91 @@ pub(crate) mod tests {
                 sort,
             },
         )
+    }
+
+    #[test]
+    fn capture_crosses_real_parquet_row_group_limit_in_order() {
+        let temporary = TempDir::new().unwrap();
+        let (_, mut config) = micro_configs();
+        config.sort.batch_rows = 1;
+        config.max_capture_output_bytes = 128 << 20;
+        let bytes = Arc::new(Mutex::new(0));
+        let mut writer = SequentialCaptureWriter::create_segment(
+            "boundary",
+            &temporary.path().join("capture"),
+            bytes.clone(),
+            &config,
+        )
+        .unwrap();
+        writer.defer_batch_sync();
+        let n = crate::PARQUET_ROW_GROUPS_PER_FILE + 1;
+        for sequence in 0..n {
+            writer
+                .push(
+                    sequence as u64,
+                    (sequence as u64).to_be_bytes().to_vec(),
+                    b"x",
+                )
+                .unwrap();
+        }
+        let locator = writer.close_segment().unwrap();
+        assert_eq!(locator.extension().unwrap(), "json");
+        let run = crate::SortedRun::read_parts(&locator).unwrap();
+        assert_eq!(run.parts.len(), 2);
+        for (path, count) in run
+            .parts
+            .iter()
+            .zip([crate::PARQUET_ROW_GROUPS_PER_FILE, 1])
+        {
+            let metadata =
+                ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap()).unwrap();
+            assert_eq!(metadata.metadata().num_row_groups(), count);
+        }
+        let mut cursor = crate::PartCursor::open(&run, 17, 1 << 20).unwrap();
+        for sequence in 0..n {
+            let row = cursor.next_row().unwrap().unwrap();
+            assert_eq!(row.sort_key_bytes(), (sequence as u64).to_be_bytes());
+            assert_eq!(row.payload(), b"x");
+        }
+        assert!(cursor.next_row().unwrap().is_none());
+        assert_eq!(
+            *bytes.lock().unwrap(),
+            run.parts
+                .iter()
+                .map(|p| fs::metadata(p).unwrap().len())
+                .sum::<u64>()
+                + fs::metadata(locator).unwrap().len()
+        );
+    }
+
+    #[test]
+    fn missing_capture_part_is_an_open_error_not_finite_eof() {
+        let temporary = TempDir::new().unwrap();
+        let (_, config) = micro_configs();
+        let mut writer = SequentialCaptureWriter::create_segment(
+            "missing",
+            &temporary.path().join("capture"),
+            Arc::new(Mutex::new(0)),
+            &config,
+        )
+        .unwrap();
+        writer
+            .push(0, 0u64.to_be_bytes().to_vec(), b"first")
+            .unwrap();
+        writer.split_part_for_test().unwrap();
+        writer
+            .push(1, 1u64.to_be_bytes().to_vec(), b"second")
+            .unwrap();
+        let locator = writer.close_segment().unwrap();
+        let run = crate::SortedRun::read_parts(&locator).unwrap();
+        assert_eq!(run.parts.len(), 2);
+        fs::remove_file(&run.parts[1]).unwrap();
+        let mut cursor = crate::PartCursor::open(&run, 1, 1 << 20).unwrap();
+        assert_eq!(cursor.next_row().unwrap().unwrap().payload(), b"first");
+        match cursor.next_row() {
+            Err(SortError::Io(error)) => assert_eq!(error.kind(), io::ErrorKind::NotFound),
+            _ => panic!("缺片必须传播实际打开错误，不能当作完整 EOF"),
+        }
     }
 
     #[test]

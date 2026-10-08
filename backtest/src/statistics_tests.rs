@@ -308,6 +308,37 @@ fn progress_off_on_and_output_fault_preserve_full_business_and_failed_prepare_re
             .filter(|r| r["stage"] != "complete")
             .all(|r| r["published"] == false)
     );
+    // 正式无统计准备使用计数路径；进度仍保留相同逻辑观察数量。
+    let counted_output = Output::default();
+    prep.work_root = temp.path().join("counted-progress");
+    prepare_and_publish_historical_run_v1(
+        &prep,
+        Some(HistoricalPreparationProgressV1::new(
+            Duration::from_secs(30),
+            counted_output.clone(),
+        )),
+    )
+    .unwrap();
+    let counted = counted_output.0.lock().unwrap().clone();
+    let counted_last: Value = serde_json::from_str(
+        std::str::from_utf8(&counted)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(counted_last["stage"], "complete");
+    for name in [
+        "generated_groups",
+        "generated_observations",
+        "applied_inputs",
+    ] {
+        assert_eq!(
+            counted_last["work"][name],
+            rows.last().unwrap()["work"][name]
+        );
+    }
     prep.work_root = temp.path().join("broken");
     let broken = prepare_historical_run_with_statistics_v1(
         &prep,

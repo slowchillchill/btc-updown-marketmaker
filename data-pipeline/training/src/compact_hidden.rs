@@ -275,15 +275,33 @@ mod tests {
             let facts = compact_core.push_facts(&prepared).unwrap();
             compact.push_prepared(&input, &prepared, &facts).unwrap();
             let result = apply(&mut old_core, &input);
+            let position = input.input_position;
             writer.record(input, result).unwrap();
+            if [0, 2].contains(&position) { writer.split_part_for_test().unwrap(); }
         }
         compact.publish().unwrap();
         writer.stabilize().unwrap();
         let mut output_config = config();
         output_config.sort.merge_workers = 8;
-        let old = prepare_hidden_v1(old_core,
-            PublicRecordingReaderV1::recover(&recording_root, 1, 1<<20).unwrap(),
+        let recording = PublicRecordingReaderV1::recover(&recording_root, 1, 1<<20).unwrap();
+        assert_eq!(recording.file_paths().len(), 3);
+        let mut old = prepare_hidden_v1(old_core,
+            recording,
             &temp.path().join("old-hidden"), &output_config, "same-hidden-consumer".into()).unwrap();
+        // 仅改变原材料的物理位置；原epoch、步骤、引用及桶边界不变。
+        for (label, path) in [("split-index", &mut old.index_path), ("split-derived", &mut old.derived_path)] {
+            let mut cursor = PartCursor::open(&crate::SortedRun::read_parts(path).unwrap(), 1, 1<<20).unwrap();
+            let mut capture = crate::gate_a::SequentialCaptureWriter::create_segment(label,
+                &temp.path().join(label), std::sync::Arc::new(std::sync::Mutex::new(0)), &output_config).unwrap();
+            let mut sequence = 0;
+            while let Some(row) = cursor.next_row().unwrap() {
+                capture.push(sequence, row.sort_key_bytes().to_vec(), row.payload()).unwrap();
+                if sequence == 0 { capture.split_part_for_test().unwrap(); }
+                sequence += 1;
+            }
+            *path = capture.close_segment().unwrap();
+            assert_eq!(crate::SortedRun::read_parts(path).unwrap().parts.len(), 2);
+        }
         let mut expected = Vec::new();
         let mut steps = HiddenStepReaderV1::open(&old, 1, 1<<20).unwrap();
         while let Some(row) = steps.next_row().unwrap() { expected.push(serde_json::to_value(row).unwrap()); }

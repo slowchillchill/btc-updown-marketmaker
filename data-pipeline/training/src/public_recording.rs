@@ -1,12 +1,16 @@
 //! 唯一后台记录流。应用调用不持有写入器；稳定由所属运行显式请求。
 use crate::{
-    RunCursor,
+    RunCursor, SortedRun,
     gate_a::{GateAOutputConfig, SequentialCaptureWriter},
     gate_a_publication::{commit_public_segment, sync_tree},
 };
 use contracts::*;
 use data_pipeline_core::{
-    pm_reduction::*, public_input::*, public_observation_core::PublicAppliedIngressV1,
+    pm_reduction::*,
+    public_input::*,
+    public_observation_core::{
+        PublicAppliedIngressV1, PublicPmReductionV1, PublicRecordingAppliedIngressV1,
+    },
     public_reduction::*,
 };
 use serde::{Deserialize, Serialize};
@@ -71,6 +75,17 @@ struct ObservationExpansion {
     last_market: Option<String>,
 }
 
+// 同一 writer 的借用编码材料；没有第二份业务状态或持久格式。
+struct RecordingGroup<'a> {
+    group_id: &'a Sha256Hex,
+    group_position: u64,
+    member_input_positions: &'a [u64],
+    closed_at_input_position: u64,
+    records: &'a [PublicBusinessFactV1],
+    observation_count: u64,
+    observations: Option<&'a [MarketBusinessObservationV1]>,
+}
+
 pub struct PublicRecordingWriterV1 {
     root: PathBuf,
     config: GateAOutputConfig,
@@ -132,7 +147,7 @@ impl PublicRecordingWriterV1 {
     }
     fn write(&mut self, row: impl Serialize) -> RecordingResult<()> {
         if self.writer.is_none() {
-            let mut writer = SequentialCaptureWriter::create(
+            let mut writer = SequentialCaptureWriter::create_segment(
                 "public_recording_v1",
                 &self.root.join(format!("pending-{:020}", self.segment)),
                 self.total_bytes.clone(),
@@ -155,11 +170,67 @@ impl PublicRecordingWriterV1 {
         input: RecordedIngressV1,
         result: PublicAppliedIngressV1<'static>,
     ) -> RecordingResult<()> {
+        let groups = result.applied.closed_groups;
+        let groups = groups
+            .iter()
+            .map(|g| RecordingGroup {
+                group_id: &g.group_id,
+                group_position: g.group_position,
+                member_input_positions: &g.member_input_positions,
+                closed_at_input_position: g.closed_at_input_position,
+                records: &g.records,
+                observation_count: g.observations.len() as u64,
+                observations: Some(&g.observations),
+            })
+            .collect();
+        self.record_materials(
+            input,
+            result.applied.applied_prefix,
+            result.pm_reductions,
+            result.reductions,
+            groups,
+        )
+    }
+    /// 同一物化／写入及失败发布语义；明确数量直接编码原历史观察区间。
+    pub(crate) fn record_counts(
+        &mut self,
+        input: RecordedIngressV1,
+        result: PublicRecordingAppliedIngressV1<'static>,
+    ) -> RecordingResult<()> {
+        let groups = result.closed_groups;
+        let groups = groups
+            .iter()
+            .map(|g| RecordingGroup {
+                group_id: &g.group_id,
+                group_position: g.group_position,
+                member_input_positions: &g.member_input_positions,
+                closed_at_input_position: g.closed_at_input_position,
+                records: &g.records,
+                observation_count: g.observation_count,
+                observations: None,
+            })
+            .collect();
+        self.record_materials(
+            input,
+            result.applied_prefix,
+            result.pm_reductions,
+            result.reductions,
+            groups,
+        )
+    }
+    fn record_materials(
+        &mut self,
+        input: RecordedIngressV1,
+        prefix: AppliedIngressPrefixV1,
+        pm_reductions: Vec<(PublicFactPositionV1, PublicPmReductionV1<'static>)>,
+        reductions: Vec<PublicReductionBatchV1>,
+        groups: Vec<RecordingGroup<'_>>,
+    ) -> RecordingResult<()> {
         if self.failed {
             return Err(io::Error::other("记录尾部已失败，不能继续签发").into());
         }
         self.failed = true;
-        let outcome = self.record_inner(input, result);
+        let outcome = self.record_inner(input, prefix, pm_reductions, reductions, groups);
         if outcome.is_ok() {
             self.failed = false;
         }
@@ -168,14 +239,17 @@ impl PublicRecordingWriterV1 {
     fn record_inner(
         &mut self,
         input: RecordedIngressV1,
-        result: PublicAppliedIngressV1<'static>,
+        prefix: AppliedIngressPrefixV1,
+        pm_reductions: Vec<(PublicFactPositionV1, PublicPmReductionV1<'static>)>,
+        reductions: Vec<PublicReductionBatchV1>,
+        groups: Vec<RecordingGroup<'_>>,
     ) -> RecordingResult<()> {
         let input_position = input.input_position;
         let normal_end = matches!(input.ingress, DptIngressV1::EndOfInput);
         self.write(PublicStoredRowV1::Input(input))?;
         #[cfg(test)]
         faults::at("after_input")?;
-        let mut materials = result.reductions.into_iter();
+        let mut materials = reductions.into_iter();
         // 非 PM 的批次可能仅含报告，故先全部后台物化；每批只保存一次规范记录。
         let mut batches = std::collections::BTreeMap::new();
         for batch in materials.by_ref() {
@@ -190,7 +264,7 @@ impl PublicRecordingWriterV1 {
                 batches.insert(binding.position.clone(), (binding, record));
             }
         }
-        for (position, reduction) in result.pm_reductions {
+        for (position, reduction) in pm_reductions {
             let canonical_position = reduction
                 .steps
                 .first()
@@ -202,9 +276,7 @@ impl PublicRecordingWriterV1 {
             // 即便消息只有无输出报告，规范位置仍从当组原消息位置确定。
             let canonical_position = canonical_position.unwrap_or_else(|| {
                 self.pending.next_canonical_position
-                    + result
-                        .applied
-                        .closed_groups
+                    + groups
                         .iter()
                         .flat_map(|g| g.records.iter())
                         .position(|f| f.position == position)
@@ -229,7 +301,7 @@ impl PublicRecordingWriterV1 {
                 })?;
             }
         }
-        for group in result.applied.closed_groups {
+        for group in groups {
             let refs = group.records.iter().map(|f| f.position.clone()).collect();
             for fact in group.records.iter() {
                 if let PublicBusinessPayloadV1::PolymarketMessage(message) = &fact.payload {
@@ -282,22 +354,22 @@ impl PublicRecordingWriterV1 {
                 }
                 self.pending.next_canonical_position += 1;
             }
-            if self.compact_historical {
+            if self.compact_historical || group.observations.is_none() {
                 self.write(PublicStoredRowV1::GroupObservationRange(
                     PublicGroupObservationRangeV1 {
                         group_id: group.group_id.clone(),
                         group_position: group.group_position,
-                        member_input_positions: group.member_input_positions.clone(),
+                        member_input_positions: group.member_input_positions.to_vec(),
                         closed_at_input_position: group.closed_at_input_position,
                         records: refs,
                         observation_start: self.pending.next_observation_position,
-                        observation_count: group.observations.len() as u64,
+                        observation_count: group.observation_count,
                     },
                 ))?;
-                self.pending.next_observation_position += group.observations.len() as u64;
-            } else {
+                self.pending.next_observation_position += group.observation_count;
+            } else if let Some(observations) = group.observations {
                 let mut observation_positions = Vec::new();
-                for observation in &group.observations {
+                for observation in observations {
                     let index = PublicObservationIndexV1 {
                         observation_position: self.pending.next_observation_position,
                         market: observation.market.clone(),
@@ -316,7 +388,7 @@ impl PublicRecordingWriterV1 {
                 self.write(PublicStoredRowV1::Group(PublicGroupIndexV1 {
                     group_id: group.group_id.clone(),
                     group_position: group.group_position,
-                    member_input_positions: group.member_input_positions.clone(),
+                    member_input_positions: group.member_input_positions.to_vec(),
                     closed_at_input_position: group.closed_at_input_position,
                     records: refs,
                     observation_positions,
@@ -325,7 +397,7 @@ impl PublicRecordingWriterV1 {
             self.pending.next_group_position += 1;
             self.pending.next_public_index_position += 1;
         }
-        self.pending.next_input_position = result.applied.applied_prefix.next_input_position;
+        self.pending.next_input_position = prefix.next_input_position;
         self.pending.normal_end = normal_end;
         Ok(())
     }
@@ -345,6 +417,13 @@ impl PublicRecordingWriterV1 {
     pub fn record_aborted(&mut self, input: RecordedIngressV1) -> RecordingResult<()> {
         self.failed = true;
         self.write(PublicStoredRowV1::Input(input))
+    }
+    #[cfg(test)]
+    pub(crate) fn split_part_for_test(&mut self) -> io::Result<()> {
+        self.writer
+            .as_mut()
+            .expect("已开始的测试捕获段")
+            .split_part_for_test()
     }
     /// 合法检查点/市场边界/正常结束由所属运行显式调用；空闲不会进入此入口。
     pub fn stabilize(&mut self) -> RecordingResult<Option<CommittedIngressPrefixV1>> {
@@ -377,21 +456,29 @@ pub struct PublicRecordingReaderV1 {
     pub header: PublicInputStreamHeaderV1,
     pub prefix: Option<CommittedIngressPrefixV1>,
     root: PathBuf,
-    segments: std::vec::IntoIter<(PathBuf, CommittedIngressPrefixV1)>,
+    files: std::vec::IntoIter<(PathBuf, Option<CommittedIngressPrefixV1>)>,
     segment_prefix: Option<CommittedIngressPrefixV1>,
     observed: CommittedIngressPrefixV1,
     cursor: Option<RunCursor>,
     batch_rows: usize,
     max_batch_bytes: usize,
-    next_segment_index: usize,
+    next_file_index: usize,
     markets: BTreeMap<String, MarketIdentityV2>,
     expansion: Option<ObservationExpansion>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RecordingRowLocation {
-    pub segment_index: usize,
+    pub file_index: usize,
     pub row_group: usize,
     pub row_in_group: u64,
+}
+fn segment_run(path: &Path) -> io::Result<SortedRun> {
+    let manifest = path.join("captured.parts.json");
+    SortedRun::read_parts(&if manifest.exists() {
+        manifest
+    } else {
+        path.join("captured.parquet")
+    })
 }
 impl PublicRecordingReaderV1 {
     /// 冷恢复入口；调用方先结束原写入方，不能用于并发发现尚未返回的发布。
@@ -475,6 +562,14 @@ impl PublicRecordingReaderV1 {
                 .into());
             }
         }
+        let mut files = Vec::new();
+        for (path, prefix) in segments {
+            let parts = segment_run(&path)?.parts;
+            let last = parts.len().saturating_sub(1);
+            for (index, path) in parts.into_iter().enumerate() {
+                files.push((path, (index == last).then(|| prefix.clone())));
+            }
+        }
         let observed = CommittedIngressPrefixV1 {
             input_stream_id: header.input_stream_id.clone(),
             next_input_position: 0,
@@ -489,13 +584,13 @@ impl PublicRecordingReaderV1 {
             header,
             prefix,
             root: root.into(),
-            segments: segments.into_iter(),
+            files: files.into_iter(),
             segment_prefix: None,
             observed,
             cursor: None,
             batch_rows,
             max_batch_bytes,
-            next_segment_index: 0,
+            next_file_index: 0,
             markets: BTreeMap::new(),
             expansion: None,
         })
@@ -568,11 +663,23 @@ impl PublicRecordingReaderV1 {
         Ok(self.next_physical_row_with_location()?.map(|(row, _)| row))
     }
     // 候选状态在首次页请求打开原reader时取一次；没有新稳定视图或全文件扫描。
-    pub(crate) fn segment_paths(&self) -> Vec<PathBuf> {
-        self.segments
+    #[cfg(test)]
+    fn stable_segments(&self) -> Vec<(PathBuf, CommittedIngressPrefixV1)> {
+        self.files
             .as_slice()
             .iter()
-            .map(|(path, _)| path.join("captured.parquet"))
+            .filter_map(|(path, prefix)| {
+                prefix
+                    .as_ref()
+                    .map(|p| (path.parent().unwrap().into(), p.clone()))
+            })
+            .collect()
+    }
+    pub(crate) fn file_paths(&self) -> Vec<PathBuf> {
+        self.files
+            .as_slice()
+            .iter()
+            .map(|(path, _)| path.clone())
             .collect()
     }
     pub(crate) fn next_physical_row_with_location(
@@ -586,7 +693,7 @@ impl PublicRecordingReaderV1 {
                     return Ok(Some((
                         row,
                         RecordingRowLocation {
-                            segment_index: self.next_segment_index - 1,
+                            file_index: self.next_file_index - 1,
                             row_group: position.row_group,
                             row_in_group: position.row_in_group,
                         },
@@ -603,16 +710,16 @@ impl PublicRecordingReaderV1 {
                     .into());
                 }
             }
-            let Some((path, prefix)) = self.segments.next() else {
+            let Some((path, prefix)) = self.files.next() else {
                 return Ok(None);
             };
-            self.segment_prefix = Some(prefix);
+            self.segment_prefix = prefix;
             self.cursor = Some(RunCursor::open(
-                &path.join("captured.parquet"),
+                &path,
                 self.batch_rows,
                 self.max_batch_bytes,
             )?);
-            self.next_segment_index += 1;
+            self.next_file_index += 1;
         }
     }
     fn observe(&mut self, row: &PublicStoredRowV1) -> RecordingResult<()> {

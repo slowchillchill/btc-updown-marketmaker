@@ -1128,7 +1128,7 @@ pub struct SortMetrics {
 }
 
 /// 一个逻辑有序段的物理文件，按顺序读取，不在分片处产生业务结束。
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SortedRun {
     pub parts: Vec<PathBuf>,
 }
@@ -1136,6 +1136,64 @@ pub struct SortedRun {
 impl SortedRun {
     pub(crate) fn single(path: PathBuf) -> Self {
         Self { parts: vec![path] }
+    }
+    // 仅保存已有物理片的有序相对定位，不保存业务状态。
+    pub(crate) fn parts_description(&self) -> io::Result<(PathBuf, Vec<u8>)> {
+        let first = self.parts.first().expect("完成的有序段至少有一个物理文件");
+        let relative = Self {
+            parts: self
+                .parts
+                .iter()
+                .map(|p| PathBuf::from(p.file_name().expect("物理文件名")))
+                .collect(),
+        };
+        Ok((
+            first.with_extension("parts.json"),
+            serde_json::to_vec(&relative).map_err(io::Error::other)?,
+        ))
+    }
+    pub(crate) fn save_parts(&self) -> io::Result<PathBuf> {
+        if self.parts.len() == 1 {
+            return Ok(self.parts[0].clone());
+        }
+        let (path, bytes) = self.parts_description()?;
+        File::options()
+            .write(true)
+            .create_new(true)
+            .open(&path)?
+            .write_all(&bytes)?;
+        Ok(path)
+    }
+    pub(crate) fn read_parts(path: &Path) -> io::Result<Self> {
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "parquet")
+        {
+            return Ok(Self::single(path.into()));
+        }
+        let mut run: Self = serde_json::from_reader(File::open(path)?)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if run.parts.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "物理片清单至少定位一个文件",
+            ));
+        }
+        let directory = path.parent().expect("物理清单具有所属目录");
+        for part in &mut run.parts {
+            // 清单只定位同目录物理文件；不能把绝对或父目录路径解释成片名。
+            let mut components = part.components();
+            if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+                || components.next().is_some()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "物理片定位必须是同目录文件名",
+                ));
+            }
+            *part = directory.join(&*part);
+        }
+        Ok(run)
     }
 }
 

@@ -183,3 +183,80 @@ fn compact_finite_consumption_crosses_midnight_without_recording_and_propagates_
         .unwrap();
     assert!(error.to_string().contains("value"), "{error}");
 }
+
+#[test]
+fn counted_background_recording_drains_end_and_returns_real_writer_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let f = file(
+        temp.path(),
+        "recorded",
+        &[row(86_399_500, "100"), row(86_400_500, "104")],
+    );
+    for fail in [false, true] {
+        let c = config(
+            &temp.path().join(if fail { "failed" } else { "success" }),
+            vec![f.clone()],
+        );
+        std::fs::create_dir(&c.work_root).unwrap();
+        let mut merge = prepare_historical_finite_files_v1(
+            &c.work_root.join("merge"),
+            &c.files,
+            &c.canonical,
+            c.header.input_stream_id.clone(),
+            c.received_start_utc_ms..c.received_end_utc_ms,
+            None,
+        )
+        .unwrap();
+        let mut output = c.recording.clone();
+        if fail {
+            output.max_artifact_payload_bytes = 1;
+        }
+        let mut positions = Vec::new();
+        let result = record_historical_merge_counts_v1(
+            &mut merge,
+            c.header.clone(),
+            &c.work_root.join("public"),
+            output,
+            |input, applied, _| {
+                if let Some(applied) = applied {
+                    assert_eq!(
+                        applied.applied_prefix.next_input_position,
+                        input.input_position + 1
+                    );
+                    positions.push(input.input_position);
+                }
+            },
+            || {},
+        );
+        if fail {
+            let error = result.err().expect("后台真实单行载荷失败必须回传");
+            assert!(
+                error.to_string().contains("载荷") && error.to_string().contains("上限"),
+                "{error}"
+            );
+            assert!(!c.work_root.join("public/prefix.json").exists());
+            assert!(
+                !std::fs::read_dir(c.work_root.join("public"))
+                    .unwrap()
+                    .any(|entry| entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("stable-"))
+            );
+        } else {
+            let (_, prefix) = result.unwrap();
+            let prefix = prefix.unwrap();
+            assert!(prefix.normal_end);
+            assert_eq!(prefix.next_input_position, 3);
+            assert_eq!(positions, [0, 1, 2]);
+            let mut replay =
+                PublicReplayV1::open(&c.work_root.join("public"), 1, 64 * 1024 * 1024).unwrap();
+            let mut replay_positions = Vec::new();
+            while let Some((input, _)) = replay.next_applied().unwrap() {
+                replay_positions.push(input.input_position);
+            }
+            assert_eq!(replay_positions, positions);
+        }
+    }
+}

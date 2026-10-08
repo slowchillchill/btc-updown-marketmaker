@@ -1134,6 +1134,7 @@ dependencies = [
  "execution-normalization",
  "ledger",
  "num-bigint",
+ "parquet",
  "rust_decimal",
  "serde",
  "serde_json",

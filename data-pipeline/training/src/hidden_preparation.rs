@@ -5,7 +5,7 @@ use crate::historical_preparation_progress::{
 };
 use crate::public_recording::*;
 use crate::{
-    ExternalSorter, RunCursor, SortRow,
+    ExternalSorter, PartCursor, SortRow, SortedRun,
     gate_a::{GateAOutputConfig, SequentialCaptureWriter},
 };
 use contracts::*;
@@ -251,7 +251,7 @@ pub fn prepare_hidden_with_progress_v1(
         config.sort.max_run_bytes,
     )?;
     let mut reducer = HiddenOrderedReducerV1::new(contexts, consumer_stream_id.clone())?;
-    let mut derived = SequentialCaptureWriter::create(
+    let mut derived = SequentialCaptureWriter::create_segment(
         "hidden_derived_v1",
         &root.join("derived"),
         Arc::new(Mutex::new(0)),
@@ -321,7 +321,8 @@ pub fn prepare_hidden_with_progress_v1(
     drop(reducer);
     notify(progress, Notice::Stage(Stage::HiddenFinalize));
     let derived_path = derived.close_segment()?;
-    let (index_path, index_metrics) = index.finish_single_file(None)?;
+    let (index_run, index_metrics) = index.finish(None)?;
+    let index_path = index_run.save_parts()?;
     notify(progress, Notice::HiddenIndexSorted(index_metrics));
     crate::gate_a_publication::sync_tree(root)?;
     Ok(HiddenPreparationV1 {
@@ -341,7 +342,7 @@ fn index_row(at: i64, position: u64, value: &HiddenIndexEntryV1) -> RecordingRes
 }
 /// 光标跨 Parquet 页读取至真正下一时点，页末不会产生闭桶。
 pub struct HiddenBucketReaderV1 {
-    cursor: RunCursor,
+    cursor: PartCursor,
     prefix: CommittedIngressPrefixV1,
     next: Option<HiddenIndexEntryV1>,
     position: u64,
@@ -353,7 +354,7 @@ impl HiddenBucketReaderV1 {
         bytes: usize,
     ) -> RecordingResult<Self> {
         Ok(Self {
-            cursor: RunCursor::open(&prepared.index_path, rows, bytes)?,
+            cursor: PartCursor::open(&SortedRun::read_parts(&prepared.index_path)?, rows, bytes)?,
             prefix: prepared.prefix.clone(),
             next: None,
             position: 0,
@@ -409,7 +410,7 @@ impl HiddenBucketReaderV1 {
 
 /// 按派生文件原序读取强类型消费材料；不重解码原始行情或重算业务。
 pub struct HiddenStepReaderV1 {
-    cursor: RunCursor,
+    cursor: PartCursor,
 }
 impl HiddenStepReaderV1 {
     pub fn open(
@@ -418,7 +419,7 @@ impl HiddenStepReaderV1 {
         bytes: usize,
     ) -> RecordingResult<Self> {
         Ok(Self {
-            cursor: RunCursor::open(&prepared.derived_path, rows, bytes)?,
+            cursor: PartCursor::open(&SortedRun::read_parts(&prepared.derived_path)?, rows, bytes)?,
         })
     }
     pub fn next_row(&mut self) -> RecordingResult<Option<HiddenStoredRowV1>> {
@@ -432,7 +433,7 @@ impl HiddenStepReaderV1 {
 
 /// 完整外排索引的原位置读取，供桶中的参考位置定位唯一规范记录。
 pub struct HiddenIndexReaderV1 {
-    cursor: RunCursor,
+    cursor: PartCursor,
     next_position: u64,
 }
 impl HiddenIndexReaderV1 {
@@ -442,7 +443,7 @@ impl HiddenIndexReaderV1 {
         bytes: usize,
     ) -> RecordingResult<Self> {
         Ok(Self {
-            cursor: RunCursor::open(&prepared.index_path, rows, bytes)?,
+            cursor: PartCursor::open(&SortedRun::read_parts(&prepared.index_path)?, rows, bytes)?,
             next_position: 0,
         })
     }

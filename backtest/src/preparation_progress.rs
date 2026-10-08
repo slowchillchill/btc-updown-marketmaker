@@ -2,7 +2,6 @@
 use crate::{
     MaterialError, ProcessCountersV1, process_clock_ticks_per_second_v1, process_measurement_v1,
 };
-use contracts::AppliedIngressV1;
 use data_pipeline_training::{
     MergeProgress, SortMetrics,
     historical_preparation_progress::{
@@ -260,17 +259,13 @@ impl HistoricalPreparationProgressV1 {
             Some(&after),
         );
     }
-    pub(crate) fn applied(&mut self, applied: &AppliedIngressV1) {
+    pub(crate) fn applied(&mut self, next_input_position: u64, groups: u64, observations: u64) {
         if !self.enabled() {
             return;
         }
-        self.work.applied_inputs = applied.applied_prefix.next_input_position;
-        self.work.generated_groups += applied.closed_groups.len() as u64;
-        self.work.generated_observations += applied
-            .closed_groups
-            .iter()
-            .map(|g| g.observations.len() as u64)
-            .sum::<u64>();
+        self.work.applied_inputs = next_input_position;
+        self.work.generated_groups += groups;
+        self.work.generated_observations += observations;
         self.emit(false, None, None);
     }
     pub(crate) fn notice(&mut self, notice: Notice) {
