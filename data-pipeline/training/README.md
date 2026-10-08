@@ -101,6 +101,8 @@ TypedRaw Parquet 仍先以原打开的 `File` 完成长度与 SHA 校验，然�
 
 按 [D-0309](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6052454945)，新有限历史录制使用 `PublicRecordingWriterV1::create_historical`，将 `Canonical::ReferenceEvent::BinanceDepthState` 的完整派生盘口和累计来源替换为 `PublicStoredRowV1::BinanceDepthReference`。该行只保存原 `canonical_position`、完整 `PublicFactBindingV1` 和原 `EventTimeV2`，仍占一个规范位置。原始 `Input` 快照、增量和来源时序完整保存；其他 Canonical、报告、组、观察索引、来源绑定及稳定前缀不变。紧凑行不是完整规范事件，不能仅读取该行取得完整深度；须沿原 `PublicReplayV1` 从 Input 和同版本公共 Core 恢复完整深度、来源与观察。旧完整记录继续可读，历史档案不改写；在线 `create` 继续记录完整正文。
 
+按 [#185 当前无损编码分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6053008485)，新有限历史文件每组保存 `GroupObservationRange`：原组字段和连续观察的 `observation_start`／`observation_count`，不逐市场重复写 Observation 或位置列表。原市场身份由前序 Canonical `FixedIdentity` 的目录保留，顺序仍按 condition 的原 `BTreeMap` 顺序；闭市市场继续保留。`PublicRecordingReaderV1::next_row`／`next_page` 逐条展开原 Observation，随后返回原 Group，完整字段、顺序与位置不变，无需运行公共 Core。重放、隐藏准备和参考扫描使用同一 reader 的内部物理入口，不展开不用的观察。`next_observation_position` 仍是逻辑计数，稳定分片与 EOF 沿原核对入口推进；旧文件及在线默认写入保持原逐行格式。此项消除重复持久索引与无用解码，不改变 Core 每组构造全部市场观察的行为或 CPU 成本。
+
 隐藏准备对该描述保留原源时刻、规范位置和派生顺序，沿原外排索引形成完整桶。`ResolvedHiddenRecordV1::BinanceDepthReference` 和 SIM 的同名非撮合描述保留绑定与时间，不恢复无用途的深度正文。纯参考桶仍推进原时间义务，跨页关闭及 EOF 不变；其他参考、市场事实和 PM 撮合步骤继续走原路径。prepare、发布后独立重放、复用和失败保证保持，不新增历史缓存或运行框架。
 
 

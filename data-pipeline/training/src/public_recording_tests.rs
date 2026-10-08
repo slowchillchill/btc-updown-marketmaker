@@ -2108,3 +2108,262 @@ fn physical_source_parts_preserve_continuous_core_and_prior_twap_reread() {
             .any(|(input, _)| !input.dependency_record_refs.is_empty())
     );
 }
+
+fn observation_range_inputs() -> Vec<RecordedIngressV1> {
+    let snapshot = |digit: char, clob: &str, at: i64, sequence: u64| {
+        let mut row = metadata_snapshot_row();
+        row.condition_id = format!("0x{}", digit.to_string().repeat(64));
+        row.clob_market_id = clob.into();
+        row.timestamp_received = at;
+        row.collector_admission_sequence = sequence;
+        row.collector_admission_time_utc_ms = at + 1;
+        row.fixed_identity_verified_at_utc = at - 1;
+        row.source_evidence_received_at_utc = Some(at);
+        row.row_evidence_validation_completed_at_utc = Some(at + 1);
+        row.metadata_fetch_start_utc = Some(at - 10);
+        row
+    };
+    let mut first = snapshot('1', "3195576", 21_000, 1);
+    first.market_lifecycle_state = MetadataMarketLifecycleState::Active;
+    first.market_runtime_role = MetadataMarketRuntimeRole::Current;
+    let second = snapshot('3', "3195578", 21_002, 2);
+    // Gamma闭市字段与终局退休是两种事实；本夹具只声明真实closed状态。
+    let mut closed = snapshot('1', "3195576", 31_000, 3);
+    closed.market_lifecycle_state = MetadataMarketLifecycleState::Active;
+    closed.market_runtime_role = MetadataMarketRuntimeRole::Current;
+    closed.closed = Some(true);
+    closed.accepting_orders = Some(false);
+    let payload =
+        r#"{"orderPriceMinTickSize":"0.01","closed":true,"acceptingOrders":false}"#.to_owned();
+    closed.source_evidence_raw_sha256 = Some(format!("{:x}", Sha256::digest(payload.as_bytes())));
+    closed.source_evidence_payload_json = Some(payload);
+    let mut third = snapshot('2', "3195577", 31_002, 4);
+    third.market_start_utc = 40_000;
+    third.market_end_utc = 50_000;
+    let mut inputs: Vec<_> = [first, second, closed, third]
+        .into_iter()
+        .enumerate()
+        .map(|(position, row)| {
+            record(
+                position as u64,
+                TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(row))),
+            )
+        })
+        .collect();
+    inputs.push(twap_record(4, 60, 41_000, "65000000000000000000000"));
+    inputs.push(end(5));
+    inputs
+}
+
+#[test]
+fn compact_observation_ranges_restore_all_original_fields_across_market_close_pages_and_segments() {
+    let temp = tempfile::tempdir().unwrap();
+    let inputs = observation_range_inputs();
+    let mut all_prefixes = Vec::new();
+    let mut all_logical_rows = Vec::new();
+    for historical in [false, true] {
+        let root = temp
+            .path()
+            .join(if historical { "compact" } else { "legacy" });
+        let mut core = core();
+        let mut writer = if historical {
+            PublicRecordingWriterV1::create_historical(&root, core.header(), config())
+        } else {
+            PublicRecordingWriterV1::create(&root, core.header(), config())
+        }
+        .unwrap();
+        let mut expected_applied = Vec::new();
+        let mut prefixes = Vec::new();
+        for input in &inputs {
+            let result = apply(&mut core, input);
+            if input.input_position == 2 {
+                assert_eq!(result.applied.closed_groups[0].observations.len(), 2);
+                assert_eq!(
+                    result.applied.closed_groups[0].observations[0].closed.value,
+                    Some(true)
+                );
+                assert_eq!(
+                    result.applied.closed_groups[0].observations[0]
+                        .accepting_orders
+                        .value,
+                    Some(false)
+                );
+            }
+            if input.input_position >= 3 {
+                for group in &result.applied.closed_groups {
+                    assert_eq!(
+                        group
+                            .observations
+                            .iter()
+                            .map(|o| o.market.condition_id.0.as_str())
+                            .collect::<Vec<_>>(),
+                        [
+                            format!("0x{}", "1".repeat(64)),
+                            format!("0x{}", "2".repeat(64)),
+                            format!("0x{}", "3".repeat(64))
+                        ]
+                    );
+                }
+            }
+            expected_applied.push(fingerprint(&result));
+            writer.record(input.clone(), result).unwrap();
+            if [1, 2, 5].contains(&input.input_position) {
+                let prefix = writer.stabilize().unwrap().unwrap();
+                prefixes.push(prefix);
+            }
+        }
+        assert_eq!(
+            prefixes
+                .iter()
+                .map(|p| p.next_observation_position)
+                .collect::<Vec<_>>(),
+            [3, 5, 11]
+        );
+        for prefix in &prefixes {
+            let mut logical =
+                PublicRecordingReaderV1::open_committed(&root, Some(prefix.clone()), 1, 1 << 20)
+                    .unwrap();
+            let mut logical_observations = 0;
+            while let Some(row) = logical.next_row().unwrap() {
+                if matches!(row, PublicStoredRowV1::Observation(_)) {
+                    logical_observations += 1;
+                }
+                assert!(!matches!(row, PublicStoredRowV1::GroupObservationRange(_)));
+            }
+            assert_eq!(logical_observations, prefix.next_observation_position);
+        }
+        let mut logical_pages = Vec::new();
+        for page in [1, 2, 20] {
+            let mut logical = PublicRecordingReaderV1::recover(&root, page, 1 << 20).unwrap();
+            let mut rows = Vec::new();
+            loop {
+                let values = logical.next_page(page).unwrap();
+                if values.is_empty() {
+                    break;
+                }
+                rows.extend(values);
+            }
+            logical_pages.push(serde_json::to_value(rows).unwrap());
+        }
+        assert_eq!(logical_pages[0], logical_pages[1]);
+        assert_eq!(logical_pages[0], logical_pages[2]);
+        let mut physical = PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap();
+        let mut counts = Vec::new();
+        let mut old_observations = 0;
+        while let Some(row) = physical.next_physical_row().unwrap() {
+            match row {
+                PublicStoredRowV1::GroupObservationRange(group) => {
+                    counts.push(group.observation_count);
+                    let value = serde_json::to_value(&group).unwrap();
+                    assert!(value.get("observation_positions").is_none());
+                    assert!(value.get("market").is_none());
+                }
+                PublicStoredRowV1::Observation(_) => old_observations += 1,
+                PublicStoredRowV1::Group(_) if historical => panic!("紧凑材料不能再保存逐观察索引"),
+                _ => {}
+            }
+        }
+        if historical {
+            assert_eq!(counts, [1, 2, 2, 3, 3]);
+            assert_eq!(old_observations, 0);
+        } else {
+            assert!(counts.is_empty());
+            assert_eq!(old_observations, 11);
+        }
+        let mut replay = PublicReplayV1::open(&root, 1, 1 << 20).unwrap();
+        let mut actual_applied = Vec::new();
+        while let Some((_, result)) = replay.next_applied().unwrap() {
+            actual_applied.push(fingerprint(&result));
+        }
+        assert_eq!(actual_applied, expected_applied);
+        all_prefixes.push(prefixes);
+        all_logical_rows.push(logical_pages.remove(0));
+    }
+    assert_eq!(all_prefixes[0], all_prefixes[1]);
+    assert_eq!(all_logical_rows[0], all_logical_rows[1]);
+}
+
+#[test]
+fn compact_observation_range_misalignment_fails_original_order_boundary() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("original");
+    let mut core = core();
+    let mut writer =
+        PublicRecordingWriterV1::create_historical(&root, core.header(), config()).unwrap();
+    for input in observation_range_inputs() {
+        let result = apply(&mut core, &input);
+        writer.record(input, result).unwrap();
+    }
+    let prefix = writer.stabilize().unwrap().unwrap();
+    let mut reader = PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap();
+    let bad_root = temp.path().join("misaligned");
+    let mut writer =
+        PublicRecordingWriterV1::create_historical(&bad_root, core.header(), config()).unwrap();
+    let mut changed = false;
+    while let Some(mut row) = reader.next_physical_row().unwrap() {
+        if !changed && let PublicStoredRowV1::GroupObservationRange(group) = &mut row {
+            group.observation_start += 1;
+            changed = true;
+        }
+        writer.write(row).unwrap();
+    }
+    assert!(changed);
+    writer.pending = prefix;
+    writer.stabilize().unwrap();
+    for physical in [false, true] {
+        let mut reader = PublicRecordingReaderV1::recover(&bad_root, 1, 1 << 20).unwrap();
+        let error = loop {
+            let row = if physical {
+                reader.next_physical_row()
+            } else {
+                reader.next_row()
+            };
+            match row {
+                Err(error) => break error,
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("错位区间不能成功"),
+            }
+        };
+        assert_eq!(error.to_string(), "稳定记录原序或流身份不符");
+    }
+}
+
+#[test]
+fn compact_observation_closed_position_overflow_returns_invalid_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("original");
+    let mut core = core();
+    let input = meta(0);
+    let result = apply(&mut core, &input);
+    let mut writer =
+        PublicRecordingWriterV1::create_historical(&root, core.header(), config()).unwrap();
+    writer.record(input, result).unwrap();
+    let prefix = writer.stabilize().unwrap().unwrap();
+    let mut reader = PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap();
+    let bad_root = temp.path().join("overflow");
+    let mut writer =
+        PublicRecordingWriterV1::create_historical(&bad_root, core.header(), config()).unwrap();
+    let mut changed = false;
+    while let Some(mut row) = reader.next_physical_row().unwrap() {
+        if let PublicStoredRowV1::GroupObservationRange(group) = &mut row {
+            group.closed_at_input_position = u64::MAX;
+            changed = true;
+        }
+        writer.write(row).unwrap();
+    }
+    assert!(changed);
+    writer.pending = prefix;
+    writer.stabilize().unwrap();
+    let mut reader = PublicRecordingReaderV1::recover(&bad_root, 1, 1 << 20).unwrap();
+    let error = loop {
+        match reader.next_row() {
+            Err(error) => break error,
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("不能表示的前沿不得成功展开"),
+        }
+    };
+    assert_eq!(
+        error.downcast_ref::<io::Error>().unwrap().kind(),
+        io::ErrorKind::InvalidData
+    );
+}

@@ -408,7 +408,7 @@ impl PublicReplayV1 {
         if let Some(p) = self.progress.as_mut() {
             p.checkpoint(Stage::MainReading, false);
         }
-        while let Some(row) = self.reader.next_row()? {
+        while let Some(row) = self.reader.next_physical_row()? {
             if let Some(p) = self.progress.as_mut() {
                 p.work.main_records_read += 1;
                 p.checkpoint(Stage::MainReading, false);
@@ -630,7 +630,7 @@ fn read_historical_identity_sources(
     let mut reader = PublicRecordingReaderV1::open_committed(root, prefix, rows, bytes)?;
     #[cfg(test)]
     scan.opened();
-    while let Some(row) = reader.next_row()? {
+    while let Some(row) = reader.next_physical_row()? {
         #[cfg(test)]
         scan.row(&row);
         if let PublicStoredRowV1::Canonical {
@@ -727,7 +727,7 @@ pub fn read_dependencies(
     #[cfg(test)]
     scan.opened();
     let mut output = Vec::new();
-    while let Some(row) = reader.next_row()? {
+    while let Some(row) = reader.next_physical_row()? {
         #[cfg(test)]
         scan.row(&row);
         if let PublicStoredRowV1::Canonical {
@@ -806,7 +806,7 @@ impl ReferenceCandidateReaderV1 {
         let mut values = Vec::new();
         let mut next = cursor;
         while values.len() < self.limit {
-            let Some(row) = self.reader.next_row()? else {
+            let Some(row) = self.reader.next_physical_row()? else {
                 #[cfg(test)]
                 scan.complete(values.len(), Some(next.next_input_position), Some(true));
                 return Ok((values, next, true));

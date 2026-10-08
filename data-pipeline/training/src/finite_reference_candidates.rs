@@ -135,7 +135,7 @@ impl FiniteReferenceCandidates {
 
     // 所有用途都由原reader解析/observe并验证原稳定EOF；只将已验证位置纳入索引。
     fn advance(&mut self) -> RecordingResult<Option<PublicStoredRowV1>> {
-        let Some((row, location)) = self.frontier.next_row_with_location()? else {
+        let Some((row, location)) = self.frontier.next_physical_row_with_location()? else {
             self.eof = true;
             return Ok(None);
         };

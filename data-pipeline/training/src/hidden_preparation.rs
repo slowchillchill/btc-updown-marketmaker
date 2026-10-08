@@ -114,7 +114,7 @@ pub fn prepare_hidden_with_progress_v1(
     let mut epochs = BTreeMap::new();
     let mut reference_order = 0;
     let mut scan_rows = 0_u64;
-    while let Some(row) = reader.next_row()? {
+    while let Some(row) = reader.next_physical_row()? {
         notify(progress, Notice::HiddenScanRow);
         if progress.is_some() {
             scan_rows += 1;
@@ -456,6 +456,7 @@ pub struct HiddenMaterialReadMetricsV1 {
     pub pages: u64,
     pub index_entries: u64,
     pub decoded_derived_rows: u64,
+    /// 原录制的物理行数；观察区间只计一条，不包含兼容展开的逻辑行。
     pub decoded_recording_rows: u64,
     pub peak_page_entries: usize,
 }
@@ -613,7 +614,7 @@ impl HiddenMaterialReaderV1 {
                     self.bytes,
                 )?);
             }
-            while let Some(row) = self.recording.as_mut().unwrap().next_row()? {
+            while let Some(row) = self.recording.as_mut().unwrap().next_physical_row()? {
                 self.metrics.decoded_recording_rows += 1;
                 match row {
                     PublicStoredRowV1::BinanceDepthReference {
