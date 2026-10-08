@@ -283,6 +283,8 @@ fn fixture_with_execution(
         driver: FinitePublicConsumptionV1::new(execution, source, "buy".into()),
         groups: vec![],
         noe_context,
+        buy_receipts: vec![],
+        cancel_receipts: vec![],
     },materials,retained_observation)
 }
 

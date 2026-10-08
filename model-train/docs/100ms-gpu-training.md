@@ -1655,10 +1655,10 @@ GRU 层并核同设备捕获和旧输入稳定；1000–1400根记忆、完整�
 账户1500／1600冻结到实际上下文消费者。原259／257完整撤单对象作为支持数学输入，
 不能代称非空订单成员的设备取消资格构建或184维编码已交付；联合冻结的该时刻无人可撤，
 仍保留该已准入请求市场的合法空成员 `CancelMarketOrders` 对象及对应支持。
-另一个未判定有限工程场景沿原SIM发送Resting和真实Matched GTC，使用实际Accepted／Trade
+另一个有限工程场景沿原SIM发送Resting和真实Matched GTC，使用实际Accepted／Trade
 反馈时钟选择100ms观察间隙。原NativeActor给出独立支持，设备冷切片只消费已公开Accepted，
 通过公共账户／市场冻结实际调用 `publish_actor_context`。它核零gap时未知cap不关闭合法族；
-该间隙须由服务器实际来源证明，不沿用旧场景的时刻，也不把切片签成完整首次领取流。
+该间隙已由服务器实际来源及原Native支持证明，不沿用旧场景的时刻，也不把切片签成完整首次领取流。
 完整模型路径采样／联合概率重算、设备取消184、完整意图共同预留与提交，
 以及完整连续宿主、PPO和活动恢复仍须沿原步骤继续接线。
 
@@ -1673,3 +1673,31 @@ GRU 层并核同设备捕获和旧输入稳定；1000–1400根记忆、完整�
 公共发布接缝，验证价格前缀的同设备梯度、捕获重放和发布源覆写后的旧值拥有权。
 工程模型形状／种子在报告中显式列明，不是正式训练参数。该入口不交付取消184、
 完整路径采样、联合概率或意图发送；不重复运行未受本批影响的联合冻结长链。
+
+`global_cancel_slots` 只消费 `freeze_cancel_objects` 已按原完整形成顺序排序的对象读面。
+它对整个 Single／Pair／Market 轴稳定压紧 present，保留全局 ordinal→物理槽映射，
+尾部 padding 没有业务 ordinal；不能对未排序订单目录直接采用同样结论。
+跨 family 选择不重新编号。成员、Pair来源和Market位置按同一映射读取，
+`formation_ranks` 仍属于原订单轴，Pair逐腿模板仍按 `paired_members[...,0/1]` 的原item ordinal。
+该公共接口变化已同步真正的联合冻结调用者，并单独重验受影响joint入口。
+
+`SubmittedLegs.terms` 保存实际原冻结 BUY 正文的共享逐腿目录：原variant、post_only、
+绝对limit／worst价格、spend与GTD到期秒；target沿已有原提交腿精确字段复用。
+`freeze_intent_orders` 只用实际公开 Submission Accepted 的 request／item 关联建立订单origin。
+receipt单独、OrderFormed或Query不能生成原正文；同身份首次冻结仍保原意图。
+条款及不可变NOE块可共享，但其生命周期必须覆盖旧冻结消费者。
+
+`input_cancel.cancel_inputs` 消费同cutoff公共对象、原关联索引、订单数量、逐订单资金、
+已选形成／Direct／取消来源以及原快照的逐对象撤单请求，生成完整全局轴的184列。
+Unknown与NotApplicable沿原模板区分，三类取消结果从已选schema15正文解码，
+不从 `canceled=False` 推断。Market聚合保逐腿实际成员和缺归属的Unknown；
+166:184只用该对象scope，不能替换成账户global请求计数。
+精确金额与整数时间先计算，末端才投影；外层沿Numbers fits／fault共同安装。
+`CancelInputs.snapshot` 在图外拥有实际输出和映射，后续暂存重放不得覆盖旧观察。
+
+有限入口 `run_cancel_inputs_validation.sh` 沿原单账户259／257对象场景导出完整来源及
+原Native184独立预期，实际调用公共Accepted关联、对象资格／排序、NOE取消读取与
+逐对象快照请求，再核现有模型对象编码器、梯度及同图重放拥有权。
+该入口的逐订单资金从当次原公开OrderFunds冷读面安装，未重新证明资金归约或连续账户；
+原GTC场景不代称旧GTD／FAK数值场景已覆盖。工程模型形状／seed显式报告，
+不形成正式参数。本接口仍不交付完整取消采样／联合概率、意图提交或完整PPO／恢复。

@@ -22,6 +22,7 @@ class SubmittedLegs:
     condition_slots: torch.Tensor | None = None
     outcome_indices: torch.Tensor | None = None
     association_known: torch.Tensor | None = None
+    terms: object | None = None  # 原冻结ModelIntent共享逐腿正文；receipt不建立订单origin。
 
 
 @dataclass(frozen=True)

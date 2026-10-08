@@ -22,7 +22,7 @@ class FrozenOrderInputs:
     fault: torch.Tensor
 
 
-def feedback_time(source, now, applicable):
+def feedback_time(source, now, applicable, *, source_at=None):
     """原cancel模板六项：三种秒差S、双存在位和适用位。
 
     适用订单缺来源时保留[0,0,0,0,0,1]；不是已知零时间。
@@ -38,7 +38,7 @@ def feedback_time(source, now, applicable):
         raise TypeError('订单时间需要同设备cutoff[roots]及bool[roots,orders]适用人口')
     present = source.present & applicable
     cutoff = now[:, None].expand(shape).reshape(-1)
-    source_at = source.platform_at.reshape(-1)
+    source_at = (source.platform_at if source_at is None else source_at).reshape(-1)
     received_at = source.received_at.reshape(-1)
     features = []
     errors = torch.zeros(shape, dtype=torch.int32, device=device)

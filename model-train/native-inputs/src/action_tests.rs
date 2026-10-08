@@ -54,6 +54,8 @@ pub(super) struct Harness {
     pub(super) driver: FinitePublicConsumptionV1<RecordedPublicGroupSourceV1<TradingTimes>>,
     groups: Vec<serde_json::Value>,
     noe_context: contracts::execution_normalization::ExecutionNormalizationContextReferenceV1,
+    buy_receipts: Vec<serde_json::Value>,
+    cancel_receipts: Vec<serde_json::Value>,
 }
 
 #[test]
@@ -152,6 +154,8 @@ impl Harness {
             driver,
             groups: vec![],
             noe_context,
+            buy_receipts: vec![],
+            cancel_receipts: vec![],
         }
     }
     fn next(&mut self) -> Option<NativeInputGroup> {
@@ -175,20 +179,20 @@ impl Harness {
     pub(super) async fn pairs(&mut self, count: usize) {
         for i in 0..count {
             self.driver.wait_for_recording_capacity().unwrap();
-            self.shared
+            let intent=Arc::new(ModelIntentV1::SubmitPairedBuy {
+                condition_id: ConditionId(CONDITION_ID.into()),
+                orders:[leg(UP_TOKEN_ID,Decimal::new(1,1)),leg(DOWN_TOKEN_ID,Decimal::new(1,1))],
+            });
+            let receipt=self.shared
                 .execute(
                     &mut self.driver.decision().unwrap(),
                     context(&format!("pair-{i}")),
-                    Some(Arc::new(ModelIntentV1::SubmitPairedBuy {
-                        condition_id: ConditionId(CONDITION_ID.into()),
-                        orders: [
-                            leg(UP_TOKEN_ID, Decimal::new(1, 1)),
-                            leg(DOWN_TOKEN_ID, Decimal::new(1, 1)),
-                        ],
-                    })),
+                    Some(intent.clone()),
                 )
                 .await
-                .unwrap();
+                .unwrap().unwrap();
+            self.buy_receipts.push(serde_json::json!({"request":format!("pair-{i}"),"intent":cancel_gpu::intent(intent.as_ref()),
+                "input_sequence":receipt.input_sequence(),"platform_arrived_at":receipt.platform_arrived_at_utc_ms()}));
         }
     }
 }
@@ -264,6 +268,10 @@ async fn complete_pair_terminal_leg_and_257_global_selection() {
                 .unwrap(),
         );
         assert_native_cancel_families(g.clone());
+        if let Some(directory)=std::env::var_os("B_GPU_CANCEL_INPUT_REFERENCE") {
+            let path=std::path::Path::new(&directory).join(format!("cancel-input-{at}.json"));
+            std::fs::write(path,serde_json::to_vec_pretty(&cancel_gpu::export(&h,&g)).unwrap()).unwrap();
+        }
         if let Some(directory)=std::env::var_os("B_GPU_ACTOR_CANCEL_REFERENCE") {
             let actor=NativeActor::new(g.clone(),0).unwrap();
             let report=serde_json::json!({"cutoff":at,"actor_context":actor.gpu_context_reference(),
@@ -319,7 +327,7 @@ async fn complete_pair_terminal_leg_and_257_global_selection() {
             let mut actor = NativeActor::new(g.clone(), 0).unwrap();
             actor.choose(3).unwrap();
             actor.choose(last.0).unwrap();
-            actor
+            let receipt=actor
                 .execute(
                     &mut h.shared,
                     &mut h.driver.decision().unwrap(),
@@ -328,6 +336,8 @@ async fn complete_pair_terminal_leg_and_257_global_selection() {
                 .await
                 .unwrap()
                 .unwrap();
+            h.cancel_receipts.push(serde_json::json!({"request":"close-b","scope":{"orders":[last.1.clone()]},
+                "input_sequence":receipt.input_sequence(),"platform_arrived_at":receipt.platform_arrived_at_utc_ms()}));
             // 原冻集合保持，发送不能抢先改写它。
             assert_eq!(g.cancel.len(), 259);
             closed_b = Some(last.1);
@@ -821,6 +831,9 @@ fn recorded_cancel_switch(
 
 #[path = "buy_tests.rs"]
 mod buy_tests;
+
+#[path = "cancel_gpu_tests.rs"]
+mod cancel_gpu;
 
 #[cfg(all(feature = "python", feature = "ort"))]
 #[tokio::test(flavor = "current_thread")]

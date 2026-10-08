@@ -74,6 +74,8 @@ class FrozenIntentOrders:
     original_target: object
     quoted: torch.Tensor
     receipt_known: torch.Tensor
+    terms: object | None = None  # 共享原SubmittedLegs条款，不从formed/Query反推。
+    term_leg_slots: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)

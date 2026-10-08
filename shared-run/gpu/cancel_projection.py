@@ -34,6 +34,31 @@ class PublicCancellationRows:
     fault: torch.Tensor
 
 
+def frozen_cancellation_outcomes(bank,selected):
+    """只解当次FrozenOrderSources已选latest_cancel正文，不再选一次latest。
+
+    None保持没有反馈；原Canceled/NotCanceled/EvidenceUnknown三态独立。
+    bank所指不可变块须仍在消费生命周期内。
+    """
+    roots,count=selected.present.shape
+    result=torch.zeros_like(selected.record_refs)
+    fault=torch.zeros(roots,dtype=torch.int32,device=result.device)
+    width=bank.semantic.shape[0]
+    if width:
+        refs=selected.record_refs.flatten()
+        present=selected.present.flatten()
+        valid=(refs>=0)&(refs<width)
+        safe=refs.clamp(0,width-1)
+        active=present&valid
+        fields,error=decode_fields(bank.semantic[safe],['scalar','integer','scalar'],active)
+        result=fields[2].reshape(roots,count)
+        invalid=present&(~valid|(bank.payload_schemas[safe]!=15)|(fields[2]<0)|(fields[2]>2))
+        fault=Numbers.combine_fault_rows((error|invalid.to(torch.int32)).reshape(roots,count))
+    else:
+        fault=selected.present.any(1).to(torch.int32)
+    return result,selected.present,fault
+
+
 def cancellation_rows_from_closed(bank,batches,closed,*,source_rows=None):
     roots,width=closed.record_refs.shape
     device=closed.record_refs.device
