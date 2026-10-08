@@ -28,6 +28,12 @@ pub enum PublicStoredRowV1 {
         binding: PublicFactBindingV1,
         record: CanonicalEventRecordV2,
     },
+    /// 有限历史专用派生深度描述；完整正文由原 Input 重放恢复。
+    BinanceDepthReference {
+        canonical_position: u64,
+        binding: PublicFactBindingV1,
+        time: EventTimeV2,
+    },
     Report {
         input_position: u64,
         report: PublicReductionReportV1<CanonicalEventId>,
@@ -54,6 +60,7 @@ pub struct PublicRecordingWriterV1 {
     pending: CommittedIngressPrefixV1,
     committed: Option<CommittedIngressPrefixV1>,
     failed: bool,
+    compact_historical_depth: bool,
 }
 impl PublicRecordingWriterV1 {
     /// 容量来自调用方当前运行配置，不在此选择训练/在线策略或稳定周期。
@@ -76,6 +83,7 @@ impl PublicRecordingWriterV1 {
             segment_rows: 0,
             committed: None,
             failed: false,
+            compact_historical_depth: false,
             pending: CommittedIngressPrefixV1 {
                 input_stream_id: header.input_stream_id.clone(),
                 next_input_position: 0,
@@ -87,6 +95,16 @@ impl PublicRecordingWriterV1 {
                 normal_end: false,
             },
         })
+    }
+    /// 仅有限历史录制采用紧凑派生深度；在线 create 保留完整规范正文。
+    pub fn create_historical(
+        root: &Path,
+        header: &PublicInputStreamHeaderV1,
+        config: GateAOutputConfig,
+    ) -> RecordingResult<Self> {
+        let mut writer = Self::create(root, header, config)?;
+        writer.compact_historical_depth = true;
+        Ok(writer)
     }
     pub fn committed_prefix(&self) -> Option<&CommittedIngressPrefixV1> {
         self.committed.as_ref()
@@ -219,11 +237,27 @@ impl PublicRecordingWriterV1 {
                     let (binding, record) = batches
                         .remove(&fact.position)
                         .expect("同次归约材料对应当组事实");
-                    self.write(PublicStoredRowV1::Canonical {
-                        canonical_position: self.pending.next_canonical_position,
-                        binding,
-                        record,
-                    })?;
+                    let row = match record {
+                        CanonicalEventRecordV2::ReferenceEvent(event)
+                            if self.compact_historical_depth
+                                && matches!(
+                                    event.payload,
+                                    CanonicalReferenceEventPayloadV2::BinanceDepthState(_)
+                                ) =>
+                        {
+                            PublicStoredRowV1::BinanceDepthReference {
+                                canonical_position: self.pending.next_canonical_position,
+                                binding,
+                                time: event.time,
+                            }
+                        }
+                        record => PublicStoredRowV1::Canonical {
+                            canonical_position: self.pending.next_canonical_position,
+                            binding,
+                            record,
+                        },
+                    };
+                    self.write(row)?;
                 }
                 self.pending.next_canonical_position += 1;
             }
@@ -491,6 +525,11 @@ impl PublicRecordingReaderV1 {
                 valid
             }
             PublicStoredRowV1::Canonical {
+                canonical_position,
+                binding,
+                ..
+            }
+            | PublicStoredRowV1::BinanceDepthReference {
                 canonical_position,
                 binding,
                 ..

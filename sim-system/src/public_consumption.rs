@@ -619,6 +619,12 @@ pub enum HiddenExecutionRecordV1 {
     },
     MarketFact(CanonicalMarketFactV1),
     Reference(CanonicalReferenceEventV2),
+    /// 有限历史的非撮合深度参考；保留原身份与时间。
+    BinanceDepthReference {
+        canonical_position: u64,
+        binding: PublicFactBindingV1,
+        time: EventTimeV2,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AcceptedHiddenStepBucketV1 {
@@ -691,6 +697,15 @@ impl RecordedHiddenBucketSourceV1 {
                 )
             })?;
             records.push(match record {
+                ResolvedHiddenRecordV1::BinanceDepthReference {
+                    canonical_position,
+                    binding,
+                    time,
+                } => HiddenExecutionRecordV1::BinanceDepthReference {
+                    canonical_position,
+                    binding,
+                    time,
+                },
                 ResolvedHiddenRecordV1::Step { stored, market } => HiddenExecutionRecordV1::Step {
                     market,
                     step: stored.step,

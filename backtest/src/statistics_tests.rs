@@ -89,9 +89,9 @@ fn actual_prepare_statistics_equal_independent_recorded_replay_with_and_without_
                 1
             );
         }
-        // 原V5元数据缺collector epoch，来源无admission，首见仍是实际接收BASE。
+        // 真实首行保留collector admission下界，首见为接收后的BASE+1。
         else {
-            assert_eq!(first["first_visible_at"], common::BASE);
+            assert_eq!(first["first_visible_at"], common::BASE + 1);
         }
     }
 }

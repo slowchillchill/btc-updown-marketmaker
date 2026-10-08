@@ -103,6 +103,8 @@ DPT先在所选文件定位指定Snapshot，再分页读取每个目标市场从
 
 按 [#214 的专项批准](https://github.com/slowchillchill/btc-updown-marketmaker/issues/214#issuecomment-5976228785)（D-0282），每次 prepare 不再丢弃已完成 core 后额外执行一次空状态公共重放。此项仅替代 #196 的该生产步骤；输入初始化、正常 End、持久材料和独立从盘重放责任保持。已有 hidden 入口消费 core 的所有权，投影的是固定上下文中的初始 tick，随后释放公开数量状态，再按真实 Canonical 和原外排独立计算隐藏步骤、报告与索引；当前 tick 和公开盘口不作隐藏起点。
 
+新有限历史材料按 [D-0309](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6052454945) 采用 DPT 的[紧凑深度描述](../data-pipeline/training/README.md#显式有限选源的公共录制)，保留原 Input 和独立公共重放。只有 Binance 派生深度正文不再逐条持久保存；隐藏参考索引及完整桶保留，SIM 撮合、NOE／Ledger、费用和最终经济读取沿原消费链。旧材料兼容，发布和复用入口不变。
+
 原输入准备／归约及 writer 写入／关闭／稳定错误仍在原步骤失败。存储 JSON、顺序、流身份、分片及 EOF 计数继续由原 hidden reader 在完整读取时核对；部分存储错误因取消前置重放而在 hidden 阶段暴露，可能留下未完成 hidden 目录，但不能返回成功材料。没有新增文件改动检测、全量重哈希或每次自产全读证明；独立 replay 的原检查保持。
 
 小型原 prepare 产生的直接移交结果，与同记录独立空重建 core 后的 hidden 结果逐字段比较固定市场、完整隐藏步骤／报告、索引、桶及正常前缀。初始化混合与当前 tick 已变化但初始 tick 不变的代表另有明确断言；既有晚身份／规则、同毫秒桶、跨 epoch 前量冲突和缺源时间回归继续覆盖原行为，另验证隐藏读取的原 EOF 错误不会变成成功。此实现段只运行小夹具和工程检查，没有真实十二分钟／小时材料运行；消除重复调用由实际调用链确认，节省时长待后续准确全流程测量，不套用旧纯 replay 时长。

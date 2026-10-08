@@ -5937,7 +5937,8 @@ pub(crate) fn drive_business_input_at_v2(
                     };
                     validate_membership_v1(directory, market, assets)
                 }
-                HiddenExecutionRecordV1::Reference(_) => Ok(()),
+                HiddenExecutionRecordV1::Reference(_)
+                | HiddenExecutionRecordV1::BinanceDepthReference { .. } => Ok(()),
             };
             if let Err(error) = result {
                 return Err(unaccepted_business_input_v2(
@@ -20559,7 +20560,8 @@ fn reduce_hidden_step_bucket_v1(
                 &fact.dependency_time,
                 &fact.quality,
             ),
-            HiddenExecutionRecordV1::Reference(_) => continue,
+            HiddenExecutionRecordV1::Reference(_)
+            | HiddenExecutionRecordV1::BinanceDepthReference { .. } => continue,
         };
         let Some(normalized) = normalized else {
             continue;

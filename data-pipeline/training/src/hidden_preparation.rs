@@ -122,13 +122,12 @@ pub fn prepare_hidden_with_progress_v1(
                 notify(progress, Notice::Checkpoint);
             }
         }
-        if let PublicStoredRowV1::Canonical {
-            canonical_position,
-            record,
-            ..
-        } = row
-        {
-            match record {
+        match row {
+            PublicStoredRowV1::Canonical {
+                canonical_position,
+                record,
+                ..
+            } => match record {
                 CanonicalEventRecordV2::PolymarketMessage(message) => {
                     let source = &message.lineage.source_evidence[0];
                     let admission = source.collector_admission.as_ref().unwrap();
@@ -170,7 +169,24 @@ pub fn prepare_hidden_with_progress_v1(
                         notify(progress, Notice::HiddenReferenceIndexed);
                     }
                 }
+            },
+            PublicStoredRowV1::BinanceDepthReference {
+                canonical_position,
+                time,
+                ..
+            } => {
+                if let Some(at) = time.source_event_at_utc_ms {
+                    let value = HiddenIndexEntryV1::Reference {
+                        canonical_position,
+                        source_at_utc_ms: at,
+                        derivation_position: reference_order,
+                    };
+                    index.push(index_row(at, reference_order, &value)?)?;
+                    reference_order += 1;
+                    notify(progress, Notice::HiddenReferenceIndexed);
+                }
             }
+            _ => {}
         }
     }
     notify(progress, Notice::Stage(Stage::HiddenMessagesFinish));
@@ -427,6 +443,12 @@ pub enum ResolvedHiddenRecordV1 {
         canonical_position: u64,
         record: CanonicalEventRecordV2,
     },
+    /// 只推进原隐藏参考时序，不提供撮合正文。
+    BinanceDepthReference {
+        canonical_position: u64,
+        binding: PublicFactBindingV1,
+        time: EventTimeV2,
+    },
 }
 /// 实际解码扫描计数；不等于磁盘物理读取字节或操作系统缓存未命中。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -593,40 +615,57 @@ impl HiddenMaterialReaderV1 {
             }
             while let Some(row) = self.recording.as_mut().unwrap().next_row()? {
                 self.metrics.decoded_recording_rows += 1;
-                if let PublicStoredRowV1::Canonical {
-                    canonical_position,
-                    record,
-                    ..
-                } = row
-                {
-                    self.last_canonical_position = Some(canonical_position);
-                    self.last_market = match &record {
-                        CanonicalEventRecordV2::PolymarketMessage(message) => {
-                            Some(message.market.clone())
+                match row {
+                    PublicStoredRowV1::BinanceDepthReference {
+                        canonical_position,
+                        binding,
+                        time,
+                    } => {
+                        self.last_canonical_position = Some(canonical_position);
+                        self.last_market = None;
+                        if let Some(slot) = fact_slots.remove(&canonical_position) {
+                            resolved[slot] = Some(ResolvedHiddenRecordV1::BinanceDepthReference {
+                                canonical_position,
+                                binding,
+                                time,
+                            });
                         }
-                        _ => None,
-                    };
-                    if let Some(market) = &self.last_market {
-                        if let Some(slots) = step_market_slots.remove(&canonical_position) {
-                            for slot in slots {
-                                if let Some(stored) = stored_steps[slot].take() {
-                                    resolved[slot] = Some(ResolvedHiddenRecordV1::Step {
-                                        stored,
-                                        market: market.clone(),
-                                    });
+                    }
+                    PublicStoredRowV1::Canonical {
+                        canonical_position,
+                        record,
+                        ..
+                    } => {
+                        self.last_canonical_position = Some(canonical_position);
+                        self.last_market = match &record {
+                            CanonicalEventRecordV2::PolymarketMessage(message) => {
+                                Some(message.market.clone())
+                            }
+                            _ => None,
+                        };
+                        if let Some(market) = &self.last_market {
+                            if let Some(slots) = step_market_slots.remove(&canonical_position) {
+                                for slot in slots {
+                                    if let Some(stored) = stored_steps[slot].take() {
+                                        resolved[slot] = Some(ResolvedHiddenRecordV1::Step {
+                                            stored,
+                                            market: market.clone(),
+                                        });
+                                    }
                                 }
                             }
                         }
+                        if let Some(slot) = fact_slots.remove(&canonical_position) {
+                            resolved[slot] = Some(ResolvedHiddenRecordV1::Reference {
+                                canonical_position,
+                                record,
+                            });
+                        }
                     }
-                    if let Some(slot) = fact_slots.remove(&canonical_position) {
-                        resolved[slot] = Some(ResolvedHiddenRecordV1::Reference {
-                            canonical_position,
-                            record,
-                        });
-                    }
-                    if fact_slots.is_empty() && step_market_slots.is_empty() {
-                        break;
-                    }
+                    _ => {}
+                }
+                if fact_slots.is_empty() && step_market_slots.is_empty() {
+                    break;
                 }
             }
         }
