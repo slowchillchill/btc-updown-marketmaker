@@ -294,6 +294,23 @@ pub struct PublicAppliedIngressV1<'a> {
     pub pm_reductions: Vec<(PublicFactPositionV1, PublicPmReductionV1<'a>)>,
     pub reductions: Vec<PublicReductionBatchV1>,
 }
+/// 有限历史录制的同次组材料；原完整观察仍由正常 push／重放生成。
+/// 数量来自同一封组时已登记市场，不构造或保存 MarketBusinessObservation。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicRecordingGroupV1 {
+    pub group_id: Sha256Hex,
+    pub group_position: u64,
+    pub member_input_positions: Vec<u64>,
+    pub closed_at_input_position: u64,
+    pub records: Arc<[PublicBusinessFactV1]>,
+    pub observation_count: u64,
+}
+pub struct PublicRecordingAppliedIngressV1<'a> {
+    pub applied_prefix: AppliedIngressPrefixV1,
+    pub closed_groups: Vec<PublicRecordingGroupV1>,
+    pub pm_reductions: Vec<(PublicFactPositionV1, PublicPmReductionV1<'a>)>,
+    pub reductions: Vec<PublicReductionBatchV1>,
+}
 /// 研究专用事实增量；没有完整观察、撮合材料或持久前缀承诺。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PublicSourceProgressGroupV1 {
@@ -322,6 +339,7 @@ struct CoreApplicationV1<'a> {
     pm_reductions: Vec<(PublicFactPositionV1, PublicPmReductionV1<'a>)>,
     reductions: Vec<PublicReductionBatchV1>,
     compact_groups: Option<Vec<PublicSourceProgressGroupV1>>,
+    recording_groups: Option<Vec<PublicRecordingGroupV1>>,
     changed_scopes: BTreeSet<SourceStreamScopeV1>,
     closed_fact_count: u32,
 }
@@ -701,9 +719,23 @@ impl PublicObservationCoreV1 {
         &mut self,
         input: &'a PreparedIngressV1<'_>,
     ) -> Result<PublicAppliedIngressV1<'a>, DptCoreErrorV1> {
-        let result = self.push_application(input, false)?;
+        let result = self.push_application(input, false, false)?;
         Ok(PublicAppliedIngressV1 {
             applied: result.applied,
+            pm_reductions: result.pm_reductions,
+            reductions: result.reductions,
+        })
+    }
+    /// 无完整观察消费者的有限历史录制；归约、选择和封组与 push 相同。
+    /// 此结果明确携带数量，不能作为策略／统计的完整观察流。
+    pub fn push_recording<'a>(
+        &mut self,
+        input: &'a PreparedIngressV1<'_>,
+    ) -> Result<PublicRecordingAppliedIngressV1<'a>, DptCoreErrorV1> {
+        let result = self.push_application(input, false, true)?;
+        Ok(PublicRecordingAppliedIngressV1 {
+            applied_prefix: result.applied.applied_prefix,
+            closed_groups: result.recording_groups.unwrap(),
             pm_reductions: result.pm_reductions,
             reductions: result.reductions,
         })
@@ -715,7 +747,7 @@ impl PublicObservationCoreV1 {
         input: &PreparedIngressV1<'_>,
     ) -> Result<PublicSourceProgressAppliedV1, DptCoreErrorV1> {
         self.enable_source_progress();
-        let result = self.push_application(input, true)?;
+        let result = self.push_application(input, true, false)?;
         Ok(PublicSourceProgressAppliedV1 {
             applied_prefix: result.applied.applied_prefix,
             closed_groups: result.compact_groups.unwrap(),
@@ -727,12 +759,13 @@ impl PublicObservationCoreV1 {
         &mut self,
         input: &PreparedIngressV1<'_>,
     ) -> Result<Vec<PublicReductionBatchV1>, DptCoreErrorV1> {
-        Ok(self.push_application(input, true)?.reductions)
+        Ok(self.push_application(input, true, false)?.reductions)
     }
     fn push_application<'a>(
         &mut self,
         input: &'a PreparedIngressV1<'_>,
         compact: bool,
+        recording: bool,
     ) -> Result<CoreApplicationV1<'a>, DptCoreErrorV1> {
         if input.recorded.input_stream_id != self.header.input_stream_id
             || input.recorded.input_position != self.next_input_position
@@ -751,6 +784,7 @@ impl PublicObservationCoreV1 {
             pm_reductions: vec![],
             reductions: vec![],
             compact_groups: compact.then(Vec::new),
+            recording_groups: recording.then(Vec::new),
             changed_scopes: BTreeSet::new(),
             closed_fact_count: 0,
         };
@@ -1499,6 +1533,18 @@ impl PublicObservationCoreV1 {
             return;
         }
         output.changed_scopes.clear();
+        if let Some(groups) = &mut output.recording_groups {
+            groups.push(PublicRecordingGroupV1 {
+                group_id,
+                group_position: self.next_group_position,
+                member_input_positions: members,
+                closed_at_input_position: self.next_input_position,
+                records,
+                observation_count: self.markets.len() as u64,
+            });
+            self.next_group_position += 1;
+            return;
+        }
         let depth = Arc::clone(self.current_depth_projection.get_or_insert_with(|| {
             Arc::new(ObservedFactV1 {
                 value: if self.global.depth.value.is_some() {
@@ -2036,6 +2082,21 @@ impl PublicAppliedIngressV1<'_> {
     pub fn into_owned(self) -> PublicAppliedIngressV1<'static> {
         PublicAppliedIngressV1 {
             applied: self.applied,
+            reductions: self.reductions,
+            pm_reductions: self
+                .pm_reductions
+                .into_iter()
+                .map(|(p, r)| (p, r.into_owned()))
+                .collect(),
+        }
+    }
+}
+
+impl PublicRecordingAppliedIngressV1<'_> {
+    pub fn into_owned(self) -> PublicRecordingAppliedIngressV1<'static> {
+        PublicRecordingAppliedIngressV1 {
+            applied_prefix: self.applied_prefix,
+            closed_groups: self.closed_groups,
             reductions: self.reductions,
             pm_reductions: self
                 .pm_reductions

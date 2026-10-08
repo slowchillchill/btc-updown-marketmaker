@@ -2161,10 +2161,10 @@ fn compact_observation_ranges_restore_all_original_fields_across_market_close_pa
     let inputs = observation_range_inputs();
     let mut all_prefixes = Vec::new();
     let mut all_logical_rows = Vec::new();
-    for historical in [false, true] {
-        let root = temp
-            .path()
-            .join(if historical { "compact" } else { "legacy" });
+    for mode in [0, 1, 2] {
+        let historical = mode != 0;
+        let mut counted_core = core();
+        let root = temp.path().join(["legacy", "compact", "counts"][mode]);
         let mut core = core();
         let mut writer = if historical {
             PublicRecordingWriterV1::create_historical(&root, core.header(), config())
@@ -2206,7 +2206,28 @@ fn compact_observation_ranges_restore_all_original_fields_across_market_close_pa
                 }
             }
             expected_applied.push(fingerprint(&result));
-            writer.record(input.clone(), result).unwrap();
+            if mode == 2 {
+                let ids = BTreeMap::new();
+                let prepared = prepare_public_ingress_v1(&counted_core, input, &ids, &[]).unwrap();
+                let counts = counted_core.push_recording(&prepared).unwrap().into_owned();
+                assert_eq!(counts.applied_prefix, result.applied.applied_prefix);
+                assert_eq!(
+                    counts
+                        .closed_groups
+                        .iter()
+                        .map(|g| g.observation_count)
+                        .collect::<Vec<_>>(),
+                    result
+                        .applied
+                        .closed_groups
+                        .iter()
+                        .map(|g| g.observations.len() as u64)
+                        .collect::<Vec<_>>()
+                );
+                writer.record_counts(input.clone(), counts).unwrap();
+            } else {
+                writer.record(input.clone(), result).unwrap();
+            }
             if [1, 2, 5].contains(&input.input_position) {
                 let prefix = writer.stabilize().unwrap().unwrap();
                 prefixes.push(prefix);
@@ -2280,7 +2301,9 @@ fn compact_observation_ranges_restore_all_original_fields_across_market_close_pa
         all_logical_rows.push(logical_pages.remove(0));
     }
     assert_eq!(all_prefixes[0], all_prefixes[1]);
+    assert_eq!(all_prefixes[0], all_prefixes[2]);
     assert_eq!(all_logical_rows[0], all_logical_rows[1]);
+    assert_eq!(all_logical_rows[0], all_logical_rows[2]);
 }
 
 #[test]

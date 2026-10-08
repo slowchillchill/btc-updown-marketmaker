@@ -6,7 +6,11 @@ use crate::{
 };
 use contracts::*;
 use data_pipeline_core::{
-    pm_reduction::*, public_input::*, public_observation_core::PublicAppliedIngressV1,
+    pm_reduction::*,
+    public_input::*,
+    public_observation_core::{
+        PublicAppliedIngressV1, PublicPmReductionV1, PublicRecordingAppliedIngressV1,
+    },
     public_reduction::*,
 };
 use serde::{Deserialize, Serialize};
@@ -69,6 +73,17 @@ struct ObservationExpansion {
     group: PublicGroupObservationRangeV1,
     emitted: u64,
     last_market: Option<String>,
+}
+
+// 同一 writer 的借用编码材料；没有第二份业务状态或持久格式。
+struct RecordingGroup<'a> {
+    group_id: &'a Sha256Hex,
+    group_position: u64,
+    member_input_positions: &'a [u64],
+    closed_at_input_position: u64,
+    records: &'a [PublicBusinessFactV1],
+    observation_count: u64,
+    observations: Option<&'a [MarketBusinessObservationV1]>,
 }
 
 pub struct PublicRecordingWriterV1 {
@@ -155,11 +170,67 @@ impl PublicRecordingWriterV1 {
         input: RecordedIngressV1,
         result: PublicAppliedIngressV1<'static>,
     ) -> RecordingResult<()> {
+        let groups = result.applied.closed_groups;
+        let groups = groups
+            .iter()
+            .map(|g| RecordingGroup {
+                group_id: &g.group_id,
+                group_position: g.group_position,
+                member_input_positions: &g.member_input_positions,
+                closed_at_input_position: g.closed_at_input_position,
+                records: &g.records,
+                observation_count: g.observations.len() as u64,
+                observations: Some(&g.observations),
+            })
+            .collect();
+        self.record_materials(
+            input,
+            result.applied.applied_prefix,
+            result.pm_reductions,
+            result.reductions,
+            groups,
+        )
+    }
+    /// 同一物化／写入及失败发布语义；明确数量直接编码原历史观察区间。
+    pub(crate) fn record_counts(
+        &mut self,
+        input: RecordedIngressV1,
+        result: PublicRecordingAppliedIngressV1<'static>,
+    ) -> RecordingResult<()> {
+        let groups = result.closed_groups;
+        let groups = groups
+            .iter()
+            .map(|g| RecordingGroup {
+                group_id: &g.group_id,
+                group_position: g.group_position,
+                member_input_positions: &g.member_input_positions,
+                closed_at_input_position: g.closed_at_input_position,
+                records: &g.records,
+                observation_count: g.observation_count,
+                observations: None,
+            })
+            .collect();
+        self.record_materials(
+            input,
+            result.applied_prefix,
+            result.pm_reductions,
+            result.reductions,
+            groups,
+        )
+    }
+    fn record_materials(
+        &mut self,
+        input: RecordedIngressV1,
+        prefix: AppliedIngressPrefixV1,
+        pm_reductions: Vec<(PublicFactPositionV1, PublicPmReductionV1<'static>)>,
+        reductions: Vec<PublicReductionBatchV1>,
+        groups: Vec<RecordingGroup<'_>>,
+    ) -> RecordingResult<()> {
         if self.failed {
             return Err(io::Error::other("记录尾部已失败，不能继续签发").into());
         }
         self.failed = true;
-        let outcome = self.record_inner(input, result);
+        let outcome = self.record_inner(input, prefix, pm_reductions, reductions, groups);
         if outcome.is_ok() {
             self.failed = false;
         }
@@ -168,14 +239,17 @@ impl PublicRecordingWriterV1 {
     fn record_inner(
         &mut self,
         input: RecordedIngressV1,
-        result: PublicAppliedIngressV1<'static>,
+        prefix: AppliedIngressPrefixV1,
+        pm_reductions: Vec<(PublicFactPositionV1, PublicPmReductionV1<'static>)>,
+        reductions: Vec<PublicReductionBatchV1>,
+        groups: Vec<RecordingGroup<'_>>,
     ) -> RecordingResult<()> {
         let input_position = input.input_position;
         let normal_end = matches!(input.ingress, DptIngressV1::EndOfInput);
         self.write(PublicStoredRowV1::Input(input))?;
         #[cfg(test)]
         faults::at("after_input")?;
-        let mut materials = result.reductions.into_iter();
+        let mut materials = reductions.into_iter();
         // 非 PM 的批次可能仅含报告，故先全部后台物化；每批只保存一次规范记录。
         let mut batches = std::collections::BTreeMap::new();
         for batch in materials.by_ref() {
@@ -190,7 +264,7 @@ impl PublicRecordingWriterV1 {
                 batches.insert(binding.position.clone(), (binding, record));
             }
         }
-        for (position, reduction) in result.pm_reductions {
+        for (position, reduction) in pm_reductions {
             let canonical_position = reduction
                 .steps
                 .first()
@@ -202,9 +276,7 @@ impl PublicRecordingWriterV1 {
             // 即便消息只有无输出报告，规范位置仍从当组原消息位置确定。
             let canonical_position = canonical_position.unwrap_or_else(|| {
                 self.pending.next_canonical_position
-                    + result
-                        .applied
-                        .closed_groups
+                    + groups
                         .iter()
                         .flat_map(|g| g.records.iter())
                         .position(|f| f.position == position)
@@ -229,7 +301,7 @@ impl PublicRecordingWriterV1 {
                 })?;
             }
         }
-        for group in result.applied.closed_groups {
+        for group in groups {
             let refs = group.records.iter().map(|f| f.position.clone()).collect();
             for fact in group.records.iter() {
                 if let PublicBusinessPayloadV1::PolymarketMessage(message) = &fact.payload {
@@ -282,22 +354,22 @@ impl PublicRecordingWriterV1 {
                 }
                 self.pending.next_canonical_position += 1;
             }
-            if self.compact_historical {
+            if self.compact_historical || group.observations.is_none() {
                 self.write(PublicStoredRowV1::GroupObservationRange(
                     PublicGroupObservationRangeV1 {
                         group_id: group.group_id.clone(),
                         group_position: group.group_position,
-                        member_input_positions: group.member_input_positions.clone(),
+                        member_input_positions: group.member_input_positions.to_vec(),
                         closed_at_input_position: group.closed_at_input_position,
                         records: refs,
                         observation_start: self.pending.next_observation_position,
-                        observation_count: group.observations.len() as u64,
+                        observation_count: group.observation_count,
                     },
                 ))?;
-                self.pending.next_observation_position += group.observations.len() as u64;
-            } else {
+                self.pending.next_observation_position += group.observation_count;
+            } else if let Some(observations) = group.observations {
                 let mut observation_positions = Vec::new();
-                for observation in &group.observations {
+                for observation in observations {
                     let index = PublicObservationIndexV1 {
                         observation_position: self.pending.next_observation_position,
                         market: observation.market.clone(),
@@ -316,7 +388,7 @@ impl PublicRecordingWriterV1 {
                 self.write(PublicStoredRowV1::Group(PublicGroupIndexV1 {
                     group_id: group.group_id.clone(),
                     group_position: group.group_position,
-                    member_input_positions: group.member_input_positions.clone(),
+                    member_input_positions: group.member_input_positions.to_vec(),
                     closed_at_input_position: group.closed_at_input_position,
                     records: refs,
                     observation_positions,
@@ -325,7 +397,7 @@ impl PublicRecordingWriterV1 {
             self.pending.next_group_position += 1;
             self.pending.next_public_index_position += 1;
         }
-        self.pending.next_input_position = result.applied.applied_prefix.next_input_position;
+        self.pending.next_input_position = prefix.next_input_position;
         self.pending.normal_end = normal_end;
         Ok(())
     }

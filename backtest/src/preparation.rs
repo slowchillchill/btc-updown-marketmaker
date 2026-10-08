@@ -221,35 +221,79 @@ fn prepare_internal(
         }
         let public_root = config.work_root.join("public");
         let progress_cell = std::cell::RefCell::new(&mut progress);
-        let (core, _) = data_pipeline_training::finite_recording::record_historical_merge_v1(
-            &mut merge,
-            header,
-            &public_root,
-            config.recording.clone(),
-            |input, applied, binding| {
-                if let Some(binding) = binding {
-                    initialization.input_positions.insert(input.input_position);
-                    initialization
-                        .source_message_ids
-                        .insert(binding.source_message_id.0.clone());
-                }
-                if let Some(applied) = applied {
-                    if let Some(s) = &mut statistics {
-                        for group in &applied.applied.closed_groups {
-                            s.observe(input, group, &initialization);
+        let (core, _) = if statistics.is_some() {
+            data_pipeline_training::finite_recording::record_historical_merge_v1(
+                &mut merge,
+                header,
+                &public_root,
+                config.recording.clone(),
+                |input, applied, binding| {
+                    if let Some(binding) = binding {
+                        initialization.input_positions.insert(input.input_position);
+                        initialization
+                            .source_message_ids
+                            .insert(binding.source_message_id.0.clone());
+                    }
+                    if let Some(applied) = applied {
+                        if let Some(s) = &mut statistics {
+                            for group in &applied.applied.closed_groups {
+                                s.observe(input, group, &initialization);
+                            }
+                        }
+                        if let Some(p) = &mut **progress_cell.borrow_mut() {
+                            p.applied(
+                                applied.applied.applied_prefix.next_input_position,
+                                applied.applied.closed_groups.len() as u64,
+                                applied
+                                    .applied
+                                    .closed_groups
+                                    .iter()
+                                    .map(|g| g.observations.len() as u64)
+                                    .sum(),
+                            );
                         }
                     }
+                },
+                || {
                     if let Some(p) = &mut **progress_cell.borrow_mut() {
-                        p.applied(&applied.applied);
+                        p.stage(Stage::PublicStabilizeAndCatalog);
                     }
-                }
-            },
-            || {
-                if let Some(p) = &mut **progress_cell.borrow_mut() {
-                    p.stage(Stage::PublicStabilizeAndCatalog);
-                }
-            },
-        )?;
+                },
+            )?
+        } else {
+            data_pipeline_training::finite_recording::record_historical_merge_counts_v1(
+                &mut merge,
+                header,
+                &public_root,
+                config.recording.clone(),
+                |input, applied, binding| {
+                    if let Some(binding) = binding {
+                        initialization.input_positions.insert(input.input_position);
+                        initialization
+                            .source_message_ids
+                            .insert(binding.source_message_id.0.clone());
+                    }
+                    if let Some(applied) = applied
+                        && let Some(p) = &mut **progress_cell.borrow_mut()
+                    {
+                        p.applied(
+                            applied.applied_prefix.next_input_position,
+                            applied.closed_groups.len() as u64,
+                            applied
+                                .closed_groups
+                                .iter()
+                                .map(|g| g.observation_count)
+                                .sum(),
+                        );
+                    }
+                },
+                || {
+                    if let Some(p) = &mut **progress_cell.borrow_mut() {
+                        p.stage(Stage::PublicStabilizeAndCatalog);
+                    }
+                },
+            )?
+        };
         if config.metadata_initialization.is_some() {
             serde_json::to_writer(
                 std::fs::File::create(public_root.join("historical-initialization.json"))?,
