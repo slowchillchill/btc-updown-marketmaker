@@ -54,6 +54,7 @@ class CapturedDeviceActor:
     """
     def __init__(self,policy,inputs,random,*,path_capacity,word_capacity,deterministic=False):
         from actor_support import DeviceNativeActor
+        from actor_context import _owned
         from prepare import _numbers
         self.numbers=_numbers();self.actor=DeviceNativeActor(inputs.actor)
         self.policy=policy;self.inputs=inputs;self.random=random;self.deterministic=deterministic
@@ -67,7 +68,9 @@ class CapturedDeviceActor:
         if inputs.state.shape!=(rows,policy.shape.hidden):raise ValueError('模型共享状态宽度不匹配')
         self.heads=policy.stages();self.width=max(999,inputs.cancels.present.shape[1])
         t=lambda shape,dtype:torch.zeros(shape,dtype=dtype,device=device)
-        self.prefix=self.numbers.device_exact_batch(self.actor.initial,word_capacity=word_capacity,device=device).value
+        # initial中的零值可共享；捕获后原位安装的各前缀字段须有独立存储。
+        self.prefix=_owned(self.numbers.device_exact_batch(
+            self.actor.initial,word_capacity=word_capacity,device=device).value)
         self.stages=torch.full((rows,path_capacity),-1,dtype=torch.int64,device=device)
         self.choices=self.stages.clone();self.scored=t((rows,path_capacity),torch.bool)
         self.length=t((rows,),torch.int64);self.ell=t((rows,),torch.float32)

@@ -68,7 +68,7 @@ class CancellationTargetHistory:
         width=int(incoming.received.to(torch.int64).sum(1).max().cpu())
         if not width:
             return replace(self,targets=replace(self.targets,fault=self.targets.fault|incoming.fault))
-        columns=(~incoming.received).long().argsort(1,stable=True)[:,:width]
+        columns=(~incoming.received).long().argsort(dim=1,stable=True)[:,:width]
         coordinates=(torch.arange(roots,device=columns.device)[:,None]*source_width+columns).flatten()
         select=lambda value:value.gather(1,columns)
         scopes=CancellationScopes(select(incoming.scopes.market_kind),select(incoming.scopes.markets),

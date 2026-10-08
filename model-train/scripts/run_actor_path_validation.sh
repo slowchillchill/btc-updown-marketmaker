@@ -8,17 +8,40 @@ for location in "$artifact" "$repo_root"; do
 done
 source /root/autodl-tmp/environments/issue-181-cu128.sh
 cd "$repo_root"
-test -z "$(git status --porcelain)"
 mkdir "$artifact";mkdir "$artifact/sources"
 git rev-parse HEAD > "$artifact/source-commit.txt"
-git status --porcelain > "$artifact/status.txt"
+git status --porcelain=v1 --untracked-files=all > "$artifact/status.txt"
+git diff --binary --no-ext-diff --cached > "$artifact/index.patch"
+git diff --binary --no-ext-diff > "$artifact/worktree.patch"
+# 新增文件不在git diff中；保留其实际内容和仓库相对名称。
+git ls-files --others --exclude-standard -z > "$artifact/untracked-files.list"
+"$repo_root/model-train/.venv/bin/python" - "$artifact" <<'PYFILES'
+from pathlib import Path
+import sys
+root=Path(sys.argv[1]);target=root/'untracked';target.mkdir()
+for name in (root/'untracked-files.list').read_bytes().split(b'\0'):
+    if not name:continue
+    path=Path(name.decode());destination=target/path;destination.parent.mkdir(parents=True,exist_ok=True)
+    if path.is_symlink():destination.symlink_to(path.readlink())
+    else:destination.write_bytes(path.read_bytes())
+PYFILES
 export PYTHONPATH="$repo_root/model-train"
 export B_GPU_ACTOR_CANCEL_REFERENCE="$artifact/sources"
 export B_GPU_ACTOR_SOURCE_COMMIT=$(git rev-parse HEAD)
 export B_GPU_ACTOR_PATH_REPORT="$artifact/probability-report.json"
 export B_GPU_COLUMNS_BINARY="$CARGO_TARGET_DIR/debug/dpt-public-compact"
 export B_GPU_RULE_CONTEXT_BINARY="$CARGO_TARGET_DIR/debug/sim-gpu-rule-context"
-env | sort > "$artifact/environment.txt"
+# 仅保留复现所需项目环境项，禁止导出全量进程环境。
+"$repo_root/model-train/.venv/bin/python" - > "$artifact/environment.json" <<'PYENV'
+import json,os,platform,torch
+keys=('UV_CACHE_DIR','XDG_CACHE_HOME','PIP_CACHE_DIR','TMPDIR','TORCH_HOME',
+    'TORCH_EXTENSIONS_DIR','TRITON_CACHE_DIR','CUDA_CACHE_PATH','PYTHONPYCACHEPREFIX',
+    'CARGO_HOME','CARGO_TARGET_DIR','RUSTUP_HOME','VIRTUAL_ENV','PYO3_PYTHON',
+    'PYTHONPATH','PYTHONNOUSERSITE','CARGO_NET_OFFLINE','B_GPU_COLUMNS_BINARY',
+    'B_GPU_RULE_CONTEXT_BINARY','OMP_NUM_THREADS','MKL_NUM_THREADS')
+print(json.dumps(dict(environment={key:os.environ[key] for key in keys if key in os.environ},
+    python=platform.python_version(),torch=torch.__version__,cuda=torch.version.cuda),indent=2))
+PYENV
 finish() { code=$?;printf '%s\n' "$code" > "$artifact/validation.exit";nvidia-smi > "$artifact/resources-end.txt" 2>&1 || true;exit "$code"; }
 trap finish EXIT
 nvidia-smi > "$artifact/resources-start.txt"
@@ -56,4 +79,12 @@ PY
 export B_GPU_ACTOR_CONTEXT_VALIDATION=1
 export B_GPU_ACTOR_PATH_VALIDATION=1
 export B_GPU_JOINT_FREEZE=1
-run actual-joint bash model-train/scripts/run_joint_freeze_validation.sh "$artifact/joint"
+# 直接复用原joint脚本的实际场景命令；候选已在本入口完整保存。
+mkdir "$artifact/joint"
+export B_GPU_PYTHON="$repo_root/model-train/.venv/bin/python"
+export B_GPU_ORDER_VALIDATOR="$repo_root/sim-system/gpu/validate_base_orders.py"
+export B_GPU_ORDER_ARTIFACT_DIR="$artifact/joint"
+export B_GPU_SIM_ORDER_QUERY=1
+export PYTHONPATH="$repo_root/model-train:$repo_root/sim-system/gpu:$repo_root/data-pipeline/gpu"
+run actual-joint cargo test -p sim-system --features shared-execution --lib --locked --offline -j24 \
+    gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution -- --ignored --nocapture

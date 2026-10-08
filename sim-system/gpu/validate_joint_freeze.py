@@ -188,10 +188,15 @@ class JointFreezeValidation:
                 bank,requests,cutoff,location,self.zero[:,None],self.zero[:,None],
                 self.zero[:,None,None].expand(-1,2,-1),torch.stack((self.yes,~self.yes),1)[:,:,None]))
             assert data.fault.cpu().tolist()==[0]
-            learning_evaluation=self.policy.frozen_state_and_value(owned,incoming_hidden,self.identities,self.version)
-            inputs=ActorPolicyInputs.publish(context,captured_market,owned,learning_evaluation,data)
-            check_joint(self.policy,inputs,self.artifact,len(self.rows),self.actor_reports,
-                published_sources=(captured_market,learning_evaluation,data))
+            # cuDNN GRU反向须由train前向保留状态；上面的原eval/no_grad推理保持独立。
+            self.policy.train()
+            try:
+                learning_evaluation=self.policy.frozen_state_and_value(owned,incoming_hidden,self.identities,self.version)
+                inputs=ActorPolicyInputs.publish(context,captured_market,owned,learning_evaluation,data)
+                check_joint(self.policy,inputs,self.artifact,len(self.rows),self.actor_reports,
+                    published_sources=(captured_market,learning_evaluation,data))
+            finally:
+                self.policy.eval()
         self.rows.append(owned)
         if self.saved is None:
             self.saved={name:getattr(owned,name).clone() for name in owned.__dataclass_fields__}

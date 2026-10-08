@@ -52,10 +52,19 @@ def original_path(inputs,native,choices,capacity=32):
         tensor(0),tensor(length),tensor(True,torch.bool),tensor([True],torch.bool),tensor([0],torch.int32))
 
 
+def candidate_summary(candidate):
+    """仅在验证边界读回实际故障与资源出口，不参与设备业务推进。"""
+    return dict(fault=candidate.fault.cpu().tolist(),complete=candidate.complete.cpu().tolist(),
+        stage=candidate.prefix.stage.cpu().tolist(),length=candidate.length.cpu().tolist(),
+        choices=candidate.choices.cpu().tolist(),fits=bool(candidate.fits.cpu()),
+        required_steps=int(candidate.required_steps.cpu()),required_words=int(candidate.required_words.cpu()),
+        random_counter=candidate.random.counter.cpu().tolist())
+
+
 def assert_candidate(candidate):
-    assert bool(candidate.fits.cpu()),int(candidate.required_steps.cpu())
-    assert candidate.fault.cpu().tolist()==[0] and candidate.complete.cpu().tolist()==[True]
-    assert candidate.prefix.stage.cpu().tolist()==[7]
+    result=candidate_summary(candidate)
+    assert result['fits'] and result['fault']==[0] and result['complete']==[True],result
+    assert result['stage']==[7],result
 
 
 def original_score(policy,inputs,native,path):
@@ -73,7 +82,7 @@ def original_score(policy,inputs,native,path):
 
 class OriginalTrace:
     """只读取原Native导出的有限步骤；不计算支持或模拟业务状态。"""
-    def __init__(self,trace):self.steps=trace['steps'];self.position=0
+    def __init__(self,trace):self.steps=trace['steps'];self.position=0;self.choices=[]
     def complete(self):return self.position==len(self.steps)
     def support(self):return self.steps[self.position]['mask']
     def prefix_features(self):return self.steps[self.position]['prefix_features']
@@ -86,7 +95,7 @@ class OriginalTrace:
         assert self.support()[choice]
         # 唯一可变化的选择是最后Cancel对象；后面没有待推导的支持。
         if self.position<len(self.steps)-1:assert choice==self.steps[self.position]['choice']
-        self.position+=1
+        self.choices.append(choice);self.position+=1
 
 
 def check_branches(directory,output):
@@ -126,7 +135,7 @@ def check_branches(directory,output):
             if family!=3 or path[-1]>=128:break
         assert path[0]==family
         if family==3:assert path[-1]>=128 and count==259
-        else:assert path==[step['choice'] for step in trace['steps']]
+        elif family==1:assert path==[step['choice'] for step in trace['steps']]
         if family==1:assert value.prefix.variants[0,1].cpu().item()==1
         saved=value.snapshot();schedule=ReplaySchedule.for_update(saved)
         policy.zero_grad(set_to_none=True)
@@ -135,8 +144,13 @@ def check_branches(directory,output):
         reference=copy.deepcopy(policy).cpu()
         group=ComponentGroup([inputs.state.detach().cpu()],[inputs.rules.cpu()],['DecisionRequired'],
             inputs.cancels.values.cpu(),None,None)
-        expected=consume_actor(RepeatedReference(reference),group,0,OriginalTrace(trace),replay=path).log_prob
-        torch.testing.assert_close(score.log_prob.cpu(),expected,rtol=2e-5,atol=2e-6)
+        original=OriginalTrace(trace)
+        # Native示例取首个合法对象；Pair模型仍保非零评分，用原CPU消费者独立选择。
+        expected=consume_actor(RepeatedReference(reference),group,0,original,
+            deterministic=family==4,replay=None if family==4 else path).log_prob
+        assert path==original.choices,(candidate_summary(saved),original.choices)
+        if family in (3,4):assert saved.prefix.cancel_index.cpu().tolist()==[path[-1]]
+        torch.testing.assert_close(score.log_prob.cpu(),expected.unsqueeze(0),rtol=2e-5,atol=2e-6)
         score.log_prob.sum().backward();expected.sum().backward()
         gradient=parameter_gradients(policy,reference,classify_zero=False)
         # 对象身份和Pair原腿仍来自完整Native全局对象，不按family重新编号。
@@ -144,7 +158,7 @@ def check_branches(directory,output):
         if family==4:assert 'CancelOrders' in selected
         if family==3:assert 'CancelOrder' in selected
         reports.append(dict(source=name,family=family,path=path,cancel_intent=selected,
-            word_capacity=16,required_words=int(value.required_words.cpu()),seed_trials=trials,
+            original_CPU_path=original.choices,word_capacity=16,required_words=int(value.required_words.cpu()),seed_trials=trials,
             engineering_seed=int(stream.seed.cpu()[0]),gradients=gradient))
         print(json.dumps(dict(stage='branch_done',**reports[-1],elapsed_seconds=time.perf_counter()-started)),flush=True)
     report=dict(status='PASS',branches=reports,source_sha=os.environ['B_GPU_ACTOR_SOURCE_COMMIT'],
@@ -234,7 +248,7 @@ def run(native,source,history):
         scored=replay_action(policy,inputs,original,schedule,word_capacity=16)
         assert scored.fits.cpu().item() and scored.fault.cpu().tolist()==[0]
         reference,z,expected=original_score(policy,inputs,native,path)
-        torch.testing.assert_close(scored.log_prob.cpu(),expected,rtol=2e-5,atol=2e-6)
+        torch.testing.assert_close(scored.log_prob.cpu(),expected.unsqueeze(0),rtol=2e-5,atol=2e-6)
         probabilities.append(scored.log_prob.detach().exp())
         print(json.dumps(dict(stage='joint_leaf',current=index+1,total=21,
             elapsed_seconds=time.perf_counter()-started)),flush=True)
@@ -269,6 +283,9 @@ def run(native,source,history):
                 assert a.keys()==b.keys()
                 for key in a:torch.testing.assert_close(a[key].cpu(),b[key].cpu(),rtol=2e-4,atol=2e-5)
             optimizer_checks.append(dict(path=path,established_AdamW=established,**counts))
+            print(json.dumps(dict(stage='optimizer_done',current=len(optimizer_checks),total=6,
+                elapsed_seconds=time.perf_counter()-started)),flush=True)
+    print(json.dumps(dict(stage="sampling_and_capacity",elapsed_seconds=time.perf_counter()-started)),flush=True)
     # 同一个有限冻结的装批代表：第二行是NoAct，非第二账户／正式根。
     # 未调用行的NaN若先经全批编码，再mask，仍可污染第一行的共享参数梯度。
     def two_rows(value):
@@ -287,7 +304,7 @@ def run(native,source,history):
     reference,z,expected=original_score(model,inputs,native,(2,5,0,0,0,0))
     result=replay_action(model,mixed,batched,ReplaySchedule.for_update(batched),word_capacity=16)
     assert result.fault.cpu().tolist()==[0,0] and result.fits.cpu().item()
-    torch.testing.assert_close(result.log_prob[:1].cpu(),expected,rtol=2e-5,atol=2e-6)
+    torch.testing.assert_close(result.log_prob[:1].cpu(),expected.unsqueeze(0),rtol=2e-5,atol=2e-6)
     assert result.log_prob[1].cpu().item()==0.
     model.zero_grad(set_to_none=True);result.log_prob.sum().backward();expected.sum().backward()
     mixed_gradients=parameter_gradients(model,reference)
@@ -298,7 +315,7 @@ def run(native,source,history):
     sampled=sampling.replay();torch.cuda.synchronize();assert_candidate(sampled);owned=sampled.snapshot()
     path=tuple(owned.choices[0,:owned.length[0]].cpu().tolist());assert path in actions
     _,_,expected=original_score(policy,inputs,native,path)
-    torch.testing.assert_close(owned.log_prob.cpu(),expected,rtol=2e-5,atol=2e-6)
+    torch.testing.assert_close(owned.log_prob.cpu(),expected.unsqueeze(0),rtol=2e-5,atol=2e-6)
     assert int(owned.random.counter[0,0].cpu())==int(owned.scored.sum().cpu())
     assert not stream.counter.any().cpu().item()
     no_trade=copy.deepcopy(policy)
@@ -329,10 +346,14 @@ def run(native,source,history):
     incomplete=small.replay();torch.cuda.synchronize()
     assert not incomplete.fits.cpu().item() and incomplete.required_steps.cpu().item()==2
     assert not incomplete.complete.all().cpu().item() and not stream.counter.any().cpu().item()
+    capacity_exit=candidate_summary(incomplete)
+    print(json.dumps(dict(event='path_capacity_exit',**capacity_exit)),flush=True)
     resumed=CapturedDeviceActor(forced,inputs,stream,path_capacity=32,word_capacity=16,deterministic=True)
     complete=resumed.replay();torch.cuda.synchronize();assert_candidate(complete)
     assert complete.choices[0,:complete.length[0]].cpu().tolist()==[2,15,0,0,0,0]
     assert complete.scored.sum().cpu().item()==2 and not complete.random.counter.any().cpu().item()
+    capacity_resumed=candidate_summary(complete)
+    print(json.dumps(dict(event='path_capacity_resumed',**capacity_resumed)),flush=True)
     # singleton价格头包含NaN但设备IF不调用；NoAct全无头与随机调用。
     with torch.no_grad():forced.action.actor.price.weight.fill_(float('nan'))
     replayed=resumed.replay();torch.cuda.synchronize();assert_candidate(replayed)
@@ -363,6 +384,6 @@ def run(native,source,history):
     report=dict(status='PASS',joint_leaves=21,original_probability_tests=legacy,optimizer_checks=optimizer_checks,
         actual_sample_path=path,independent_entropy_scale=.5,formal_profile=False,
         mixed_NoAct_NaN_gradients=mixed_gradients,
-        resource_path_retry=True,singleton_NaN_unused=True,NoAct_draws=0,NoAct_NaN_uncalled_gradients=True,
+        resource_path_retry=True,capacity_exit=capacity_exit,capacity_resumed=capacity_resumed,singleton_NaN_unused=True,NoAct_draws=0,NoAct_NaN_uncalled_gradients=True,
         elapsed_seconds=time.perf_counter()-started,full_PPO_or_continuous_host=False)
     print(json.dumps(report),flush=True);return json.dumps(report,indent=2)
