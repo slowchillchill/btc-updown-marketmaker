@@ -3,7 +3,8 @@
 本入口记录 #181 的目标环境准备方法，不授予环境重建或恢复 B 路线的权限。先复用已完成的
 环境及其证据；没有依赖变化或实际缺口时不重装、不重跑环境样板。执行范围按用户当前授权，
 仅授权代码审查时不运行计算。
-代码通过既定 Git bundle 流程同步。用户已批准
+源码在训练服务器的任务工作树中开发，按治理规则直接与 GitHub 同步，不再使用日常 Git bundle 中转。
+Codex、登录配置及 VPN 保留在系统盘，项目环境、依赖和缓存仍在数据盘。用户已批准
 材料准备在目标机直接下载；失败或停滞时按获批的有限重试、同制品换源、本机中转顺序恢复，方式耗尽后汇报。
 下载完成后的安装仍完全离线。Rust 材料见 [Rust 离线准备](autodl-rust.md)。
 
@@ -73,13 +74,14 @@ curl 继承调用者代理，`.part` 文件支持续传。连接超时为 30 秒
 
 ## 目标机离线安装
 
-先按 AGENTS.md 核对数据盘挂载、容量及两端源码版本。可将整个材料目录上传至
+先按 AGENTS.md 核对数据盘挂载、容量，以及当前 B 任务工作树的准确提交和执行范围内的额外改动。可将整个材料目录上传至
 `/root/autodl-tmp/` 下，例如 `/root/autodl-tmp/offline/python-cu128-bundle`；也可在目标机执行以下准备命令。
 当脚本从 AutoDL 数据盘工作树运行时，材料目录及文件解析路径必须在同一数据盘边界内。
-使用目标机已经核实的 Python 3.12+ 引导解释器执行脚本，其绝对路径由本机执行命令提供：
+使用目标机已经核实的 Python 3.12+ 引导解释器执行脚本，其绝对路径通过目标机当前命令的 `AUTODL_BOOTSTRAP_PYTHON` 提供。
+先在训练服务器进入当前 #181 任务工作树根目录，准确位置由仓库外配置提供，再执行以下命令。
+`main` 主工作树只用于主线同步，不作为未合并 B 代码的运行入口：
 
 ```bash
-cd /root/autodl-tmp/btc-updown-marketmaker
 "$AUTODL_BOOTSTRAP_PYTHON" model-train/scripts/autodl_environment.py prepare \
   --bundle /root/autodl-tmp/offline/python-cu128-bundle \
   --jobs 4 --pypi-mirror https://mirrors.aliyun.com/pypi --retry-sources
@@ -119,7 +121,7 @@ Torch cu128及NumPy保持准确版本；databricks-sdk的protobuf<7共同约束�
 目标锁仅取Linux依赖闭包，CPU多平台锁中的Windows pywin32不进入此GPU锁。
 
 正常运行复用已提交锁。必要重锁使用`lock_training_dependencies.sh`，最后一个参数是进度间隔秒数；
-仅该求解进程启用网络，不改变平时离线执行环境。生成锁仍须回传、审查、提交及准确bundle同步。
+仅该求解进程启用网络，不改变平时离线执行环境。生成锁须在训练服务器完成审查、提交并按治理规则直接推送 GitHub；运行记录准确提交及执行范围内的额外改动。
 `install_training_dependencies.py`对照现有虚拟环境，只下载和安装真实版本差异；
 复用已校验的下载、有限同制品换源和官方SHA，完全离线按哈希安装，再核全部锁定版本和依赖一致性。
 脚本保留虚拟环境解释器的原路径，真实路径仅用于数据盘边界核对，不能把符号链接解析结果作为uv目标。

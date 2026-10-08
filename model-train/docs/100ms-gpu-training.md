@@ -605,7 +605,7 @@ cargo run -p data-pipeline-training --bin dpt-public-compact --locked --offline 
   <finite-config.json> <locked-python> <same-commit>/data-pipeline/gpu/sort_worker.py
 ```
 
-运行仍遵守准确提交 bundle 同步及数据盘环境规则。这里的有限工程范围不能当作
+源码由训练服务器按治理规则直接与 GitHub 同步，运行记录准确提交及执行范围内的额外改动，并遵守数据盘环境规则。这里的有限工程范围不能当作
 完整 15 天/3 天根的数据准备或学习验收。设备十进制转换与独立归约已具公共 API；
 把其实际接到共享列块、hidden 材料和连续公共 GPU 状态仍是后续实现责任。
 
