@@ -814,7 +814,8 @@ async fn run_material<S: StrategyV1>(
                     let market = match record {
                         HiddenExecutionRecordV1::Step { market, .. } => Some(market),
                         HiddenExecutionRecordV1::MarketFact(fact) => Some(&fact.market),
-                        HiddenExecutionRecordV1::Reference(_) => None,
+                        HiddenExecutionRecordV1::Reference(_)
+                        | HiddenExecutionRecordV1::BinanceDepthReference { .. } => None,
                     };
                     if let Some(market) = market
                         && !driver.has_enrolled_market(&market.condition_id)

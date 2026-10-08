@@ -618,10 +618,103 @@ fn normalize_output_paths(value: &mut serde_json::Value, root: &std::path::Path)
         _ => {}
     }
 }
+fn add_binance_depth_to_reuse_material(config: &HistoricalRunConfigV1) {
+    use data_collect::{source_hourly_layout::*, writer::TypedParquetSegmentWriter};
+    let manifest_path = &config.preparation.scope.manifest_paths[0];
+    let day = manifest_path.parent().unwrap();
+    let mut files = Vec::new();
+    let mut snapshot_writer = TypedParquetSegmentWriter::create_for_current_source(
+        day,
+        "depth-snapshot",
+        "binance_depth_snapshot",
+    )
+    .unwrap();
+    snapshot_writer
+        .write_binance_depth_snapshot_rows(&[BinanceDepthSnapshotHourlyRow {
+            timestamp_received: BASE + 1000,
+            snapshot_fetch_start_utc: BASE + 990,
+            last_update_id: 100,
+            bids: r#"[["64100","0.7"],["64000","0.5"]]"#.into(),
+            asks: r#"[["64200","0.4"]]"#.into(),
+            symbol: "BTCUSDT".into(),
+            source_endpoint: "https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000"
+                .into(),
+            snapshot_status: "complete".into(),
+            source_sequence_epoch_id: Some("depth-reuse".into()),
+            connection_generation: Some(1),
+            depth_ingress_sequence: Some(1),
+            collector_admission_sequence: Some(1),
+            collector_admission_time_utc_ms: Some(BASE + 1001),
+            collector_host_id: "synthetic-collector".into(),
+            collector_region: "test".into(),
+            schema_version: BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION.into(),
+        }])
+        .unwrap();
+    snapshot_writer.append_key_value_metadata("data_collect_daily_file_fact_v1",serde_json::json!({"source_kind":"binance_depth_snapshot","schema_version":BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,"utc_hour":"2026-08-24T00","part":0,"rows":1}).to_string()).unwrap();
+    files.push((
+        snapshot_writer.finalize().unwrap(),
+        "binance_depth_snapshot",
+        BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+    ));
+    let mut update_writer = TypedParquetSegmentWriter::create_for_current_source(
+        day,
+        "depth-updates",
+        "binance_depth_update",
+    )
+    .unwrap();
+    let updates = [2_u64, 3].map(|seq| BinanceDepthUpdateHourlyRow {
+        timestamp_received: BASE + 2300 + seq as i64 * 100,
+        event_type: "depthUpdate".into(),
+        event_time: BASE + 1900 - seq as i64 * 100,
+        symbol: "BTCUSDT".into(),
+        first_update_id: 99 + seq,
+        final_update_id: 99 + seq,
+        bids: format!(r#"[["64100","0.{seq}"]]"#),
+        asks: "[]".into(),
+        stream: "btcusdt@depth".into(),
+        snapshot_last_update_id: Some(100),
+        local_u_before: if seq == 2 { None } else { Some(101) },
+        stitch_verdict: BINANCE_DEPTH_VERDICT_APPLIED.into(),
+        stitch_evidence: data_collect::sources::binance::assess_depth_sequence(
+            Some(100),
+            if seq == 2 { None } else { Some(101) },
+            99 + seq,
+            99 + seq,
+        )
+        .unwrap()
+        .stitch_evidence,
+        stitch_gap_reason: None,
+        source_sequence_epoch_id: Some("depth-reuse".into()),
+        connection_generation: Some(1),
+        depth_ingress_sequence: Some(seq),
+        collector_admission_sequence: Some(seq),
+        collector_admission_time_utc_ms: Some(BASE + 2301 + seq as i64 * 100),
+        collector_host_id: "synthetic-collector".into(),
+        collector_region: "test".into(),
+        source_endpoint: "wss://stream.binance.com:9443/ws/btcusdt@depth".into(),
+        schema_version: BINANCE_DEPTH_UPDATE_SCHEMA_VERSION.into(),
+    });
+    update_writer
+        .write_binance_depth_update_rows(&updates)
+        .unwrap();
+    update_writer.append_key_value_metadata("data_collect_daily_file_fact_v1",serde_json::json!({"source_kind":"binance_depth_update","schema_version":BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,"utc_hour":"2026-08-24T00","part":0,"rows":2}).to_string()).unwrap();
+    files.push((
+        update_writer.finalize().unwrap(),
+        "binance_depth_update",
+        BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+    ));
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+    for (file, source, version) in files {
+        manifest["files"].as_array_mut().unwrap().push(serde_json::json!({"path":file.final_path.file_name().unwrap().to_str().unwrap(),"source_kind":source,"schema_version":version,"utc_hour":"2026-08-24T00","part":0,"rows":file.row_count,"bytes":std::fs::metadata(&file.final_path).unwrap().len(),"sha256":file.sha256}));
+    }
+    std::fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+}
 #[tokio::test(flavor = "current_thread")]
 async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_and_fresh_state() {
     let temp = tempfile::tempdir().unwrap();
     let (mut legacy, rules) = setup(temp.path());
+    add_binance_depth_to_reuse_material(&legacy);
     initialize_at(&mut legacy, BASE + 1000, &[FIRST]);
     let mut old_probe = Probe {
         rules: Some(rules.clone()),
@@ -638,6 +731,80 @@ async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_
     let material = PreparedHistoricalMaterialV1::read(&description).unwrap();
     assert!(material.public_prefix.normal_end);
     assert!(!material.initialization.input_positions.is_empty());
+    use data_pipeline_training::{public_recording::*, public_replay::PublicReplayV1};
+    let mut reader =
+        PublicRecordingReaderV1::recover(&config.work_root.join("public"), 1, 1 << 20).unwrap();
+    let mut compact_rows = 0;
+    let mut source_bindings = Vec::new();
+    while let Some(row) = reader.next_row().unwrap() {
+        match row {
+            PublicStoredRowV1::BinanceDepthReference { .. } => compact_rows += 1,
+            PublicStoredRowV1::SourceBinding(binding) => source_bindings.push(binding),
+            PublicStoredRowV1::Canonical {
+                record: CanonicalEventRecordV2::ReferenceEvent(event),
+                ..
+            } if matches!(
+                event.payload,
+                CanonicalReferenceEventPayloadV2::BinanceDepthState(_)
+            ) =>
+            {
+                panic!("新历史材料仍保存完整派生深度")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(compact_rows, 3);
+    let mut replay = PublicReplayV1::open(&config.work_root.join("public"), 1, 1 << 20).unwrap();
+    // 同一扩充Input经原重放和默认writer形成旧完整表示；仅用于本小型兼容夹具。
+    let full_root = config.work_root.join("full-public");
+    let mut full_writer =
+        PublicRecordingWriterV1::create(&full_root, replay.core.header(), config.recording.clone())
+            .unwrap();
+    let mut last_depth = None;
+    while let Some((input, applied)) = replay.next_applied().unwrap() {
+        if let data_pipeline_core::public_input::DptIngressV1::Message {
+            source_evidence, ..
+        } = &input.ingress
+        {
+            source_bindings.retain(|binding| {
+                if binding.source_message_id == source_evidence.source_message_id {
+                    full_writer.record_source_binding(binding.clone()).unwrap();
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        for group in &applied.applied.closed_groups {
+            for observation in &group.observations {
+                if let Some(depth) = &observation.binance_depth.value {
+                    last_depth = Some(depth.clone());
+                }
+            }
+        }
+        full_writer.record(input, applied).unwrap();
+    }
+    assert!(source_bindings.is_empty());
+    assert_eq!(
+        full_writer.stabilize().unwrap().unwrap(),
+        material.public_prefix
+    );
+    let mut full_material = material.clone();
+    full_material.public_relative_root = "full-public".into();
+    let full_description = config.work_root.join("full-format-test.json");
+    std::fs::write(
+        &full_description,
+        serde_json::to_vec(&full_material).unwrap(),
+    )
+    .unwrap();
+    let depth = last_depth.unwrap();
+    assert_eq!(depth.last_update_id, 102);
+    assert!(
+        depth
+            .bids
+            .iter()
+            .any(|l| l.price_usdt_per_btc.0 == "64100" && l.quantity_btc.0 == "0.3")
+    );
     let original = material_bytes(&config.work_root);
     std::fs::rename(
         temp.path().join("inputs"),
@@ -651,7 +818,7 @@ async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_
     let before = material_bytes(&config.work_root);
     let mut expected = serde_json::to_value(&old_report).unwrap();
     normalize_output_paths(&mut expected, temp.path());
-    for suffix in ["reuse-a", "reuse-b"] {
+    for suffix in ["reuse-full", "reuse-a", "reuse-b"] {
         let root = temp.path().join(suffix);
         let run = reuse_outputs(&legacy, &root);
         let mut probe = Probe {
@@ -660,9 +827,15 @@ async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_
             ..Default::default()
         };
         assert!(!probe.bought_first && probe.dispatched == 0);
-        let report = run_prepared_historical_v1(&description, &run, rules.clone(), &mut probe)
-            .await
-            .unwrap();
+        let selected_description = if suffix == "reuse-full" {
+            &full_description
+        } else {
+            &description
+        };
+        let report =
+            run_prepared_historical_v1(selected_description, &run, rules.clone(), &mut probe)
+                .await
+                .unwrap();
         let first = probe.first_economics.as_ref().unwrap();
         assert_eq!(
             serde_json::to_value(first).unwrap(),
@@ -670,6 +843,39 @@ async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_
         );
         assert_eq!(first.cash.actual_available_pusd.0, "2000");
         assert!(probe.bought_first && probe.bought_second && probe.canceled);
+        let economics = report.account_economics_memory.as_ref().unwrap();
+        let first_market = economics
+            .markets
+            .iter()
+            .find(|m| m.condition_id.0 == FIRST)
+            .unwrap();
+        eprintln!(
+            "{suffix}: first-market taker economics {:?}",
+            first_market.executed[1]
+        );
+        assert_eq!(first_market.executed[1].shares, ExactDecimal("10".into()));
+        assert_eq!(
+            first_market.executed[1].principal_pusd,
+            ExactDecimal("5".into())
+        );
+        // 快照新增合法计算；首次发送与1701隐藏价0.5更新同毫秒，成交10份×0.5。
+        // 冻结规则rate=0.07、exponent=1；按公式独立计算，不沿用无深度场景的0.168。
+        let price = Decimal::new(5, 1);
+        let expected_fee = Decimal::from(10) * Decimal::new(7, 2) * price * (Decimal::ONE - price);
+        assert_eq!(
+            Decimal::from_str_exact(&first_market.executed[1].actual_fee_pusd.0).unwrap(),
+            expected_fee
+        );
+        let ledger = report.ledger_consumed_memory.as_ref().unwrap();
+        assert_eq!(
+            ledger
+                .market_projections
+                .iter()
+                .find(|m| m.condition_id.0 == FIRST)
+                .unwrap()
+                .fees_pusd,
+            first_market.executed[1].actual_fee_pusd
+        );
         assert_eq!(probe.observed, old_probe.observed);
         let mut actual = serde_json::to_value(report).unwrap();
         normalize_output_paths(&mut actual, &root);
@@ -679,7 +885,12 @@ async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_
         assert!(metadata["config"].get("preparation").is_none());
         assert_eq!(
             metadata["prepared_material"],
-            serde_json::to_value(&material).unwrap()
+            serde_json::to_value(if suffix == "reuse-full" {
+                &full_material
+            } else {
+                &material
+            })
+            .unwrap()
         );
         assert!(run.result_path.exists());
     }

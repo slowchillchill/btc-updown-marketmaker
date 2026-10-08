@@ -11,8 +11,10 @@ use data_pipeline_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     fs::{self, File},
     io,
+    ops::Bound,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -28,6 +30,12 @@ pub enum PublicStoredRowV1 {
         binding: PublicFactBindingV1,
         record: CanonicalEventRecordV2,
     },
+    /// 有限历史专用派生深度描述；完整正文由原 Input 重放恢复。
+    BinanceDepthReference {
+        canonical_position: u64,
+        binding: PublicFactBindingV1,
+        time: EventTimeV2,
+    },
     Report {
         input_position: u64,
         report: PublicReductionReportV1<CanonicalEventId>,
@@ -40,8 +48,27 @@ pub enum PublicStoredRowV1 {
     },
     PmStepBinding(PmDerivedStepBindingV1),
     Group(PublicGroupIndexV1),
+    /// 有限历史的物理行；公共 next_row/next_page 展开为原 Observation 后跟 Group。
+    GroupObservationRange(PublicGroupObservationRangeV1),
     Observation(PublicObservationIndexV1),
     SourceBinding(SourceArtifactBindingV1),
+}
+
+/// 原公共组索引的无损物理编码；观察身份由前序 FixedIdentity 恢复。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PublicGroupObservationRangeV1 {
+    pub group_id: Sha256Hex,
+    pub group_position: u64,
+    pub member_input_positions: Vec<u64>,
+    pub closed_at_input_position: u64,
+    pub records: Vec<PublicFactPositionV1>,
+    pub observation_start: u64,
+    pub observation_count: u64,
+}
+struct ObservationExpansion {
+    group: PublicGroupObservationRangeV1,
+    emitted: u64,
+    last_market: Option<String>,
 }
 
 pub struct PublicRecordingWriterV1 {
@@ -54,6 +81,7 @@ pub struct PublicRecordingWriterV1 {
     pending: CommittedIngressPrefixV1,
     committed: Option<CommittedIngressPrefixV1>,
     failed: bool,
+    compact_historical: bool,
 }
 impl PublicRecordingWriterV1 {
     /// 容量来自调用方当前运行配置，不在此选择训练/在线策略或稳定周期。
@@ -76,6 +104,7 @@ impl PublicRecordingWriterV1 {
             segment_rows: 0,
             committed: None,
             failed: false,
+            compact_historical: false,
             pending: CommittedIngressPrefixV1 {
                 input_stream_id: header.input_stream_id.clone(),
                 next_input_position: 0,
@@ -87,6 +116,16 @@ impl PublicRecordingWriterV1 {
                 normal_end: false,
             },
         })
+    }
+    /// 仅有限历史录制采用紧凑深度及观察区间；在线 create 保留原逐行表示。
+    pub fn create_historical(
+        root: &Path,
+        header: &PublicInputStreamHeaderV1,
+        config: GateAOutputConfig,
+    ) -> RecordingResult<Self> {
+        let mut writer = Self::create(root, header, config)?;
+        writer.compact_historical = true;
+        Ok(writer)
     }
     pub fn committed_prefix(&self) -> Option<&CommittedIngressPrefixV1> {
         self.committed.as_ref()
@@ -219,39 +258,70 @@ impl PublicRecordingWriterV1 {
                     let (binding, record) = batches
                         .remove(&fact.position)
                         .expect("同次归约材料对应当组事实");
-                    self.write(PublicStoredRowV1::Canonical {
-                        canonical_position: self.pending.next_canonical_position,
-                        binding,
-                        record,
-                    })?;
+                    let row = match record {
+                        CanonicalEventRecordV2::ReferenceEvent(event)
+                            if self.compact_historical
+                                && matches!(
+                                    event.payload,
+                                    CanonicalReferenceEventPayloadV2::BinanceDepthState(_)
+                                ) =>
+                        {
+                            PublicStoredRowV1::BinanceDepthReference {
+                                canonical_position: self.pending.next_canonical_position,
+                                binding,
+                                time: event.time,
+                            }
+                        }
+                        record => PublicStoredRowV1::Canonical {
+                            canonical_position: self.pending.next_canonical_position,
+                            binding,
+                            record,
+                        },
+                    };
+                    self.write(row)?;
                 }
                 self.pending.next_canonical_position += 1;
             }
-            let mut observation_positions = Vec::new();
-            for observation in &group.observations {
-                let index = PublicObservationIndexV1 {
-                    observation_position: self.pending.next_observation_position,
-                    market: observation.market.clone(),
-                    group_position: observation.group_position,
-                    visible_prefix: observation.visible_prefix.clone(),
-                    group_events: observation
-                        .group_events
-                        .iter()
-                        .map(|f| f.position.clone())
-                        .collect(),
-                };
-                observation_positions.push(index.observation_position);
-                self.write(PublicStoredRowV1::Observation(index))?;
-                self.pending.next_observation_position += 1;
+            if self.compact_historical {
+                self.write(PublicStoredRowV1::GroupObservationRange(
+                    PublicGroupObservationRangeV1 {
+                        group_id: group.group_id.clone(),
+                        group_position: group.group_position,
+                        member_input_positions: group.member_input_positions.clone(),
+                        closed_at_input_position: group.closed_at_input_position,
+                        records: refs,
+                        observation_start: self.pending.next_observation_position,
+                        observation_count: group.observations.len() as u64,
+                    },
+                ))?;
+                self.pending.next_observation_position += group.observations.len() as u64;
+            } else {
+                let mut observation_positions = Vec::new();
+                for observation in &group.observations {
+                    let index = PublicObservationIndexV1 {
+                        observation_position: self.pending.next_observation_position,
+                        market: observation.market.clone(),
+                        group_position: observation.group_position,
+                        visible_prefix: observation.visible_prefix.clone(),
+                        group_events: observation
+                            .group_events
+                            .iter()
+                            .map(|f| f.position.clone())
+                            .collect(),
+                    };
+                    observation_positions.push(index.observation_position);
+                    self.write(PublicStoredRowV1::Observation(index))?;
+                    self.pending.next_observation_position += 1;
+                }
+                self.write(PublicStoredRowV1::Group(PublicGroupIndexV1 {
+                    group_id: group.group_id.clone(),
+                    group_position: group.group_position,
+                    member_input_positions: group.member_input_positions.clone(),
+                    closed_at_input_position: group.closed_at_input_position,
+                    records: refs,
+                    observation_positions,
+                }))?;
             }
-            self.write(PublicStoredRowV1::Group(PublicGroupIndexV1 {
-                group_id: group.group_id.clone(),
-                group_position: group.group_position,
-                member_input_positions: group.member_input_positions.clone(),
-                closed_at_input_position: group.closed_at_input_position,
-                records: refs,
-                observation_positions,
-            }))?;
             self.pending.next_group_position += 1;
             self.pending.next_public_index_position += 1;
         }
@@ -314,6 +384,8 @@ pub struct PublicRecordingReaderV1 {
     batch_rows: usize,
     max_batch_bytes: usize,
     next_segment_index: usize,
+    markets: BTreeMap<String, MarketIdentityV2>,
+    expansion: Option<ObservationExpansion>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RecordingRowLocation {
@@ -424,13 +496,76 @@ impl PublicRecordingReaderV1 {
             batch_rows,
             max_batch_bytes,
             next_segment_index: 0,
+            markets: BTreeMap::new(),
+            expansion: None,
         })
     }
     pub fn root(&self) -> &Path {
         &self.root
     }
     pub fn next_row(&mut self) -> RecordingResult<Option<PublicStoredRowV1>> {
-        Ok(self.next_row_with_location()?.map(|(row, _)| row))
+        loop {
+            if let Some(expansion) = &mut self.expansion {
+                let group = &expansion.group;
+                if expansion.emitted < group.observation_count {
+                    let lower = expansion
+                        .last_market
+                        .as_ref()
+                        .map_or(Bound::Unbounded, |key| Bound::Excluded(key.as_str()));
+                    let (key, market) = self
+                        .markets
+                        .range::<str, _>((lower, Bound::Unbounded))
+                        .next()
+                        .expect("物理区间已核对FixedIdentity目录数量");
+                    let row = PublicStoredRowV1::Observation(PublicObservationIndexV1 {
+                        observation_position: group.observation_start + expansion.emitted,
+                        market: market.clone(),
+                        group_position: group.group_position,
+                        visible_prefix: AppliedIngressPrefixV1 {
+                            input_stream_id: self.header.input_stream_id.clone(),
+                            next_input_position: group
+                                .closed_at_input_position
+                                .checked_add(1)
+                                .ok_or_else(|| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "公共组关闭位置不能表示可见前沿",
+                                    )
+                                })?,
+                        },
+                        group_events: group.records.clone(),
+                    });
+                    expansion.emitted += 1;
+                    expansion.last_market = Some(key.clone());
+                    return Ok(Some(row));
+                }
+                let group = self.expansion.take().unwrap().group;
+                return Ok(Some(PublicStoredRowV1::Group(PublicGroupIndexV1 {
+                    group_id: group.group_id,
+                    group_position: group.group_position,
+                    member_input_positions: group.member_input_positions,
+                    closed_at_input_position: group.closed_at_input_position,
+                    records: group.records,
+                    observation_positions: (group.observation_start
+                        ..group.observation_start + group.observation_count)
+                        .collect(),
+                })));
+            }
+            match self.next_physical_row()? {
+                Some(PublicStoredRowV1::GroupObservationRange(group)) => {
+                    self.expansion = Some(ObservationExpansion {
+                        group,
+                        emitted: 0,
+                        last_market: None,
+                    });
+                }
+                row => return Ok(row),
+            }
+        }
+    }
+    /// 同一个解析与前缀核对入口；不展开本消费者不用的观察索引。
+    pub(crate) fn next_physical_row(&mut self) -> RecordingResult<Option<PublicStoredRowV1>> {
+        Ok(self.next_physical_row_with_location()?.map(|(row, _)| row))
     }
     // 候选状态在首次页请求打开原reader时取一次；没有新稳定视图或全文件扫描。
     pub(crate) fn segment_paths(&self) -> Vec<PathBuf> {
@@ -440,7 +575,7 @@ impl PublicRecordingReaderV1 {
             .map(|(path, _)| path.join("captured.parquet"))
             .collect()
     }
-    pub(crate) fn next_row_with_location(
+    pub(crate) fn next_physical_row_with_location(
         &mut self,
     ) -> RecordingResult<Option<(PublicStoredRowV1, RecordingRowLocation)>> {
         loop {
@@ -494,10 +629,24 @@ impl PublicRecordingReaderV1 {
                 canonical_position,
                 binding,
                 ..
+            }
+            | PublicStoredRowV1::BinanceDepthReference {
+                canonical_position,
+                binding,
+                ..
             } => {
                 let valid = *canonical_position == p.next_canonical_position
                     && binding.position.input_stream_id == p.input_stream_id;
                 p.next_canonical_position += 1;
+                valid
+            }
+            PublicStoredRowV1::GroupObservationRange(group) => {
+                let valid = group.group_position == p.next_group_position
+                    && group.observation_start == p.next_observation_position
+                    && group.observation_count == self.markets.len() as u64;
+                p.next_group_position += 1;
+                p.next_public_index_position += 1;
+                p.next_observation_position += self.markets.len() as u64;
                 valid
             }
             PublicStoredRowV1::Group(group) => {
@@ -517,6 +666,18 @@ impl PublicRecordingReaderV1 {
             return Err(
                 io::Error::new(io::ErrorKind::InvalidData, "稳定记录原序或流身份不符").into(),
             );
+        }
+        if let PublicStoredRowV1::Canonical {
+            record: CanonicalEventRecordV2::MarketFact(fact),
+            ..
+        } = row
+            && matches!(
+                fact.payload,
+                CanonicalMarketFactPayloadV1::FixedIdentity { .. }
+            )
+        {
+            self.markets
+                .insert(fact.market.condition_id.0.clone(), fact.market.clone());
         }
         Ok(())
     }

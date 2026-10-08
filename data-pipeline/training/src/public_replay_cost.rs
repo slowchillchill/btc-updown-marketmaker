@@ -381,9 +381,11 @@ fn row_kind(row: &PublicStoredRowV1) -> &'static str {
     match row {
         PublicStoredRowV1::Input(_) => "input",
         PublicStoredRowV1::Canonical { .. } => "canonical",
+        PublicStoredRowV1::BinanceDepthReference { .. } => "binance_depth_reference",
         PublicStoredRowV1::Report { .. } => "report",
         PublicStoredRowV1::PmReport { .. } => "pm_report",
         PublicStoredRowV1::PmStepBinding(_) => "pm_step_binding",
+        PublicStoredRowV1::GroupObservationRange(_) => "group_observation_range",
         PublicStoredRowV1::Group(_) => "group",
         PublicStoredRowV1::Observation(_) => "observation",
         PublicStoredRowV1::SourceBinding(_) => "source_binding",

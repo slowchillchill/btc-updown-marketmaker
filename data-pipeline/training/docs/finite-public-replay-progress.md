@@ -38,8 +38,8 @@ research_causal_input [--progress-interval-seconds <SECONDS>] --first-fit-hour <
 
 | 字段 | 真实计量单位 |
 |---|---|
-| `main_records_read` | 主 reader 成功返回的完整存储记录数 |
-| `dependency_records_validated` / `candidate_records_validated` | 同一私有原校验前沿分别在两类用途下成功返回的记录数；复用后的已验证记录不再累计 |
+| `main_records_read` | 主 reader 成功返回的物理存储记录数；新历史观察区间只计一条，不计兼容展开的逻辑行 |
+| `dependency_records_validated` / `candidate_records_validated` | 同一私有原校验前沿分别在两类用途下成功返回的物理记录数；复用后的已验证记录不再累计 |
 | `dependency_location_rows_visited` / `candidate_location_rows_visited` | 定位游标实际访问的原 `SortRow` 数；不是 Arrow 提前解码的整批／行组行数 |
 | `dependency_target_records_parsed` / `candidate_target_records_parsed` | 定位目标成功解析为 `PublicStoredRowV1` 的次数；同目标再次请求可再次累计 |
 | `applied_inputs` | core 原应用前缀的 `next_input_position`，不等于主 reader 已读记录 |
