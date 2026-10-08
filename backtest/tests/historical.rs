@@ -710,6 +710,63 @@ fn add_binance_depth_to_reuse_material(config: &HistoricalRunConfigV1) {
     }
     std::fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 }
+// 将同一小夹具的物理行分为两片；不修改已发布原件或业务内容。
+fn split_material_fixture(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::path::PathBuf {
+    use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(source).unwrap()).unwrap();
+    let schema = builder.schema().clone();
+    let rows = builder.metadata().file_metadata().num_rows() as usize;
+    assert!(rows >= 2);
+    let batches: Vec<_> = builder
+        .with_batch_size(rows)
+        .build()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let paths = [
+        destination.to_path_buf(),
+        destination.with_file_name(format!(
+            "{}-part-00001.parquet",
+            destination.file_stem().unwrap().to_str().unwrap()
+        )),
+    ];
+    let mut writers: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema.clone(), None)
+                .unwrap()
+        })
+        .collect();
+    let mut position = 0;
+    for batch in batches {
+        let first = (rows / 2).saturating_sub(position).min(batch.num_rows());
+        if first > 0 {
+            writers[0].write(&batch.slice(0, first)).unwrap();
+        }
+        if first < batch.num_rows() {
+            writers[1]
+                .write(&batch.slice(first, batch.num_rows() - first))
+                .unwrap();
+        }
+        position += batch.num_rows();
+    }
+    for writer in writers {
+        writer.close().unwrap();
+    }
+    let description = destination.with_extension("parts.json");
+    let relative = data_pipeline_training::SortedRun {
+        parts: paths
+            .iter()
+            .map(|path| path.file_name().unwrap().into())
+            .collect(),
+    };
+    std::fs::write(&description, serde_json::to_vec(&relative).unwrap()).unwrap();
+    description
+}
 #[tokio::test(flavor = "current_thread")]
 async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_and_fresh_state() {
     let temp = tempfile::tempdir().unwrap();
@@ -805,6 +862,49 @@ async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_
             .iter()
             .any(|l| l.price_usdt_per_btc.0 == "64100" && l.quantity_btc.0 == "0.3")
     );
+    // 两次复用读取等价多片；旧完整表示仍用于独立经济对照。
+    let parts_root = config.work_root.join("parts-public");
+    std::fs::create_dir(&parts_root).unwrap();
+    for file in ["stream.json", "historical-initialization.json"] {
+        let source = config.work_root.join("public").join(file);
+        if source.exists() {
+            std::fs::copy(source, parts_root.join(file)).unwrap();
+        }
+    }
+    for entry in std::fs::read_dir(config.work_root.join("public")).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name().to_str().unwrap().starts_with("stable-") {
+            let target = parts_root.join(entry.file_name());
+            std::fs::create_dir(&target).unwrap();
+            std::fs::copy(entry.path().join("prefix.json"), target.join("prefix.json")).unwrap();
+            split_material_fixture(
+                &entry.path().join("captured.parquet"),
+                &target.join("captured.parquet"),
+            );
+        }
+    }
+    let mut parts_material = material.clone();
+    parts_material.public_relative_root = "parts-public".into();
+    for relative in [
+        &mut parts_material.hidden_derived_relative_path,
+        &mut parts_material.hidden_index_relative_path,
+    ] {
+        let source = config.work_root.join(&*relative);
+        let destination = source.with_file_name(format!(
+            "{}-fixture.parquet",
+            source.file_stem().unwrap().to_str().unwrap()
+        ));
+        *relative = split_material_fixture(&source, &destination)
+            .strip_prefix(&config.work_root)
+            .unwrap()
+            .to_path_buf();
+    }
+    let parts_description = config.work_root.join("parts-format-test.json");
+    std::fs::write(
+        &parts_description,
+        serde_json::to_vec(&parts_material).unwrap(),
+    )
+    .unwrap();
     let original = material_bytes(&config.work_root);
     std::fs::rename(
         temp.path().join("inputs"),
@@ -830,7 +930,7 @@ async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_
         let selected_description = if suffix == "reuse-full" {
             &full_description
         } else {
-            &description
+            &parts_description
         };
         let report =
             run_prepared_historical_v1(selected_description, &run, rules.clone(), &mut probe)
@@ -888,7 +988,7 @@ async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_
             serde_json::to_value(if suffix == "reuse-full" {
                 &full_material
             } else {
-                &material
+                &parts_material
             })
             .unwrap()
         );

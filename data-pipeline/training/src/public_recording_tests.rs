@@ -507,11 +507,27 @@ fn hidden_buckets_cross_pages_and_reference_only_buckets_close_globally() {
             PublicRecordingWriterV1::create(&root, core.header(), config())
         }
         .unwrap();
+        let mut expected_replay = Vec::new();
         for input in &inputs {
             let result = apply(&mut core, input);
+            expected_replay.push(fingerprint(&result));
             writer.record(input.clone(), result).unwrap();
+            if historical && [0, 3].contains(&input.input_position) {
+                writer
+                    .writer
+                    .as_mut()
+                    .unwrap()
+                    .split_part_for_test()
+                    .unwrap();
+            }
         }
         writer.stabilize().unwrap();
+        let mut replay = PublicReplayV1::open(&root, 1, 1 << 20).unwrap();
+        let mut actual_replay = Vec::new();
+        while let Some((_, result)) = replay.next_applied().unwrap() {
+            actual_replay.push(fingerprint(&result));
+        }
+        assert_eq!(actual_replay, expected_replay);
         let rows = all_rows(&root, 1);
         let expected_descriptions: Vec<_> = rows
             .iter()
@@ -554,6 +570,40 @@ fn hidden_buckets_cross_pages_and_reference_only_buckets_close_globally() {
             "hidden-test".into(),
         )
         .unwrap();
+        let mut prepared = prepared;
+        if historical {
+            // 小夹具仅在物理层切片：首个同时间桶和派生步骤跨文件仍是连续输入。
+            for (label, path) in [
+                ("split-index", &mut prepared.index_path),
+                ("split-derived", &mut prepared.derived_path),
+            ] {
+                let mut cursor = crate::PartCursor::open(
+                    &crate::SortedRun::read_parts(path).unwrap(),
+                    1,
+                    1 << 20,
+                )
+                .unwrap();
+                let mut writer = crate::gate_a::SequentialCaptureWriter::create(
+                    label,
+                    &temp.path().join(label),
+                    std::sync::Arc::new(std::sync::Mutex::new(0)),
+                    &config(),
+                )
+                .unwrap();
+                let mut sequence = 0;
+                while let Some(row) = cursor.next_row().unwrap() {
+                    writer
+                        .push(sequence, row.sort_key_bytes().to_vec(), row.payload())
+                        .unwrap();
+                    if sequence == 0 {
+                        writer.split_part_for_test().unwrap();
+                    }
+                    sequence += 1;
+                }
+                *path = writer.close_segment().unwrap();
+                assert_eq!(crate::SortedRun::read_parts(path).unwrap().parts.len(), 2);
+            }
+        }
         let mut index = HiddenIndexReaderV1::open(&prepared, 1, 1 << 20).unwrap();
         let mut indices = Vec::new();
         let mut references = Vec::new();
@@ -665,7 +715,12 @@ fn hidden_buckets_cross_pages_and_reference_only_buckets_close_globally() {
             &config(),
         )
         .unwrap();
-        let mut original_index = crate::RunCursor::open(&prepared.index_path, 2, 1 << 20).unwrap();
+        let mut original_index = crate::PartCursor::open(
+            &crate::SortedRun::read_parts(&prepared.index_path).unwrap(),
+            2,
+            1 << 20,
+        )
+        .unwrap();
         let mut changed = false;
         let mut sequence = 0;
         while let Some(row) = original_index.next_row().unwrap() {

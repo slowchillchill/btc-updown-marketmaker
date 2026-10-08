@@ -40,11 +40,11 @@ impl CandidateQuery {
         if self
             .located
             .as_ref()
-            .is_none_or(|(segment, _, _)| *segment != location.segment_index)
+            .is_none_or(|(segment, _, _)| *segment != location.file_index)
         {
-            let mut cursor = RunCursor::open(&paths[location.segment_index], rows, bytes)?;
+            let mut cursor = RunCursor::open(&paths[location.file_index], rows, bytes)?;
             cursor.start_row_group(location.row_group);
-            self.located = Some((location.segment_index, location.row_group, cursor));
+            self.located = Some((location.file_index, location.row_group, cursor));
         }
         let (_, group, cursor) = self.located.as_mut().unwrap();
         if *group != location.row_group {
@@ -122,7 +122,7 @@ impl FiniteReferenceCandidates {
         bytes: usize,
     ) -> RecordingResult<Self> {
         let frontier = PublicRecordingReaderV1::open_committed(root, prefix, rows, bytes)?;
-        let paths = frontier.segment_paths();
+        let paths = frontier.file_paths();
         Ok(Self {
             frontier,
             paths,
@@ -360,6 +360,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn fixture(root: &Path) {
+        fixture_parts(root, false);
+    }
+    fn fixture_parts(root: &Path, split: bool) {
         let mut c = core();
         let mut writer =
             crate::public_recording::PublicRecordingWriterV1::create(root, c.header(), config())
@@ -371,7 +374,11 @@ mod tests {
             end(3),
         ] {
             let result = apply(&mut c, &input);
+            let position = input.input_position;
             writer.record(input, result).unwrap();
+            if split && position == 1 {
+                writer.split_part_for_test().unwrap();
+            }
         }
         writer.stabilize().unwrap();
     }
@@ -432,7 +439,7 @@ mod tests {
     fn complete_pages_cursor_full_page_and_current_input_match_original() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("public");
-        fixture(&root);
+        fixture_parts(&root, true);
         let mut indexed = indexed(&root, 1);
         for cutoff in [0, 1, 2, 3, 1] {
             let mut old = ReferenceCandidateReaderV1::open(&root, 1, 1 << 20, cutoff).unwrap();
@@ -539,7 +546,7 @@ mod tests {
     fn saved_dependencies_keep_all_types_order_duplicates_missing_and_future_cutoff() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("public");
-        fixture(&root);
+        fixture_parts(&root, true);
         let mut state = indexed(&root, 1);
         assert!(state.dependencies(&[], &mut None).unwrap().is_empty());
         assert!(state.index.is_empty());
