@@ -1,6 +1,6 @@
 //! 唯一后台记录流。应用调用不持有写入器；稳定由所属运行显式请求。
 use crate::{
-    RunCursor,
+    RunCursor, SortedRun,
     gate_a::{GateAOutputConfig, SequentialCaptureWriter},
     gate_a_publication::{commit_public_segment, sync_tree},
 };
@@ -147,7 +147,7 @@ impl PublicRecordingWriterV1 {
     }
     fn write(&mut self, row: impl Serialize) -> RecordingResult<()> {
         if self.writer.is_none() {
-            let mut writer = SequentialCaptureWriter::create(
+            let mut writer = SequentialCaptureWriter::create_segment(
                 "public_recording_v1",
                 &self.root.join(format!("pending-{:020}", self.segment)),
                 self.total_bytes.clone(),
@@ -418,6 +418,13 @@ impl PublicRecordingWriterV1 {
         self.failed = true;
         self.write(PublicStoredRowV1::Input(input))
     }
+    #[cfg(test)]
+    pub(crate) fn split_part_for_test(&mut self) -> io::Result<()> {
+        self.writer
+            .as_mut()
+            .expect("已开始的测试捕获段")
+            .split_part_for_test()
+    }
     /// 合法检查点/市场边界/正常结束由所属运行显式调用；空闲不会进入此入口。
     pub fn stabilize(&mut self) -> RecordingResult<Option<CommittedIngressPrefixV1>> {
         if self.failed {
@@ -449,21 +456,29 @@ pub struct PublicRecordingReaderV1 {
     pub header: PublicInputStreamHeaderV1,
     pub prefix: Option<CommittedIngressPrefixV1>,
     root: PathBuf,
-    segments: std::vec::IntoIter<(PathBuf, CommittedIngressPrefixV1)>,
+    files: std::vec::IntoIter<(PathBuf, Option<CommittedIngressPrefixV1>)>,
     segment_prefix: Option<CommittedIngressPrefixV1>,
     observed: CommittedIngressPrefixV1,
     cursor: Option<RunCursor>,
     batch_rows: usize,
     max_batch_bytes: usize,
-    next_segment_index: usize,
+    next_file_index: usize,
     markets: BTreeMap<String, MarketIdentityV2>,
     expansion: Option<ObservationExpansion>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RecordingRowLocation {
-    pub segment_index: usize,
+    pub file_index: usize,
     pub row_group: usize,
     pub row_in_group: u64,
+}
+fn segment_run(path: &Path) -> io::Result<SortedRun> {
+    let manifest = path.join("captured.parts.json");
+    SortedRun::read_parts(&if manifest.exists() {
+        manifest
+    } else {
+        path.join("captured.parquet")
+    })
 }
 impl PublicRecordingReaderV1 {
     /// 冷恢复入口；调用方先结束原写入方，不能用于并发发现尚未返回的发布。
@@ -547,6 +562,14 @@ impl PublicRecordingReaderV1 {
                 .into());
             }
         }
+        let mut files = Vec::new();
+        for (path, prefix) in segments {
+            let parts = segment_run(&path)?.parts;
+            let last = parts.len().saturating_sub(1);
+            for (index, path) in parts.into_iter().enumerate() {
+                files.push((path, (index == last).then(|| prefix.clone())));
+            }
+        }
         let observed = CommittedIngressPrefixV1 {
             input_stream_id: header.input_stream_id.clone(),
             next_input_position: 0,
@@ -561,13 +584,13 @@ impl PublicRecordingReaderV1 {
             header,
             prefix,
             root: root.into(),
-            segments: segments.into_iter(),
+            files: files.into_iter(),
             segment_prefix: None,
             observed,
             cursor: None,
             batch_rows,
             max_batch_bytes,
-            next_segment_index: 0,
+            next_file_index: 0,
             markets: BTreeMap::new(),
             expansion: None,
         })
@@ -640,11 +663,23 @@ impl PublicRecordingReaderV1 {
         Ok(self.next_physical_row_with_location()?.map(|(row, _)| row))
     }
     // 候选状态在首次页请求打开原reader时取一次；没有新稳定视图或全文件扫描。
-    pub(crate) fn segment_paths(&self) -> Vec<PathBuf> {
-        self.segments
+    #[cfg(test)]
+    fn stable_segments(&self) -> Vec<(PathBuf, CommittedIngressPrefixV1)> {
+        self.files
             .as_slice()
             .iter()
-            .map(|(path, _)| path.join("captured.parquet"))
+            .filter_map(|(path, prefix)| {
+                prefix
+                    .as_ref()
+                    .map(|p| (path.parent().unwrap().into(), p.clone()))
+            })
+            .collect()
+    }
+    pub(crate) fn file_paths(&self) -> Vec<PathBuf> {
+        self.files
+            .as_slice()
+            .iter()
+            .map(|(path, _)| path.clone())
             .collect()
     }
     pub(crate) fn next_physical_row_with_location(
@@ -658,7 +693,7 @@ impl PublicRecordingReaderV1 {
                     return Ok(Some((
                         row,
                         RecordingRowLocation {
-                            segment_index: self.next_segment_index - 1,
+                            file_index: self.next_file_index - 1,
                             row_group: position.row_group,
                             row_in_group: position.row_in_group,
                         },
@@ -675,16 +710,16 @@ impl PublicRecordingReaderV1 {
                     .into());
                 }
             }
-            let Some((path, prefix)) = self.segments.next() else {
+            let Some((path, prefix)) = self.files.next() else {
                 return Ok(None);
             };
-            self.segment_prefix = Some(prefix);
+            self.segment_prefix = prefix;
             self.cursor = Some(RunCursor::open(
-                &path.join("captured.parquet"),
+                &path,
                 self.batch_rows,
                 self.max_batch_bytes,
             )?);
-            self.next_segment_index += 1;
+            self.next_file_index += 1;
         }
     }
     fn observe(&mut self, row: &PublicStoredRowV1) -> RecordingResult<()> {
