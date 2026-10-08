@@ -97,7 +97,7 @@ class MarketInputs100ms:
     def prefix_at(self, observation_ms):
         return torch.searchsorted(self.delivered_cutoffs,observation_ms,right=True)-1
 
-    def freeze(self, observation_ms, market_indices, root_started_at, source_memory, endpoint_memory):
+    def freeze(self, observation_ms, market_indices, root_started_at, source_memory, endpoint_memory, *, applied_prefix=None):
         """观察时刻固定在UTC100ms；调用方先接纳截至C的全部完整组，再冻结。
 
         不提交账户/订单/随机数/GRU。只有全部公共及Native计算成功后，协调器才能一次接纳
@@ -110,6 +110,8 @@ class MarketInputs100ms:
             if value.shape!=(roots,) or value.dtype!=torch.int64 or value.device!=device:
                 raise ValueError('需同设备int64根批次')
         prefixes = self.prefix_at(observation_ms)
+        if applied_prefix is not None:
+            prefixes = torch.minimum(prefixes,applied_prefix)
         valid_market = (market_indices>=0)&(market_indices<self.market.market_count)
         if not self.market.market_count: raise ValueError('完整fast装配需要真实固定市场人口')
         safe = market_indices.clamp(0,self.market.market_count-1)

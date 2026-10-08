@@ -1833,7 +1833,7 @@ Market正文保原condition，后续处理时展开仍归Mutation处理层，不
 已有actual-joint阶段和全部必需开关，exit0不能替代实际1500／1600覆盖。
 
 选择发布切片交付原公共预留接口及真实消费者；有界FOK处理和请求反馈见下一节。
-完整Actor到发送／Registry／MutationRequests的总入口、统一时钟、持续OrderFormation宿主、
+有界Actor实际发送见后述“真实来源与冻结Actor发送”。统一连续时钟、持续OrderFormation宿主、
 完整连续SIM→NOE→Ledger、PPO或活动恢复仍未交付。公共取消处理和公开形成读面已接通，
 见“完整取消请求与公开订单形成”；有限真实来源验证不证明持续宿主已经完成。
 
@@ -1933,4 +1933,73 @@ formed private sequence及公开市场未知状态；另沿真实Query先到、�
 核原可知边界。GPU输入来自实际原请求和已领取NOE，CPU Registry只作独立后验参考。
 旧单目标Base取消接口保持兼容，原FOK、Actor概率及发布证据按未变范围复用。
 执行与失败记录见[100ms任务记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6059645688)。
-这些有限入口不证明完整Actor实际发送、统一连续宿主、PPO、活动恢复或正式训练已交付。
+这些取消／形成有限入口本身不证明Actor发送。后述有界发送已另接实际消费者；统一连续宿主、
+PPO、活动恢复或正式训练仍未交付。
+
+
+### 真实来源与冻结Actor发送
+
+`shared-run/gpu/public_source.py::PublicGroupSource` 持有实际消费位置和已安装完整组页。
+它从原compact导出的组头、来源进度、每组AppliedIngressPrefix及normal EndOfInput取下一组；
+缺页保持当前位置，不能据页尾、观察cutoff或外部ready签发完成。Ck只包含已消费原组。
+`MarketInputs100ms.freeze(applied_prefix=...)` 因而保留已消费前缀上限，不能借预取事实更新冻结。
+原v1／v2／v3设备缓存的旧消费者仍不要求新增旁列。新来源需要这些列时，
+`PreparedPublicPage.ensure_group_lineage` 从同一绑定compact的原导出入口补取，只在内存安装；
+不重写原合格材料或旧缓存。旧v3缓存代表已核原成员消费、来源关联、页头和正常EOF。
+
+`sim-system/gpu/input_frontier.py::InputCommitFrontier` 拥有整根唯一u64输入提交前沿。
+实际已提交的冷开户／激活、完整公开组、hidden桶、关闭／观察及请求沿同一前沿登记。
+资源不足和重复调用没有新业务输入，不前移序号。公共组receipt保原完整组和AppliedPrefix；
+观察cutoff保原运行／session、观察时刻和实际已领取delivery前沿。该值来自
+`PendingRecords.delivered_through`，沿原按received／source private顺序领取后分配的delivery序；
+不能取source private的最大值。例如原首条private=3、delivery=1时，cutoff必须为1。预读、发射高水位或NOE序号
+不能代替该前沿。此GPU物理实现不要求同步写CPU SimEventLogV2文件；阶段记录仍可异步回传。
+冷接活动根必须提供真实已提交前沿，不得接上原请求后另从零计数。
+
+`shared-run/gpu/send_clock.py::BoundedSendClock.advance_before` 复用原SIM阶段选择和所属处理器，
+耗尽严格早于sk的义务。处理中新生成的更早请求／finality也须继续消费；同刻组、hidden桶和反馈
+保留。真实页／桶缺口和资源需求按原状态续接。推进完成才建立开放接收门，首次Registry领取
+保available_at为本次实际公开可见时刻（可等于sk）。严格比较的是原received/event端点；
+不能改成sk−1，也不能把available_at回填为received。原包含端点接口保持兼容。
+首次领取后只续原ClosedWaiting与当前Ledger；可应用记录继续扫描，缺前驱仍等待。
+
+`shared-run/gpu/actor_send.py::FrozenActorSend` 消费一次完整ActorSelection和原控制面身份，
+按启用且就绪的根推进／首次领取至实际Sk，再在各根当前Ledger预留原正文。
+完整候选可私有保存全部根；禁用根不发布、不提交RNG或预留，后来启用时领取自己的真实前缀。
+首次领取时，cutoff与内嵌的原公共组receipt分别按根更新。某根已推进部分公共组但仍缺页时，
+它保留整份上次观察快照，包括组引用、输入序、观察时刻和delivery；其它已就绪根可独立领取。
+补页后的新观察只更新本轮fresh根，旧Ck对象也保持原值。
+推进与Ledger扫描的ready只表示阶段就绪，不能充当动作完成；早退仍返回已有首次receipt与动作完成状态。
+各根发布提交一次业务RNG；发布后物理容量不足
+只续原预留／登记。资金拒绝保持原决定；reservation.complete不等于资金批准。NoAct不发布，
+多合法Family选NoTrade仍按原规则提交随机数，但不建Bridge请求／receipt／预留或输入增量。
+
+`ActorRequestSubmission` 将完整已选正文整批交给Native `model_intent_requests_v2`，
+复用intent-bridge `request_from_intent_v2` 的原纯构造。CPU适配器也调用同一函数；没有SDK公式副本。
+实际MutationRequests与本地submission_started共同提交后才前移整根输入前沿。
+每根保首次receipt和完成状态；同批Buy／Cancel各根可独立提交，资源不足只续未完成根，
+后续Cancel回执不能替换已成功Buy回执。后一个Buy容量续接时只更新新领取根的
+`SubmittedLegs`，保先前腿的receipt／input sequence，供后续公开OrderFormation关联。
+重复消费不重发、不重占款或重抽业务随机。
+
+有限原FOK来源的独立CPU公开账户检查点证明：Ck=1300后、sk=1414前实际可领取反馈改变资金。
+GPU实际消费真实compact组／hidden桶及原FOK处理、finality，首次领取6条available=1414，
+保留received=1414／1415的3条反馈及1414真实hidden桶／公开组。旧Ck、原完整组引用、首次正文
+和非零业务游标均保持。独立工程模型的Pair决定实际登记input_sequence=13，下一前沿14，
+receipt实际arrived_at=1429，重复消费不增加前沿或账本前缀。另一个真实NoTrade决定消耗一次
+Family随机数，保持无receipt／Bridge／输入增量。模型偏好只选择合法叶，不改原支持。
+
+原入口为显式ignored的 `gpu_frozen_actor_sends_from_real_bounded_source` 和
+`gpu_frozen_actor_no_trade_at_real_send_boundary`，在锁定CUDA环境以 `--ignored --nocapture` 运行。
+批次组件另用真实MutationRequests、公共预留／本地发送和取消登记，核Buy＋Cancel＋NoTrade的
+容量续接、逐根receipt及完成状态；其已发布正文夹具不证明完整多根Actor评分或时钟。
+旧页和九条原NOE端点代表分别核缓存补列／EOF及开放门6、原包含门7、后续仅领取同刻1条。
+`shared-run/gpu/validate_actor_send_cutoff.py` 使用同一原compact的两个无旧请求冷根，
+真实推进公共组和hidden桶，核缺页根保旧Ck、另一根领取与补页续接。首次NOE前的合法零行
+沿原公共领取／Registry／取消投影返回正式空人口，保closed.fault、delivery与available，不填造批。
+此代表没有NOE反馈，delivery为零；非零delivery语义由上述九条原NOE入口验证，不宣称新的两根Actor发送覆盖。
+
+calculation_duration=114ms、dispatch_delay=0ms仅属于该具名有限工程场景，出处随来源保存；
+GPU运行耗时另记，不改变逻辑发送时间，不是正式延迟配置。本来源原请求／市场／账户证明
+该区间没有GTD、FAK、结算或终态经济义务；实际出现未装配阶段会报告缺口，不能用None隐藏。
+本切片不是完整无限宿主、持续形成／统一全时钟、完整结算、PPO、活动恢复或正式训练。

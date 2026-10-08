@@ -8,7 +8,7 @@ mod sim_adapter;
 pub use live_adapter::{
     LiveAdapterV1, LiveIntentCallContextV1, LiveIntentErrorV1, LiveIntentImmediateSuccessV1,
 };
-pub use sim_adapter::SimGroupAdapterV1;
+pub use sim_adapter::{SimGroupAdapterV1, request_from_intent_v2};
 
 mod private {
     use super::{BridgeBackendV1, Future, ModelIntentV1};

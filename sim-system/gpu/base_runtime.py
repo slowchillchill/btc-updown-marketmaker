@@ -1,7 +1,7 @@
 """持续Base SIM运行状态：唯一hidden队列与请求/订单/账户/义务的装配。
 
 保留各原模块的状态和纯候选边界；本装配不持有公共Ledger或推进NOE公开门。
-支持原GTC/FOK pending接单、逐腿结果和末项完整响应；完整Actor发送桥与持续宿主仍未交付。
+支持原GTC/FOK pending接单、逐腿结果和末项完整响应；有界Actor发送由shared-run接线，持续宿主仍未交付。
 """
 from dataclasses import dataclass,replace
 import torch
@@ -27,6 +27,8 @@ class BaseSimRuntime:
     resolution_obligations: object = None
     settlement_registrations: object = None  # 显式Registered/成功与有限查询场景；不代表完整结算后端。
     order_query_history: object = None  # 显式原订单保留水位；不代表列表查询RootSnapshot退役。
+
+    input_frontier: object = None  # 所属整根实际输入提交前沿，非请求专用计数。
 
     post_results: object = None  # 原逐项Post正文，末项封口前保留真实第一结果。
     cancel_results: object = None  # 原逐目标取消正文，完整末项封口后仍保原决定。
@@ -250,7 +252,7 @@ class BaseSimRuntime:
         return replace(self, market_controls=HiddenMarketControls.empty(
             self.orders.roots, source.market_count, self.account.asset_roots.device))
 
-    def choose(self, hidden_source, hidden_eof, advance_until, enabled, *, settlement=None,gtd=None):
+    def choose(self, hidden_source, hidden_eof, advance_until, enabled, *, settlement=None,gtd=None,before=False):
         from account_state import grouped_fault
         fault=self.account.fault | self.orders.fault | grouped_fault(
             self.hidden.fault,self.account.asset_roots,self.orders.roots)
@@ -271,7 +273,7 @@ class BaseSimRuntime:
         if settlement is None and self.settlement_registrations is not None:
             settlement=self.settlement_registrations.next_clock()
         choice=next_sim_drive(self.requests,self.fills,self.calendars,source,hidden_eof,
-            advance_until,enabled,settlement=settlement,gtd=gtd,hidden_next_at=next_at)
+            advance_until,enabled,settlement=settlement,gtd=gtd,hidden_next_at=next_at,before=before)
         return replace(choice,hidden_frontier=self.hidden_frontier,settlement_registrations=self.settlement_registrations,
             order_query_history=self.order_query_history)
 

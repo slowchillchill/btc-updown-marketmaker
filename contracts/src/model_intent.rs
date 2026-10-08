@@ -1,14 +1,15 @@
 use rust_decimal::Decimal;
+use serde::{Serialize, Deserialize};
 
 use crate::{ConditionId, TokenId};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuyLegIntentV1 {
     pub token_id: TokenId,
     pub order: BuyOrderIntentV1,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelIntentV1 {
     SubmitSingleBuy {
         condition_id: ConditionId,
@@ -29,7 +30,7 @@ pub enum ModelIntentV1 {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuyOrderIntentV1 {
     GtcLimit {
         limit_price_pusd_per_share: Decimal,

@@ -168,7 +168,7 @@ def full_item(item,original):
     assert actual==expected,(actual,expected)
 
 
-def check(source,codec,progress,after_posts=None):
+def check(source,codec,progress,after_posts=None,*,before_drive=None,defer_initial_send=False):
     started=time.perf_counter();yes=T([True],torch.bool);zero=T([0]);posts=source['posts'];count=len(posts)
     conditions,markets,tokens=asset_layout(source);asset_count=len(markets);market_count=len(conditions)
     sampler=EmpiricalDelaySampler.build((ROOT/'sim-system/config/latency-profiles'/source['profile_sha256']/'profile.json').read_bytes(),
@@ -214,13 +214,15 @@ def check(source,codec,progress,after_posts=None):
     identity,offsets=byte_column([source['request_id'].encode()])
     ordinals=T([[p['batch_item_ordinal'] for p in posts]]);present=T([[True]*count],torch.bool)
     delayed=T([['FokMarket' in p['item']['order']['kind'] and source['rule']['taker_delay_enabled'] for p in posts]],torch.bool)
-    sending=lambda r,l:submit_post_orders(r,l,sampler,identity,offsets,zero,T([1]),integers([source['input_sequence']]),
+    sending=lambda r,l,input_sequences=None:submit_post_orders(r,l,sampler,identity,offsets,zero,T([1]),integers([source['input_sequence']]) if input_sequences is None else input_sequences,
         T([source['sent_at']]),T([list(range(count))]),ordinals,present,delayed,T([source['rule']['taker_delay_ms']]),
         T([list(range(count))]),T([list(range(count))]),yes,T([0],torch.int32))
-    runtime,account,receipt,enough=run(lambda:sending(runtime,ledger.ledger));ledger=replace(ledger,ledger=account)
-    assert receipt.fault.cpu().tolist()==[0] and enough.cpu().tolist()==[True]
-    assert receipt.arrived_at.cpu().tolist()==[source['receipt']['arrived_at']]
-    checkpoint(ledger.ledger,source['sent_ledger'])
+    receipt=None
+    if not defer_initial_send:
+        runtime,account,receipt,enough=run(lambda:sending(runtime,ledger.ledger));ledger=replace(ledger,ledger=account)
+        assert receipt.fault.cpu().tolist()==[0] and enough.cpu().tolist()==[True]
+        assert receipt.arrived_at.cpu().tolist()==[source['receipt']['arrived_at']]
+        checkpoint(ledger.ledger,source['sent_ledger'])
     emitter=replace(FeedbackEmitter.open(1),next_private_sequence=run(lambda:integers([source['first_private']])),next_batch_sequence=run(lambda:integers([source['first_batch']])))
     noe=run(lambda:Projection.open(emitter,zero,zero,zero,zero,T([0]*asset_count),integers([0]),T([-1]),T([-1]),zero,zero))
     bids=[]
@@ -232,6 +234,8 @@ def check(source,codec,progress,after_posts=None):
     ask_width=max(map(len,ask_lists));ask_directory=T([row+[-1]*(ask_width-len(row)) for row in ask_lists])
     ask_rows=ask_directory[T([0])]
     taker,maker=run(lambda:(rational([source['taker_rebate_rate']]),rational([source['maker_rebate_rate']])))
+    if before_drive is not None:
+        return before_drive(source,runtime,ledger,noe,sampler,rule,slots,owners,receipt,intents,ask_directory,taker,maker,progress,initial_submit=sending if defer_initial_send else None)
     batches=[];timeline=[];effect_index=0;changed=False;capacity_checked=False
     horizon=runtime.requests.effective_at.flatten(1).max(1).values+max(step['offset_ms'] for step in source['finality_path']['steps'])
     end=T([e['market']['window']['end_at_utc_ms'] for e in source['initial']])

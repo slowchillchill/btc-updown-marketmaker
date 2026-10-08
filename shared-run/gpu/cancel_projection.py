@@ -120,6 +120,18 @@ def frozen_cancellation_outcomes(bank,selected):
 def cancellation_rows_from_closed(bank,batches,closed,*,source_rows=None):
     roots,width=closed.record_refs.shape
     device=closed.record_refs.device
+    if width == 0:
+        from fields import RecordList
+        columns=closed.record_refs
+        zero=ExactInt.from_i64_tensor(columns.flatten())
+        references=RecordList((columns.flatten(),columns.flatten()),
+            torch.empty((0,0),dtype=torch.bool,device=device))
+        targets=PublicCancellationRows(closed.emitted,zero,zero,zero,columns,
+            zero,zero,zero,closed.delivered_sequences,columns,columns,columns,
+            closed.available_at,references,columns,columns,closed.fault)
+        completions=CancellationCompletions(closed.emitted,zero,closed.delivered_sequences,
+            zero,zero,closed.available_at,columns,columns,closed.fault,columns,columns,columns,zero,zero)
+        return targets,completions
     source_rows=resolve_closed_public_rows(bank,batches,closed) if source_rows is None else source_rows
     rows,at,coordinates,active,fault=(source_rows.rows,source_rows.at,source_rows.coordinates,source_rows.active,source_rows.fault)
     schema=bank.payload_schemas[rows]

@@ -37,7 +37,7 @@ class SimDriveChoice:
 
 
 def next_sim_drive(requests, fills, calendars, hidden, hidden_eof, advance_until, enabled,
-                   *, settlement=None, gtd=None, hidden_next_at=None):
+                   *, settlement=None, gtd=None, hidden_next_at=None, before=False):
     """选择每根唯一原阶段；同阶段人口仍由其原(time,seq,ordinal)入口选择。
 
     settlement/GTD由所属实际义务模块供给，None仅表示本装配无此类义务。
@@ -77,5 +77,6 @@ def next_sim_drive(requests, fills, calendars, hidden, hidden_eof, advance_until
         waiting=~hidden.present & ~hidden_eof
         source_known=source_known | waiting
         before_next=~waiting | (at<hidden_next_at)
-    present=population.any(1) & source_known & before_next & enabled & (at<=advance_until) & (fault==0)
+    boundary = at < advance_until if before else at <= advance_until
+    present=population.any(1) & source_known & before_next & enabled & boundary & (fault==0)
     return SimDriveChoice(at,phase,present,fault,requests,fills,calendars)

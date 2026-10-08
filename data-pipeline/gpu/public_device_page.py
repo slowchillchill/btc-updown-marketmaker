@@ -195,7 +195,8 @@ def build_public_device_page(binary, material, destination, *, device='cuda', pr
 class PreparedPublicPage:
     """验收页后复用预排数组与精确bank；所有根共享此不可变对象。"""
     def __init__(self,directory,material,*,device='cuda'):
-        self.directory=Path(directory); self.device=torch.device(device); self._tensors={}; self._prefixes={}
+        self.directory=Path(directory); self.material=Path(material)
+        self.device=torch.device(device); self._tensors={}; self._prefixes={}
         manifest_bytes=(self.directory/'manifest.json').read_bytes()
         manifest=json.loads(manifest_bytes)
         legacy=manifest['version']==LEGACY_VERSION
@@ -210,6 +211,8 @@ class PreparedPublicPage:
                 or source['applied_prefix']!=manifest['source_applied_prefix']
                 or source['files']!=manifest['source_members'] or not source['normal_end']):
             raise ValueError('公共设备页原材料绑定错误')
+        self.source_manifest_sha256=manifest['source_manifest_sha256']
+        self.normal_end=source['normal_end']
         self.columns=manifest['metadata']
         if self.columns['version'] != ('public_pm_device_columns_v2' if current else 'public_pm_device_columns_v1'):
             raise ValueError('公共设备页与消费列语义版本不一致')
@@ -314,6 +317,23 @@ class PreparedPublicPage:
         self.decimal_columns=DeviceDecimalColumns(exact['coefficient'],exact['decimal_denominator'],
             self.tensor('decimal_scale'),self.tensor('decimal_present').bool())
         self.decimals=_numbers().ExactRational(exact['numerator'],exact['denominator'])
+
+    def ensure_group_lineage(self,binary=None):
+        """旧合格页按需从绑定的原compact补旁列；不改材料或既有页成员。"""
+        names=('source_progress_changes','group_applied_prefixes')
+        if all(name in self.columns for name in names):return
+        if binary is None:
+            raise ValueError('旧设备页缺原组来源旁列，须提供原compact导出入口')
+        manifest=(self.material/'manifest.json').read_bytes()
+        if hashlib.sha256(manifest).hexdigest()!=self.source_manifest_sha256:
+            raise ValueError('补原组旁列时材料绑定改变')
+        original=json.loads(subprocess.check_output([str(binary),'--pm-device-columns',str(self.material),'268435456']))
+        if ((self.material/'manifest.json').read_bytes()!=manifest
+                or original['input_stream_id']!=self.columns['input_stream_id']
+                or not np.array_equal(np.asarray(original['groups'],dtype='<i8').reshape(-1,3),self.columns['groups'])
+                or original['group_ids']!=list(self.columns['group_ids'])):
+            raise ValueError('旧页与原compact完整组关联不一致')
+        for name in names:self.columns[name]=original[name]
 
     def _array(self,name,kind,ndim):
         value=self.arrays[name]

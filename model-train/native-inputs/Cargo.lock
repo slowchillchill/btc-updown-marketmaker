@@ -2941,6 +2941,7 @@ dependencies = [
  "data-pipeline-core",
  "data-pipeline-training",
  "execution-normalization",
+ "intent-bridge",
  "ledger",
  "num-bigint",
  "num-integer",

@@ -204,9 +204,9 @@ class CapturedDeviceActor:
             self.inputs.policy_version,self.required_words,self.required_steps,self.fits,
             self.prefix.stage==7,self.prefix.fault)
 
-    def publish_and_reserve(self,publication,state,control):
+    def publish_and_reserve(self,publication,state,control,enabled=None):
         """所属Execute消费者：完整选择→原正文→当前公共Ledger；不发送。"""
-        return publication.consume(self,state,control)
+        return publication.consume(self,state,control,enabled)
 
 
 class ActorSelection:
@@ -221,12 +221,13 @@ class ActorSelection:
         self.published=torch.zeros_like(random.seed,dtype=torch.bool)
         self.required_words=None
 
-    def consume(self,driver,state,control):
+    def consume(self,driver,state,control,enabled=None):
         from actor_context import _owned
         from actor_intent import selected_action
         from admission import coordinate
         from action_selection import SelectionReservation
         numbers=driver.numbers
+        enabled=torch.ones_like(self.published) if enabled is None else enabled
         if self.candidate is None:
             candidate=driver.replay()
             self.required_words=candidate.required_words.clone()
@@ -238,10 +239,11 @@ class ActorSelection:
             if not bool(body.fits.cpu()):return state,self
             self.candidate=candidate.snapshot()
             self.action=_owned(body.value)
-            committed=self.candidate.complete & (self.action.fault==0) & (self.action.family>=0)
-            self.random.counter.copy_(torch.where(committed[:,None],self.candidate.random.counter,self.random.counter))
-            self.published |= committed
-        needed=self.published if self.reservation is None else self.published & ~self.reservation.complete
+        committed=enabled & ~self.published & self.candidate.complete & (self.action.fault==0) & (self.action.family>=0)
+        self.random.counter.copy_(torch.where(committed[:,None],self.candidate.random.counter,self.random.counter))
+        self.published |= committed
+        needed=enabled & self.published
+        if self.reservation is not None:needed &= committed | ~self.reservation.complete
         if not bool(needed.any().cpu()):return state,self
         result=numbers.device_exact_batch(lambda:state.reserve_selected(self.action,needed),
             word_capacity=driver.word_capacity,device=driver.actor.device)

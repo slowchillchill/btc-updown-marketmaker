@@ -302,10 +302,20 @@ fn cancel_targets_batch_v2(input: &str) -> PyResult<String> {
     sim_system::cancellation::cancel_targets_batch_v2(input).map_err(error)
 }
 
+#[pyfunction]
+fn model_intent_requests_v2(input: &str) -> PyResult<String> {
+    let items: Vec<(sim_system::execution::RequestContextV2, contracts::ModelIntentV1)> =
+        serde_json::from_str(input).map_err(error)?;
+    let requests = items.into_iter().map(|(context,intent)|
+        intent_bridge::request_from_intent_v2(context,&intent)).collect::<Result<Vec<_>,_>>().map_err(error)?;
+    serde_json::to_string(&requests).map_err(error)
+}
+
 #[pymodule]
 fn model_native_inputs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(post_terms_batch_v2, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_targets_batch_v2, module)?)?;
+    module.add_function(wrap_pyfunction!(model_intent_requests_v2, module)?)?;
     module.add_class::<PythonGroup>()?;
     module.add_class::<PythonActor>()?;
     Ok(())

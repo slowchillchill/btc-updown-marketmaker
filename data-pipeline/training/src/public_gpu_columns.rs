@@ -61,6 +61,9 @@ pub struct PublicPmDeviceColumnsV1 {
     /// 与groups同序的原闭组身份；物理行不代完整group ID。
     pub group_ids: Vec<Sha256Hex>,
     pub group_members: Vec<Vec<u64>>,
+    /// 与完整闭组同序的原来源进度，不由页尾或观察时间重建。
+    pub source_progress_changes: Vec<Vec<SourceStreamProgressV1>>,
+    pub group_applied_prefixes: Vec<AppliedIngressPrefixV1>,
     /// 全部直接来源的原双时间：[group,typeId,sourcePresent,sourceMs,receivedMs]。
     pub fact_sources: Vec<[i64;5]>,
     /// 原事实成交：[group,asset(-1=Binance),priceId,qPresent,qId,side(B/S/U/None),
@@ -351,6 +354,9 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
         for group in &packet.groups {
             builder.columns.group_ids.push(group.group_id.clone());
             builder.columns.group_members.push(group.member_input_positions.clone());
+            builder.columns.source_progress_changes.push(group.source_progress_changes.clone());
+            builder.columns.group_applied_prefixes.push(AppliedIngressPrefixV1 {
+                input_stream_id:packet.input.input_stream_id.clone(),next_input_position:packet.input.input_position+1});
             builder.columns.groups.push([i64::try_from(group.group_position)?,i64::try_from(group.closed_at_input_position)?,group.visible_at_utc_ms]);
             for fact in &group.records {
                 let kind = match &fact.payload {

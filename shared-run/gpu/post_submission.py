@@ -1,7 +1,7 @@
 """原PostOrders发送事实的薄协调；混合GTC/FOK共用请求登记与本地预留关联。
 
 控制面提供真实global/request/item/event身份、send时刻和输入序。此入口不
-生成SDK请求正文、平台序或发送时刻；不代替下一批完整Actor发送桥。
+生成SDK请求正文、平台序或发送时刻；完整已选正文由actor_send消费者接入。
 """
 from dataclasses import replace
 import torch

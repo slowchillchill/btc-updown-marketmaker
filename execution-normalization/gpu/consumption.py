@@ -32,6 +32,8 @@ class ReceiveGates:
     public_visible_at: torch.Tensor
     has_closed_receive: torch.Tensor
     has_public_visible: torch.Tensor
+    receive_inclusive: torch.Tensor | None = None
+    public_inclusive: torch.Tensor | None = None
 
     @classmethod
     def unset(cls,roots,*,device='cuda'):
@@ -40,12 +42,22 @@ class ReceiveGates:
         return cls(times,times.clone(),missing,missing.clone())
 
     def set_receive(self,at,enabled):
+        inclusive=None if self.receive_inclusive is None else self.receive_inclusive | enabled
         return replace(self,closed_receive_at=torch.where(enabled,at,self.closed_receive_at),
-            has_closed_receive=self.has_closed_receive | enabled)
+            has_closed_receive=self.has_closed_receive | enabled,receive_inclusive=inclusive)
 
     def set_public(self,at,enabled):
+        inclusive=None if self.public_inclusive is None else self.public_inclusive | enabled
         return replace(self,public_visible_at=torch.where(enabled,at,self.public_visible_at),
-            has_public_visible=self.has_public_visible | enabled)
+            has_public_visible=self.has_public_visible | enabled,public_inclusive=inclusive)
+
+    def before(self,at,enabled):
+        """所属真实推进已耗尽<at后设置开放端点；不以at-1改业务时钟。"""
+        receive=torch.ones_like(enabled) if self.receive_inclusive is None else self.receive_inclusive
+        public=torch.ones_like(enabled) if self.public_inclusive is None else self.public_inclusive
+        return replace(self.set_receive(at,enabled).set_public(at,enabled),
+            receive_inclusive=torch.where(enabled,False,receive),
+            public_inclusive=torch.where(enabled,False,public))
 
 
 @dataclass(frozen=True)
@@ -107,8 +119,13 @@ class PendingRecords:
         for value in [gates.has_closed_receive,gates.has_public_visible]:
             if value.shape!=(roots,) or value.dtype!=torch.bool or value.device!=self.active.device:
                 raise TypeError('NOE未设时间门须显式同设备bool[roots]')
-        ready=self.active & (self.received_at<=closed_receive_at[:,None]) & (
-            self.received_at<=public_visible_at[:,None])
+        receive=(self.received_at<=closed_receive_at[:,None]) if gates.receive_inclusive is None else \
+            torch.where(gates.receive_inclusive[:,None],self.received_at<=closed_receive_at[:,None],
+                self.received_at<closed_receive_at[:,None])
+        visible=(self.received_at<=public_visible_at[:,None]) if gates.public_inclusive is None else \
+            torch.where(gates.public_inclusive[:,None],self.received_at<=public_visible_at[:,None],
+                self.received_at<public_visible_at[:,None])
+        ready=self.active & receive & visible
         ready=ready & (gates.has_closed_receive & gates.has_public_visible)[:,None]
         order=torch.arange(width,device=self.active.device).expand(roots,width)
         def sort(key):

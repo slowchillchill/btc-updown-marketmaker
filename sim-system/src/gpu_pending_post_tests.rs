@@ -7,6 +7,11 @@ async fn pending_post_original_sources() -> Vec<serde_json::Value> {
 
 #[cfg(feature="shared-execution")]
 async fn pending_post_original_sources_for(names:&[&str],include_cancels:bool) -> Vec<serde_json::Value> {
+    pending_post_original_sources_at(names,include_cancels,None).await
+}
+
+#[cfg(feature="shared-execution")]
+async fn pending_post_original_sources_at(names:&[&str],include_cancels:bool,receive_checkpoint:Option<i64>) -> Vec<serde_json::Value> {
     let mut cases=Vec::new();
     for &name in names {
         let cash=if name=="fok_fee_funds" {"92"} else {"2000"};
@@ -170,12 +175,13 @@ async fn pending_post_original_sources_for(names:&[&str],include_cancels:bool) -
             state=gpu_accept_projection_reference(&mut actor,next,BusinessReducerOutputV2::LogicalDrive(
                 LogicalDriveOutputV2 {lifecycle:frame.into_lifecycle_feedback().unwrap(),..Default::default()}),&mut batches);
         }
-        let closed_at=drive.last().unwrap()["at"].as_i64().unwrap()+10_000;
+        let final_closed_at=drive.last().unwrap()["at"].as_i64().unwrap()+10_000;
+        let closed_at=receive_checkpoint.unwrap_or(final_closed_at);
         actor.projection_port.close_receive_prefix(closed_at);
         actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(crate::public_consumption::ActorTimeRecordV1 {
             run_id:run_id.clone(),drive_position:1,logical_time_utc_ms:closed_at}));
         let records=observation.take_closed_records();
-        let original_records=records.iter().map(|record|serde_json::json!({"record":record.record(),"position":record.position(),"visibility":record.visibility()})).collect::<Vec<_>>();
+        let mut original_records=records.iter().map(|record|serde_json::json!({"record":record.record(),"position":record.position(),"visibility":record.visibility()})).collect::<Vec<_>>();
         let mut waiting=records;
         while !waiting.is_empty() {
             let count=waiting.len();let mut next=Vec::new();
@@ -185,9 +191,27 @@ async fn pending_post_original_sources_for(names:&[&str],include_cancels:bool) -
             }
             assert!(next.len()<count,"原公开NOE前驱闭合 {name}");waiting=next;
         }
+        let bounded_pre_send_ledger=receive_checkpoint.map(|_|gpu_ledger_reservation_checkpoint(&ledger,"actual_received_before_execute"));
+        if receive_checkpoint.is_some() {
+            actor.projection_port.close_receive_prefix(final_closed_at);
+            actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(crate::public_consumption::ActorTimeRecordV1 {
+                run_id:run_id.clone(),drive_position:2,logical_time_utc_ms:final_closed_at}));
+            let records=observation.take_closed_records();
+            original_records.extend(records.iter().map(|r|serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()})));
+            let mut waiting=records;
+            while !waiting.is_empty() {
+                let count=waiting.len();let mut next=Vec::new();
+                for record in waiting {
+                    let applied=ledger.apply_noe_memory_v2(&record).unwrap();
+                    if matches!(applied,ledger::LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation|ledger::LedgerMemoryApplyOutcomeV1::Applied(ledger::LedgerApplyOutcomeV1::MissingPlatformPredecessor {..})) {next.push(record);}
+                }
+                assert!(next.len()<count,"原后继公开NOE前驱闭合 {name}");waiting=next;
+            }
+        }
         let received_ledger=gpu_ledger_reservation_checkpoint(&ledger,"after_received_actual_noe");
         let rules=actor._rule_snapshot.snapshot();
         let mut source=serde_json::json!({"name":name,"opening_ledger":opening,"cash":cash,"initial":initial,"changed":changed,
+            "run_id":actor.opened.run_id,"session_id":state.session.as_ref().unwrap().opening_fact.session_id,
             "posts":posts,"reserve_intents":reserve_intents,"sent_ledger":sent_ledger,"received_ledger":received_ledger,
             "records":original_records,"closed_at":closed_at,"request_id":request_id,"sent_at":1200,"input_sequence":11,"pending":pending,
             "receipt":{"arrived_at":receipt.platform_arrived_at_utc_ms,"count":receipt.scheduled_action_count},
@@ -198,6 +222,7 @@ async fn pending_post_original_sources_for(names:&[&str],include_cancels:bool) -
             "finality_path":policy.normal_path(),"taker_rebate_rate":rules.project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
             "next_private":state.session.as_ref().unwrap().next_private_feedback_sequence,
             "next_batch":state.session.as_ref().unwrap().next_projection_batch_sequence});
+        if let Some(checkpoint)=bounded_pre_send_ledger {source["bounded_pre_send_ledger"]=checkpoint;}
         if include_cancels {
             source["cancellation"]=pending_cancel_original_extension(&mut actor,state,&observation,&mut ledger,closed_at);
         }
@@ -303,4 +328,66 @@ async fn gpu_pending_post_uses_request_market_for_asset_admission() {
     serde_json::to_writer(child.stdin.take().unwrap(),&cases).unwrap();let output=child.wait_with_output().unwrap();
     std::fs::write(path.join("request-market-admission-report.json"),&output.stdout).unwrap();
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));eprintln!("request_market_admission={}",String::from_utf8_lossy(&output.stdout));
+}
+
+// 本来源只有原GTC/FOK及未结束市场，不装造GTD/FAK/结算义务。
+#[cfg(feature="shared-execution")]
+async fn pending_actor_send_original_source() -> serde_json::Value {
+    let mut sources=pending_post_original_sources_at(&["fok_success"],false,Some(1410)).await;
+    let source=&mut sources[0];
+    let initial:Vec<ExecutionMarketEventV3>=serde_json::from_value(source["initial"].clone()).unwrap();
+    // 两条正式原消息：公开领取界=1414；下一hidden桶恰为1414，仅同刻项增加原ask数量。
+    let events=vec![decoded_maker_level_event(BookSide::Ask,"0.5","1000.001","1000.001",1413,1413,10),
+        decoded_maker_level_event(BookSide::Ask,"0.5","1000.001","1000.002",1414,1414,11)];
+    let (directory,mut hidden)=public_consumption_tests::gpu_compact_hidden_for_order_fixture(&initial,&events,false);
+    let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
+    std::fs::create_dir_all(&artifact).unwrap();
+    std::fs::rename(directory.path().join("public"),artifact.join("public-compact")).unwrap();
+    std::fs::rename(directory.path().join("hidden"),artifact.join("hidden-compact")).unwrap();
+    hidden["source_binding"]["public"]=serde_json::json!(artifact.join("public-compact"));
+    hidden["source_binding"]["hidden"]=serde_json::json!(artifact.join("hidden-compact"));
+    source["bounded_public_events"]=serde_json::json!(events);
+    source["bounded_hidden"]=hidden;
+    source["bounded_timing"]=serde_json::json!({"observation_at":1300,"calculation_duration":114,"dispatch_delay":0,
+        "provenance":"gpu_frozen_actor_sends_from_real_bounded_source finite engineering fixture"});
+    std::fs::write(artifact.join("original-actor-send.json"),serde_json::to_vec_pretty(source).unwrap()).unwrap();
+    source.clone()
+}
+
+#[cfg(feature="shared-execution")]
+#[tokio::test(flavor="current_thread")]
+#[ignore="locked GPU initial sorting; original bounded source and actual receive checkpoint"]
+async fn pending_actor_send_original_public_checkpoint() {
+    let source=pending_actor_send_original_source().await;
+    let pre=&source["bounded_pre_send_ledger"];
+    assert_ne!(pre["cash"],source["sent_ledger"]["cash"],"原已领取Ledger资金确实改变");
+    let records=source["records"].as_array().unwrap();
+    assert!(records.iter().any(|r|r["visibility"]["Feedback"]["available_at_utc_ms"]==1410));
+    assert_eq!(source["bounded_timing"]["calculation_duration"],114);
+    assert!(source["bounded_hidden"]["buckets"].as_array().unwrap().iter().any(|b|b["bucket"]["bucket_time_utc_ms"]==1414),"真实同刻hidden桶必须存在");
+}
+
+#[cfg(feature="shared-execution")]
+#[tokio::test(flavor="current_thread")]
+#[ignore="locked GPU; real compact prefix and strict Execute boundary to one Actor send"]
+async fn gpu_frozen_actor_sends_from_real_bounded_source() {bounded_gpu_actor_check(None).await;}
+
+#[cfg(feature="shared-execution")]
+#[tokio::test(flavor="current_thread")]
+#[ignore="locked GPU; real NoTrade at the bounded send boundary"]
+async fn gpu_frozen_actor_no_trade_at_real_send_boundary() {bounded_gpu_actor_check(Some("--no-trade")).await;}
+
+#[cfg(feature="shared-execution")]
+async fn bounded_gpu_actor_check(mode:Option<&str>) {
+    let source=pending_actor_send_original_source().await;
+    let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
+    let mut command=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap());
+    command.arg(std::env::var("B_GPU_ACTOR_SEND_VALIDATOR").unwrap());
+    if let Some(mode)=mode {command.arg(mode);}
+    let mut child=command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    serde_json::to_writer(child.stdin.take().unwrap(),&source).unwrap();
+    let output=child.wait_with_output().unwrap();
+    std::fs::write(artifact.join("actor-send-report.json"),&output.stdout).unwrap();
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    eprintln!("actor_send={}",String::from_utf8_lossy(&output.stdout));
 }

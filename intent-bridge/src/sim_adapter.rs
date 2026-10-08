@@ -148,6 +148,45 @@ fn sim_order_kind(order: &BuyOrderIntentV1) -> Result<SimBuyOrderKindV1, SimRunA
     })
 }
 
+/// 原公共意图到SIM请求的纯构造；不登记、采样、发送或读取平台状态。
+pub fn request_from_intent_v2(
+    context: RequestContextV2,
+    intent: &ModelIntentV1,
+) -> Result<sim_system::execution::BusinessRequestV2, SimRunActorErrorV2> {
+    use sim_system::execution::BusinessRequestV2;
+    Ok(match intent {
+        ModelIntentV1::SubmitSingleBuy {
+            condition_id,
+            order,
+        } => {
+            BusinessRequestV2::PostOrder(single_buy_request(context, condition_id, order)?)
+        }
+        ModelIntentV1::SubmitPairedBuy {
+            condition_id,
+            orders,
+        } => BusinessRequestV2::PostOrders(paired_buy_request(
+            context,
+            condition_id,
+            orders,
+        )?),
+        ModelIntentV1::CancelOrder { platform_order_id } => {
+            BusinessRequestV2::CancelOrder(cancel_order_request(context, platform_order_id))
+        }
+        ModelIntentV1::CancelOrders { platform_order_ids } => {
+            BusinessRequestV2::CancelOrders(cancel_orders_request(
+                context,
+                platform_order_ids,
+            )?)
+        }
+        ModelIntentV1::CancelMarketOrders { condition_id } => {
+            BusinessRequestV2::CancelMarketOrders(cancel_market_orders_request(
+                context,
+                condition_id,
+            ))
+        }
+    })
+}
+
 /// 仅借用当前组的 sealed 后端；不接受调用方替换 cutoff。
 pub struct SimGroupAdapterV1<'d, 'run> {
     decision: &'d mut sim_system::execution::PublicGroupDecisionV1<'run>,
@@ -191,40 +230,7 @@ impl SimGroupAdapterV1<'_, '_> {
         context: RequestContextV2,
         intent: &ModelIntentV1,
     ) -> Result<MutationRequestReceiptV2, RequestFailureV1> {
-        use sim_system::execution::BusinessRequestV2;
-        let request = (|| {
-            Ok(match intent {
-                ModelIntentV1::SubmitSingleBuy {
-                    condition_id,
-                    order,
-                } => {
-                    BusinessRequestV2::PostOrder(single_buy_request(context, condition_id, order)?)
-                }
-                ModelIntentV1::SubmitPairedBuy {
-                    condition_id,
-                    orders,
-                } => BusinessRequestV2::PostOrders(paired_buy_request(
-                    context,
-                    condition_id,
-                    orders,
-                )?),
-                ModelIntentV1::CancelOrder { platform_order_id } => {
-                    BusinessRequestV2::CancelOrder(cancel_order_request(context, platform_order_id))
-                }
-                ModelIntentV1::CancelOrders { platform_order_ids } => {
-                    BusinessRequestV2::CancelOrders(cancel_orders_request(
-                        context,
-                        platform_order_ids,
-                    )?)
-                }
-                ModelIntentV1::CancelMarketOrders { condition_id } => {
-                    BusinessRequestV2::CancelMarketOrders(cancel_market_orders_request(
-                        context,
-                        condition_id,
-                    ))
-                }
-            })
-        })();
+        let request = request_from_intent_v2(context, intent);
         request
             .map_err(RequestFailureV1::before_request_effect)
             .and_then(|request| self.decision.request_with_effect(request))
