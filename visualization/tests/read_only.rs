@@ -6,7 +6,9 @@ use axum::{
 };
 use contracts::*;
 use data_pipeline_core::public_input::{DptIngressV1, RecordedIngressV1};
-use data_pipeline_training::public_recording::PublicRecordingWriterV1;
+use data_pipeline_training::public_recording::{
+    PublicRecordingReaderV1, PublicRecordingWriterV1, PublicStoredRowV1,
+};
 use serde_json::Value;
 use shared_run::{StrategyInputV1, StrategyOutputV1, StrategyV1};
 use std::{collections::BTreeMap, path::Path};
@@ -63,6 +65,41 @@ async fn production_range_end_report_and_missing_metadata_are_independent_read_o
         report.end_reason,
         backtest::HistoricalEndReasonV1::RangeEnd
     ));
+    // 同次真实小夹具的历史材料，经原可视化分页入口恢复完整逻辑索引。
+    let root = config.preparation.work_root.join("public");
+    let mut logical = PublicRecordingReaderV1::recover(&root, 2, 1 << 20).unwrap();
+    let prefix = logical.prefix.clone().unwrap();
+    let source = PublicSourceConfig {
+        committed_prefix: root.join(&prefix.stable_storage_ref).join("prefix.json"),
+        root,
+        page_rows: 2,
+        max_batch_bytes: 1 << 20,
+    };
+    let (mut pages, _) = PublicPages::open(&source).unwrap();
+    let mut observations = 0_u64;
+    let mut groups = 0_u64;
+    for page in 0.. {
+        let rows = logical.next_page(2).unwrap();
+        for row in &rows {
+            match row {
+                PublicStoredRowV1::Observation(_) => observations += 1,
+                PublicStoredRowV1::Group(_) => groups += 1,
+                PublicStoredRowV1::GroupObservationRange(_) => panic!("公开分页不得暴露物理区间"),
+                _ => {}
+            }
+        }
+        let response: Value = serde_json::from_slice(&pages.page(page).unwrap()).unwrap();
+        assert_eq!(
+            response["rows"],
+            exact_json(serde_json::to_value(&rows).unwrap())
+        );
+        if rows.len() < 2 {
+            break;
+        }
+    }
+    assert_eq!(observations, prefix.next_observation_position);
+    assert_eq!(groups, prefix.next_group_position);
+    assert!(observations > 0);
     let before = files(temp.path());
     let app = router(
         load_sources(SourcesConfig {

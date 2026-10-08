@@ -51,6 +51,7 @@ fn kind(row: &PublicStoredRowV1) -> &'static str {
         PublicStoredRowV1::Report { .. } => "Report",
         PublicStoredRowV1::PmReport { .. } => "PmReport",
         PublicStoredRowV1::PmStepBinding(_) => "PmStepBinding",
+        PublicStoredRowV1::GroupObservationRange(_) => "GroupObservationRange",
         PublicStoredRowV1::Group(_) => "Group",
         PublicStoredRowV1::Observation(_) => "Observation",
         PublicStoredRowV1::SourceBinding(_) => "SourceBinding",
