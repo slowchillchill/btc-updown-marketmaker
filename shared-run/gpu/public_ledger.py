@@ -28,6 +28,7 @@ class PublicLedgerState:
     cancellations: object | None = None  # 原已登记请求人口；None不是Known空请求集合。
 
     submission_bindings: object | None = None  # 冷前缀须安装已公开关联；None不证明完整历史。
+    cancellation_target_history: object | None = None  # 首次领取目标与稳定身份轴；None保持未安装。
 
     def append_batch(self,bank,batch):
         """原SIM/NOE发射新批后追加一次；不重开账户，不领取或推进可见门。
@@ -73,13 +74,16 @@ class PublicLedgerState:
         registry = self.registry.receive(events)
         registry = registry.receive(cancellation_order_events(targets, rank))
         cancellations = None if self.cancellations is None else self.cancellations.receive(completions)
+        history = None if self.cancellation_target_history is None else self.cancellation_target_history.receive(targets)
         cancellation_fault = completions.fault if cancellations is None else cancellations.completions.fault
+        if history is not None:
+            cancellation_fault = cancellation_fault | history.targets.fault
         # Registry只在首次领取路径更新。Ledger再试始终引用原waiting和首次visibility。
         waiting = self.waiting.accept(self.ledger.columns, closed,source_rows=source_rows)
         # 原Registry接纳失败时不得继续提交同根Ledger；其它独立根仍能推进。
         ledger_input=replace(self.ledger,fault=self.ledger.fault | registry.events.fault | targets.fault | cancellation_fault | submission_bindings.fault)
         fault = closed.fault | registry.events.fault | targets.fault | cancellation_fault | waiting.fault | ledger_input.fault | submission_bindings.fault
-        return replace(self, pending_noe=pending, registry=registry, waiting=waiting, ledger=ledger_input, cancellations=cancellations, submission_bindings=submission_bindings), PublicDelivery(
+        return replace(self, pending_noe=pending, registry=registry, waiting=waiting, ledger=ledger_input, cancellations=cancellations, submission_bindings=submission_bindings,cancellation_target_history=history), PublicDelivery(
             closed, bindings, targets, completions, fault)
 
     def receive(self, bank, gates, association_available, *, passes=None):

@@ -202,7 +202,7 @@ def check(source,runtime,noe,sampler,asset_tokens,state,live_resources):
                 torch.ones_like(state.ledger.columns.enabled)))
             assert not held_delivery.closed.emitted.any().cpu().item()
             check_account(frame['joint_before_receive'],'joint_before_1506_response')
-            joint.freeze(state,t([1500]))
+            joint.freeze(state,t([1500]),noe.normalizer.bank)
         cutoff=t([frame['cutoff']]);gates=ReceiveGates.unset(1).set_receive(cutoff,yes).set_public(cutoff,yes)
         state,delivery=run(lambda:state.receive(noe.normalizer.bank,gates,torch.ones_like(state.ledger.columns.enabled)))
         assert delivery.fault.cpu().tolist()==[0] and delivery.closed.emitted.cpu().sum().item()==1
@@ -214,7 +214,7 @@ def check(source,runtime,noe,sampler,asset_tokens,state,live_resources):
         assert not (state.waiting.received&~state.waiting.consumed).any().cpu().item()
         check_account(frame['after'],'after_receive')
         if joint is not None and index==2:
-            joint.freeze(state,t([1600]))
+            joint.freeze(state,t([1600]),noe.normalizer.bank)
         intents=FrozenIntentOrders(yes[:,None],integers([1]),yes[:,None],rational(['5']),~yes[:,None],yes[:,None])
         frozen=run(lambda:state.freeze_account(intents,cutoff))
         assert frozen.orders.cancellable.cpu().tolist()==[[False]] and frozen.orders.matched_known.cpu().tolist()==[[True]]

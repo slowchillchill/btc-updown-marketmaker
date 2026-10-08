@@ -88,6 +88,13 @@ class JointFreezeValidation:
         # 只登记原Post合法腿；后继Query预留没有Post receipt，不能造为已提交腿。
         self.legs=self.run(lambda:SubmittedLegs(self.yes[:,None],self.yes[:,None],self.zero[:,None],
             self.zero[:,None],rational(['5']),self.yes[:,None],self.zero[:,None],self.zero[:,None],self.yes[:,None]))
+        if os.environ.get('B_GPU_ACTOR_PATH_VALIDATION')=='1':
+            from intent_terms import SubmittedBuyTerms
+            # 原发送正文提供不可变条款；公开Accepted才给订单建立origin。
+            terms=source['post_terms']['order']['kind']['GtcLimit']
+            self.legs=replace(self.legs,terms=self.run(lambda:SubmittedBuyTerms(self.zero[:,None],
+                torch.full_like(self.yes[:,None],terms['post_only']),rational([terms['limit_price_pusd_per_share']]),
+                rational(['0']),self.zero[:,None])))
         self.identities=torch.zeros((1,3),dtype=torch.int64,device='cuda')
         # 显式有限组件参数，不是正式profile/根预算；hidden数值从1500开始。
         torch.manual_seed(181)
@@ -95,7 +102,7 @@ class JointFreezeValidation:
         self.hidden=torch.zeros((2,1,64),device='cuda');self.initial_hidden=self.hidden.clone()
         self.version=self.zero+7;self.saved=None;self.captured_old=None
 
-    def freeze(self,state,cutoff):
+    def freeze(self,state,cutoff,bank=None):
         from input_account import account_inputs_at_prefix
         from portfolio_nav import PortfolioValuation
         from model_train.frozen_inputs import FrozenPolicyInputs100ms
@@ -144,14 +151,47 @@ class JointFreezeValidation:
                 (captured.value[1].provided,native.provided)):
             assert torch.equal(actual,expected)
         captured_market,captured_native,captured_account,captured_scopes=captured.value
-        if os.environ.get('B_GPU_ACTOR_CONTEXT_VALIDATION')=='1':
-            self.check_actor_context(captured_account,captured_scopes,captured_market)
+        actor_parts=None
+        if (os.environ.get('B_GPU_ACTOR_CONTEXT_VALIDATION')=='1'
+                or os.environ.get('B_GPU_ACTOR_PATH_VALIDATION')=='1'):
+            actor_parts=self.check_actor_context(captured_account,captured_scopes,captured_market)
         publishing_keys=self.identities.clone()
         owned=FrozenPolicyInputs100ms.publish(captured_market,captured_native,publishing_keys,captured.fits)
+        incoming_hidden=self.hidden
         with torch.no_grad():
             evaluated=self.policy.frozen_state_and_value(owned,self.hidden,self.identities,self.version)
             assert evaluated.ready.cpu().tolist()==[True] and evaluated.fault.cpu().tolist()==[0]
             self.hidden=evaluated.hidden
+        if os.environ.get('B_GPU_ACTOR_PATH_VALIDATION')=='1':
+            from model_train.device_actor_validation import check_joint
+            context,objects,directory=actor_parts
+            from intent_terms import freeze_intent_orders
+            from cancel_requests import CancellationScopes,freeze_cancel_snapshot,freeze_scoped_cancel_requests
+            from input_cancel import cancel_inputs
+            from model_train.action_inputs import ActorPolicyInputs
+            intents,error=self.run(lambda:freeze_intent_orders(self.legs,state.submission_bindings,
+                self.intents.identities,captured_account.orders.present))
+            assert error.cpu().tolist()==[0] and intents.origin_known.cpu().tolist()==[[True]]
+            targets=state.cancellation_target_history.targets
+            assert targets.fault.cpu().tolist()==[0] and targets.received.any().cpu().item()
+            # 原显式单笔Cancel请求scope包含已终态sim-1，不按当前eligible对象裁掉。
+            request_scopes=CancellationScopes(~self.yes[:,None],self.zero[:,None]-1,self.yes[:,None,None])
+            object_scopes=CancellationScopes(objects.kinds==2,objects.markets,objects.members)
+            location=self.zero[:,None];known=self.yes[:,None]
+            snapshot=self.run(lambda:freeze_cancel_snapshot(state.cancellations,request_scopes,
+                object_scopes,objects.present,location,known,captured_account.orders.present,targets,cutoff))
+            requests=self.run(lambda:freeze_scoped_cancel_requests(snapshot.state,request_scopes,
+                object_scopes,location,snapshot.location_known,snapshot.targets,cutoff))
+            data=self.run(lambda:cancel_inputs(objects,directory,intents,captured_account.orders,
+                captured_account.order_sources,captured_account.ledger.order_funds,
+                captured_account.ledger.order_funds.read(captured_account.ledger.lifecycle),
+                bank,requests,cutoff,location,self.zero[:,None],self.zero[:,None],
+                self.zero[:,None,None].expand(-1,2,-1),torch.stack((self.yes,~self.yes),1)[:,:,None]))
+            assert data.fault.cpu().tolist()==[0]
+            learning_evaluation=self.policy.frozen_state_and_value(owned,incoming_hidden,self.identities,self.version)
+            inputs=ActorPolicyInputs.publish(context,captured_market,owned,learning_evaluation,data)
+            check_joint(self.policy,inputs,self.artifact,len(self.rows),self.actor_reports,
+                published_sources=(captured_market,learning_evaluation,data))
         self.rows.append(owned)
         if self.saved is None:
             self.saved={name:getattr(owned,name).clone() for name in owned.__dataclass_fields__}
@@ -259,6 +299,7 @@ class JointFreezeValidation:
         self.actor_reports.append({'actor_exact_context_cutoff':int(context.cutoff.cpu()[0]),
             'cash_micro':values(context.cash_micro),'cap_centishares':values(context.cap_centishares),
             'empty_member_market_object':True})
+        return context,objects,directory
 
     def finish(self):
         assert len(self.rows)==2

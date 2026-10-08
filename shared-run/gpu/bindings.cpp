@@ -52,6 +52,85 @@ class DeviceConditionalLoop {
     C10_CUDA_CHECK(cudaGraphLaunch(executable_, c10::cuda::getCurrentCUDAStream().stream()));
   }
 };
+// 按设备许可执行静态阶段图，再由设备决定是否继续。只持有图，不调度业务或训练梯度。
+class DeviceConditionalSequenceLoop {
+  torch::Tensor ready_;
+  std::vector<torch::Tensor> conditions_;
+  cudaGraph_t graph_ = nullptr;
+  cudaGraphExec_t executable_ = nullptr;
+ public:
+  DeviceConditionalSequenceLoop(uint64_t entry, std::vector<uint64_t> bodies,
+      std::vector<torch::Tensor> conditions, torch::Tensor ready)
+      : ready_(ready), conditions_(std::move(conditions)) {
+    TORCH_CHECK(ready.is_cuda() && ready.scalar_type()==torch::kBool && ready.dim()==0
+        && ready.is_contiguous(), "循环条件须为连续CUDA bool标量");
+    TORCH_CHECK(bodies.size()==conditions_.size() && !bodies.empty(), "阶段图与许可须一一对应");
+    for (const auto& flag : conditions_)
+      TORCH_CHECK(flag.device()==ready.device() && flag.scalar_type()==torch::kBool
+          && flag.dim()==0 && flag.is_contiguous(), "阶段许可须同设备连续bool标量");
+    const c10::cuda::CUDAGuard guard(ready.device());
+    try {
+      C10_CUDA_CHECK(cudaGraphCreate(&graph_,0));
+      cudaGraphConditionalHandle handle;
+      C10_CUDA_CHECK(cudaGraphConditionalHandleCreate(&handle,graph_,0,0));
+      cudaGraphNode_t start,setter,loop;
+      C10_CUDA_CHECK(cudaGraphAddChildGraphNode(&start,graph_,nullptr,0,reinterpret_cast<cudaGraph_t>(entry)));
+      C10_CUDA_CHECK(public_graph_condition_node(&setter,graph_,start,handle,ready.data_ptr<bool>()));
+      cudaGraphNodeParams params{};
+      params.type=cudaGraphNodeTypeConditional;params.conditional.handle=handle;
+      params.conditional.type=cudaGraphCondTypeWhile;params.conditional.size=1;
+      C10_CUDA_CHECK(cudaGraphAddNode(&loop,graph_,&setter,1,&params));
+      auto body=params.conditional.phGraph_out[0];
+      cudaGraphNode_t previous=nullptr;
+      for (size_t i=0;i<bodies.size();++i) {
+        cudaGraphConditionalHandle selected;
+        C10_CUDA_CHECK(cudaGraphConditionalHandleCreate(&selected,graph_,0,0));
+        cudaGraphNode_t condition,branch,child;
+        C10_CUDA_CHECK(public_graph_condition_node(&condition,body,previous,selected,
+            conditions_[i].data_ptr<bool>()));
+        cudaGraphNodeParams stage{};
+        stage.type=cudaGraphNodeTypeConditional;stage.conditional.handle=selected;
+        stage.conditional.type=cudaGraphCondTypeIf;stage.conditional.size=1;
+        C10_CUDA_CHECK(cudaGraphAddNode(&branch,body,&condition,1,&stage));
+        C10_CUDA_CHECK(cudaGraphAddChildGraphNode(&child,stage.conditional.phGraph_out[0],nullptr,0,
+            reinterpret_cast<cudaGraph_t>(bodies[i])));
+        previous=branch;
+      }
+      cudaGraphNode_t tail;
+      C10_CUDA_CHECK(public_graph_condition_node(&tail,body,previous,handle,ready.data_ptr<bool>()));
+      C10_CUDA_CHECK(cudaGraphInstantiateWithFlags(&executable_,graph_,0));
+    } catch (...) {
+      if (executable_) cudaGraphExecDestroy(executable_);
+      if (graph_) cudaGraphDestroy(graph_);
+      throw;
+    }
+  }
+  DeviceConditionalSequenceLoop(const DeviceConditionalSequenceLoop&)=delete;
+  ~DeviceConditionalSequenceLoop() {
+    if (executable_) cudaGraphExecDestroy(executable_);
+    if (graph_) cudaGraphDestroy(graph_);
+  }
+  void replay() {
+    const c10::cuda::CUDAGuard guard(ready_.device());
+    C10_CUDA_CHECK(cudaGraphLaunch(executable_,c10::cuda::getCurrentCUDAStream().stream()));
+  }
+};
+extern "C" void public_gpu_policy_uniform(const int64_t*,const int64_t*,const bool*,double*,int64_t,cudaStream_t);
+torch::Tensor policy_uniform(torch::Tensor seed,torch::Tensor counter,torch::Tensor enabled) {
+  TORCH_CHECK(seed.is_cuda() && seed.scalar_type()==torch::kInt64 && seed.dim()==1 && seed.is_contiguous()
+      && counter.device()==seed.device() && counter.scalar_type()==torch::kInt64
+      && counter.is_contiguous() && counter.dim()==2 && counter.size(0)==seed.size(0)
+      && counter.size(1)==4,"随机源需要同设备seed[R]/128位游标[R,4]低字在前");
+  TORCH_CHECK(enabled.device()==seed.device() && enabled.scalar_type()==torch::kBool
+      && enabled.sizes()==seed.sizes() && enabled.is_contiguous(),"随机许可须为同根连续bool");
+  TORCH_CHECK(seed.numel()<=int64_t(INT32_MAX)*256,"随机物理人口超过CUDA grid.x容量");
+  const c10::cuda::CUDAGuard guard(seed.device());
+  auto output=torch::empty_like(seed,seed.options().dtype(torch::kFloat64));
+  if (seed.numel()) public_gpu_policy_uniform(seed.data_ptr<int64_t>(),counter.data_ptr<int64_t>(),
+      enabled.data_ptr<bool>(),output.data_ptr<double>(),seed.numel(),c10::cuda::getCurrentCUDAStream().stream());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
 extern "C" void public_gpu_decimal(const uint8_t*, int64_t, const int64_t*,
     const bool*, uint32_t*, uint32_t*, int8_t*, int32_t*, int32_t*, int64_t, cudaStream_t);
 extern "C" void sim_gpu_snapshot_gather(const int64_t*, const int64_t*, const bool*,
@@ -401,6 +480,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   pybind11::class_<DeviceConditionalLoop>(m, "DeviceConditionalLoop")
       .def(pybind11::init<uint64_t, uint64_t, torch::Tensor>())
       .def("replay", &DeviceConditionalLoop::replay);
+  pybind11::class_<DeviceConditionalSequenceLoop>(m,"DeviceConditionalSequenceLoop")
+      .def(pybind11::init<uint64_t,std::vector<uint64_t>,std::vector<torch::Tensor>,torch::Tensor>())
+      .def("replay",&DeviceConditionalSequenceLoop::replay);
+  m.def("policy_uniform",&policy_uniform);
   m.def("ordered_attribution", &ordered_attribution);
   m.def("sim_trade_key", &sim_trade_key);
   m.def("integer_op", &integer_op);

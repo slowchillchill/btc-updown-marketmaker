@@ -70,9 +70,11 @@ def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=Fa
     if source.get('joint_public') is not None:
         from registry import PublicCancellationState
         from commitments import SubmissionBindings
+        from cancel_projection import CancellationTargetHistory
         from dataclasses import replace
         state=replace(state,cancellations=run(lambda:PublicCancellationState.open(integers([1]),~active[:,None])),
-            submission_bindings=SubmissionBindings.empty(1,'cuda',prefix_known=True))
+            submission_bindings=SubmissionBindings.empty(1,'cuda',prefix_known=True),
+            cancellation_target_history=run(lambda:CancellationTargetHistory.open(order.sequence,active[:,None])))
     for batch in batches[1:]:
         state=run(lambda:state.append_batch(noe.normalizer.bank,batch))
     cutoff=tensor([source['prior_closed_at']])
@@ -80,6 +82,8 @@ def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=Fa
     state,delivery=run(lambda:state.receive(noe.normalizer.bank,gates,
         torch.ones_like(state.ledger.columns.enabled)))
     assert delivery.fault.cpu().tolist()==[0]
+    if state.cancellation_target_history is not None:
+        assert state.cancellation_target_history.targets.received.shape==(1,0)
     assert not (state.waiting.received & ~state.waiting.consumed).any().cpu().item()
     assert delivery.closed.emitted.sum().cpu().item()==len(source['prior_records'])
     expected=source['cancel_ledger_before']['projection']
@@ -140,6 +144,29 @@ def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=Fa
     state,delivery=run(lambda:state.receive(noe.normalizer.bank,gates,
         torch.ones_like(state.ledger.columns.enabled)))
     assert delivery.fault.cpu().tolist()==[0]
+    if state.cancellation_target_history is not None:
+        history=state.cancellation_target_history
+        assert history.targets.received.cpu().tolist()==[[True]]
+        assert history.targets.scopes.order_members.cpu().tolist()==[[[True]]]
+        assert history.targets.outcomes.cpu().tolist()==[[0]]
+        assert values(history.targets.requests)==[1]
+        old_width=history.targets.received.shape[1]
+        before_targets=history.targets.received.clone();before_outcomes=history.targets.outcomes.clone()
+        repeated,empty=run(lambda:state.receive(noe.normalizer.bank,gates,torch.ones_like(state.ledger.columns.enabled)))
+        assert not empty.closed.emitted.any().cpu().item()
+        same=repeated.cancellation_target_history.targets
+        assert same.received.shape[1]==old_width and same.received.data_ptr()==history.targets.received.data_ptr()
+        assert torch.equal(history.targets.received,before_targets) and torch.equal(same.outcomes,before_outcomes)
+        assert values(repeated.ledger.current_entry_sequence)==values(state.ledger.current_entry_sequence)
+        from queues import _take
+        # 只增长/重排物理目录，空槽没有业务身份人口；原终态sim-1仍被目标引用。
+        grown_sequences=_take(history.order_sequences,tensor([0,0]))
+        grown=run(lambda:history.with_orders(grown_sequences,tensor([[False,True]],torch.bool)))
+        assert grown.targets.fault.cpu().tolist()==[0]
+        assert grown.targets.scopes.order_members.cpu().tolist()==[[[False,True]]]
+        assert values(grown.targets.requests)==values(history.targets.requests)
+        assert torch.equal(grown.targets.outcomes,history.targets.outcomes)
+        assert history.targets.scopes.order_members.cpu().tolist()==[[[True]]]
     actual=[row_reference[row]['position'] for row,present in zip(delivery.closed.record_refs.cpu().tolist()[0],
         delivery.closed.emitted.cpu().tolist()[0]) if present]
     assert actual==[reference['position'] for reference in source['cancel_records']]

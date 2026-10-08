@@ -445,6 +445,29 @@ fn small_domain_joint_probability_entropy_and_singleton_optimizer() {
     eprintln!("{report}");
     h.driver.stop_and_drain().unwrap();
 }
+#[cfg(feature = "python")]
+#[test]
+#[ignore = "requires locked GPU Python; full device paths and original joint/AdamW reference"]
+fn device_full_actor_path_matches_original_probability_and_optimizer() {
+    use pyo3::prelude::*;
+    let mut h = fixture_cash("0.0006");
+    let group = Arc::new(ready(&mut h));
+    let actor = NativeActor::new(group.clone(), 0).unwrap();
+    assert_eq!(actor.root_upper(Family::SubmitPairedBuy).unwrap(), 3u32.into());
+    let context = actor.gpu_context_reference();
+    let report: String = Python::attach(|py| {
+        let module = py.import("model_train.device_actor_validation").unwrap();
+        let native = Py::new(py, crate::python::PythonGroup { group }).unwrap();
+        let source = crate::python::value(py, serde_json::json!({"actor_context":context})).unwrap();
+        let history = crate::python::value(py,
+            serde_json::Value::Array(h.groups[..h.groups.len() - 1].to_vec())).unwrap();
+        module.getattr("run").unwrap().call1((native, source, history)).unwrap().extract().unwrap()
+    });
+    let path = std::env::var("B_GPU_ACTOR_PATH_REPORT").unwrap();
+    std::fs::write(path, &report).unwrap();
+    eprintln!("{report}");
+    h.driver.stop_and_drain().unwrap();
+}
 fn leg_values(order: &BuyOrderIntentV1) -> (Decimal, Decimal, Decimal) {
     match order {
         BuyOrderIntentV1::GtcLimit {
@@ -1485,7 +1508,9 @@ async fn actual_single_repair_cap_counts_visible_success_and_nonterminal_commitm
             assert!(read.pending_noe_record_count() > 0);
             if let Some(directory)=std::env::var_os("B_GPU_ACTOR_CANCEL_REFERENCE") {
                 let report=serde_json::json!({"cutoff":at,"actor_context":actor.gpu_context_reference(),
-                    "actor_paths":gpu_actor_paths(group.clone(),&[0,1,2,3,4,5])});
+                    "actor_paths":gpu_actor_paths(group.clone(),&[0,1,2,3,4,5]),
+                    "rule_features":group.rows[0].rule.as_slice(),"cancel_features":group.cancel,
+                    "fok_trace":gpu_actor_trace(group.clone(),1,true)});
                 std::fs::write(std::path::Path::new(&directory).join("repair-before-economic.json"),
                     serde_json::to_vec_pretty(&report).unwrap()).unwrap();
             }
@@ -2103,6 +2128,29 @@ pub(crate) fn gpu_actor_paths(group: Arc<NativeInputGroup>, families: &[usize]) 
             "price_indices":actor.state.legs.iter().map(|leg|leg.price_index.as_ref().map(ToString::to_string)).collect::<Vec<_>>() }));
     }
     serde_json::json!({"family_support":family_support,"traces":traces})
+}
+
+/// 有限参考仅选已有合法最高数量/FOK，完整支持仍来自原NativeActor。
+fn gpu_actor_trace(group:Arc<NativeInputGroup>,family:usize,prefer_fok:bool)->serde_json::Value {
+    let mut actor=NativeActor::new(group,0).unwrap();
+    let mut steps=Vec::new();let mut choice=family;
+    loop {
+        let mask=actor.support().unwrap();
+        steps.push(serde_json::json!({"stage":format!("{:?}",actor.state.stage),"mask":mask,
+            "choice":choice,"prefix_features":actor.prefix_features().to_vec(),
+            "price_indices":if matches!(actor.state.stage,Stage::Price(_)){actor.price_indices().unwrap()}else{vec![]},
+            "price_fee_features":if matches!(actor.state.stage,Stage::Price(_)){actor.price_fee_features().unwrap()}else{vec![]}}));
+        actor.choose(choice).unwrap();
+        if actor.is_complete(){break;}
+        let support=actor.support().unwrap();
+        choice=match actor.state.stage {
+            Stage::QuantityBranch if prefer_fok=>support.iter().rposition(|v|*v).unwrap(),
+            Stage::Variant(_) if prefer_fok&&support[1]=>1,
+            _=>support.iter().position(|v|*v).unwrap(),
+        };
+    }
+    serde_json::json!({"family":family,"steps":steps,"path":actor.path,
+        "variants":actor.state.legs.iter().map(|v|v.variant.map(|v|format!("{v:?}"))).collect::<Vec<_>>()})
 }
 
 #[tokio::test(flavor = "current_thread")]

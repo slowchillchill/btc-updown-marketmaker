@@ -13,5 +13,6 @@ extern "C" cudaError_t public_graph_condition_node(cudaGraphNode_t* node, cudaGr
   params.gridDim = dim3(1);
   params.blockDim = dim3(1);
   params.kernelParams = args;
-  return cudaGraphAddKernelNode(node, graph, &predecessor, 1, &params);
+  return cudaGraphAddKernelNode(node, graph, predecessor ? &predecessor : nullptr,
+      predecessor ? 1 : 0, &params);
 }

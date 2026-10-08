@@ -34,6 +34,64 @@ class PublicCancellationRows:
     fault: torch.Tensor
 
 
+@dataclass(frozen=True)
+class CancellationTargetHistory:
+    """首次领取的完整目标历史及同轴身份目录；不借当前可撤订单人口。
+
+    open只用于调用者已从真实开户/检查点证明完整空历史的入口。None表示
+    没有安装历史。目录保持终态、被请求或被原目标引用的订单身份。
+    """
+    order_sequences: object
+    order_present: torch.Tensor
+    targets: object
+
+    @classmethod
+    def open(cls,sequences,present):
+        roots,count=present.shape;device=present.device
+        if (present.dtype!=torch.bool or sequences.sign.numel()!=present.numel()
+                or sequences.words.device!=device):
+            raise TypeError('取消目标目录需要同设备完整身份轴')
+        blank=present[:,:0];columns=torch.empty((roots,0),dtype=torch.int64,device=device)
+        zero=ExactInt.from_i64_tensor(columns.flatten())
+        scopes=CancellationScopes(blank,columns,torch.empty((roots,0,count),dtype=torch.bool,device=device))
+        targets=CancellationTargets(blank,zero,scopes,columns,columns,
+            torch.zeros(roots,dtype=torch.int32,device=device))
+        return cls(sequences,present,targets)
+
+    def receive(self,rows):
+        # 与唯一receive共同返回候选；Ledger等待/重试不调用本方法。
+        from dataclasses import replace
+        incoming=targets_from_rows(rows,self.order_sequences,self.order_present)
+        roots,source_width=incoming.received.shape
+        # 现有首次领取的冷人口装箱边界：只追加自然批的真实目标，不把全部NOE
+        # 物理width/空领取padding复制为目标历史。后继固定容量宿主仍未交付。
+        width=int(incoming.received.to(torch.int64).sum(1).max().cpu())
+        if not width:
+            return replace(self,targets=replace(self.targets,fault=self.targets.fault|incoming.fault))
+        columns=(~incoming.received).long().argsort(1,stable=True)[:,:width]
+        coordinates=(torch.arange(roots,device=columns.device)[:,None]*source_width+columns).flatten()
+        select=lambda value:value.gather(1,columns)
+        scopes=CancellationScopes(select(incoming.scopes.market_kind),select(incoming.scopes.markets),
+            incoming.scopes.order_members.gather(1,columns[:,:,None].expand(-1,-1,self.order_present.shape[1])))
+        packed=CancellationTargets(select(incoming.received),_take(incoming.requests,coordinates),scopes,
+            select(incoming.outcomes),select(incoming.available_at),incoming.fault)
+        return replace(self,targets=append_targets(self.targets,packed))
+
+    def with_orders(self,sequences,present):
+        """冷目录增长/重排；保原目标成员，旧候选和旧冻结不随新轴覆盖。"""
+        from dataclasses import replace
+        roots,old_count=self.order_present.shape;new_count=present.shape[1]
+        same,error=identity_matches(self.order_sequences,sequences,roots,old_count,new_count)
+        same=same&self.order_present[:,:,None]&present[:,None,:]
+        members=(self.targets.scopes.order_members[:,:,:,None]&same[:,None,:,:]).any(2)
+        referenced=self.targets.scopes.order_members.any(1)
+        missing=referenced&(same.to(torch.int64).sum(2)!=1)
+        fault=self.targets.fault|missing.any(1).to(torch.int32)
+        fault|=Numbers.combine_fault_rows(torch.where(referenced[:,:,None],error,0).flatten(1))
+        targets=replace(self.targets,scopes=replace(self.targets.scopes,order_members=members),fault=fault)
+        return type(self)(sequences,present,targets)
+
+
 def frozen_cancellation_outcomes(bank,selected):
     """只解当次FrozenOrderSources已选latest_cancel正文，不再选一次latest。
 
