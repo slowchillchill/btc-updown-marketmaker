@@ -2896,3 +2896,83 @@ fn thin_reference_facts_match_full_actual_reductions() {
         );
     }
 }
+
+#[test]
+fn recording_counts_skip_observation_projection_and_preserve_core_state() {
+    let mut full = core();
+    let mut recording = core();
+    let inputs = [
+        meta(0),
+        pm(1, 81856, 21_605, book("4557.61")),
+        record(
+            2,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot("a", 100, 1))),
+        ),
+        record(
+            3,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(update(
+                "a",
+                101,
+                101,
+                2,
+                Some(100),
+                None,
+                BinanceDepthStitchVerdict::Applied,
+                vec![level("64000", "0.8")],
+            ))),
+        ),
+        record(
+            4,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(update(
+                "a",
+                103,
+                103,
+                3,
+                Some(100),
+                Some(101),
+                BinanceDepthStitchVerdict::NotAppliedConfirmedHole,
+                vec![],
+            ))),
+        ),
+        record(
+            5,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot("b", 200, 1))),
+        ),
+    ];
+    for input in inputs {
+        let expected = push(&mut full, &input);
+        let ids = BTreeMap::new();
+        let prepared = prepare_public_ingress_v1(&recording, &input, &ids, &[]).unwrap();
+        let actual = crate::without_identity_encoding(|| recording.push_recording(&prepared))
+            .unwrap()
+            .into_owned();
+        assert_eq!(actual.applied_prefix, expected.applied_prefix);
+        assert_eq!(actual.closed_groups.len(), expected.closed_groups.len());
+        for (actual, expected) in actual.closed_groups.iter().zip(&expected.closed_groups) {
+            assert_eq!(actual.group_id, expected.group_id);
+            assert_eq!(actual.group_position, expected.group_position);
+            assert_eq!(
+                actual.member_input_positions,
+                expected.member_input_positions
+            );
+            assert_eq!(
+                actual.closed_at_input_position,
+                expected.closed_at_input_position
+            );
+            assert_eq!(actual.records, expected.records);
+            assert_eq!(actual.observation_count, expected.observations.len() as u64);
+            assert_eq!(actual.observation_count, 1);
+        }
+        // 缓存只在完整观察构造块内生成：计数路径未进入该块。
+        assert!(recording.current_depth_projection.is_none());
+        assert!(full.current_depth_projection.is_some());
+    }
+    let end = RecordedIngressV1 {
+        input_stream_id: "core-test".into(),
+        input_position: 6,
+        ingress: DptIngressV1::EndOfInput,
+        dependency_record_refs: vec![],
+    };
+    // 切回正常入口后完整观察与未知状态、深度和证据仍逐字段相同。
+    assert_eq!(push(&mut full, &end), push(&mut recording, &end));
+}
