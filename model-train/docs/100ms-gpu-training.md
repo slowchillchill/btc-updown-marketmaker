@@ -799,12 +799,19 @@ waiting；原生图消费者沿同一候选共同提交这些需求对应的资�
 归约器，不使用公共 PM 派生步骤替代 hidden。配置显式给出 `max_packet_bytes`、
 `consumer_stream_id` 和 `SortConfig`，包括实际 CPU 跨 run 归并的 `merge_workers`。
 
-产物 `compact_hidden_source_steps_v1` 保存压缩消息步骤、固定偏移/位置列和真实时间
+新产物 `compact_hidden_source_steps_v2` 保存压缩消息步骤、固定偏移/位置列和真实时间
 索引。首次盘口步骤引用公共原输入；恢复时核对原消息、代际、游标、盘口摘要和原
 物化身份。已初始化资产换代后的恢复沿原 Reset/重校准转移，不生成第二次首次快照。
 消息/参考人口与完整原来源闭合，可索引步骤人口与完整步骤载荷闭合；成员哈希不能
 代替这些关系检查。所有文件刷新、同步和摘要完成后，凭据随目录原子发布且不覆盖
 现有目标。失败保留本构建的 pending 目录，不发布部分结果。
+
+JSON字段保持原结构。files前三项仍为消息／偏移／位置，后面按序列全部索引片：
+hidden_index.parquet、hidden_index-part-00001.parquet等，名字沿原part_path连续生成。
+同一manifest是唯一片清单，没有.parts.json。新reader严格支持旧v1四成员与新v2三固定
+成员加至少一索引片，逐片核字节／SHA；旧reader明确拒v2。读取复用PartCursor，片边界
+不重置索引位置或关闭桶。旧v1材料与已绑定缓存原样可用；新v2有自己的manifest SHA，
+须从新材料重建派生缓存，不能只改旧缓存绑定。
 
 读取器通过下一全局时间或完整 EOF 关闭真实时间桶，Parquet 页末不关闭桶。它携带
 自身材料摘要及来源 `AppliedIngressPrefixV1`，不伪造旧 public recording 的稳定前缀。

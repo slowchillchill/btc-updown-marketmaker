@@ -6,7 +6,7 @@ use crate::{
     hidden_preparation::HiddenIndexEntryV1,
     historical_preparation_progress::HistoricalPreparationNotifierV1,
     public_recording::RecordingResult,
-    ExternalSorter, InitialRunOrder, RunCursor, SortConfig, SortRow,
+    ExternalSorter, InitialRunOrder, PartCursor, SortedRun, SortConfig, SortRow,
 };
 use contracts::*;
 use data_pipeline_core::pm_reduction::{MaterializedPmReductionV1, PmReductionStepV1,
@@ -24,8 +24,31 @@ pub struct CompactHiddenPreparationConfigV1 {
     pub consumer_stream_id: String,
 }
 
-const VERSION: &str = "compact_hidden_source_steps_v1";
+const VERSION_V1: &str = "compact_hidden_source_steps_v1";
+const VERSION: &str = "compact_hidden_source_steps_v2";
 const MEMBERS: [&str; 4] = ["hidden_messages.bin", "message_offsets.u64le", "message_positions.u64le", "hidden_index.parquet"];
+
+fn index_member(part: usize) -> String {
+    if part == 0 { MEMBERS[3].into() }
+    else { crate::part_path(Path::new(MEMBERS[3]), part).file_name().unwrap().to_string_lossy().into_owned() }
+}
+
+// 同一最终索引移交用于生产发布；只保存已有有序片，不生成第二份清单。
+pub(super) fn publish_index_parts(run: SortedRun, pending: &Path, interval: Duration,
+    progress: &mut impl FnMut(&str, &str, u64, Option<u64>)) -> RecordingResult<Vec<CompactFileV1>> {
+    let mut files = Vec::with_capacity(run.parts.len());
+    for (part, source) in run.parts.into_iter().enumerate() {
+        let name = index_member(part);
+        let path = pending.join(&name);
+        fs::rename(source, &path)?;
+        File::open(&path)?.sync_all()?;
+        files.push(CompactFileV1 {name: name.clone(), bytes: path.metadata()?.len(),
+            sha256: file_sha256_with_progress(&path, interval, |done,total| {
+                progress("hidden_member_sha256", &name, done, Some(total));
+            })?});
+    }
+    Ok(files)
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -176,25 +199,25 @@ pub fn prepare_compact_hidden_material_with_interval_v1(
     crate::historical_preparation_progress::notify(progress,
         crate::historical_preparation_progress::HistoricalPreparationNoticeV1::Stage(
             crate::historical_preparation_progress::HistoricalPreparationStageV1::HiddenFinalize));
-    let (index_path, index_metrics) = index.finish_single_file_with_progress(&mut |notice| {
+    let (index_run, index_metrics) = index.finish_with_progress(&mut |notice| {
         crate::historical_preparation_progress::notify(progress,
             crate::historical_preparation_progress::HistoricalPreparationNoticeV1::SourceMergeProgress {index: 0, progress: notice});
     })?;
     crate::historical_preparation_progress::notify(progress,
         crate::historical_preparation_progress::HistoricalPreparationNoticeV1::HiddenIndexSorted(index_metrics));
-    fs::rename(index_path, pending.join(MEMBERS[3]))?;
+    let index_files = publish_index_parts(index_run, &pending, interval, &mut publication_progress)?;
     fs::remove_dir_all(pending.join("index"))?;
-    File::open(pending.join(MEMBERS[3]))?.sync_all()?;
     let mut files = Vec::new();
-    for name in MEMBERS {
+    for name in &MEMBERS[..3] {
         let path = pending.join(name);
         files.push(CompactFileV1 {
-            name: name.into(), bytes: path.metadata()?.len(),
+            name: (*name).into(), bytes: path.metadata()?.len(),
             sha256: file_sha256_with_progress(&path, interval, |done, total| {
                 publication_progress("hidden_member_sha256", name, done, Some(total));
             })?,
         });
     }
+    files.extend(index_files);
     let manifest = CompactHiddenManifestV1 {version: VERSION.into(), source_manifest_sha256,
         summary, indexed_steps, normal_end: true, files};
     let mut receipt = File::create_new(pending.join("manifest.json"))?;
@@ -236,7 +259,7 @@ pub struct CompactHiddenMaterialReaderV1 {
     cached_steps: Vec<PmReductionStepV1<'static, SourceEvidenceRefV3>>,
     #[cfg(test)]
     message_loads: u64,
-    index: RunCursor,
+    index: PartCursor,
     next: Option<HiddenIndexEntryV1>,
     position: u64,
     read_steps: u64,
@@ -267,8 +290,17 @@ impl CompactHiddenMaterialReaderV1 {
         max_packet_bytes: usize, interval: Duration,
         mut progress: impl FnMut(&str, &str, u64, Option<u64>)) -> RecordingResult<Self> {
         let manifest: CompactHiddenManifestV1 = serde_json::from_reader(File::open(root.join("manifest.json"))?)?;
-        if manifest.version != VERSION || !manifest.normal_end || manifest.files.len() != MEMBERS.len() {
+        let valid_members = match manifest.version.as_str() {
+            VERSION_V1 => manifest.files.len() == MEMBERS.len(),
+            VERSION => manifest.files.len() >= MEMBERS.len(),
+            _ => false,
+        };
+        if !valid_members || !manifest.normal_end {
             return Err(io::Error::other("hidden材料完成凭据不合法").into());
+        }
+        for (position, file) in manifest.files.iter().enumerate() {
+            let expected = if position < 3 { MEMBERS[position].into() } else { index_member(position-3) };
+            if file.name != expected { return Err(io::Error::other("hidden成员名称/顺序不匹配").into()); }
         }
         if manifest.indexed_steps > manifest.summary.steps {
             return Err(io::Error::other("hidden索引步骤超出实际步骤数量").into());
@@ -315,8 +347,9 @@ impl CompactHiddenMaterialReaderV1 {
             || expected_references.len() as u64 != manifest.summary.references {
             return Err(io::Error::other("hidden消息/参考人口与原完整来源不闭合").into());
         }
-        for (file,name) in manifest.files.iter().zip(MEMBERS) {
-            if file.name != name || fs::metadata(root.join(name))?.len() != file.bytes {
+        for file in &manifest.files {
+            let name = file.name.as_str();
+            if fs::metadata(root.join(name))?.len() != file.bytes {
                 return Err(io::Error::other("hidden成员名称/大小不匹配").into());
             }
             let hash = file_sha256_with_progress(&root.join(name), interval, |done,total| {
@@ -365,10 +398,11 @@ impl CompactHiddenMaterialReaderV1 {
         let material_manifest_sha256 = file_sha256_with_progress(&root.join("manifest.json"), interval, |done,total| {
             progress("hidden_receipt_sha256", "manifest.json", done, Some(total));
         })?;
+        let index = PartCursor::open(&SortedRun {parts: manifest.files[3..].iter().map(|file| root.join(&file.name)).collect()}, rows, bytes)?;
         Ok(Self {manifest, material_manifest_sha256, source_scene, payload:File::open(root.join(MEMBERS[0]))?, offsets, messages,
             source, cached_message:None, cached_steps:Vec::new(),
             #[cfg(test)] message_loads:0, read_reports:0, expected_indexed_steps:0, expected_references, reference_facts:BTreeMap::new(), reference_locations:BTreeMap::new(), failed:false,
-            index:RunCursor::open(&root.join(MEMBERS[3]), rows, bytes)?, next:None, position:0,
+            index, next:None, position:0,
             read_steps:0, read_references:0, last_key:None, max_packet_bytes})
     }
 
@@ -681,10 +715,13 @@ mod tests {
 
     fn read_all(root: &Path, source: &Path, rows: usize) -> Vec<ClosedCompactHiddenBucketV1> {
         let mut reader = CompactHiddenMaterialReaderV1::open(root, source, rows, 1<<20, 1<<20, |_,_,_,_| {}).unwrap();
+        let expected_receipt = file_sha256_with_progress(&root.join("manifest.json"), Duration::ZERO, |_,_| {}).unwrap();
+        assert_eq!(reader.material_manifest_sha256, expected_receipt);
         let mut result = Vec::new();
         let mut snapshots = Vec::new();
         let mut transitions = Vec::new();
         while let Some(bucket) = reader.next_bucket().unwrap() {
+            assert_eq!(bucket.material_manifest_sha256, expected_receipt);
             for position in &bucket.reference_positions {
                 let fact = reader.reference_fact(*position).unwrap();
                 assert_eq!(fact.dependency_time.source_event_at_utc_ms,Some(bucket.bucket_time_utc_ms));
@@ -721,6 +758,37 @@ mod tests {
         result
     }
 
+    fn split_index_for_test(root: &Path, config: &crate::gate_a::GateAOutputConfig) -> CompactHiddenManifestV1 {
+        let mut manifest: CompactHiddenManifestV1 = serde_json::from_reader(File::open(root.join("manifest.json")).unwrap()).unwrap();
+        let run = SortedRun {parts: manifest.files[3..].iter().map(|file| root.join(&file.name)).collect()};
+        let work = root.join("split-test");
+        let mut cursor = PartCursor::open(&run, 1, 1<<20).unwrap();
+        let mut writer = crate::gate_a::SequentialCaptureWriter::create_segment("split-index", &work,
+            std::sync::Arc::new(std::sync::Mutex::new(0)), config).unwrap();
+        let mut sequence = 0;
+        while let Some(row) = cursor.next_row().unwrap() {
+            writer.push(sequence, row.sort_key_bytes().to_vec(), row.payload()).unwrap();
+            if sequence == 0 { writer.split_part_for_test().unwrap(); }
+            sequence += 1;
+        }
+        let locator = writer.close_segment().unwrap();
+        let split = SortedRun::read_parts(&locator).unwrap();
+        assert_eq!(split.parts.len(), 2);
+        drop(cursor);
+        for file in &manifest.files[3..] { fs::remove_file(root.join(&file.name)).unwrap(); }
+        manifest.files.truncate(3);
+        manifest.files.extend(publish_index_parts(split, root, Duration::ZERO, &mut |_,_,_,_| {}).unwrap());
+        fs::remove_dir_all(work).unwrap();
+        serde_json::to_writer(File::create(root.join("manifest.json")).unwrap(), &manifest).unwrap();
+        manifest
+    }
+
+    fn logical_buckets(mut buckets: Vec<ClosedCompactHiddenBucketV1>) -> Vec<ClosedCompactHiddenBucketV1> {
+        // 内容可比较，凭据必须各自绑定，不能改绑缓存或要求两版相同摘要。
+        for bucket in &mut buckets { bucket.material_manifest_sha256.clear(); }
+        buckets
+    }
+
     #[test]
     #[ignore = "AutoDL同桶多消息及下一桶预读，直接交物化步骤不重复读取来源"]
     fn gpu_bucket_source_materializes_same_time_messages_before_peek_once() {
@@ -742,6 +810,7 @@ mod tests {
         let mut sort = config().sort; sort.merge_workers = 8;
         prepare_compact_hidden_material_v1(&source_root,&target,1<<20,&sort,order,
             "same-time-gpu-consumer".into(),None,|_,_,_,_| {}).unwrap();
+        split_index_for_test(&target, &config());
         let mut reader = CompactHiddenMaterialReaderV1::open(&target,&source_root,1,1<<20,1<<20,|_,_,_,_| {}).unwrap();
         let first = crate::compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1(&mut reader).unwrap().unwrap();
         assert_eq!(first.bucket.bucket_time_utc_ms,20050);
@@ -805,7 +874,28 @@ mod tests {
         assert_eq!(manifest.summary.messages,3);
         assert_eq!(manifest.summary.steps,15);
         assert_eq!(manifest.summary.reports,6);
-        assert_eq!(fs::read_dir(&target).unwrap().count(),MEMBERS.len()+1);
+        assert_eq!(manifest.version, VERSION);
+        assert_eq!(manifest.files.len(), 4);
+        assert_eq!(fs::read_dir(&target).unwrap().count(),manifest.files.len()+1);
+        let single = read_all(&target,&source_root,1);
+        let single_sha = single[0].material_manifest_sha256.clone();
+        let legacy = temp.path().join("legacy-v1"); fs::create_dir(&legacy).unwrap();
+        for file in &manifest.files { fs::copy(target.join(&file.name), legacy.join(&file.name)).unwrap(); }
+        let mut old = serde_json::to_value(&manifest).unwrap(); old["version"] = serde_json::json!(VERSION_V1);
+        serde_json::to_writer(File::create(legacy.join("manifest.json")).unwrap(), &old).unwrap();
+        let old_buckets = read_all(&legacy,&source_root,1);
+        assert_ne!(old_buckets[0].material_manifest_sha256, single_sha);
+        assert_eq!(logical_buckets(old_buckets), logical_buckets(single.clone()));
+        let manifest = split_index_for_test(&target, &config());
+        assert_eq!(manifest.files.len(), 5);
+        assert_eq!(fs::read_dir(&target).unwrap().count(),manifest.files.len()+1);
+        let multiple = read_all(&target,&source_root,1);
+        assert_ne!(multiple[0].material_manifest_sha256, single_sha);
+        assert_eq!(logical_buckets(single), logical_buckets(multiple));
+        let subsequent = target.join(&manifest.files[4].name);
+        let missing = temp.path().join("missing-piece.parquet");fs::rename(&subsequent, &missing).unwrap();
+        assert!(CompactHiddenMaterialReaderV1::open(&target,&source_root,1,1<<20,1<<20,|_,_,_,_| {}).is_err());
+        fs::rename(missing, subsequent).unwrap();
         // 原输入才持久保存盘口；hidden快照步骤只有输入引用，没有再编码整侧。
         let mut reader = CompactHiddenMaterialReaderV1::open(&target,&source_root,1,1<<20,1<<20,|_,_,_,_| {}).unwrap();
         let positions:Vec<_> = reader.messages.keys().copied().collect();
@@ -866,7 +956,7 @@ mod tests {
         serde_json::to_writer(File::create(target.join("manifest.json")).unwrap(),&bad).unwrap();
         assert!(CompactHiddenMaterialReaderV1::open(&target,&source_root,1,1<<20,1<<20,|_,_,_,_| {}).is_err());
         serde_json::to_writer(File::create(target.join("manifest.json")).unwrap(),&manifest).unwrap();
-        let mut original = RunCursor::open(&target.join(MEMBERS[3]),1,1<<20).unwrap();
+        let mut original = PartCursor::open(&SortedRun {parts:manifest.files[3..].iter().map(|file|target.join(&file.name)).collect()},1,1<<20).unwrap();
         let replacement_root = temp.path().join("tamper-index");
         fs::create_dir(&replacement_root).unwrap();
         let mut replacement = ExternalSorter::new(&replacement_root,&sort).unwrap();
@@ -877,13 +967,13 @@ mod tests {
             replacement.push(row).unwrap();
         }
         assert!(removed);
-        let (index,_) = replacement.finish_single_file(None).unwrap();
-        fs::rename(index,target.join(MEMBERS[3])).unwrap();
+        let (index,_) = replacement.finish(None).unwrap();
+        drop(original);
+        for file in &manifest.files[3..] {fs::remove_file(target.join(&file.name)).unwrap();}
+        let replacement_files = publish_index_parts(index, &target, Duration::ZERO, &mut |_,_,_,_| {}).unwrap();
         let mut tampered:serde_json::Value = serde_json::to_value(&manifest).unwrap();
         tampered["indexed_steps"] = serde_json::json!(manifest.indexed_steps-1);
-        tampered["files"][3]["bytes"] = serde_json::json!(fs::metadata(target.join(MEMBERS[3])).unwrap().len());
-        tampered["files"][3]["sha256"] = serde_json::json!(file_sha256_with_progress(&target.join(MEMBERS[3]),
-            Duration::from_secs(10),|_,_| {}).unwrap());
+        tampered["files"] = serde_json::to_value(manifest.files[..3].iter().chain(&replacement_files).collect::<Vec<_>>()).unwrap();
         serde_json::to_writer(File::create(target.join("manifest.json")).unwrap(),&tampered).unwrap();
         let mut broken = CompactHiddenMaterialReaderV1::open(&target,&source_root,1,1<<20,1<<20,|_,_,_,_| {}).unwrap();
         loop {

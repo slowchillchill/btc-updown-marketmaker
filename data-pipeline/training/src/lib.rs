@@ -1484,14 +1484,6 @@ impl ExternalSorter {
         ))
     }
 
-    pub(crate) fn finish_single_file_with_progress(
-        self,
-        progress: &mut dyn FnMut(MergeProgress),
-    ) -> Result<(PathBuf, SortMetrics), SortError> {
-        let (run, metrics) = self.finish_mode(None, false, progress)?;
-        Ok((run.parts.into_iter().next().expect("单文件发布出口"), metrics))
-    }
-
     pub(crate) fn finish_single_with_digest(self) -> Result<SortOutcome, SortError> {
         let mut digest = logical_hasher();
         let (path, metrics) = self.finish_single_file(Some(&mut digest))?;
@@ -3521,7 +3513,19 @@ mod tests {
                 ParquetRecordBatchReaderBuilder::try_new(File::open(part).unwrap()).unwrap();
             assert_eq!(metadata.metadata().num_row_groups(), expected);
         }
-        let mut reader = PartCursor::open(&result.output_run, 1, cfg.max_run_bytes).unwrap();
+        let published = temp.path().join("compact-index"); fs::create_dir(&published).unwrap();
+        let files = crate::compact_hidden_material::publish_index_parts(result.output_run, &published,
+            std::time::Duration::ZERO, &mut |_,_,_,_| {}).unwrap();
+        assert_eq!(files.iter().map(|file| file.name.as_str()).collect::<Vec<_>>(),
+            ["hidden_index.parquet", "hidden_index-part-00001.parquet"]);
+        for file in &files {
+            let path = published.join(&file.name);
+            assert_eq!(file.bytes, fs::metadata(&path).unwrap().len());
+            assert_eq!(file.sha256, crate::compact_public::file_sha256_with_progress(&path,
+                std::time::Duration::ZERO, |_,_| {}).unwrap());
+        }
+        let run = SortedRun {parts: files.iter().map(|file| published.join(&file.name)).collect()};
+        let mut reader = PartCursor::open(&run, 1, cfg.max_run_bytes).unwrap();
         let mut independent = logical_hasher();
         for i in 0..n as u64 {
             let row = reader.next_row().unwrap().unwrap();

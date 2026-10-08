@@ -123,8 +123,12 @@ Binance 原输入带真实 `connection_generation`，代次变化或已知连续
 仍保留原 epoch 顺序，末端索引保留原 `(真实时间,派生位置)` 顺序。来源中没有真实
 时间的参考仍留在公共原材料，不伪造接收时间进入 hidden 索引。
 
-`compact_hidden_source_steps_v1` 保存原步骤和报告，初始盘口引用原输入，消息只保存
+新写 `compact_hidden_source_steps_v2` 保存原步骤和报告，初始盘口引用原输入，消息只保存
 一次。读取验证自身完成凭据、完整来源人口、固定位置/偏移、可索引步骤人口及原
 物化身份。完整桶由真实下一时间或 EOF 关闭；页边界不是业务关闭。发布刷新、同步、
 哈希并原子改名，不覆盖既有目录。此处是冷材料，不签发旧录制的稳定前缀，也不
-推进公开运行时可见性。CLI 参数与边界见[100ms技术说明](../../model-train/docs/100ms-gpu-training.md)。
+推进公开运行时可见性。manifest的前三成员仍为原消息／偏移／位置，随后有序声明全部
+索引片：首片hidden_index.parquet，后续复用原part_path连续命名，不另建.parts.json。
+新reader严格读取旧v1四成员或新v2至少四成员；旧reader不支持v2。全部片逐一核字节
+与SHA，片尾不闭桶。旧材料及其SHA绑定缓存不改；新manifest须重新派生设备列，不能
+改绑旧缓存。CLI 参数与边界见[100ms技术说明](../../model-train/docs/100ms-gpu-training.md)。
