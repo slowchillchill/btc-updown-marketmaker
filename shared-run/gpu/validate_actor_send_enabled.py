@@ -47,7 +47,7 @@ def repeated(value):
     raise TypeError(type(value))
 
 
-def check(source,page,compact):
+def check(source,page,compact,*,prepublish=False):
     started=time.perf_counter();yes=T([True,True],torch.bool);zero=T([0,0]);first=T([True,False],torch.bool)
     policy,single,_,control=make_parts(source,2)
     actor=replace(single.actor,**{name:(value if name in ('rules','condition_slots') else repeated(value))
@@ -135,9 +135,15 @@ def check(source,page,compact):
     assert waiting.complete.cpu().tolist()==[False,False] and waiting.receipt is None
     assert publication.action is None and random.counter.cpu().tolist()==[[0]*4]*2
     sender.receive=actual_receive
+    if prepublish:
+        publication.publish(driver,control,yes)
+        assert publication.published.cpu().tolist()==[True,True]
+        published_counter=random.counter.clone()
     result=sender.execute(clock,first)
-    assert publication.published.cpu().tolist()==[True,False]
-    assert random.counter[0,0].cpu().item()>0 and random.counter[1].cpu().tolist()==[0]*4
+    assert publication.published.cpu().tolist()==([True,True] if prepublish else [True,False])
+    assert random.counter[0,0].cpu().item()>0
+    if prepublish:assert torch.equal(random.counter,published_counter)
+    else:assert random.counter[1].cpu().tolist()==[0]*4
     assert publication.action.family.cpu().tolist()==[2,2]
     assert clock.public.pending_noe.active[1].sum().cpu().item()==2
     assert clock.public.waiting.received[1].sum().cpu().item()==0
@@ -150,6 +156,7 @@ def check(source,page,compact):
     result=sender.execute(clock,~first)
     assert publication.published.cpu().tolist()==[True,True]
     assert torch.equal(random.counter[0],old_counter) and random.counter[1,0].cpu().item()>0
+    if prepublish:assert torch.equal(random.counter,published_counter)
     assert sender.received.cpu().tolist()==[True,True]
     assert clock.public.pending_noe.active[1].sum().cpu().item()==0
     funds=run(clock.public.ledger.funds)
@@ -164,8 +171,8 @@ def check(source,page,compact):
     sender.execute(clock,~first)
     assert torch.equal(random.counter,after) and clock.public is state
     return dict(passed=True,scope='real Captured two independent roots / enabled publication RNG / production first claim / current Ledger refusal; SIM advancement and request dispatch not tested',
-        unpublished_early_stage_not_complete=True,claims=claims,published=publication.published.cpu().tolist(),counters=random.counter.cpu().tolist(),
+        published_at_completion_before_partial_reservation=prepublish,unpublished_early_stage_not_complete=True,claims=claims,published=publication.published.cpu().tolist(),counters=random.counter.cpu().tolist(),
         funds_before=[str(x) for x in before_funds],next_input=values(clock.runtime.input_frontier.next_sequence),elapsed_seconds=time.perf_counter()-started)
 
 if __name__=='__main__':
-    print(json.dumps(check(json.loads(Path(sys.argv[1]).read_text()),sys.argv[2],sys.argv[3])),flush=True)
+    print(json.dumps(check(json.loads(Path(sys.argv[1]).read_text()),sys.argv[2],sys.argv[3],prepublish='--prepublish' in sys.argv)),flush=True)

@@ -116,6 +116,18 @@ class PriceQueueBatch:
                        total_base=enlarged(self.total_base),total_quote=enlarged(self.total_quote),
                        consumed_base=enlarged(self.consumed_base),account_remaining=enlarged(self.account_remaining))
 
+    def append_empty_rows(self, price):
+        """为新合法报价建立空FIFO；旧行坐标、段与债务都不移动。"""
+        empty=type(self).empty(price,self.capacity)
+        def integer(left,right):
+            capacity=max(left.words.size(1),right.words.size(1))
+            left,right=left.with_capacity(capacity),right.with_capacity(capacity)
+            return ExactInt(torch.cat((left.words,right.words)),torch.cat((left.sign,right.sign)),torch.cat((left.fault,right.fault)))
+        return replace(self,price=ExactRational(integer(self.price.numerator,price.numerator),integer(self.price.denominator,price.denominator)),
+            kind=torch.cat((self.kind,empty.kind)),order_ids=torch.cat((self.order_ids,empty.order_ids)),
+            **{name:integer(getattr(self,name),getattr(empty,name)) for name in
+               ('total_base','total_quote','consumed_base','account_remaining','debt')},fault=torch.cat((self.fault,empty.fault)))
+
     def _compact(self, enabled=None):
         if enabled is None:
             enabled = torch.ones(self.rows, dtype=torch.bool, device=self.kind.device)

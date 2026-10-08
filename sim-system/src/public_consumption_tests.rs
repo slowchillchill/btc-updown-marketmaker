@@ -362,7 +362,11 @@ pub(super) fn gpu_public_for_order_fixture(
                     price:v.price_pusd_per_share.0.clone(),size:Some(v.quantity_after_shares.0.clone()),
                     side:if v.side==BookSide::Bid {PolymarketSide::Buy} else {PolymarketSide::Sell},best_bid:None,best_ask:None}],
             },
-            _=>panic!("这个夹具只重编码原初始Book与原PriceChange的源值，不抄before"),
+            ExecutionMarketEventPayloadV3::BestBidAsk(v)=>PolymarketOrderbookEvent::BestBidAsk {
+                asset_id:v.asset.token_id.0.clone(),best_bid:v.best_bid_pusd_per_share.as_ref().map(|v|v.0.clone()),
+                best_ask:v.best_ask_pusd_per_share.as_ref().map(|v|v.0.clone()),spread:None,
+            },
+            _=>panic!("这个夹具只重编码原Book、PriceChange与BestBidAsk的源值，不抄before"),
         };
         let source=event.time.source_event_at_utc_ms.expect("原PM须有真实源时刻");
         let mut pm=row("epoch-1",inputs.len() as u64,source,event.time.received_at_utc_ms,payload);

@@ -313,10 +313,16 @@ fn model_intent_requests_v2(input: &str) -> PyResult<String> {
 
 #[pymodule]
 fn model_native_inputs(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(sim_order_ids_v1, module)?)?;
     module.add_function(wrap_pyfunction!(post_terms_batch_v2, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_targets_batch_v2, module)?)?;
     module.add_function(wrap_pyfunction!(model_intent_requests_v2, module)?)?;
     module.add_class::<PythonGroup>()?;
     module.add_class::<PythonActor>()?;
     Ok(())
+}
+
+#[pyfunction]
+fn sim_order_ids_v1(sequences: Vec<u64>) -> Vec<String> {
+    sequences.into_iter().map(sim_system::platform_order_id_v1).collect()
 }

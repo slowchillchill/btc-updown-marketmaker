@@ -2003,3 +2003,56 @@ calculation_duration=114ms、dispatch_delay=0ms仅属于该具名有限工程场
 GPU运行耗时另记，不改变逻辑发送时间，不是正式延迟配置。本来源原请求／市场／账户证明
 该区间没有GTD、FAK、结算或终态经济义务；实际出现未装配阶段会报告缺口，不能用None隐藏。
 本切片不是完整无限宿主、持续形成／统一全时钟、完整结算、PPO、活动恢复或正式训练。
+
+
+### 同账户的有限连续Actor运行
+
+`shared-run/gpu/continuous_actor.py::ContinuousActorRun` 按实际逻辑时刻选择观察、
+模型开始、完成和发送。`model-train/model_train/continuous_inputs.py` 拥有 history、
+path 和 endpoint，成功冻结才提交候选记忆；每个完整组消费一次，静默窗不重复累计。
+公开订单沿同一个 Registry／SubmissionBindings、SubmittedLegs 和实际领取前缀生成，
+不从未来 SIM 订单补入冻结。公共协调层不导入具体模型。
+
+`ActorModelQueue` 保同根模型顺序，观察仍在模型忙时冻结排队。开始时绑定不可变策略
+及版本，所有 GRU 层沿前任务状态承接。模型完成 c 包含完整 Actor 选择、正文及一次
+业务 RNG 发布；发送 s 才在当时 Ledger 预留并登记原请求。NoAct／NoTrade 在完成时
+按原规则结束，不因 dispatch 延迟重抽。待发送动作按实际 s 排序，不要求发送 FIFO。
+首次 `_prepare` 从共享当前请求人口追加正文；已准备的稳定 item 引用及此前 receipt 保留。
+后完成而早发送的 Buy 不能被晚发送的旧任务覆盖。
+
+`sim-system/gpu/continuous_execution.py` 消费实际持久 Post／Cancel 正文，复用原 pending、
+hidden、finality 和 rebate 处理器。合法 GTC 编码价没有既有 bid 行时，在所属隐藏市场／
+FIFO 建立空行后继续原接单，不改变价格、数量或支持。资源不足保此前成功前缀和原 pending；
+连续协调返回原处理效果需求。冷增长后只续未提交项，不重复输入、RNG、经济效果或反馈。
+已发送且两腿处理时刻不同的公开形成仍取各腿自身时间。
+
+有限原材料从 C1300 连续到 C1900，保持同一 runtime 和账户。C1300 完成于 1414，
+显式 dispatch=120ms，发送于 1534；C1400 在其发送前冻结，模型完成于 1528。
+原旧 FOK 的可领取反馈先改变当前账户，新 Pair 在实际 SDK／市场状态中处理，随后公开取消。
+新 Pair 的完整 Submission Accepted received=1600；严格开放 C1600 不包含该响应，
+旧冻结保无对应 Pair origin。C1700 合法领取后才提供该 Pair，实际取消两腿在 1879 处理，
+结果容量 1→2 续接后于 C1900 领取。horizon=1901 保留未来模型完成和 2000 终态。
+另一代表让 C1400 也实际发送 Buy：1528 的正文先追加，1534 的正文随后追加，
+两请求原 item、ordinal、receipt 和冻结可见性均保留。
+
+`gpu_frozen_actor_sends_from_real_bounded_source` 通过配置连续验证器运行上述单账户链；
+`gpu_continuous_out_of_order_buy_population` 核真实两 Buy 错开发送。
+`continuous_actor_original_request_reference` 只对实际已发正文调用原 CPU 请求／处理／
+投影／Ledger；`validate_continuous_reference.py` 对有限两请求的逐项结果、完整 NOE 位置与
+正文及最终经济事实作独立后验，不向 GPU 提供调度或期望结果。该原有限材料没有有效 BBA／
+参考样本，因此它的增量记忆对照只覆盖空历史，不能证明非零 history／path 承接。
+
+`gpu_continuous_nonzero_history_preserves_windows` 另经原强类型事件解析、typed raw、Core 和 compact
+入口建立三条显式 BBA（中价 0.45／0.46／0.47，交付时刻 1251／1351／1451）。实际
+`ContinuousActorInputs` 在 C1300／1400／1500 保留 1／2／3 条历史，各窗只计新样本；之后
+静默窗清零 path，保留 history 与旧冻结。期望复用原历史公式，从这些源值与时刻独立计算。
+C1500 原事实窗口容量 1 实测需求 3；失败候选不提交完整 memory／endpoint，原
+`grow_resources` 后同窗只接纳一次。一次整段消费的对照先调用 freeze 清空 path，才比较
+成功逐窗冻结后的记忆；两种结果不能直接比较未清空的整段 path。
+
+模型完成时已发布而发送时晚启用的根，仍须按实际当前 Ledger 首次预留；未请求的 EMPTY
+结果不代表已完成资金决定。未知行情的原 `EvidenceUnknownNoEffect` 请求正常完成，不建立
+价格 0 的 GTC 队列。取消目录按各根实际请求身份更新，历史目标只在其原冻结下解码一次；
+较旧冻结晚发送不会重新解释较新请求。注册／完成公共读面的短组件检查与完整 SIM 取消／
+时延证据分开记录。工程权重和显式逻辑延迟不是 PPO 更新或正式训练配置；GPU 耗时另记。
+这些入口未证明无限宿主、跨日／终态结算、正式延迟 profile、PPO 或活动恢复。

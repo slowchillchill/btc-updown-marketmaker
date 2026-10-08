@@ -98,7 +98,7 @@ class SourceHistoryInputs:
             value,value,value,value,value,torch.full_like(started_at,-1),started_at.clone(),
             torch.zeros_like(started_at),started_at.clone())
 
-    def consume(self, prefixes, delivered_cutoffs, market_indices, started_at, memory):
+    def consume(self, prefixes, delivered_cutoffs, market_indices, started_at, memory,*,applied_prefix=None,enabled=None):
         """一次批量接纳连续完整组；不得省略无字段变化的组。
 
         delivered_cutoffs由公共交付协调器给出，含实际delivery delay及跨块前沿。
@@ -136,13 +136,21 @@ class SourceHistoryInputs:
         consecutive = ((prefixes>=0) & (prefixes<self.shared.group_count)).all()
         consecutive &= ((prefixes[1:]-prefixes[:-1])==1).all()
         monotonic = (delivered_cutoffs[1:]>=delivered_cutoffs[:-1]).all()
-        valid_root = valid_market & consecutive & monotonic & (prefixes[0]==memory.last_prefix+1)
-        valid_root &= delivered_cutoffs[0]>=memory.last_cutoff
+        requested=torch.ones((groups,roots),dtype=torch.bool,device=device)
+        if applied_prefix is not None:
+            requested=(prefixes[:,None]>memory.last_prefix[None])&(prefixes[:,None]<=applied_prefix[None])
+        if enabled is not None:requested &= enabled[None]
+        has_groups=requested.any(0)
+        group_first=requested.to(torch.int64).argmax(0)
+        group_last=torch.where(requested,torch.arange(groups,device=device)[:,None],-1).max(0).values.clamp_min(0)
+        valid_root = valid_market & consecutive & monotonic & (prefixes[group_first]==memory.last_prefix+1)
+        valid_root &= delivered_cutoffs[group_first]>=memory.last_cutoff
         valid_root &= (memory.market_ids==0) | (memory.market_ids==self.market_ids[safe])
         valid_root &= started_at==memory.root_started_at
-        fault = (~valid_root).to(torch.int32) | eligible_root.fault
+        fault = torch.where(has_groups,(~valid_root).to(torch.int32) | eligible_root.fault,0)
         fault |= _numbers().combine_fault_rows((after_start.fault|before_end.fault).reshape(groups,roots).T)
-        eligible = (valid_root[None] & (eligible_root.order<=0)[None]
+        valid_root &= has_groups
+        eligible = (requested & valid_root[None] & (eligible_root.order<=0)[None]
                     & (after_start.order.reshape(groups,roots)>=0) & (before_end.order.reshape(groups,roots)<0)
                     & market_frame.admitted[:,safe])
         numbers = _numbers()
@@ -223,8 +231,8 @@ class SourceHistoryInputs:
             path_max = maximum.select(has_new & (was_empty | (high.order<0)),memory.path_max)
             result = SourceHistoryMemory(ring_values,ring_ids,ring_times,keep,memory.path_count+count,
                 path_first,path_last,path_min,path_max,memory.path_squares+squares+cross,
-                torch.where(valid_root,prefixes[-1],memory.last_prefix),
-                torch.where(valid_root,delivered_cutoffs[-1],memory.last_cutoff),
+                torch.where(valid_root,prefixes[group_last],memory.last_prefix),
+                torch.where(valid_root,delivered_cutoffs[group_last],memory.last_cutoff),
                 torch.where(valid_root,self.market_ids[safe],memory.market_ids),memory.root_started_at)
             error = fault | numbers.combine_fault_rows(torch.stack(errors,dim=1).reshape(roots,-1))
             error |= numbers.combine_fault_rows((ef|eg|low.fault|high.fault).reshape(roots,6))

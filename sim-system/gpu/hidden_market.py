@@ -43,9 +43,10 @@ class HiddenAssetState:
     external_shares: object  # ExactRational[levels]；原档位前驱保持全部源精度。
     queues: PriceQueueBatch
     fault: torch.Tensor  # int32[assets]，错误候选不可提交到活动状态。
+    level_sides: torch.Tensor | None = None  # 同一FIFO物理行的BID=0/ASK=1；旧调用者仍显式供给。
 
     @classmethod
-    def empty(cls, level_assets, prices, asset_markets, markets, *, segment_capacity=4):
+    def empty(cls, level_assets, prices, asset_markets, markets, *, segment_capacity=4,level_sides=None):
         assets = asset_markets.numel()
         if level_assets.dtype != torch.int64 or not level_assets.is_cuda:
             raise TypeError('价位所属资产须为设备int64列')
@@ -67,12 +68,41 @@ class HiddenAssetState:
                    torch.zeros(assets, dtype=torch.bool, device=device),
                    torch.zeros(assets, dtype=torch.bool, device=device),
                    torch.zeros(assets, dtype=torch.bool, device=device), zeros(prices),
-                   PriceQueueBatch.empty(prices, segment_capacity), fault)
+                   PriceQueueBatch.empty(prices, segment_capacity), fault,level_sides)
 
     def _mask(self, enabled):
         if enabled.dtype != torch.bool or enabled.shape != self.initialized.shape or enabled.device != self.quality.device:
             raise TypeError('资产事件掩码须为同设备bool[assets]')
         return enabled
+
+    def append_empty_levels(self, assets, prices):
+        """增加已编码请求所需的物理价位；不安装未来行情数量。"""
+        queues=self.queues.append_empty_rows(prices)
+        zero=prices.numerator.constant(0)
+        old=self.external_shares
+        def join(left,right):
+            capacity=max(left.words.size(1),right.words.size(1))
+            left,right=left.with_capacity(capacity),right.with_capacity(capacity)
+            return ExactInt(torch.cat((left.words,right.words)),torch.cat((left.sign,right.sign)),torch.cat((left.fault,right.fault)))
+        external=ExactRational(join(old.numerator,zero),join(old.denominator,zero.constant(1)))
+        sides=None if self.level_sides is None else torch.cat((self.level_sides,torch.zeros_like(assets)))
+        result=replace(self,level_assets=torch.cat((self.level_assets,assets)),queues=queues,external_shares=external,level_sides=sides)
+        return replace(result,fault=result.fault|result._asset_fault(queues.fault))
+
+    def pending_bid_levels(self,terms,asset_roots,enabled):
+        """SDK处理时原GTC价格关联同一FIFO；缺行只建立空资源。"""
+        roots=enabled.numel();device=enabled.device
+        active=enabled&(terms.quantity_kind==0)&(terms.encoding_rejection==-1)&(terms.fault==0)
+        owners=asset_roots[self.level_assets]
+        same=self.queues.price.compare(rational_take(terms.limit_price,owners))
+        match=(self.level_sides==0)&(self.level_assets==terms.assets[owners])&(same.order==0)&active[owners]
+        rows=torch.arange(self.level_assets.numel(),device=device)
+        found=torch.full((roots,),-1,dtype=torch.int64,device=device).scatter_reduce(0,owners,torch.where(match,rows,-1),reduce='amax')
+        missing=active&(found<0)
+        selected=torch.arange(roots,device=device)[missing]
+        result=self.append_empty_levels(terms.assets[missing],rational_take(terms.limit_price,selected))
+        appended=self.level_assets.numel()+missing.to(torch.int64).cumsum(0)-1
+        return result,replace(terms,bid_rows=torch.where(active,torch.where(missing,appended,found),terms.bid_rows))
 
     def _asset_fault(self, level_fault):
         # 按位OR，不使用整数max丢失同资产多价位的不同错误位。

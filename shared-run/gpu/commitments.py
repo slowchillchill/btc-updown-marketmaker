@@ -26,6 +26,30 @@ class SubmittedLegs:
     input_sequences: object | None = None  # 原已收到receipt的完整u64，非SIM私有序号。
     input_sequence_known: torch.Tensor | None = None  # 旧冷前缀未装原receipt序号时保持未知。
 
+    def append(self, incoming):
+        """追加另一原决定的腿，保留所有旧request/ordinal及首次receipt。"""
+        from dataclasses import fields
+        roots=self.present.size(0)
+        def integer(left,right):
+            capacity=max(left.words.size(1),right.words.size(1))
+            left,right=left.with_capacity(capacity),right.with_capacity(capacity)
+            return ExactInt(torch.cat((left.words.reshape(roots,-1,capacity),right.words.reshape(roots,-1,capacity)),1).flatten(0,1),
+                torch.cat((left.sign.reshape(roots,-1),right.sign.reshape(roots,-1)),1).flatten(),
+                torch.cat((left.fault.reshape(roots,-1),right.fault.reshape(roots,-1)),1).flatten())
+        def join(left,right):
+            if isinstance(left,torch.Tensor):return torch.cat((left,right),1)
+            if isinstance(left,ExactInt):return integer(left,right)
+            return type(left)(**{field.name:join(getattr(left,field.name),getattr(right,field.name)) for field in fields(left)})
+        def sequences(legs):
+            return legs.input_sequences if legs.input_sequences is not None else legs.target.numerator.constant(0)
+        def known(legs):
+            return legs.input_sequence_known if legs.input_sequence_known is not None else torch.zeros_like(legs.present)
+        values={field.name:(None if getattr(self,field.name) is None and getattr(incoming,field.name) is None else
+            join(getattr(self,field.name),getattr(incoming,field.name))) for field in fields(self)
+            if field.name not in ('input_sequences','input_sequence_known')}
+        return type(self)(**values,input_sequences=integer(sequences(self),sequences(incoming)),
+            input_sequence_known=torch.cat((known(self),known(incoming)),1))
+
 
 def bind_submission_receipt(legs, request_keys, receipt):
     """将实际首次/重复receipt绑定原腿；后来回执不能覆盖首次输入序。"""

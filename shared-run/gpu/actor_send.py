@@ -143,6 +143,49 @@ class FrozenActorSend:
         return ActorSendResult(self.publication,self.receipt,self.sent.clone(),self.complete.clone(),advance)
 
 
+class SubmittedActorRequests:
+    """同运行原正文与原腿人口；不分配业务序或平台身份。"""
+    def __init__(self,post_intents=None,submitted_legs=None):
+        self.post_intents=post_intents;self.submitted_legs=submitted_legs
+        self.cancel_requests=None;self.cancel_keys=None;self.cancellation=None
+
+    def cancellation_directory(self,original):
+        from registry import PublicCancellationState
+        from queues import ExactInt,Numbers
+        device=original.registered.device;keys=self.cancel_keys
+        width=max(map(len,keys));old_width=original.registered.size(1)
+        values=[value for row in keys for value in row+(-1,)*(width-len(row))]
+        requests=Numbers.run_exact_batch(lambda:ExactInt.from_values(values,device=device))
+        registered=torch.nn.functional.pad(original.registered,(0,width-old_width),value=False)
+        expanded=PublicCancellationState.open(requests,registered)
+        return replace(expanded,completions=original.completions)
+
+    def freeze_account(self,public,cutoff,markets,request_identity_order):
+        from queues import Numbers
+        intents,fault=Numbers.run_exact_batch(lambda:public.registry.freeze_intent_population(
+            self.submitted_legs,public.submission_bindings,cutoff))
+        account=Numbers.run_exact_batch(lambda:public.freeze_account(intents,cutoff,
+            submitted_legs=self.submitted_legs,cancel_markets=markets,request_identity_order=request_identity_order))
+        return replace(account,fault=account.fault|fault)
+
+    def cancel_scopes(self,intents):
+        from cancel_requests import CancellationScopes
+        from registry import identity_matches
+        from queues import _take
+        roots,count=intents.present.shape;device=intents.present.device
+        if self.cancellation is None:
+            empty=torch.empty((roots,0),dtype=torch.int64,device=device)
+            return CancellationScopes(empty.bool(),empty,torch.empty((roots,0,count),dtype=torch.bool,device=device))
+        catalog=self.cancellation;refs=catalog.item_refs
+        targets=catalog.intents
+        coordinates=(torch.arange(roots,device=device)[:,None,None]*targets.market.size(1)+refs.clamp_min(0)).flatten()
+        identities=_take(targets.order_sequences,coordinates)
+        match,_=identity_matches(identities,intents.identities,roots,refs.size(1)*refs.size(2),count)
+        match=match.reshape(roots,refs.size(1),refs.size(2),count)&catalog.present[:,:,:,None]
+        condition=targets.conditions.gather(1,refs[:,:,0].clamp_min(0))
+        return CancellationScopes(catalog.methods==4,condition,match.any(2))
+
+
 class ActorRequestSubmission:
     """原完整BusinessRequest的实际Post/Cancel消费者。
 
@@ -150,12 +193,14 @@ class ActorRequestSubmission:
     所属pending列并调用原登记入口。条款仍由处理时SDK入口计算。
     """
     def __init__(self,control,send_events,sampler,rule,identity_bytes,identity_offsets,
-            conditions,tokens,bid_rows,market_end,codec,*,post_intents=None,order_sequences=None):
+            conditions,tokens,bid_rows,market_end,codec,*,post_intents=None,order_sequences=None,population=None):
         self.control=control;self.send_events=send_events
         self.sampler,self.rule,self.identity_bytes,self.identity_offsets=sampler,rule,identity_bytes,identity_offsets
         self.conditions,self.tokens,self.bid_rows,self.market_end=conditions,tokens,bid_rows,market_end
-        self.codec,self.post_intents,self.order_sequences=codec,post_intents,order_sequences
+        self.population=population if population is not None else SubmittedActorRequests(post_intents)
+        self.codec,self.post_intents,self.order_sequences=codec,self.population.post_intents,order_sequences
         self.prepared=None;self.submitted_legs=None;self.cancellation=None
+        self.cancel_indices=None;self.legs_appended=False
 
     def _prepare(self,requests,action):
         from pending_post_intents import PendingPostIntents
@@ -168,7 +213,7 @@ class ActorRequestSubmission:
         methods=[0]*roots;delayed=[[] for _ in range(roots)]
         population=[];assets=[];conditions=[];bids=[];ends=[]
         for root,family in enumerate(families):
-            previous=self.post_intents
+            previous=self.population.post_intents
             population.append(list(previous.items[root]) if previous is not None else [])
             assets.append(previous.assets[root].cpu().tolist() if previous is not None else [])
             conditions.append(previous.conditions[root].cpu().tolist() if previous is not None else [])
@@ -182,7 +227,7 @@ class ActorRequestSubmission:
                 item=post['item'];order=item['order'];kind,terms=next(iter(order['kind'].items()))
                 asset=self.tokens[root].index(order['token_id']);condition=self.conditions[root].index(order['condition_id'])
                 price=terms.get('limit_price_pusd_per_share')
-                bid=self.bid_rows[root][(asset,Fraction(price))] if price is not None else self.bid_rows[root][(asset,None)]
+                bid=self.bid_rows[root].get((asset,Fraction(price)),-1) if price is not None else self.bid_rows[root].get((asset,None),-1)
                 refs[root].append(len(population[root]));ordinals[root].append(post['batch_item_ordinal'])
                 delayed[root].append(kind=='FokMarket' and self.rule.context['taker_delay_enabled'])
                 population[root].append(json.dumps(item));assets[root].append(asset);conditions[root].append(condition)
@@ -193,12 +238,20 @@ class ActorRequestSubmission:
         self.post_intents=PendingPostIntents(tuple(tuple(row) for row in pad(population,width,'null')),
             t(pad(assets,width,-1)),t(pad(conditions,width,-1)),t(pad(bids,width,-1)),t(pad(ends,width,0)),
             torch.zeros(roots,dtype=torch.int32,device=device))
+        self.population.post_intents=self.post_intents
         self.prepared=(t(methods),t(pad(refs,actions,-1)),t(pad(ordinals,actions,0)),
             t(pad([[True]*len(row) for row in refs],actions,False),torch.bool),
             t(pad(delayed,actions,False),torch.bool))
         # 取消正文由原Rust去重/目标构造入口解析；市场请求不读取订单人口。
         if any(family>=3 for family in families):
-            cancel_requests=tuple((directory[root],) if family>=3 else () for root,family in enumerate(families))
+            previous=self.population.cancel_requests or tuple(() for _ in range(roots))
+            keys=self.population.cancel_keys or tuple(() for _ in range(roots))
+            current=self.control.global_requests.cpu().tolist()
+            self.cancel_indices=t([len(row) if families[root]>=3 else 0 for root,row in enumerate(previous)])
+            cancel_requests=tuple(row+((directory[root],) if families[root]>=3 else ()) for root,row in enumerate(previous))
+            self.population.cancel_requests=cancel_requests
+            self.population.cancel_keys=tuple(row+((current[root],) if families[root]>=3 else ()) for root,row in enumerate(keys))
+            incoming=tuple((directory[root],) if families[root]>=3 else () for root in range(roots))
             items=[]
             for row in cancel_requests:
                 mapping={}
@@ -207,9 +260,12 @@ class ActorRequestSubmission:
                     for item in body.get('items',[{'item':body['item']}] if 'item' in body else []):
                         mapping.setdefault(item['item']['item_id'],len(mapping))
                 items.append(mapping)
-            self.cancellation=cancellation_catalog(cancel_requests,
+            added=cancellation_catalog(incoming,
                 tuple({value:i for i,value in enumerate(row)} for row in self.conditions),tuple(items),
                 self.order_sequences,self.codec.cancel_targets_batch_v2,device)
+            previous_catalog=self.population.cancellation
+            self.cancellation=added if previous_catalog is None else previous_catalog.append(added)
+            self.population.cancellation=self.cancellation
 
     def __call__(self,runtime,public,requests,action,enabled,*,cutoff):
         from commitments import bind_submission_receipt
@@ -221,7 +277,7 @@ class ActorRequestSubmission:
             self._prepare(requests,action)
         methods,refs,ordinals,present,delayed=self.prepared
         # 冷装完整原正文轴；所有方法共享同一请求目录及完整物理动作轴。
-        cancel_columns=None if self.cancellation is None else self.cancellation.columns(torch.zeros_like(self.control.global_requests))
+        cancel_columns=None if self.cancellation is None else self.cancellation.columns(self.cancel_indices)
         width=max(refs.size(1),0 if cancel_columns is None else cancel_columns[1].size(1),runtime.requests.action_capacity)
         if runtime.requests.action_capacity<width:
             runtime=replace(runtime,requests=runtime.requests.resized(runtime.requests.capacity,width))
@@ -243,12 +299,17 @@ class ActorRequestSubmission:
             frontier,_=Numbers.run_exact_batch(lambda:runtime.input_frontier.commit(buy&receipt.registered&buy_enough&(receipt.fault==0)))
             runtime=replace(runtime,input_frontier=frontier)
             public=replace(public,ledger=ledger)
+            if not self.legs_appended:
+                previous=self.population.submitted_legs
+                self.population.submitted_legs=action.legs if previous is None else Numbers.run_exact_batch(lambda:previous.append(action.legs))
+                self.legs_appended=True
             self.submitted_legs=Numbers.run_exact_batch(lambda:bind_submission_receipt(
-                action.legs if self.submitted_legs is None else self.submitted_legs,
-                self.control.global_requests,receipt))
+                self.population.submitted_legs,self.control.global_requests,receipt))
+            self.population.submitted_legs=self.submitted_legs
             enough=torch.where(buy,buy_enough,enough)
         if bool(cancel.any().cpu()):
             from admission import coordinate
+            public=replace(public,cancellations=self.population.cancellation_directory(public.cancellations))
             methods,refs,ordinals,present=cancel_columns
             refs,ordinals,present=pad(refs,-1),pad(ordinals,0),pad(present,False)
             runtime,public,cancel_receipt,cancel_enough=Numbers.run_exact_batch(lambda:submit_cancellation(runtime,public,self.sampler,

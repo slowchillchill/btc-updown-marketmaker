@@ -1,3 +1,8 @@
+/// 原SIM订单序号对应的平台身份；GPU公开读取沿同一构造。
+pub fn platform_order_id_v1(order_sequence: u64) -> String {
+    format!("sim-{order_sequence}")
+}
+
 pub mod settlement;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -3605,7 +3610,7 @@ impl ExecutionStateV2 {
         let next_order_sequence = order_sequence
             .checked_add(1)
             .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        let platform_order_id = format!("sim-{order_sequence}");
+        let platform_order_id = platform_order_id_v1(order_sequence);
         let mut account_deltas = Vec::new();
         let required_available_pusd_units = accepted_quote_units
             .checked_add(total_immediate_taker_fee_units)

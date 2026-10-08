@@ -314,6 +314,26 @@ class PublicRegistryState:
     """首次领取的设备来源人口；append不改旧状态，冻结结果保持原值。"""
     events: PublicRegistryEvents
 
+    def freeze_intent_population(self,legs,bindings,cutoff):
+        """已领取公开身份建立订单轴；原条款只从真实提交/Accepted绑定读取。"""
+        from intent_terms import freeze_intent_orders
+        identities,present=self.order_population(cutoff)
+        return freeze_intent_orders(legs,bindings,identities,present)
+
+    def order_population(self,cutoff=None):
+        """唯一Registry的已领取完整身份轴；给原读面与目标目录无损重定位。"""
+        events=self.events;roots,width=events.received.shape;device=events.received.device
+        visible=events.received if cutoff is None else events.received&(events.available_at<=cutoff[:,None])
+        if not width:
+            return events.orders,visible
+        priority=torch.arange(width,device=device)[None,:].expand(roots,width)
+        present=first_identity_population(events.orders,torch.zeros_like(events.kinds),visible,priority)
+        permutation=(~present).to(torch.int64).argsort(dim=1,stable=True)
+        count=int(present.sum(1).max().cpu())
+        selected=permutation[:,:count]
+        coordinates=(torch.arange(roots,device=device)[:,None]*width+selected).flatten()
+        return _take(events.orders,coordinates),present.gather(1,selected)
+
     def receive(self, incoming):
         # 两端已由公共领取器绑定同根账户、源位置和公开可见前缀。
         # 容量/精确值重试属于纯候选；调用者成功提交前不得消费源位置。

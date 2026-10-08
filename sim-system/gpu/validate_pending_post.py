@@ -139,6 +139,11 @@ def public_open(source):
 
 
 def full_item(item,original):
+    if 'EvidenceUnknownNoEffect' in original:
+        assert item.outcomes.cpu().tolist()==[2]
+        assert item.reasons.cpu().tolist()==[-2]
+        assert not item.fill_present.any().cpu().item()
+        return
     if 'Accepted' not in original:
         assert item.outcomes.cpu().tolist()==[1]
         assert REJECTED_REASONS[int(item.reasons.cpu()[0])]==original['RejectedNoEffect']
@@ -192,8 +197,9 @@ def check(source,codec,progress,after_posts=None,*,before_drive=None,defer_initi
                 slots.add((tokens[post['item']['order']['token_id']],'bids',Fraction(kind['GtcLimit']['limit_price_pusd_per_share'])))
     slots=sorted(slots);prices=[str(price) for _,_,price in slots];owners=T([0]*len(slots));assets=T([s[0] for s in slots])
     def build():
-        hidden=HiddenAssetState.empty(assets,rational(prices),T(markets),market_count,segment_capacity=1)
-        for asset,event in enumerate(source['initial']):
+        hidden=HiddenAssetState.empty(assets,rational(prices),T(markets),market_count,segment_capacity=1,
+            level_sides=T([int(side=='asks') for _,side,_ in slots]) if not source.get('preloaded',True) else None)
+        for asset,event in enumerate(source['initial'] if source.get('preloaded',True) else []):
             book=event['payload']['event'];quantities=['0']*len(slots)
             for side in ('bids','asks'):
                 for level in book[side]:quantities[slots.index((asset,side,Fraction(level['price_pusd_per_share'])))]=level['quantity_shares']
@@ -206,6 +212,8 @@ def check(source,codec,progress,after_posts=None,*,before_drive=None,defer_initi
             RebateCoordinator(MakerDays.empty(T([[0]]),T([[source['market_end']]]),yes[:,None],fills=1,days=1),TakerDays.empty(1,'cuda',fills=1,days=1)),
             market_controls=HiddenMarketControls.empty(1,market_count,'cuda'),post_results=PostResults.empty(quantity,1,1))
     runtime=run(build);ledger=public_open(source)
+    original_levels=runtime.hidden.level_assets.clone()
+    original_prices=amounts(runtime.hidden.queues.price)
     principal=[intent['requested_principal_pusd'] for intent in source['reserve_intents']]
     fee=[intent['immediate_fee_reserve_pusd'] for intent in source['reserve_intents']]
     admission,reserved=run(lambda:ledger.ledger.reserve_action(T([list(range(count))]),T([[0]*count]),rational(principal),rational(fee),T([[True]*count],torch.bool)))
@@ -316,6 +324,11 @@ def check(source,codec,progress,after_posts=None,*,before_drive=None,defer_initi
         if batch.emitted.any().cpu().item():ledger=run(lambda:ledger.append_batch(noe.normalizer.bank,batch))
     assert timeline==source['drive'],(timeline,source['drive'])
     assert effect_index==count and runtime.requests.sealed.cpu().tolist()==[[True]]
+    if not source.get('preloaded',True):
+        assert torch.equal(runtime.hidden.level_assets,original_levels)
+        assert amounts(runtime.hidden.queues.price)==original_prices
+        assert not runtime.hidden.queues.fault.any().cpu().item()
+        assert values(runtime.orders.next_sequence)==[1] and values(runtime.fills.next_sequence)==[1]
     expected={(r['position']['source_watermark']['projection_batch_sequence'],r['position']['record_ordinal']):r for r in source['records']}
     seen={}
     for batch in batches:

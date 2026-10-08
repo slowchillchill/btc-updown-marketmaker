@@ -470,6 +470,10 @@ class BaseSimRuntime:
             raise ValueError('Post处理须有原hidden控制与逐项正文资源')
         pending=self.requests.next_pending()
         terms=intents.encode(pending,self.hidden,self.market_controls,rule,codec,choice.enabled(5))
+        if self.hidden.level_sides is not None:
+            hidden,terms=Numbers.run_exact_batch(lambda:self.hidden.pending_bid_levels(terms,self.account.asset_roots,choice.enabled(5)))
+            self=replace(self,hidden=hidden)
+            row_roots=self.account.asset_roots[hidden.level_assets]
         requests,orders,queue,account,fills,effects=run_pending_base_acceptance(self.requests,self.orders,
             self.hidden.queues,self.account,self.fills,terms,ask_rows,take_ratio(rule.values,
                 torch.full((self.orders.roots,),2,dtype=torch.int64,device=ask_rows.device)),

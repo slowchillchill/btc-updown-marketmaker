@@ -74,7 +74,11 @@ class PublicLedgerState:
         registry = self.registry.receive(events)
         registry = registry.receive(cancellation_order_events(targets, rank))
         cancellations = None if self.cancellations is None else self.cancellations.receive(completions)
-        history = None if self.cancellation_target_history is None else self.cancellation_target_history.receive(targets)
+        history = self.cancellation_target_history
+        if history is not None:
+            # 同次已领取Registry才建立身份；不从SIM订单或未来Accepted补人口。
+            identities,present=registry.order_population()
+            history=history.with_orders(identities,present).receive(targets)
         cancellation_fault = completions.fault if cancellations is None else cancellations.completions.fault
         if history is not None:
             cancellation_fault = cancellation_fault | history.targets.fault

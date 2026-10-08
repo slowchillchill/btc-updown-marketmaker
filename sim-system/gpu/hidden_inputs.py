@@ -224,7 +224,7 @@ class HiddenPmBlock:
         return (self.level_assets == asset) & (self.level_sides == side) & (relation.order == 0) & (fault == 0), fault
 
     def empty_state(self, *, segment_capacity=4):
-        state = HiddenAssetState.empty(self.level_assets, self.prices, self.asset_markets, self.market_count, segment_capacity=segment_capacity)
+        state = HiddenAssetState.empty(self.level_assets, self.prices, self.asset_markets, self.market_count, segment_capacity=segment_capacity,level_sides=self.level_sides)
         cold_fault = state._asset_fault(getattr(self, 'price_fault', torch.zeros_like(self.level_assets, dtype=torch.int32)))
         decimal_fault = Numbers.combine_fault_rows(self.decimal_fault.reshape(1, -1))[0]
         return replace(state, fault=state.fault | cold_fault | decimal_fault)

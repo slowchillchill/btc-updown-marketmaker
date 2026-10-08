@@ -12,6 +12,12 @@ async fn pending_post_original_sources_for(names:&[&str],include_cancels:bool) -
 
 #[cfg(feature="shared-execution")]
 async fn pending_post_original_sources_at(names:&[&str],include_cancels:bool,receive_checkpoint:Option<i64>) -> Vec<serde_json::Value> {
+    pending_post_original_sources_at_continuation(names,include_cancels,receive_checkpoint,None).await
+}
+
+#[cfg(feature="shared-execution")]
+async fn pending_post_original_sources_at_continuation(names:&[&str],include_cancels:bool,receive_checkpoint:Option<i64>,
+    continuation:Option<&serde_json::Value>) -> Vec<serde_json::Value> {
     let mut cases=Vec::new();
     for &name in names {
         let cash=if name=="fok_fee_funds" {"92"} else {"2000"};
@@ -69,8 +75,11 @@ async fn pending_post_original_sources_at(names:&[&str],include_cancels:bool,rec
             initial[1]=data_pipeline_core::decode_execution_market_event_v3(&data_pipeline_core::encode_execution_market_event_v3(&initial[1]).unwrap()).unwrap();
         }
         let condition=initial[0].market.condition_id.clone();let token=TokenId("1".into());let other_token=TokenId("2".into());
-        let (state,_)=reduce_market_event_slice_v2(actor.state.take().unwrap(),MarketEventPathV1::HiddenPlatform,1100,
-            &initial,actor._rule_snapshot.snapshot(),policy.as_ref()).unwrap_or_else(|_|panic!("原初始化 {name}"));
+        let state=actor.state.take().unwrap();
+        let state=if name=="preloading" {state} else {
+            reduce_market_event_slice_v2(state,MarketEventPathV1::HiddenPlatform,1100,
+                &initial,actor._rule_snapshot.snapshot(),policy.as_ref()).unwrap_or_else(|_|panic!("原初始化 {name}")).0
+        };
         let fok=|spend:&str,worst:&str|SimBuyOrderKindV1::FokMarket {
             spend_pusd:spend.parse().unwrap(),worst_price_pusd_per_share:worst.parse().unwrap()};
         let gtc=|price:&str,size:&str|SimBuyOrderKindV1::GtcLimit {
@@ -82,6 +91,7 @@ async fn pending_post_original_sources_at(names:&[&str],include_cancels:bool,rec
             "mixed_reject_last"=>vec![(7,gtc("0.3","5")),(1,fok("3.6","0.6"))],
             "mixed_accept_last"=>vec![(7,gtc(if include_cancels {"0.1"} else {"0.3"},"5")),(1,fok("1","0.6"))],
             "mixed_reject_first"=>vec![(7,gtc("0.5","1")),(1,fok("2","0.5"))],
+            "preloading"=>vec![(0,gtc("0.12","10"))],
             _=>vec![(0,gtc("0.123","10"))]};
         let posts=kinds.into_iter().enumerate().map(|(i,(ordinal,kind))|PostOrderBatchItemV2 {
             batch_item_ordinal:if include_cancels {i as u16} else {ordinal},
@@ -94,7 +104,7 @@ async fn pending_post_original_sources_at(names:&[&str],include_cancels:bool,rec
                 SimBuyOrderKindV1::GtcLimit {limit_price_pusd_per_share,size_shares,post_only}=> {
                     let tick=match &initial[0].payload {ExecutionMarketEventPayloadV3::InitialL2Snapshot(book)=>&book.initial_tick_size_pusd_per_share,_=>unreachable!()};
                     let tick_decimal:rust_decimal::Decimal=tick.0.parse().unwrap();
-                    let n=(*size_shares*rust_decimal::Decimal::from(100)).to_string().parse::<num_bigint::BigUint>().unwrap();
+                    let n=(*size_shares*rust_decimal::Decimal::from(100)).normalize().to_string().parse::<num_bigint::BigUint>().unwrap();
                     let index=(*limit_price_pusd_per_share/tick_decimal).to_string().parse::<u16>().unwrap();
                     let cost=actor._rule_snapshot.limit_buy_cost_v1(&n,index,tick,*post_only).unwrap();
                     (crate::matching::decimal_from_micro_units_v1(cost.principal_micro.to_string().parse().unwrap()).unwrap(),
@@ -175,7 +185,8 @@ async fn pending_post_original_sources_at(names:&[&str],include_cancels:bool,rec
             state=gpu_accept_projection_reference(&mut actor,next,BusinessReducerOutputV2::LogicalDrive(
                 LogicalDriveOutputV2 {lifecycle:frame.into_lifecycle_feedback().unwrap(),..Default::default()}),&mut batches);
         }
-        let final_closed_at=drive.last().unwrap()["at"].as_i64().unwrap()+10_000;
+        let final_closed_at=continuation.map(|items|items["requests"][0]["sent_at"].as_i64().unwrap())
+            .unwrap_or_else(||drive.last().unwrap()["at"].as_i64().unwrap()+10_000);
         let closed_at=receive_checkpoint.unwrap_or(final_closed_at);
         actor.projection_port.close_receive_prefix(closed_at);
         actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(crate::public_consumption::ActorTimeRecordV1 {
@@ -210,7 +221,7 @@ async fn pending_post_original_sources_at(names:&[&str],include_cancels:bool,rec
         }
         let received_ledger=gpu_ledger_reservation_checkpoint(&ledger,"after_received_actual_noe");
         let rules=actor._rule_snapshot.snapshot();
-        let mut source=serde_json::json!({"name":name,"opening_ledger":opening,"cash":cash,"initial":initial,"changed":changed,
+        let mut source=serde_json::json!({"name":name,"preloaded":name!="preloading","opening_ledger":opening,"cash":cash,"initial":initial,"changed":changed,
             "run_id":actor.opened.run_id,"session_id":state.session.as_ref().unwrap().opening_fact.session_id,
             "posts":posts,"reserve_intents":reserve_intents,"sent_ledger":sent_ledger,"received_ledger":received_ledger,
             "records":original_records,"closed_at":closed_at,"request_id":request_id,"sent_at":1200,"input_sequence":11,"pending":pending,
@@ -225,6 +236,8 @@ async fn pending_post_original_sources_at(names:&[&str],include_cancels:bool,rec
         if let Some(checkpoint)=bounded_pre_send_ledger {source["bounded_pre_send_ledger"]=checkpoint;}
         if include_cancels {
             source["cancellation"]=pending_cancel_original_extension(&mut actor,state,&observation,&mut ledger,closed_at);
+        } else if let Some(requests)=continuation {
+            source["continuation"]=pending_continuous_original_extension(&mut actor,state,&observation,&mut ledger,&initial,requests);
         }
         cases.push(source);
     }
@@ -272,6 +285,25 @@ async fn gpu_pending_fok_and_mixed_post_match_original_submission() {
     std::fs::write(artifact.join("pending-post-report.json"),&output.stdout).unwrap();
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     eprintln!("pending_post={}",String::from_utf8_lossy(&output.stdout));
+}
+
+#[cfg(feature="shared-execution")]
+#[tokio::test(flavor="current_thread")]
+#[ignore="locked GPU; original Preloading unknown request completes without creating a price queue"]
+async fn gpu_pending_preloading_preserves_unknown_no_effect() {
+    let cases=pending_post_original_sources_for(&["preloading"],false).await;
+    assert!(cases[0]["effects"][0]["outcome"].get("EvidenceUnknownNoEffect").is_some());
+    let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
+    std::fs::create_dir_all(&artifact).unwrap();
+    std::fs::write(artifact.join("original-pending-post-sources.json"),serde_json::to_vec_pretty(&cases).unwrap()).unwrap();
+    let mut child=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+        .arg(std::env::var("B_GPU_PENDING_POST_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    serde_json::to_writer(child.stdin.take().unwrap(),&cases).unwrap();
+    let output=child.wait_with_output().unwrap();
+    std::fs::write(artifact.join("pending-post-report.json"),&output.stdout).unwrap();
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    eprintln!("pending_preloading={}",String::from_utf8_lossy(&output.stdout));
 }
 
 #[cfg(feature="shared-execution")]
@@ -333,12 +365,33 @@ async fn gpu_pending_post_uses_request_market_for_asset_admission() {
 // 本来源只有原GTC/FOK及未结束市场，不装造GTD/FAK/结算义务。
 #[cfg(feature="shared-execution")]
 async fn pending_actor_send_original_source() -> serde_json::Value {
+    pending_actor_send_original_source_with_history(false).await
+}
+
+#[cfg(feature="shared-execution")]
+async fn pending_actor_send_original_source_with_history(nonzero_history:bool) -> serde_json::Value {
     let mut sources=pending_post_original_sources_at(&["fok_success"],false,Some(1410)).await;
     let source=&mut sources[0];
     let initial:Vec<ExecutionMarketEventV3>=serde_json::from_value(source["initial"].clone()).unwrap();
     // 两条正式原消息：公开领取界=1414；下一hidden桶恰为1414，仅同刻项增加原ask数量。
-    let events=vec![decoded_maker_level_event(BookSide::Ask,"0.5","1000.001","1000.001",1413,1413,10),
+    let mut events=vec![decoded_maker_level_event(BookSide::Ask,"0.5","1000.001","1000.001",1413,1413,10),
         decoded_maker_level_event(BookSide::Ask,"0.5","1000.001","1000.002",1414,1414,11)];
+    if nonzero_history {
+        for (sequence,at,bid) in [(20,1250,"0.4"),(21,1350,"0.42"),(22,1450,"0.44")] {
+            let mut event=crate::task21_tests::sealed_event(
+                ExecutionMarketEventPayloadV3::BestBidAsk(contracts::BestBidAskV2 {
+                    asset:crate::task21_tests::asset("1",0,"Up"),
+                    best_bid_pusd_per_share:Some(ExactDecimal(bid.into())),
+                    best_ask_pusd_per_share:Some(ExactDecimal("0.5".into()))}),
+                crate::task21_tests::orderbook_evidence(at,at,sequence),crate::task21_tests::fresh_quality());
+            event.market=initial[0].market.clone();
+            event.event_id=data_pipeline_core::derive_execution_market_event_v3_id(&event).unwrap();
+            events.push(data_pipeline_core::decode_execution_market_event_v3(&data_pipeline_core::encode_execution_market_event_v3(&event).unwrap()).unwrap());
+        }
+        events.sort_by_key(|event|event.time.source_event_at_utc_ms);
+        // row()实际collector admission=received+1；仅有限源的独立history期望。
+        source["nonzero_history_samples"]=serde_json::json!([["0.45",1251],["0.46",1351],["0.47",1451]]);
+    }
     let (directory,mut hidden)=public_consumption_tests::gpu_compact_hidden_for_order_fixture(&initial,&events,false);
     let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
     std::fs::create_dir_all(&artifact).unwrap();
@@ -374,12 +427,22 @@ async fn gpu_frozen_actor_sends_from_real_bounded_source() {bounded_gpu_actor_ch
 
 #[cfg(feature="shared-execution")]
 #[tokio::test(flavor="current_thread")]
+#[ignore="真实两Buy按实际发送时刻倒序，保持共同正文人口与稳定引用"]
+async fn gpu_continuous_out_of_order_buy_population() {bounded_gpu_actor_check(Some("--out-of-order-buy")).await;}
+
+#[cfg(feature="shared-execution")]
+#[tokio::test(flavor="current_thread")]
+#[ignore="真实非零BBA经ContinuousActorInputs逐窗冻结、静默及容量续接"]
+async fn gpu_continuous_nonzero_history_preserves_windows() {bounded_gpu_actor_check(Some("--nonzero-history")).await;}
+
+#[cfg(feature="shared-execution")]
+#[tokio::test(flavor="current_thread")]
 #[ignore="locked GPU; real NoTrade at the bounded send boundary"]
 async fn gpu_frozen_actor_no_trade_at_real_send_boundary() {bounded_gpu_actor_check(Some("--no-trade")).await;}
 
 #[cfg(feature="shared-execution")]
 async fn bounded_gpu_actor_check(mode:Option<&str>) {
-    let source=pending_actor_send_original_source().await;
+    let source=pending_actor_send_original_source_with_history(mode==Some("--nonzero-history")).await;
     let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
     let mut command=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap());
     command.arg(std::env::var("B_GPU_ACTOR_SEND_VALIDATOR").unwrap());
@@ -390,4 +453,118 @@ async fn bounded_gpu_actor_check(mode:Option<&str>) {
     std::fs::write(artifact.join("actor-send-report.json"),&output.stdout).unwrap();
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     eprintln!("actor_send={}",String::from_utf8_lossy(&output.stdout));
+}
+
+
+// 仅补本次实际已发正文的独立原CPU后验；不提供GPU调度或结果输入。
+#[cfg(feature="shared-execution")]
+fn pending_continuous_original_extension(actor:&mut SimRunActorV2,mut state:BusinessReducerStateV2,
+    observation:&noe_projection::MemoryNoeObservationV4,ledger:&mut ledger::LedgerWriterV1,
+    initial:&[ExecutionMarketEventV3],requests:&serde_json::Value) -> serde_json::Value {
+    let mut stages=Vec::new();let mut all_records=Vec::new();
+    let events:Vec<ExecutionMarketEventV3>=serde_json::from_value(requests["public_events"].clone()).unwrap();
+    for event in &events {
+        let at=match &event.payload {
+            ExecutionMarketEventPayloadV3::LevelExecutionTransition(level)=>level.platform_effective_at_utc_ms,
+            ExecutionMarketEventPayloadV3::BestBidAsk(_)=>event.time.source_event_at_utc_ms.expect("原BBA有源时刻"),
+            _=>panic!("本原短源仅档位与显式BBA消息"),
+        };
+        let (next,_)=reduce_market_event_slice_v2(state,MarketEventPathV1::HiddenPlatform,at,
+            std::slice::from_ref(event),actor._rule_snapshot.snapshot(),actor._finality_policy.as_ref())
+            .unwrap_or_else(|_|panic!("原连续档位消息无法归约"));state=next;
+    }
+    for (index,value) in requests["requests"].as_array().unwrap().iter().enumerate() {
+        let sent=value["sent_at"].as_i64().unwrap();
+        let request:BusinessRequestV2=serde_json::from_value(value["body"].clone()).unwrap();
+        let sequence=value["input_sequence"].as_u64().unwrap();
+        if let BusinessRequestV2::PostOrders(body)=&request {
+            let reserves=body.items.iter().map(|post| {
+                let (principal,fee)=match &post.item.order.kind {
+                    SimBuyOrderKindV1::GtcLimit {limit_price_pusd_per_share,size_shares,post_only}=> {
+                        let event=initial.iter().find(|event|match &event.payload {
+                            ExecutionMarketEventPayloadV3::InitialL2Snapshot(book)=>book.asset.token_id==post.item.order.token_id,
+                            _=>false}).unwrap();
+                        let ExecutionMarketEventPayloadV3::InitialL2Snapshot(book)=&event.payload else {unreachable!()};
+                        let tick=&book.initial_tick_size_pusd_per_share;
+                        let n=(*size_shares*rust_decimal::Decimal::from(100)).normalize().to_string().parse::<num_bigint::BigUint>().unwrap();
+                        let price=(*limit_price_pusd_per_share/tick.0.parse::<rust_decimal::Decimal>().unwrap()).normalize().to_string().parse::<u16>().unwrap();
+                        let cost=actor._rule_snapshot.limit_buy_cost_v1(&n,price,tick,*post_only).unwrap();
+                        (crate::matching::decimal_from_micro_units_v1(cost.principal_micro.to_string().parse().unwrap()).unwrap(),
+                            rust_decimal::Decimal::from_str_exact(&cost.fee_1e5_units.to_string()).unwrap()/rust_decimal::Decimal::from(100_000))
+                    },
+                    SimBuyOrderKindV1::FokMarket {spend_pusd,..}=>(*spend_pusd,rust_decimal::Decimal::ZERO),
+                    _=>unreachable!("本原Actor代表只有GTC/FOK"),
+                };
+                let identity=ledger::LedgerSubmissionItemIdentityV1 {global_request_id:body.context.global_request_id.clone(),batch_item_ordinal:post.batch_item_ordinal};
+                ledger::ReserveIntentV1 {request_identity:ledger::LedgerRequestIdentityV1(serde_json::to_string(&identity).unwrap()),
+                    condition_id:post.item.order.condition_id.clone(),requested_principal_pusd:ExactDecimal(principal.to_string()),immediate_fee_reserve_pusd:ExactDecimal(fee.to_string())}
+            }).collect::<Vec<_>>();
+            ledger.try_reserve_action_v2(&reserves).unwrap();
+            for (post,reserve) in body.items.iter().zip(&reserves) {
+                let identity=ledger::LedgerSubmissionItemIdentityV1 {global_request_id:body.context.global_request_id.clone(),batch_item_ordinal:post.batch_item_ordinal};
+                let event=ledger::LedgerLocalEventIdentityV1(serde_json::to_string(&("submission-started",&identity)).unwrap());
+                ledger.record_submission_started(&event,&reserve.request_identity,&identity).unwrap();
+            }
+        }
+        let (next,receipt)=register_request_candidate(&actor.opened,actor.scenario.initial_market_directory(),state,
+            &request_cutoff(sent),&request,sequence,actor._latency_profile.as_ref(),actor._rule_snapshot.snapshot());state=next;
+        let mut effects=Vec::new();let mut batches=Vec::new();
+        while let Some(key)=state.session.as_ref().unwrap().mutation_requests.pending_actions.keys().next().copied() {
+            let (next,effect)=advance_mutation_candidate_with_outputs(&actor.opened,actor.scenario.initial_market_directory(),state,
+                key.effective_processing_at_utc_ms,actor._rule_snapshot.snapshot(),actor._finality_policy.as_ref());state=next;
+            let effect=effect.unwrap();
+            let body=match &effect.business {
+                MutationActionBusinessEffectV3::Post(post)=>serde_json::json!({"Post":match &post.outcome {
+                    PostOrderItemOutcomeV2::Accepted(body)=>serde_json::json!({"Accepted":body}),
+                    PostOrderItemOutcomeV2::RejectedNoEffect(reason)=>serde_json::json!({"RejectedNoEffect":reason}),
+                    PostOrderItemOutcomeV2::EvidenceUnknownNoEffect(reason)=>serde_json::json!({"EvidenceUnknownNoEffect":format!("{reason:?}")}),
+                }}),
+                MutationActionBusinessEffectV3::Cancel(targets)=>serde_json::json!({"Cancel":targets}),
+                _=>unreachable!(),
+            };
+            effects.push(serde_json::json!({"at":key.effective_processing_at_utc_ms,"ordinal":key.batch_item_ordinal,"body":body}));
+            state=gpu_accept_projection_reference(actor,state,BusinessReducerOutputV2::MutationAction(Some(effect)),&mut batches);
+        }
+        let mut received=sent;
+        for batch in &batches {
+            for family in ["orders","trades","direct"] {
+                for member in batch[family].as_array().unwrap() {
+                    for key in ["feedback_received_at_utc_ms","response_received_at_utc_ms"] {
+                        if let Some(at)=member["metadata"][key].as_i64() {received=received.max(at);}
+                    }
+                }
+            }
+        }
+        let visible=received+1;
+        assert!(visible<initial[0].market.window.end_at_utc_ms,"本有限代表不越过市场终态");
+        actor.projection_port.close_receive_prefix(visible);
+        actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(crate::public_consumption::ActorTimeRecordV1 {
+            run_id:actor.opened.run_id.clone(),drive_position:3+index as u64,logical_time_utc_ms:visible}));
+        let records=observation.take_closed_records();
+        all_records.extend(records.iter().map(|record|serde_json::json!({"record":record.record(),"position":record.position(),"visibility":record.visibility()})));
+        let mut waiting=records;
+        while !waiting.is_empty() {
+            let count=waiting.len();let mut next=Vec::new();
+            for record in waiting {
+                let applied=ledger.apply_noe_memory_v2(&record).unwrap();
+                if matches!(applied,ledger::LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation|ledger::LedgerMemoryApplyOutcomeV1::Applied(ledger::LedgerApplyOutcomeV1::MissingPlatformPredecessor {..})) {next.push(record);}
+            }
+            assert!(next.len()<count,"原连续NOE前驱未闭合");waiting=next;
+        }
+        stages.push(serde_json::json!({"sent_at":sent,"receipt":{"arrived_at":receipt.platform_arrived_at_utc_ms,"count":receipt.scheduled_action_count},
+            "effects":effects,"batches":batches,"received_before":visible,"ledger":gpu_ledger_reservation_checkpoint(ledger,"continuous_original_receive")}));
+    }
+    serde_json::json!({"stages":stages,"records":all_records})
+}
+
+#[cfg(feature="shared-execution")]
+#[tokio::test(flavor="current_thread")]
+#[ignore="实际已发GPU正文的原CPU结果/NOE/Ledger后验"]
+async fn continuous_actor_original_request_reference() {
+    let path=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
+    let requests:serde_json::Value=serde_json::from_slice(&std::fs::read(path.join("actual-continuous-requests.json")).unwrap()).unwrap();
+    let original:serde_json::Value=serde_json::from_slice(&std::fs::read(path.join("original-actor-send.json")).unwrap()).unwrap();
+    let continuation=serde_json::json!({"requests":requests,"public_events":original["bounded_public_events"]});
+    let source=pending_post_original_sources_at_continuation(&["fok_success"],false,Some(1410),Some(&continuation)).await;
+    std::fs::write(path.join("original-continuous-reference.json"),serde_json::to_vec_pretty(&source[0]).unwrap()).unwrap();
 }

@@ -221,29 +221,41 @@ class ActorSelection:
         self.published=torch.zeros_like(random.seed,dtype=torch.bool)
         self.required_words=None
 
-    def consume(self,driver,state,control,enabled=None):
+    def publish(self,driver,control,enabled=None):
+        """完整模型决定完成时发布正文/RNG；不读取发送时的Ledger。"""
         from actor_context import _owned
         from actor_intent import selected_action
-        from admission import coordinate
-        from action_selection import SelectionReservation
         numbers=driver.numbers
         enabled=torch.ones_like(self.published) if enabled is None else enabled
         if self.candidate is None:
             candidate=driver.replay()
             self.required_words=candidate.required_words.clone()
             # 共同物理资源出口允许一次冷读取，不读逐条件选择/业务身份。
-            if not bool(candidate.fits.cpu()):return state,self
+            if not bool(candidate.fits.cpu()):return self
             body=numbers.device_exact_batch(lambda:selected_action(candidate,driver.inputs.actor,control),
                 word_capacity=driver.word_capacity,device=driver.actor.device)
             self.required_words=torch.maximum(self.required_words,body.required_words)
-            if not bool(body.fits.cpu()):return state,self
+            if not bool(body.fits.cpu()):return self
             self.candidate=candidate.snapshot()
             self.action=_owned(body.value)
         committed=enabled & ~self.published & self.candidate.complete & (self.action.fault==0) & (self.action.family>=0)
         self.random.counter.copy_(torch.where(committed[:,None],self.candidate.random.counter,self.random.counter))
         self.published |= committed
+        return self
+
+    def consume(self,driver,state,control,enabled=None):
+        from actor_context import _owned
+        from admission import coordinate
+        from action_selection import SelectionReservation
+        enabled=torch.ones_like(self.published) if enabled is None else enabled
+        self.publish(driver,control,enabled)
+        if self.candidate is None:return state,self
+        numbers=driver.numbers
         needed=enabled & self.published
-        if self.reservation is not None:needed &= committed | ~self.reservation.complete
+        if self.reservation is not None:
+            from reservation import EMPTY
+            recorded=((self.reservation.decision.outcomes!=EMPTY)|~self.action.legs.present).all(1)
+            needed &= ~(self.reservation.complete&recorded)
         if not bool(needed.any().cpu()):return state,self
         result=numbers.device_exact_batch(lambda:state.reserve_selected(self.action,needed),
             word_capacity=driver.word_capacity,device=driver.actor.device)

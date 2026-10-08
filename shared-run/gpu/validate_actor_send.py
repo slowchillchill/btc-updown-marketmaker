@@ -49,7 +49,7 @@ def receive_current(state,delivery,stage,enabled=None):
     return state,~(state.waiting.received&~state.waiting.consumed).any(1)&(state.ledger.fault==0)
 
 
-def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,ask_directory,taker,maker,progress,codec,artifact,*,clock_only=False,initial_submit=None,no_trade=False):
+def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,ask_directory,taker,maker,progress,codec,artifact,*,clock_only=False,initial_submit=None,no_trade=False,continuous=None):
     yes=T([True],torch.bool);zero=T([0]);started=time.perf_counter()
     timing=source['bounded_timing'];ck=T([timing['observation_at']]);sk=ck+timing['calculation_duration']+timing['dispatch_delay']
     assert sk.cpu().tolist()==[1414] and source['market_end']>1415
@@ -131,6 +131,9 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
     assert not clock.public.pending_noe.active.any().cpu().item()
     checkpoint(clock.public.ledger,source['sent_ledger'])
     assert values(clock.runtime.account.cash)==[int(Fraction(source['cash'])*1000000)]
+    if continuous is not None:
+        return continuous(source,clock,pm,market,reference,binance,block,sampler,rule,receipt,intents,
+            ask_directory,taker,maker,codec,artifact,stage)
     # 只消费实际完成Ck的完整原group，并将该位置上限交给原100ms编码器。
     source_snapshot=public_source.snapshot();prefix=public_source.prefix_at(pm,ck)
     decision_cutoff=None

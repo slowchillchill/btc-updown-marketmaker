@@ -84,15 +84,19 @@ class BoundedSendClock:
             if handler is None:
                 raise NotImplementedError(f'本来源实际出现phase={phase}，原处理器尚未装配')
             runtime,projection,batch,effect=handler(self.runtime,self.projection,choice)
-            if batch is not None and bool((batch.fault!=0).any().cpu()):
+            batches=() if batch is None else batch if isinstance(batch,tuple) else (batch,)
+            handler_fault=torch.zeros_like(fault)
+            for emitted in batches:handler_fault |= emitted.fault
+            if effect is not None and hasattr(effect,'fault'):handler_fault |= effect.fault
+            if bool((handler_fault!=0).any().cpu()):
                 # 未完成候选不替换此刻权威状态；此前成功pending/公开组仍保留。
-                return SendAdvance(torch.zeros_like(enabled),missing_public,missing_hidden,batch.fault,processed,effect)
+                return SendAdvance(torch.zeros_like(enabled),missing_public,missing_hidden,handler_fault,processed,effect)
             if phase==4 and runtime.input_frontier is not None:
                 frontier,commit_fault=Numbers.run_exact_batch(lambda:runtime.input_frontier.commit(active))
                 if bool(commit_fault.any().cpu()):return SendAdvance(torch.zeros_like(enabled),missing_public,missing_hidden,commit_fault,processed)
                 runtime=replace(runtime,input_frontier=frontier)
             self.runtime,self.projection=runtime,projection
-            if batch is not None:self.public=self.public.append_batch(self.bank(projection),batch)
+            for emitted in batches:self.public=self.public.append_batch(self.bank(projection),emitted)
             processed+=1
             if progress:progress('sim_phase',processed=processed,phase=phase,at=choice.at.detach().cpu().tolist())
 

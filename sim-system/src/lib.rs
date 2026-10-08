@@ -15,6 +15,7 @@ pub(crate) mod legacy_reader;
 pub(crate) mod market;
 pub(crate) mod market_directory;
 pub(crate) mod matching;
+pub use matching::platform_order_id_v1;
 #[cfg(feature = "measurement")]
 mod measurement_probe;
 
