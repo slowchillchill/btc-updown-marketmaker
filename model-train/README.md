@@ -698,3 +698,14 @@ consume/encode的五个冷冻结前缀核对0—77；尚未证明连续GPU账户
 腿保持Unknown；实际收到的明确结果仍优先，Rejected的Known零不留人口。
 当前取消入口中未绑定腿是有限组件输入；原21前缀的真实receipt腿另有连续来源对照。
 尚未接全部请求登记、FOK与模型全根，因此不称完整slow433或合法Actor已交付。
+
+
+100ms设备Actor的完整路径及原概率／梯度／AdamW接口见
+[GPU技术文档](docs/100ms-gpu-training.md#同冻结的完整动作路径与可微重算接口)。
+`CapturedDeviceActor.publish_and_reserve` 现消费真实完整候选，调用者为本次决定保留
+`ActorSelection`，在完整正文发布时提交一次业务RNG，再消费当前公共Ledger整动作预留。
+发布前容量不足保输入游标；发布后预留目录不足只重试原动作，资金拒绝保原决定。
+公共正文复用SubmittedLegs／SubmittedBuyTerms／CancellationScopes，Pair沿真实双腿
+request／Accepted关联装配并保原ordinal；重复消费不重采样、不重复占款或回滚当前账户。
+API、真实来源和验证边界见[发布与预留说明](docs/100ms-gpu-training.md#完整动作发布与原公共整动作预留)。
+SDK发送、连续OrderFormation来源、统一时钟与完整运行／训练宿主仍未交付。

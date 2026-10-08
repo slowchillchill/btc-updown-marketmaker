@@ -33,6 +33,47 @@ class CancelObjectDirectory:
     paired_origin_order: torch.Tensor  # 原request字符串字典序，保原稳定平局。
 
 
+def assemble_cancel_directory(legs,bindings,intents,markets,request_identity_order):
+    """同公开前缀的原完整双腿请求→Accepted订单；不按两个订单猜Pair。
+
+    request_identity_order来自原请求身份字典序，与原腿轴一致；物理关联槽
+    不能充当排序。每个ordinal0占一个Pair槽，成员按原ordinal0/1排列。
+    """
+    from registry import identity_matches
+    roots,width=legs.present.shape;orders=intents.present.size(1)
+    device=legs.present.device
+    if (request_identity_order.shape!=(roots,width) or request_identity_order.dtype!=torch.int64
+            or request_identity_order.device!=device):
+        raise TypeError('Pair目录需要同原腿轴的请求身份字典序')
+    same=(legs.request_slots[:,:,None]==legs.request_slots[:,None,:])
+    population=legs.present & legs.receipt_known
+    first=population & (legs.item_ordinals==0) & ((same & population[:,None,:]).sum(2)==2)
+    second=same & population[:,None,:] & (legs.item_ordinals[:,None,:]==1)
+    first &= second.sum(2)==1
+    next_leg=second.to(torch.int32).argmax(2) if width else legs.item_ordinals
+    binding=(legs.request_slots[:,:,None]==bindings.request_slots[:,None,:]) & (
+        legs.item_ordinals[:,:,None]==bindings.item_ordinals[:,None,:])
+    binding &= bindings.received[:,None,:] & bindings.accepted[:,None,:]
+    if bindings.received.size(1):
+        from queues import _take
+        binding_at=binding.to(torch.int32).argmax(2)
+        original=_take(bindings.orders,(torch.arange(roots,device=device)[:,None]*bindings.received.size(1)+binding_at).flatten())
+        equal,error=identity_matches(original,intents.identities,roots,width,orders)
+        matches=equal & intents.present[:,None,:] & binding.any(2)[:,:,None]
+    else:
+        matches=torch.zeros((roots,width,orders),dtype=torch.bool,device=device)
+        error=torch.zeros_like(matches,dtype=torch.int32)
+    known=(matches.sum(2)==1) & (binding.sum(2)==1)
+    at=matches.to(torch.int32).argmax(2) if orders else torch.zeros_like(legs.item_ordinals)
+    members=torch.stack((at,at.gather(1,next_leg)),2)
+    present=first & known & known.gather(1,next_leg)
+    fault=bindings.fault | Numbers.combine_fault_rows(torch.where(matches,error,0).reshape(roots,-1))
+    fault |= (population & (request_identity_order<0)).any(1).to(torch.int32)
+    fault |= (population & binding.any(2) & ~known).any(1).to(torch.int32)
+    return CancelObjectDirectory(markets.market_present,markets.market_start,markets.condition_order,
+        markets.requested,present,members,request_identity_order),fault
+
+
 @dataclass(frozen=True)
 class CancelObjectsRead:
     present: torch.Tensor  # [roots,orders+pairs+markets]，物理padding不参与人口。

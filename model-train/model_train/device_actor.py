@@ -1,4 +1,4 @@
-"""原精确Actor上的设备完整路径；模型只评分，候选不发送或预留。"""
+"""原精确Actor设备路径及一次选择发布；公共Ledger整动作预留，不发送。"""
 from dataclasses import dataclass,fields,is_dataclass
 import torch
 from .action_random import ActionRandom,draw_condition
@@ -203,3 +203,53 @@ class CapturedDeviceActor:
             ActionRandom(self.random.seed,self.counter),self.inputs.actor.identities,self.inputs.actor.cutoff,
             self.inputs.policy_version,self.required_words,self.required_steps,self.fits,
             self.prefix.stage==7,self.prefix.fault)
+
+    def publish_and_reserve(self,publication,state,control):
+        """所属Execute消费者：完整选择→原正文→当前公共Ledger；不发送。"""
+        return publication.consume(self,state,control)
+
+
+class ActorSelection:
+    """本次决定的发布拥有者；保留正文、原资金决定及唯一业务随机提交。
+
+    生命周期由原控制面的一次决定管理，不建全局去重库。完整选择发布时
+    提交随机游标；预留目录增长或资金拒绝不撤回选择。NoAct没有决定。
+    """
+    def __init__(self,random):
+        self.random=random
+        self.candidate=self.action=self.reservation=None
+        self.published=torch.zeros_like(random.seed,dtype=torch.bool)
+        self.required_words=None
+
+    def consume(self,driver,state,control):
+        from actor_context import _owned
+        from actor_intent import selected_action
+        from admission import coordinate
+        from action_selection import SelectionReservation
+        numbers=driver.numbers
+        if self.candidate is None:
+            candidate=driver.replay()
+            self.required_words=candidate.required_words.clone()
+            # 共同物理资源出口允许一次冷读取，不读逐条件选择/业务身份。
+            if not bool(candidate.fits.cpu()):return state,self
+            body=numbers.device_exact_batch(lambda:selected_action(candidate,driver.inputs.actor,control),
+                word_capacity=driver.word_capacity,device=driver.actor.device)
+            self.required_words=torch.maximum(self.required_words,body.required_words)
+            if not bool(body.fits.cpu()):return state,self
+            self.candidate=candidate.snapshot()
+            self.action=_owned(body.value)
+            committed=self.candidate.complete & (self.action.fault==0) & (self.action.family>=0)
+            self.random.counter.copy_(torch.where(committed[:,None],self.candidate.random.counter,self.random.counter))
+            self.published |= committed
+        needed=self.published if self.reservation is None else self.published & ~self.reservation.complete
+        if not bool(needed.any().cpu()):return state,self
+        result=numbers.device_exact_batch(lambda:state.reserve_selected(self.action,needed),
+            word_capacity=driver.word_capacity,device=driver.actor.device)
+        self.required_words=torch.maximum(self.required_words,result.required_words)
+        if not bool(result.fits.cpu()):return state,self
+        current,reservation=result.value
+        # 保存本次原决定；后续余额增多或暂存覆盖不刷新已发布根。
+        if self.reservation is None:self.reservation=_owned(reservation)
+        else:self.reservation=SelectionReservation(coordinate(reservation.decision,self.reservation.decision,needed),
+            torch.where(needed,reservation.complete,self.reservation.complete))
+        return current,self

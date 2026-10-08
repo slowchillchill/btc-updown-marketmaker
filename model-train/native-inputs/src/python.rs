@@ -270,6 +270,19 @@ impl PythonActor {
             serde_json::json!(format!("{:?}", self.actor.intent().map_err(error)?)),
         )
     }
+    #[cfg(test)]
+    fn validation_selection(&self, py: Python<'_>, request: &str) -> PyResult<Py<PyAny>> {
+        use crate::prefix::Family;
+        let selected=match self.actor.state.family {
+            Some(Family::NoTrade)=>crate::SelectedAction::NoTrade,
+            Some(Family::SubmitSingleBuy | Family::SubmitPairedBuy)=>crate::SelectedAction::Buy(&self.actor.state),
+            _=>crate::SelectedAction::CancelIndex(self.actor.cancel_index.ok_or_else(||error("未完成撤单选择"))?),
+        };
+        let context=sim_system::execution::RequestContextV2 {global_request_id:request.into(),caller_correlation_id:None};
+        let (intent,reserves)=self.actor.group.select_action::<()>(self.actor.row,selected,&context,|_,_,_|unreachable!())
+            .map_err(error)?;
+        value(py,serde_json::json!({"intent":intent.as_ref().map(|i|crate::support::gpu_intent_reference(i)),"reserves":reserves}))
+    }
     fn path(&self) -> Vec<usize> {
         self.actor.path.clone()
     }

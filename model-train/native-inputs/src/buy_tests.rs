@@ -254,7 +254,7 @@ fn fixture_with_execution(
     };
     let mut ledger =
         LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
-    let materials=if configured.is_some() {
+    let materials=if configured.is_some() || std::env::var_os("B_GPU_ACTOR_SELECTION_REPORT").is_some() {
         crate::public_input_tests::nav_gpu::bind(&mut execution,&mut ledger,&temp.path().join("ledger"))
     } else {
         execution.bind_ledger_recording_v2(&mut ledger,&temp.path().join("ledger")).unwrap();None
@@ -285,6 +285,7 @@ fn fixture_with_execution(
         noe_context,
         buy_receipts: vec![],
         cancel_receipts: vec![],
+        materials: materials.clone(),
     },materials,retained_observation)
 }
 
@@ -465,6 +466,73 @@ fn device_full_actor_path_matches_original_probability_and_optimizer() {
     });
     let path = std::env::var("B_GPU_ACTOR_PATH_REPORT").unwrap();
     std::fs::write(path, &report).unwrap();
+    eprintln!("{report}");
+    h.driver.stop_and_drain().unwrap();
+}
+
+#[cfg(feature="python")]
+pub(crate) fn validate_actor_selection(group:Arc<NativeInputGroup>,source:serde_json::Value,entry:&str,suffix:&str) {
+    use pyo3::prelude::*;
+    let base=std::path::PathBuf::from(std::env::var("B_GPU_ACTOR_SELECTION_REPORT").unwrap());
+    let path=base.with_file_name(format!("{}-{suffix}.json",base.file_stem().unwrap().to_string_lossy()));
+    std::fs::write(path.with_extension("source.json"),serde_json::to_vec_pretty(&source).unwrap()).unwrap();
+    let report:String=Python::attach(|py|{
+        let module=py.import("model_train.actor_selection_validation").unwrap();
+        let native=Py::new(py,crate::python::PythonGroup {group}).unwrap();
+        module.getattr(entry).unwrap().call1((native,crate::python::value(py,source).unwrap())).unwrap().extract().unwrap()
+    });
+    std::fs::write(&path,&report).unwrap();eprintln!("actor_selection_{suffix}={report}");
+}
+
+#[cfg(feature = "python")]
+#[test]
+#[ignore = "requires locked GPU Python; real Actor selection publication and public Ledger reservation"]
+fn device_actor_selection_publishes_original_and_reserves_current_ledger() {
+    use pyo3::prelude::*;
+    let (mut h,materials,_)=fixture_with_execution("10",["0.01","0.01"],24_999,
+        &[35_000,45_000,55_000],["100","100"],"5",&[],None);
+    let group=Arc::new(ready(&mut h));
+    let read=h.shared.ledger().economic_read().unwrap();
+    assert_eq!(read.base().platform_source_prefix,0);
+    assert_eq!(read.successful_trades().count(),0);
+    let action=group.rows[0].action_context.as_ref().unwrap();
+    let mut source=serde_json::json!({"actor_context":NativeActor::new(group.clone(),0).unwrap().gpu_context_reference(),
+        "cutoff":group.cutoff.decision_time().logical_time_utc_ms(),
+        "condition_id":group.rows[0].hidden_state_key.condition_id,
+        "tokens":action.tokens,
+        "checkpoint":{"projection":read.base(),"cash":read.cash(),"records":[],"successful_trades":[],
+            "resolutions":[],"costs":[],"rebate_days":[],
+            "residual":{"other_cash_pusd":read.residual_cash().other_cash_pusd,
+                "directional_cash_pusd":read.residual_cash().directional_cash_pusd}}});
+    let mut cash_steps=Vec::new();
+    let mut cursor=materials.as_ref().unwrap().lock().unwrap().len();
+    for (identity,amount,correction,at) in [("actor-debit","-9.99",None,34_000),
+        ("actor-deposit","20",None,44_000),("actor-correction","9.99",Some("actor-debit"),54_000)] {
+        h.driver.decision().unwrap().apply_external_cash_fact_v1(contracts::economics::ExternalCashFactV1 {
+            identity:identity.into(),signed_delta_pusd:ExactDecimal(amount.into()),
+            attribution:contracts::economics::ExternalCashAttributionV1::UnknownActivity,
+            correction_of:correction.map(str::to_owned)}).unwrap();
+        while h.driver.next_group_at().unwrap().is_some_and(|next|next<at) {
+            h.driver.next_group().unwrap().unwrap();h.shared.apply_closed().unwrap();
+        }
+        h.driver.observe_at(at).unwrap().unwrap();h.shared.apply_closed().unwrap();
+        let stored=materials.as_ref().unwrap().lock().unwrap();
+        let rows=stored[cursor..].iter().filter_map(|material|material.consumed_record_v2().map(|row|
+            serde_json::json!({"record":row.record(),"visibility":row.visibility(),"position":row.position()}))).collect::<Vec<_>>();
+        cursor=stored.len();
+        assert_eq!(rows.len(),2,"本有限阶段只有原ExternalCash Evidence/Economic");
+        let read=h.shared.ledger().economic_read().unwrap();
+        cash_steps.push(serde_json::json!({"rows":rows,"cash":read.cash(),"projection":read.base(),"cutoff":at}));
+    }
+    source["cash_steps"]=serde_json::json!(cash_steps);
+    std::fs::write(std::path::Path::new(&std::env::var("B_GPU_ACTOR_SELECTION_REPORT").unwrap()).with_extension("source.json"),
+        serde_json::to_vec_pretty(&source).unwrap()).unwrap();
+    let report:String=Python::attach(|py| {
+        let module=py.import("model_train.actor_selection_validation").unwrap();
+        let native=Py::new(py,crate::python::PythonGroup {group}).unwrap();
+        module.getattr("run").unwrap().call1((native,crate::python::value(py,source).unwrap())).unwrap().extract().unwrap()
+    });
+    std::fs::write(std::env::var("B_GPU_ACTOR_SELECTION_REPORT").unwrap(),&report).unwrap();
     eprintln!("{report}");
     h.driver.stop_and_drain().unwrap();
 }
@@ -1513,6 +1581,14 @@ async fn actual_single_repair_cap_counts_visible_success_and_nonterminal_commitm
                     "fok_trace":gpu_actor_trace(group.clone(),1,true)});
                 std::fs::write(std::path::Path::new(&directory).join("repair-before-economic.json"),
                     serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+            }
+            #[cfg(feature="python")]
+            if std::env::var_os("B_GPU_ACTOR_SELECTION_REPORT").is_some() {
+                let source=serde_json::json!({"cutoff":at,"actor_context":actor.gpu_context_reference(),
+                    "tokens":group.rows[0].action_context.as_ref().unwrap().tokens,
+                    "condition_id":group.rows[0].hidden_state_key.condition_id,"cancel_features":group.cancel,
+                    "checkpoint":crate::public_input_tests::nav_gpu::checkpoint(&h.shared,read,Some(&group),&h.materials)});
+                validate_actor_selection(group.clone(),source,"run_single","single");
             }
             saw_economic_pending = true;
         }

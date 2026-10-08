@@ -1659,8 +1659,8 @@ GRU 层并核同设备捕获和旧输入稳定；1000–1400根记忆、完整�
 反馈时钟选择100ms观察间隙。原NativeActor给出独立支持，设备冷切片只消费已公开Accepted，
 通过公共账户／市场冻结实际调用 `publish_actor_context`。它核零gap时未知cap不关闭合法族；
 该间隙已由服务器实际来源及原Native支持证明，不沿用旧场景的时刻，也不把切片签成完整首次领取流。
-完整模型路径采样／联合概率重算沿下述增量接口继续接线；完整意图共同预留与提交，
-以及完整连续宿主、PPO和活动恢复仍须沿原步骤继续推进。
+完整模型路径采样、联合概率重算及选择发布／原公共整动作预留见下述接口。
+SDK发送、完整连续宿主、PPO和活动恢复仍须沿原步骤继续推进。
 
 `actor_features.py` 从同一次 `ActorPrefix` 生成原36列模型前缀，入口为
 `DeviceNativeActor.prefix_features`。数量根、收敛区间、数量和价格先沿精确整数求值，
@@ -1733,7 +1733,8 @@ FOK价格头使用本文件已有真实市场估费列，完整取消头使用�
 采样只返回候选，不修改输入游标。协调者须在完整路径、精确字、fault和输入所有权
 共同满足时发布候选并提交业务游标。路径／字容量不足时保留原完整冻结和输入游标，
 按需求增长后重算同一动作，不能裁剪数量／路径或用失败候选发送部分腿。
-这个接口尚未实现真实意图共同预留和发送；两腿选择完成不表示平台原子成交。
+`replay`本身不预留或发送；后述`publish_and_reserve`消费其完整候选，
+完成一次选择发布及原公共整动作预留。两腿选择完成不表示平台原子成交。
 
 `ReplaySchedule.for_update` 仅在完整学习更新的协调边界一次读回已拥有路径的不可变
 调度元数据。CPU保留此步骤的具体原因是现有autograd参数调用边界必须保持原
@@ -1771,3 +1772,59 @@ None与zero梯度的区别，以及原AdamW已有状态；不能把未调用头�
 该链仍保1500显式工程hidden起点、严格1506领取门和原T−30根资格边界；
 不据此宣称1000–1400完整根记忆、GTD／FAK数值覆盖、全部BUY生产接线、
 完整连续宿主、完整PPO或活动恢复已交付。
+
+
+### 完整动作发布与原公共整动作预留
+
+`CapturedDeviceActor.publish_and_reserve` 是模型Execute消费者。调用者为本次决定持有
+一个 `ActorSelection`，传入此刻真实的 `PublicLedgerState` 和 `ActionControl`。
+控制面提供原trajectory／account／condition目录、稳定决定、全局请求、逐腿Ledger请求
+身份及实际Execute时点；设备槽只定位这些原身份。此入口不生成平台序号、receipt或发送时点。
+`ActorSelection.candidate` 保存完整精确前缀、路径、联合概率、cutoff、策略版本及候选随机游标；
+`action` 保存本次原正文。调用者只消费 `published` 为真的根，NoAct没有已发布动作。
+
+`native-inputs/gpu/actor_intent.py` 从原合法终态装配公共 `SubmittedLegs`、
+`SubmittedBuyTerms` 和 `CancellationScopes`，不复制ModelIntent或ReserveIntent合同。
+数量百份数转原shares，价格使用原冻结tick和价格坐标，FOK正文是原spend和worst-price。
+Actor变体1映射公共条款变体2（FOK）；两腿保原ordinal0／1。本金保原精确金额，
+GTC费用复用SIM的LIMIT最大即时费，FOK预留即时费为0。价格头的市场估费不替代预留费。
+
+完整选择及正文的物理字／路径资源满足后，发布者拥有必要值，并提交一次业务RNG。
+发布前资源不足不发布部分腿，保持原冻结及输入随机游标，增长后重算原动作。
+发布后原预留槽或projected-market目录不足，保留已发布正文和已提交游标；增长后只重试
+原公共预留。`shared-run/gpu/action_selection.py` 调用原 `AdmissionLifecycle.reserve_action`，
+安装实际返回的Ledger，资金使用此刻账户而非旧冻结cash。资金拒绝也是本次完整决定：
+后续现金更正不能刷新正文、改为NoTrade或重采样。重复消费返回当前账户并保留原决定，
+不能把旧执行Ledger快照装回账户。多Family抽到NoTrade仍提交Family一次随机数，
+但无预留或请求；Cancel也无买入预留；NoAct不评分、不抽样、不发布。
+
+`freeze_account` 可接原 `submitted_legs`、`order_formation`、公开市场列及原request字典序。
+`assemble_cancel_directory` 使用首次领取维护的 `SubmissionBindings`，将原完整双腿请求
+的ordinal0／1匹配到实际Accepted订单和同cutoff的 `FrozenIntentOrders` 身份轴。
+它不按两个Accepted猜Pair，不以物理slot排序原请求。随后复用 `freeze_cancel_objects`，
+沿原完整全局ordinal找到物理对象。发布的Single／Pair正文保原订单身份和Pair腿序；
+Market正文保原condition，后续处理时展开仍归Mutation处理层，不能用冻结成员代替该责任。
+`publish_actor_context` 仅拥有发布所需的订单轴、Pair成员、condition映射和既有实际可变列，
+共享原不可变规则；不复制整个Ledger、Registry或NOE存储。
+
+有限验证使用原Native真实同账户及原CPU选择入口作独立正文／金额参考，覆盖单腿GTC／FOK、
+混合两腿、发布前容量1和发布后预留／市场目录不足、扩容同正文续接及非零RNG重复消费。
+原SIM生成ExternalCash的Evidence／Economic后连续append、公开领取和Ledger归约，
+核冻结后Actual不足、Actual足够但Maker不足，以及实际现金更正后原拒绝粘滞且当前账户不回滚。
+原259对象以固定工程seed保非零模型评分，核三种取消正文、全局ordinal257和原Pair腿序；
+该有限原冻结对象输入不冒充持续生产形成来源。原连续Registry来源另核生产Pair装配，
+实际1500／1600账户联合冻结核新接线、旧冻结及真实状态梯度。
+
+这些入口通过设置仓库外 `B_GPU_ACTOR_SELECTION_REPORT` 保存source和报告后运行：
+`device_actor_selection_publishes_original_and_reserves_current_ledger`、
+`actual_single_repair_cap_counts_visible_success_and_nonterminal_commitment` 和
+`complete_pair_terminal_leg_and_257_global_selection`。第一项显式ignored，须在锁定CUDA环境
+以 `--ignored --exact --nocapture` 执行；后两项复用原Native工程场景。
+完整概率／梯度／AdamW入口保持独立，受影响联合验证仍复用 `run_actor_path_validation.sh`
+已有actual-joint阶段和全部必需开关，exit0不能替代实际1500／1600覆盖。
+
+本切片交付发布和原公共预留接口及真实消费者，未交付SDK发送、submission_started／
+Registry／MutationRequests完整生产接线、FOK平台处理、CancelMarket处理时展开、
+统一时钟、持续OrderFormation宿主、完整连续SIM→NOE→Ledger、PPO或活动恢复。
+OrderFormation的真实处理时点、receipt input sequence、formed private sequence及市场
+关联仍须由完整宿主接入；有限来源验证不证明这条持续来源已经完成。

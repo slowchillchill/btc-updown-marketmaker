@@ -563,7 +563,16 @@ def check_family(source):
             if known[index]:assert remaining[index]==Fraction(oracle['remaining']['Known'])
         def objects_freeze():
             formation,objects_directory=cancel_object_columns(frame,catalog,identities,state.events)
-            return freeze_cancel_objects(view,formation,objects_directory),objects_directory
+            from cancel_objects import assemble_cancel_directory
+            registered=torch.tensor([[request in receipts for request,_,_ in leg_keys]],dtype=torch.bool,device='cuda')
+            submitted=SubmittedLegs(torch.ones_like(registered),registered,
+                torch.tensor([[buy_ids[request] for request,_,_ in leg_keys]],device='cuda'),
+                torch.tensor([[item for _,item,_ in leg_keys]],device='cuda'),
+                rational([target for _,_,target in leg_keys]),torch.ones_like(registered))
+            request_order=torch.tensor([[sorted(buy_ids).index(request) for request,_,_ in leg_keys]],device='cuda')
+            production,pair_fault=assemble_cancel_directory(submitted,binding_state,directory(frame),objects_directory,request_order)
+            objects=freeze_cancel_objects(view,formation,production)
+            return replace(objects,fault=objects.fault|pair_fault),production
         objects,objects_directory=Numbers.run_exact_batch(objects_freeze)
         compare_objects(frame,objects,objects_directory,catalog)
         objects_saved.append((objects,objects.members.clone(),objects.present.clone()))

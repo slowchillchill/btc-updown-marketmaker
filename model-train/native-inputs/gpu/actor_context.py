@@ -7,6 +7,7 @@ from input_projection import decimal_value
 
 
 def _owned(value):
+    if value is None:return None
     if isinstance(value,torch.Tensor): return value.clone()
     if hasattr(value,'__dataclass_fields__'):
         return replace(value,**{field.name:_owned(getattr(value,field.name)) for field in fields(value)})
@@ -29,6 +30,9 @@ class FrozenActorContext:
     cancels: object          # 全current/old人口及真实成员/形成顺序。
     rules: object            # 原不可变PublicRuleGpu；不复制共享规则。
     fault: torch.Tensor
+    order_identities: object | None = None  # 同cutoff原公开订单轴，仅发布正文使用。
+    paired_members: torch.Tensor | None = None  # 原Pair目录ordinal0/1，不从布尔集合恢复。
+    condition_slots: torch.Tensor | None = None  # 原市场轴→condition身份字典。
 
 
 def publish_actor_context(account,native,market_inputs,market_freeze,market_indices,
@@ -88,4 +92,7 @@ def publish_actor_context(account,native,market_inputs,market_freeze,market_indi
     tick_units=tick_units.select((tick_known&valid_tick).flatten(),tick_units.constant(100))
     return FrozenActorContext(account.cutoff.clone(),identities.clone(),assets.clone(),_owned(cash),_owned(cap),
         (repair.gap_exact.numerator.sign.reshape(rows,2)>0).clone(),repair.gap_known.clone(),repair.cap_known.clone(),
-        _owned(tick_units),(enabled&decision).clone(),decision.clone(),_owned(cancel_objects),rules,fault.clone())
+        _owned(tick_units),(enabled&decision).clone(),decision.clone(),_owned(cancel_objects),rules,fault.clone(),
+        None if account.intent_orders is None else _owned(account.intent_orders.identities),
+        None if account.cancel_directory is None else account.cancel_directory.paired_members.clone(),
+        condition_slots.clone())

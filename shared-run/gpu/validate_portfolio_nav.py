@@ -131,7 +131,9 @@ def cold_ledger(checkpoint,pm):
     resolutions=run(lambda:MarketResolutions.open(pool,unresolved,ResolutionSources.bind(
         SimpleNamespace(terminals=[],canonical_ids=[]),tokens)))
     present={row['condition_id'] for row in checkpoint['projection']['market_projections']}
-    ledger=run(lambda:AdmissionLifecycle.open(platform,projection.normalizer.bank,columns,
+    from core import EvidenceBank
+    bank=projection.normalizer.bank if projection.normalizer is not None else EvidenceBank.empty('cuda')
+    ledger=run(lambda:AdmissionLifecycle.open(platform,bank,columns,
         integers([checkpoint['projection']['ledger_entry_seq']]),integers([checkpoint['projection']['ledger_local_prefix']]),pool,
         unresolved_markets=unresolved,resolutions=resolutions,
         projected_markets=ProjectedMarkets.open(tensor(list(range(len(markets)))),tensor([[m['condition_id'] in present for m in markets]],torch.bool),yes),

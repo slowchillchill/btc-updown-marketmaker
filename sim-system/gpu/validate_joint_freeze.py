@@ -154,7 +154,7 @@ class JointFreezeValidation:
         actor_parts=None
         if (os.environ.get('B_GPU_ACTOR_CONTEXT_VALIDATION')=='1'
                 or os.environ.get('B_GPU_ACTOR_PATH_VALIDATION')=='1'):
-            actor_parts=self.check_actor_context(captured_account,captured_scopes,captured_market)
+            actor_parts=self.check_actor_context(captured_account,captured_scopes,captured_market,state)
         publishing_keys=self.identities.clone()
         owned=FrozenPolicyInputs100ms.publish(captured_market,captured_native,publishing_keys,captured.fits)
         incoming_hidden=self.hidden
@@ -221,7 +221,7 @@ class JointFreezeValidation:
             'provided_fields':433,'elapsed_seconds':time.perf_counter()-self.started}
         self.reports.append(report);print(json.dumps({'stage':'joint_freeze_done',**report}),flush=True)
 
-    def check_actor_context(self,account,native,market):
+    def check_actor_context(self,account,native,market,state):
         from actor_context import publish_actor_context
         from actor_support import DeviceNativeActor
         from cancel_objects import OrderFormation,CancelObjectDirectory,freeze_cancel_objects
@@ -235,7 +235,9 @@ class JointFreezeValidation:
         directory=CancelObjectDirectory(frame.admitted,self.market.times[:,0][None,:],
             self.zero[:,None],self.yes[:,None],torch.empty((1,0),dtype=torch.bool,device='cuda'),
             torch.empty((1,0,2),dtype=torch.int64,device='cuda'),torch.empty((1,0),dtype=torch.int64,device='cuda'))
-        objects=self.run(lambda:freeze_cancel_objects(account.orders,formation,directory))
+        account=self.run(lambda:state.freeze_account(self.intents,account.cutoff,submitted_legs=self.legs,
+            order_formation=formation,cancel_markets=directory,request_identity_order=self.zero[:,None]))
+        directory=account.cancel_directory;objects=account.cancel_objects
         # 原请求condition已准入；无人可撤仍保留合法的空成员Market对象。
         selected=objects.present
         assert selected.sum().cpu().item()==1

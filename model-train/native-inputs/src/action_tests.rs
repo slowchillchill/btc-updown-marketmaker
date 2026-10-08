@@ -56,6 +56,7 @@ pub(super) struct Harness {
     noe_context: contracts::execution_normalization::ExecutionNormalizationContextReferenceV1,
     buy_receipts: Vec<serde_json::Value>,
     cancel_receipts: Vec<serde_json::Value>,
+    materials: Option<crate::public_input_tests::nav_gpu::Materials>,
 }
 
 #[test]
@@ -122,9 +123,7 @@ impl Harness {
         );
         let mut ledger =
             LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
-        execution
-            .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
-            .unwrap();
+        let materials=crate::public_input_tests::nav_gpu::bind(&mut execution,&mut ledger,&temp.path().join("ledger"));
         let noe_context = observation
             .opening_record()
             .unwrap()
@@ -156,6 +155,7 @@ impl Harness {
             noe_context,
             buy_receipts: vec![],
             cancel_receipts: vec![],
+            materials,
         }
     }
     fn next(&mut self) -> Option<NativeInputGroup> {
@@ -279,6 +279,15 @@ async fn complete_pair_terminal_leg_and_257_global_selection() {
                 "rule_features":g.rows[0].rule.as_slice(),"cancel_features":g.cancel});
             std::fs::write(std::path::Path::new(&directory).join(format!("cancel-{at}.json")),
                 serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
+        #[cfg(feature="python")]
+        if at==36_000 && std::env::var_os("B_GPU_ACTOR_SELECTION_REPORT").is_some() {
+            let actor=NativeActor::new(g.clone(),0).unwrap();
+            let source=serde_json::json!({"cutoff":at,"actor_context":actor.gpu_context_reference(),
+                "tokens":g.rows[0].action_context.as_ref().unwrap().tokens,
+                "condition_id":g.rows[0].hidden_state_key.condition_id,"cancel_features":g.cancel,
+                "checkpoint":crate::public_input_tests::nav_gpu::checkpoint(&h.shared,g.action_before.as_ref().unwrap(),Some(&g),&h.materials)});
+            buy_tests::validate_actor_selection(g.clone(),source,"run_cancel","cancel");
         }
         if at == 36_000 {
             assert_eq!(g.cancel.len(), 259);

@@ -8,7 +8,8 @@ use data_pipeline_core::{public_input::prepare_public_ingress_v1,
 pub(crate) type Materials=Arc<std::sync::Mutex<Vec<LedgerRecordMaterialV2>>>;
 
 pub(crate) fn bind(execution:&mut PublicSimExecutionV1,ledger:&mut LedgerWriterV1,path:&Path)->Option<Materials> {
-    if std::env::var_os("B_GPU_NAV_VALIDATOR").is_none() && std::env::var_os("B_GPU_ACTOR_CANCEL_REFERENCE").is_none() {
+    if std::env::var_os("B_GPU_NAV_VALIDATOR").is_none() && std::env::var_os("B_GPU_ACTOR_CANCEL_REFERENCE").is_none()
+        && std::env::var_os("B_GPU_ACTOR_SELECTION_REPORT").is_none() {
         execution.bind_ledger_recording_v2(ledger,path).unwrap();return None;
     }
     let materials=Arc::new(std::sync::Mutex::new(Vec::new()));

@@ -106,7 +106,13 @@ class PublicLedgerState:
         committed=storage.snapshot()
         return replace(self,ledger=committed.ledger,waiting=committed.waiting)
 
-    def freeze_account(self, intents, cutoff, *, submitted_legs=None):
+    def reserve_selected(self, action, enabled):
+        """Execute边界消费原完整选择；读取此刻实际Ledger，不读取旧冻结资金。"""
+        from action_selection import reserve_selected
+        return reserve_selected(self,action,enabled)
+
+    def freeze_account(self, intents, cutoff, *, submitted_legs=None,
+                       order_formation=None,cancel_markets=None,request_identity_order=None):
         """在真实公开推进/apply_closed之后一次冻结，不领取反馈或读取SIM。
 
         cutoff须为此状态实际ActionBefore的逻辑时间；压紧状态不支持任意历史回读。
@@ -133,7 +139,17 @@ class PublicLedgerState:
             fault |= commitments.fault
         if requests is not None:
             fault |= requests.fault
-        return FrozenPublicAccount(cutoff.clone(), self.ledger, orders, sources, funds, pending, requests, fault, commitments)
+        directory=objects=None
+        if order_formation is not None:
+            if submitted_legs is None or cancel_markets is None or request_identity_order is None:
+                raise ValueError('撤单冻结需要原腿、公开形成来源、市场列和请求身份字典序')
+            from cancel_objects import assemble_cancel_directory,freeze_cancel_objects
+            directory,pair_fault=assemble_cancel_directory(submitted_legs,self.submission_bindings,
+                intents,cancel_markets,request_identity_order)
+            objects=freeze_cancel_objects(orders,order_formation,directory)
+            fault=fault | pair_fault | objects.fault
+        return FrozenPublicAccount(cutoff.clone(), self.ledger, orders, sources, funds, pending, requests,
+            fault, commitments,intents,directory,objects)
 
 
 @dataclass(frozen=True)
@@ -147,3 +163,6 @@ class FrozenPublicAccount:
     cancellations: object | None
     fault: torch.Tensor
     commitments: object | None = None  # 完整receipt逐腿读面；None不是Known空承诺集合。
+    intent_orders: object | None = None
+    cancel_directory: object | None = None
+    cancel_objects: object | None = None
