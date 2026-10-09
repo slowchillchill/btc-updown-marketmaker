@@ -310,6 +310,7 @@ impl PublicConsumptionTimeSourceV1 for RecordedTimes {
 struct DeliveredFeedbackState {
     sequence: std::cell::Cell<u64>,
     responses: RefCell<Vec<contracts::DirectResponseMetadataV2>>,
+    settlements: RefCell<Vec<SettlementLifecycleFeedbackV2>>,
 }
 impl DeliveredFeedbackState {
     fn deliver_through(&self, at: i64) {
@@ -328,6 +329,10 @@ struct DeliveredProjection {
 impl BusinessProjectionPortV2 for DeliveredProjection {
     fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool {
         self.accepted = batch.projection_batch_sequence;
+        self.delivered
+            .settlements
+            .borrow_mut()
+            .extend(batch.settlement_lifecycle.iter().cloned());
         for response in batch.direct_responses() {
             if let BusinessDirectResponseV2::CancelAllOrders(response) = response {
                 self.delivered
@@ -1061,6 +1066,272 @@ async fn price_change_bba_before_initial_books_preserves_preloading_and_private_
         [START, START + 100_000, START + 110_000, START + 120_000]
     );
     driver.stop_and_drain().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn midnight_resolution_without_initial_books_redeems_zero_balance_once() {
+    // 已发生失败的旧市场：午夜仅登记 metadata，不带前日盘口或账户。
+    // 终态 source/received/admitted、WS epoch/sequence 和赢家均取原事故证据。
+    const CONDITION: &str = "0x958f8bdb135b6b06eb2943729196ec066aa5499599fb6f9fe00e718b44169af9";
+    const UP: &str =
+        "86414155968606164816894781771088030693649396591540249038646879610300960485835";
+    const DOWN: &str =
+        "114524727566509658620026900094951031660526443095197303364728454725101893208982";
+    const END: i64 = 1_789_171_200_000;
+    const SOURCE: i64 = 1_789_171_353_344;
+    const RECEIVED: i64 = 1_789_171_353_356;
+    const EPOCH: &str = "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237";
+    const SEQUENCE: u64 = 24_734_572;
+    let market = MarketIdentityV2 {
+        condition_id: ConditionId(CONDITION.into()),
+        clob_market_id: ClobMarketId("4457758".into()),
+        window: MarketWindowV2 {
+            start_at_utc_ms: END - 300_000,
+            end_at_utc_ms: END,
+        },
+    };
+    let mut metadata = metadata_snapshot_row();
+    metadata.condition_id = CONDITION.into();
+    metadata.clob_market_id = market.clob_market_id.0.clone();
+    metadata.asset_ids = format!(r#"["{UP}","{DOWN}"]"#);
+    metadata.market_start_utc = market.window.start_at_utc_ms;
+    metadata.market_end_utc = END;
+    metadata.timestamp_received = 1_789_170_600_107;
+    metadata.collector_admission_time_utc_ms = 1_789_170_600_111;
+    metadata.fixed_identity_verified_at_utc = metadata.timestamp_received - 1;
+    metadata.source_evidence_received_at_utc = Some(metadata.timestamp_received);
+    metadata.row_evidence_validation_completed_at_utc =
+        Some(metadata.collector_admission_time_utc_ms);
+    metadata.metadata_fetch_start_utc = Some(metadata.timestamp_received - 10);
+    // 原小证据核实了此中间行的种类、时间及 sequence，未包含状态枚举。
+    // 其余状态/无外源字段沿 core_tests::local_transition_row 构造，非原行复写。
+    let mut active = metadata.clone();
+    active.metadata_row_kind = PolymarketMetadataRowKind::MarketStateTransition;
+    active.timestamp_received = 1_789_170_900_013;
+    active.collector_admission_time_utc_ms = 1_789_170_900_014;
+    active.collector_admission_sequence = 13_509;
+    active.metadata_origin = PolymarketMetadataOrigin::LocalMarketStateTimer;
+    active.source_endpoint = None;
+    active.source_endpoint_unavailable_reason =
+        Some(MetadataSourceEndpointUnavailableReason::NotApplicableNoSourceEvidence);
+    active.source_evidence_origin = None;
+    active.source_evidence_event_type = None;
+    active.source_evidence_channel = None;
+    active.source_evidence_received_at_utc = None;
+    active.row_evidence_validation_completed_at_utc = None;
+    active.source_evidence_payload_json = None;
+    active.metadata_fetch_start_utc = None;
+    active.closed = None;
+    active.active = None;
+    active.active_unavailable_reason =
+        Some(MetadataActiveUnavailableReason::NotApplicableForRowKind);
+    active.accepting_orders = None;
+    active.outcomes_raw = None;
+    active.outcome_prices_raw = None;
+    active.response_fields_unavailable_reason = None;
+    active.market_lifecycle_state = MetadataMarketLifecycleState::Active;
+    active.market_lifecycle_transition =
+        Some(MetadataMarketLifecycleTransition::PrefetchedToActive);
+    active.lifecycle_scheduled_at_utc = Some(market.window.start_at_utc_ms);
+    active.lifecycle_applied_at_utc = Some(active.timestamp_received);
+    active.market_runtime_role = MetadataMarketRuntimeRole::Current;
+    active.market_runtime_role_transition =
+        Some(MetadataMarketRuntimeRoleTransition::NextToCurrent);
+    active.runtime_role_scheduled_at_utc = Some(market.window.start_at_utc_ms);
+    active.runtime_role_applied_at_utc = Some(active.timestamp_received);
+    let mut terminal_metadata = terminal_metadata_row(&market);
+    terminal_metadata.asset_ids = metadata.asset_ids.clone();
+    terminal_metadata.timestamp_received = RECEIVED;
+    terminal_metadata.collector_admission_time_utc_ms = RECEIVED;
+    terminal_metadata.source_evidence_received_at_utc = Some(RECEIVED);
+    terminal_metadata.row_evidence_validation_completed_at_utc = Some(RECEIVED);
+    terminal_metadata.lifecycle_applied_at_utc = Some(RECEIVED);
+    terminal_metadata.runtime_role_applied_at_utc = Some(RECEIVED);
+    terminal_metadata.ws_platform_timestamp_raw = Some(SOURCE.to_string());
+    terminal_metadata.ws_platform_timestamp_utc = Some(SOURCE);
+    terminal_metadata.winning_asset_id = Some(UP.into());
+    terminal_metadata.ws_claimant_source_sequence_epoch_id = Some(EPOCH.into());
+    terminal_metadata.ws_claimant_collector_admission_sequence = Some(SEQUENCE);
+    let mut ws = terminal_orderbook_row(&market);
+    ws.timestamp_received = RECEIVED;
+    ws.timestamp = Some(SOURCE);
+    ws.collector_admission_time_utc_ms = RECEIVED;
+    ws.source_sequence_epoch_id = EPOCH.into();
+    ws.collector_admission_sequence = SEQUENCE;
+    if let PolymarketOrderbookEvent::MarketResolved {
+        asset_ids,
+        winning_asset_id,
+        ..
+    } = &mut ws.event
+    {
+        *asset_ids = vec![UP.into(), DOWN.into()];
+        *winning_asset_id = UP.into();
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    for input in [
+        record(
+            0,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata))),
+        ),
+        record(
+            1,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(active))),
+        ),
+        record(
+            2,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(
+                terminal_metadata,
+            ))),
+        ),
+        record(
+            3,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(ws)),
+        ),
+        end(4),
+    ] {
+        let result = apply(&mut core, &input);
+        writer.record(input, result).unwrap();
+    }
+    writer.stabilize().unwrap();
+    let context = core.pm_context(CONDITION).unwrap();
+    let scenario = sealed_scenario_for_markets(vec![
+        crate::scenario::PlatformMarketV1::try_new(
+            context.market,
+            context
+                .assets
+                .into_iter()
+                .map(|asset| asset.asset)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap(),
+    ]);
+    let (execution, delivered) = public_execution_with_scenario(
+        &temp.path().join("sim.jsonl"),
+        scenario,
+        SimCallerRoleV1::HistoricalBacktest,
+    )
+    .await;
+    let hidden = prepare_hidden_v1(
+        core,
+        PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap(),
+        &temp.path().join("hidden"),
+        &config(),
+        "midnight-terminal".into(),
+    )
+    .unwrap();
+    let mut recorded = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+    // 零额外宿主延迟；不把实际来源可见时刻映射到旧小数值夹具时间。
+    let source = std::iter::from_fn(move || recorded.next_visible_group());
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "midnight-terminal".into());
+    driver.enable_finite_recording_wait().unwrap();
+    driver.next_group().unwrap().unwrap(); // 先登记身份，未提供任何初始 L2。
+    let account_sequence = driver
+        .execution
+        .actor
+        .state
+        .as_ref()
+        .unwrap()
+        .session
+        .as_ref()
+        .unwrap()
+        .execution_state
+        .next_account_transition_seq();
+    let mut buckets = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
+    let mut terminal_count = 0;
+    while let Some(bucket) = buckets.next_bucket().unwrap() {
+        let at = bucket.reference.bucket_time_utc_ms();
+        while driver
+            .next_group_at()
+            .unwrap()
+            .is_some_and(|next| next < at)
+        {
+            driver.next_group().unwrap().unwrap();
+        }
+        for record in bucket.records.iter() {
+            if let HiddenExecutionRecordV1::MarketFact(fact) = record
+                && matches!(fact.payload, CanonicalMarketFactPayloadV1::Terminal(_))
+            {
+                terminal_count += 1;
+                assert_eq!(at, SOURCE);
+                assert_eq!(fact.dependency_time.source_event_at_utc_ms, Some(SOURCE));
+            }
+        }
+        driver.hidden_bucket(bucket).unwrap();
+    }
+    while driver.next_group().unwrap().is_some() {}
+    assert_eq!(terminal_count, 1, "配对后的终态只归约一次");
+    let session = driver
+        .execution
+        .actor
+        .state
+        .as_ref()
+        .unwrap()
+        .session
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        session.execution_state.next_account_transition_seq(),
+        account_sequence
+    );
+    assert!(
+        session
+            .execution_state
+            .redeemed_market_resolution(CONDITION)
+            .is_some()
+    );
+    for state in [
+        &session.public_markets,
+        session.hidden_platform_markets.as_ref().unwrap(),
+    ] {
+        assert_eq!(state.external_level_count_for_tests(CONDITION), 0);
+        assert_eq!(
+            state.validate_input_complete(),
+            Err(crate::market::MarketEventErrorV1::IncompleteInitialLoad(
+                vec![CONDITION.into()]
+            ))
+        );
+    }
+    let feedback = delivered.settlements.borrow();
+    let redemptions = feedback
+        .iter()
+        .filter_map(|feedback| match &feedback.event {
+            SettlementLifecycleEventV2::AutoRedeemApplied {
+                condition_id,
+                resolution_source_event_at_utc_ms,
+                redeemed_outcome_balances,
+                redeemed_pusd,
+                account_delta,
+                ..
+            } => Some((
+                condition_id,
+                resolution_source_event_at_utc_ms,
+                redeemed_outcome_balances,
+                redeemed_pusd,
+                account_delta,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(condition, at, balances, amount, delta)] = redemptions.as_slice() else {
+        panic!("零余额自动赎回反馈必须恰好一次: {redemptions:?}");
+    };
+    assert_eq!(condition.0, CONDITION);
+    assert_eq!(**at, SOURCE);
+    assert_eq!(amount.0, "0");
+    assert!(delta.is_none());
+    assert_eq!(balances.len(), 2);
+    assert!(
+        balances
+            .iter()
+            .all(|balance| balance.balance_shares.0 == "0")
+    );
+    drop(feedback);
+    driver.complete().unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]

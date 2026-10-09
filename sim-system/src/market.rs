@@ -742,11 +742,6 @@ impl MarketStateV2 {
                 terminal,
                 parsed_payouts,
             } => {
-                if !self.assets.values().all(|asset| asset.initialized) {
-                    return Err(MarketEventErrorV1::AssetNotInitialized(
-                        event.market.condition_id.0.clone(),
-                    ));
-                }
                 self.market_quality = event.quality.availability;
                 if let Some(source_event_at_utc_ms) = event.time.source_event_at_utc_ms {
                     if source_event_at_utc_ms < end_at_utc_ms {
