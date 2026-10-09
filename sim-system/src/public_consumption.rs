@@ -94,6 +94,27 @@ pub struct PreparedPublicGroupV1 {
 }
 #[cfg(any(test, feature = "public-consumption"))]
 impl PreparedPublicGroupV1 {
+    /// 原始日生产的同次公共应用；沿在线／历史已有准备算法交接。
+    pub fn from_day(
+        applied: &mut data_pipeline_training::day_producer::DayAppliedV1,
+    ) -> Vec<PublicGroupDeliveryV1> {
+        prepare_public_groups(
+            &applied.applied,
+            applied.first_canonical_position,
+            &mut applied.prepared_pm,
+            |condition| applied.contexts.get(condition).cloned(),
+        )
+        .into_iter()
+        .map(|prepared| {
+            let delivered_at_utc_ms =
+                original_public_group_visible_at_utc_ms(&applied.input, &prepared.group);
+            PublicGroupDeliveryV1 {
+                delivered_at_utc_ms,
+                prepared,
+            }
+        })
+        .collect()
+    }
     /// 同次在线应用材料：共享原组 Arc，移动 PM 原准备对象，不重解析或读盘。
     /// 宿主按返回组原序登记/消费后，再完成 pending 的记录确认。
     pub fn from_online<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
@@ -397,6 +418,12 @@ pub trait PublicProjectionPortV1: crate::run_v2::BusinessProjectionPortV2 {
 }
 pub(crate) struct PublicProjectionAdapterV1(pub Box<dyn PublicProjectionPortV1>);
 impl crate::run_v2::BusinessProjectionPortV2 for PublicProjectionAdapterV1 {
+    fn checkpoint_state(
+        &self,
+    ) -> Result<Option<Vec<u8>>, crate::run_v2::noe_projection::MemoryNoeErrorV1> {
+        self.0.checkpoint_state()
+    }
+
     fn uses_background_normalization(&self) -> bool {
         self.0.uses_background_normalization()
     }
@@ -463,6 +490,7 @@ impl PublicRunOpenedV1 {
 
 /// 有限来源提供的真实消费时序项；此时间由运行宿主或既有消费索引提供。
 /// 迭代结束表示正常有限输入结束，读取失败必须返回 Err。
+#[derive(Clone)]
 pub struct PublicGroupDeliveryV1 {
     pub prepared: Arc<PreparedPublicGroupV1>,
     pub delivered_at_utc_ms: i64,
@@ -558,9 +586,11 @@ impl<T: PublicConsumptionTimeSourceV1> RecordedPublicGroupSourceV1<T> {
     }
 }
 #[cfg(any(test, feature = "public-consumption"))]
-impl<T: PublicConsumptionTimeSourceV1> Iterator for RecordedPublicGroupSourceV1<T> {
-    type Item = Result<PublicGroupDeliveryV1, crate::run_v2::SimRunActorErrorV2>;
-    fn next(&mut self) -> Option<Self::Item> {
+impl<T: PublicConsumptionTimeSourceV1> RecordedPublicGroupSourceV1<T> {
+    /// 沿唯一公共 Core 生成不可变组。这里的时间是来源可见时间，尚未应用账户延迟。
+    pub fn next_visible_group(
+        &mut self,
+    ) -> Option<Result<PublicGroupDeliveryV1, crate::run_v2::SimRunActorErrorV2>> {
         loop {
             if let Some(item) = self.pending.pop_front() {
                 return Some(Ok(item));
@@ -595,15 +625,8 @@ impl<T: PublicConsumptionTimeSourceV1> Iterator for RecordedPublicGroupSourceV1<
                 |condition| self.replay.core.prepared_pm_context(condition),
             ) {
                 let visible_at = original_public_group_visible_at_utc_ms(&input, &prepared.group);
-                let at = match self
-                    .times
-                    .execution_time_for_visible_group(&prepared.reference, visible_at)
-                {
-                    Ok(at) => at,
-                    Err(error) => return Some(Err(error)),
-                };
                 self.pending.push_back(PublicGroupDeliveryV1 {
-                    delivered_at_utc_ms: at,
+                    delivered_at_utc_ms: visible_at,
                     prepared,
                 });
             }
@@ -611,7 +634,52 @@ impl<T: PublicConsumptionTimeSourceV1> Iterator for RecordedPublicGroupSourceV1<
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg(any(test, feature = "public-consumption"))]
+impl<T: PublicConsumptionTimeSourceV1> Iterator for RecordedPublicGroupSourceV1<T> {
+    type Item = Result<PublicGroupDeliveryV1, crate::run_v2::SimRunActorErrorV2>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_visible_group().map(|item| {
+            let mut group = item?;
+            group.delivered_at_utc_ms = self.times.execution_time_for_visible_group(
+                &group.prepared.reference,
+                group.delivered_at_utc_ms,
+            )?;
+            Ok(group)
+        })
+    }
+}
+/// 账户只应用自己的时序；公共组、准备证据和完整观察继续共享同一 Arc。
+#[cfg(any(test, feature = "public-consumption"))]
+pub struct RetimedPublicGroupSourceV1<I, T> {
+    source: I,
+    times: T,
+}
+#[cfg(any(test, feature = "public-consumption"))]
+impl<I, T> RetimedPublicGroupSourceV1<I, T> {
+    pub fn new(source: I, times: T) -> Self {
+        Self { source, times }
+    }
+}
+#[cfg(any(test, feature = "public-consumption"))]
+impl<I, T> Iterator for RetimedPublicGroupSourceV1<I, T>
+where
+    I: Iterator<Item = Result<PublicGroupDeliveryV1, crate::run_v2::SimRunActorErrorV2>>,
+    T: PublicConsumptionTimeSourceV1,
+{
+    type Item = I::Item;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.source.next().map(|item| {
+            let mut group = item?;
+            group.delivered_at_utc_ms = self.times.execution_time_for_visible_group(
+                &group.prepared.reference,
+                group.delivered_at_utc_ms,
+            )?;
+            Ok(group)
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HiddenExecutionRecordV1 {
     Step {
         market: MarketIdentityV2,
@@ -626,14 +694,89 @@ pub enum HiddenExecutionRecordV1 {
         time: EventTimeV2,
     },
 }
+/// 旧持久材料与新流式来源保持各自真实绑定，共用原隐藏桶归约。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum HiddenBucketReferenceV2 {
+    Recorded(ClosedHiddenStepBucketV1),
+    Streaming(ClosedStreamingHiddenStepBucketV1),
+}
+impl HiddenBucketReferenceV2 {
+    pub fn bucket_time_utc_ms(&self) -> i64 {
+        match self {
+            Self::Recorded(r) => r.bucket_time_utc_ms,
+            Self::Streaming(r) => r.bucket_time_utc_ms,
+        }
+    }
+    pub fn index_start(&self) -> u64 {
+        match self {
+            Self::Recorded(r) => r.index_start,
+            Self::Streaming(r) => r.index_start,
+        }
+    }
+    pub fn index_end(&self) -> u64 {
+        match self {
+            Self::Recorded(r) => r.index_end,
+            Self::Streaming(r) => r.index_end,
+        }
+    }
+    pub fn closure(&self) -> ReplayIndexClosureV1 {
+        match self {
+            Self::Recorded(r) => r.closure,
+            Self::Streaming(r) => r.closure,
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AcceptedHiddenStepBucketV1 {
-    pub(crate) reference: ClosedHiddenStepBucketV1,
+    pub(crate) reference: HiddenBucketReferenceV2,
     #[serde(skip_serializing)]
     pub(crate) records: Arc<[HiddenExecutionRecordV1]>,
 }
 impl AcceptedHiddenStepBucketV1 {
-    pub fn reference(&self) -> &ClosedHiddenStepBucketV1 {
+    #[cfg(any(test, feature = "public-consumption"))]
+    pub fn from_day(
+        bucket: data_pipeline_training::hidden_stream::StreamingHiddenBucketV1,
+    ) -> Self {
+        use data_pipeline_training::hidden_preparation::ResolvedHiddenRecordV1;
+        let records = bucket
+            .records
+            .into_iter()
+            .map(|record| match record {
+                ResolvedHiddenRecordV1::Step { stored, market } => HiddenExecutionRecordV1::Step {
+                    market,
+                    step: stored.step,
+                },
+                ResolvedHiddenRecordV1::Reference { record, .. } => match record {
+                    CanonicalEventRecordV2::MarketFact(f) => HiddenExecutionRecordV1::MarketFact(f),
+                    CanonicalEventRecordV2::ReferenceEvent(r) => {
+                        HiddenExecutionRecordV1::Reference(r)
+                    }
+                    _ => unreachable!(),
+                },
+                ResolvedHiddenRecordV1::BinanceDepthReference {
+                    canonical_position,
+                    binding,
+                    time,
+                } => HiddenExecutionRecordV1::BinanceDepthReference {
+                    canonical_position,
+                    binding,
+                    time,
+                },
+            })
+            .collect();
+        Self::from_streaming(bucket.reference, records)
+    }
+    pub fn from_streaming(
+        reference: ClosedStreamingHiddenStepBucketV1,
+        records: Vec<HiddenExecutionRecordV1>,
+    ) -> Self {
+        Self {
+            reference: HiddenBucketReferenceV2::Streaming(reference),
+            records: records.into(),
+        }
+    }
+    pub fn reference(&self) -> &HiddenBucketReferenceV2 {
         &self.reference
     }
     pub fn records(&self) -> &[HiddenExecutionRecordV1] {
@@ -642,7 +785,7 @@ impl AcceptedHiddenStepBucketV1 {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct LoggedHiddenStepBucketV1 {
-    pub reference: ClosedHiddenStepBucketV1,
+    pub reference: HiddenBucketReferenceV2,
 }
 
 #[cfg(any(test, feature = "public-consumption"))]
@@ -725,15 +868,16 @@ impl RecordedHiddenBucketSourceV1 {
             });
         }
         Ok(Some(AcceptedHiddenStepBucketV1 {
-            reference,
+            reference: HiddenBucketReferenceV2::Recorded(reference),
             records: records.into(),
         }))
     }
 }
 
 /// 同次步骤的前序与规则材料；完整快照数组继续由原准备对象持有。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DeferredPublicPmReductionV1 {
+    #[serde(with = "data_pipeline_core::pm_reduction::recovery")]
     captured: data_pipeline_core::public_observation_core::PublicPmReductionV1<'static>,
 }
 impl DeferredPublicPmReductionV1 {
@@ -791,4 +935,176 @@ pub struct PublicConsumptionResourceSnapshotV1 {
     pub business: crate::resource::ResourceQuantityV1,
     pub pending_projection: crate::resource::ResourceQuantityV1,
     pub applied_input_sequence: u64,
+}
+
+/// 内部恢复表示；正式受信截止仍只由消费器签发。
+#[doc(hidden)]
+pub mod checkpoint {
+    use super::*;
+    #[derive(Deserialize)]
+    struct Receipt {
+        session_id: String,
+        group: PublicGroupReferenceV1,
+        actor_input_sequence: u64,
+        execution_time: ActorTimeRecordV1,
+    }
+    #[derive(Deserialize)]
+    struct Cutoff {
+        receipt: Receipt,
+        decision_time: ActorTimeRecordV1,
+        private_feedback_sequence: u64,
+    }
+    pub mod cutoff {
+        use super::*;
+        pub fn serialize<S: serde::Serializer>(
+            value: &TrustedGroupDecisionCutoffV1,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            value.serialize(serializer)
+        }
+        pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<TrustedGroupDecisionCutoffV1, D::Error> {
+            let value = Cutoff::deserialize(deserializer)?;
+            Ok(TrustedGroupDecisionCutoffV1 {
+                receipt: PublicGroupAppliedReceiptV1 {
+                    session_id: value.receipt.session_id,
+                    group: value.receipt.group,
+                    actor_input_sequence: value.receipt.actor_input_sequence,
+                    execution_time: TrustedActorExecutionTimeV1(value.receipt.execution_time),
+                },
+                decision_time: TrustedActorExecutionTimeV1(value.decision_time),
+                private_feedback_sequence: value.private_feedback_sequence,
+            })
+        }
+    }
+    #[derive(Serialize, Deserialize)]
+    pub struct PreparedGroup {
+        reference: PublicGroupReferenceV1,
+        #[serde(with = "group_observation")]
+        group: Arc<ClosedBusinessGroupV1>,
+        pm_inputs: Vec<(u64, CanonicalPmMessageV1)>,
+        pm_contexts: Vec<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>,
+    }
+    // 私有恢复所需的一位存在信息。正式观察的 null 表示不改写；只记录
+    // 已观察但没有买价的位置，避免 CBOR 将其合并为尚未观察。
+    mod group_observation {
+        use super::*;
+        #[derive(Serialize)]
+        struct SavedRef<'a> {
+            group: &'a ClosedBusinessGroupV1,
+            empty_valuation_bids: Vec<(usize, usize)>,
+        }
+        #[derive(Deserialize)]
+        struct Saved {
+            group: ClosedBusinessGroupV1,
+            empty_valuation_bids: Vec<(usize, usize)>,
+        }
+        pub fn serialize<S: serde::Serializer>(
+            group: &Arc<ClosedBusinessGroupV1>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            let empty_valuation_bids = group
+                .observations
+                .iter()
+                .enumerate()
+                .flat_map(|(market, observation)| {
+                    observation
+                        .assets
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, asset)| asset.valuation_best_bid.value == Some(None))
+                        .map(move |(asset, _)| (market, asset))
+                })
+                .collect();
+            SavedRef {
+                group,
+                empty_valuation_bids,
+            }
+            .serialize(serializer)
+        }
+        pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Arc<ClosedBusinessGroupV1>, D::Error> {
+            let mut saved = Saved::deserialize(deserializer)?;
+            for (market, asset) in saved.empty_valuation_bids {
+                let asset = saved
+                    .group
+                    .observations
+                    .get_mut(market)
+                    .and_then(|market| market.assets.get_mut(asset))
+                    .ok_or_else(|| serde::de::Error::custom("恢复空买价位置不存在"))?;
+                asset.valuation_best_bid.value = Some(None);
+            }
+            Ok(Arc::new(saved.group))
+        }
+    }
+    impl PreparedGroup {
+        pub fn capture(group: &PreparedPublicGroupV1) -> Self {
+            Self {
+                reference: group.reference.clone(),
+                group: group.group.clone(),
+                pm_inputs: group
+                    .pm_inputs
+                    .iter()
+                    .map(|(i, p)| (*i, p.message().clone()))
+                    .collect(),
+                pm_contexts: group.pm_contexts.clone(),
+            }
+        }
+        pub fn restore(
+            self,
+        ) -> Result<Arc<PreparedPublicGroupV1>, data_pipeline_core::ContractError> {
+            Ok(Arc::new(PreparedPublicGroupV1 {
+                reference: self.reference,
+                group: self.group,
+                pm_inputs: self
+                    .pm_inputs
+                    .into_iter()
+                    .map(|(i, m)| Ok((i, PreparedPmMessageV1::prepare(m)?)))
+                    .collect::<Result<_, data_pipeline_core::ContractError>>()?,
+                pm_contexts: self.pm_contexts,
+            }))
+        }
+    }
+    #[derive(Serialize, Deserialize)]
+    pub struct Delivery {
+        prepared: PreparedGroup,
+        delivered_at_utc_ms: i64,
+    }
+    impl Delivery {
+        pub fn capture(value: &PublicGroupDeliveryV1) -> Self {
+            Self {
+                prepared: PreparedGroup::capture(&value.prepared),
+                delivered_at_utc_ms: value.delivered_at_utc_ms,
+            }
+        }
+        pub fn restore(self) -> Result<PublicGroupDeliveryV1, data_pipeline_core::ContractError> {
+            Ok(PublicGroupDeliveryV1 {
+                prepared: self.prepared.restore()?,
+                delivered_at_utc_ms: self.delivered_at_utc_ms,
+            })
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[doc(hidden)]
+pub struct HiddenBucketCheckpointV1 {
+    reference: HiddenBucketReferenceV2,
+    records: Arc<[HiddenExecutionRecordV1]>,
+}
+impl HiddenBucketCheckpointV1 {
+    pub fn capture(bucket: &AcceptedHiddenStepBucketV1) -> Self {
+        Self {
+            reference: bucket.reference.clone(),
+            records: bucket.records.clone(),
+        }
+    }
+    pub fn restore(self) -> AcceptedHiddenStepBucketV1 {
+        AcceptedHiddenStepBucketV1 {
+            reference: self.reference,
+            records: self.records,
+        }
+    }
 }

@@ -1179,6 +1179,7 @@ fn byte_window_complete_multi_page_stream_and_actual_file_reads() {
         expected_schema,
         decode_typed_raw_record_batch,
         original.clone(),
+        0,
     )
     .unwrap();
     let mut new = stream_with_chunk_reader(
@@ -1189,6 +1190,7 @@ fn byte_window_complete_multi_page_stream_and_actual_file_reads() {
         expected_schema,
         decode_typed_raw_record_batch,
         window.clone(),
+        0,
     )
     .unwrap();
     let mut plain = stream_with_chunk_reader(
@@ -1199,6 +1201,7 @@ fn byte_window_complete_multi_page_stream_and_actual_file_reads() {
         expected_schema,
         decode_typed_raw_record_batch,
         File::open(&path).unwrap(),
+        0,
     )
     .unwrap();
     let mut total = 0;
@@ -1301,6 +1304,7 @@ fn byte_window_outside_scope_bad_later_page_keeps_original_batch_error() {
         expected_schema,
         decode_typed_raw_record_batch,
         File::open(&path).unwrap(),
+        0,
     )
     .unwrap();
     let mut new = open_parquet_with_decoder(

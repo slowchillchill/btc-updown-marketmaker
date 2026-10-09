@@ -40,6 +40,7 @@ pub(crate) fn after(at: i64, delay: u64) -> Result<i64, SimRunActorErrorV2> {
             "历史时序超出 UTC 毫秒定义域",
         ))
 }
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct DeliveryTimes {
     pub delays: DelayScheduleV1,
     pub last: Option<i64>,

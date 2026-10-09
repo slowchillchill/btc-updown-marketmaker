@@ -1685,3 +1685,232 @@ async fn paired_receivable_precedes_loser_failure_and_compensation_barrier() {
         market
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_settlement_and_unclaimed_feedback_restore_with_original_modules() {
+    use sim_system::{
+        finality::TradeFinalityPolicyV2, latency_profile::load_embedded_proxy_latency_profile,
+        scenario::*,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let (core, TradingTimes(mut delivered)) = recorded_settlement(&root);
+    // 公共交付可合法落后平台接收；29,697ms来自此夹具加载的原代理延迟档，
+    // 不是平台上限。空档覆盖该档，不改脚本、原随机序或反馈。
+    for at in &mut delivered {
+        if *at >= 66_000 {
+            *at += SETTLEMENT_DELTA_MS as i64;
+        }
+    }
+    let times = TradingTimes(delivered);
+    let (mut execution, observation, rules) = execution_with_rules_v4(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SUCCESS_POLICY,
+        None,
+        "e".repeat(64),
+        "100",
+    );
+    execution.configure_resolution_redeem_v1(script(1)).unwrap();
+    let ledger_root = temp.path().join("ledger");
+    let mut ledger =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &ledger_root)
+        .unwrap();
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation)
+        .unwrap()
+        .unwrap();
+    let groups = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let consumed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = consumed.clone();
+    let source = groups
+        .clone()
+        .into_iter()
+        .inspect(move |_| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        })
+        .map(Ok);
+    let mut driver =
+        FinitePublicConsumptionV1::new(execution, source, "settlement-checkpoint".into());
+    driver.enable_finite_recording_wait().unwrap();
+    for _ in 0..4 {
+        driver.next_group().unwrap().unwrap();
+    }
+    shared
+        .execute(
+            &mut driver.decision().unwrap(),
+            RequestContextV2 {
+                global_request_id: "checkpoint-buy-five".into(),
+                caller_correlation_id: None,
+            },
+            Some(Arc::new(ModelIntentV1::SubmitSingleBuy {
+                condition_id: ConditionId(CONDITION_ID.into()),
+                order: BuyLegIntentV1 {
+                    token_id: TokenId(UP_TOKEN_ID.into()),
+                    order: BuyOrderIntentV1::GtcLimit {
+                        limit_price_pusd_per_share: Decimal::new(6, 1),
+                        size_shares: Decimal::from(5),
+                        post_only: false,
+                    },
+                },
+            })),
+        )
+        .await
+        .unwrap();
+    let mut coordinator = SettlementCoordinatorV1::default();
+    loop {
+        assert!(driver.next_group().unwrap().is_some());
+        shared
+            .advance_settlement(&mut coordinator, &mut driver)
+            .unwrap();
+        if driver
+            .settlement_simulation_read(&ConditionId(CONDITION_ID.into()))
+            .is_some_and(|r| !r.final_success)
+        {
+            break;
+        }
+    }
+    let next_public = driver.next_group_at().unwrap().unwrap();
+    driver.advance_before(next_public).unwrap();
+    assert!(
+        driver
+            .settlement_simulation_read(&ConditionId(CONDITION_ID.into()))
+            .is_some_and(|r| !r.final_success)
+    );
+    let mut sim = Vec::new();
+    driver.write_checkpoint(&mut sim).unwrap();
+    let prefetched = driver.prefetched_group().unwrap();
+    let cursor = consumed.load(std::sync::atomic::Ordering::Relaxed);
+    let mut ledger = Vec::new();
+    shared.ledger().write_checkpoint(&mut ledger).unwrap();
+    let mut registry = Vec::new();
+    shared.write_checkpoint(&mut registry).unwrap();
+    let mut settlement = Vec::new();
+    ciborium::ser::into_writer(&coordinator, &mut settlement).unwrap();
+    #[derive(serde::Deserialize)]
+    struct Driver {
+        noe: Vec<u8>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Observation {
+        consumption: ::execution_normalization::NoeConsumptionSourceV2,
+        closed_receive_time: Option<i64>,
+        public_visible_time: Option<i64>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Port {
+        observation: Observation,
+    }
+    let saved: Driver = ciborium::de::from_reader(sim.as_slice()).unwrap();
+    let mut saved: Port = ciborium::de::from_reader(saved.noe.as_slice()).unwrap();
+    let closed = saved.observation.closed_receive_time.unwrap();
+    let visible = saved.observation.public_visible_time.unwrap();
+    assert!(
+        saved
+            .observation
+            .consumption
+            .take_closed(closed, visible)
+            .is_empty(),
+        "耐久保存不能提前领取尚不可见反馈"
+    );
+    let future = saved
+        .observation
+        .consumption
+        .take_closed(i64::MAX, i64::MAX);
+    assert!(!future.is_empty(), "完整状态须实际含尚未领的反馈");
+    assert!(
+        future.iter().all(|r| r.durable_reference().is_some()),
+        "恢复消费引用指向原已稳定NOE材料"
+    );
+    while driver.next_group().unwrap().is_some() {
+        shared
+            .advance_settlement(&mut coordinator, &mut driver)
+            .unwrap();
+    }
+    shared.apply_closed().unwrap();
+    let expected = serde_json::to_value(AccountEconomicsReadV2::from_ledger_and_observations(
+        &shared.ledger().economic_read().unwrap(),
+        std::iter::empty(),
+    ))
+    .unwrap();
+    let expected_projection = shared.ledger().projection_v2();
+    driver.stop_and_drain().unwrap();
+    drop(shared);
+    let scenario = PlatformScenarioV1::try_new(
+        core.fixed_markets()
+            .map(|market| {
+                let c = core.pm_context(&market.condition_id.0).unwrap();
+                PlatformMarketV1::try_new(
+                    c.market,
+                    c.assets
+                        .into_iter()
+                        .map(|a| a.asset)
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .unwrap(),
+                )
+                .unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let scenario = Arc::new(
+        SealedPlatformScenarioV1::decode_and_seal(
+            &serde_json::to_vec(&SimulationScenarioArtifactV1 {
+                schema_version: PLATFORM_SCENARIO_SCHEMA_V1.into(),
+                markets: scenario.market_set().markets().to_vec(),
+            })
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let (mut state, observation) = PublicConsumptionStateV1::restore_checkpoint(
+        sim.as_slice(),
+        rules,
+        Arc::new(TradeFinalityPolicyV2::decode_and_seal(SUCCESS_POLICY).unwrap()),
+        scenario,
+        load_embedded_proxy_latency_profile().unwrap(),
+        2 << 20,
+        128,
+    )
+    .unwrap();
+    let mut ledger = LedgerWriterV1::restore_checkpoint(ledger.as_slice()).unwrap();
+    state
+        .reconnect_ledger_recording(&mut ledger, &ledger_root)
+        .unwrap();
+    let mut shared =
+        SharedExecutionV2::restore_checkpoint(ledger, observation, registry.as_slice()).unwrap();
+    let source = prefetched
+        .into_iter()
+        .chain(groups.into_iter().skip(cursor))
+        .map(Ok);
+    let mut driver = FinitePublicConsumptionV1::from_checkpoint_state(state, source);
+    driver.enable_finite_recording_wait().unwrap();
+    let mut coordinator: SettlementCoordinatorV1 =
+        ciborium::de::from_reader(settlement.as_slice()).unwrap();
+    assert!(
+        driver
+            .settlement_simulation_read(&ConditionId(CONDITION_ID.into()))
+            .is_some_and(|r| !r.final_success)
+    );
+    while driver.next_group().unwrap().is_some() {
+        shared
+            .advance_settlement(&mut coordinator, &mut driver)
+            .unwrap();
+    }
+    shared.apply_closed().unwrap();
+    assert_eq!(shared.ledger().projection_v2(), expected_projection);
+    assert_eq!(
+        serde_json::to_value(AccountEconomicsReadV2::from_ledger_and_observations(
+            &shared.ledger().economic_read().unwrap(),
+            std::iter::empty()
+        ))
+        .unwrap(),
+        expected
+    );
+    driver.stop_and_drain().unwrap();
+}

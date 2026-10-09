@@ -2322,6 +2322,9 @@ pub(crate) type DecodeBatch<Row> = fn(
 
 pub struct TypedRawParquetStream<Row = TypedRawRow> {
     reader: ParquetRecordBatchReader,
+    row_group_rows: Vec<u64>,
+    seek_reader:
+        Option<Box<dyn Fn(u64) -> Result<ParquetRecordBatchReader, TypedRawReadError> + Send>>,
     decode: DecodeBatch<Row>,
     path: PathBuf,
     source_kind: String,
@@ -2336,7 +2339,43 @@ pub struct TypedRawParquetStream<Row = TypedRawRow> {
     max_physical_batch_bytes: Option<usize>,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TypedRawCursorV1 {
+    pub row_group: usize,
+    pub row_in_group: u64,
+    pub physical_row: u64,
+}
+
 impl<Row> TypedRawParquetStream<Row> {
+    /// 定位已验证文件的原物理行；只解码目标行组，不重扫已消费前缀。
+    pub fn seek_physical(&mut self, physical_row: u64) -> Result<(), TypedRawReadError> {
+        let seek = self
+            .seek_reader
+            .as_ref()
+            .expect("正式文件读取器保留定位能力");
+        self.reader = seek(physical_row)?;
+        self.next_row_index = physical_row;
+        self.finished = false;
+        Ok(())
+    }
+    pub fn cursor(&self) -> TypedRawCursorV1 {
+        let mut remaining = self.next_row_index;
+        for (row_group, rows) in self.row_group_rows.iter().enumerate() {
+            if remaining < *rows {
+                return TypedRawCursorV1 {
+                    row_group,
+                    row_in_group: remaining,
+                    physical_row: self.next_row_index,
+                };
+            }
+            remaining -= rows;
+        }
+        TypedRawCursorV1 {
+            row_group: self.row_group_rows.len(),
+            row_in_group: 0,
+            physical_row: self.next_row_index,
+        }
+    }
     pub const fn last_physical_batch_rows(&self) -> usize {
         self.last_physical_batch_rows
     }
@@ -2517,6 +2556,26 @@ pub(crate) fn open_parquet_with_decoder<Row>(
     schema: fn(&str, &str) -> Result<SchemaRef, TypedRawReadError>,
     decode: DecodeBatch<Row>,
 ) -> Result<TypedRawParquetStream<Row>, TypedRawReadError> {
+    open_parquet_at_with_decoder(
+        file,
+        batch_size,
+        scope,
+        max_physical_batch_bytes,
+        schema,
+        decode,
+        0,
+    )
+}
+
+pub(crate) fn open_parquet_at_with_decoder<Row>(
+    file: ParquetInputFacts<'_>,
+    batch_size: usize,
+    scope: Option<TypedRawReadScope>,
+    max_physical_batch_bytes: Option<usize>,
+    schema: fn(&str, &str) -> Result<SchemaRef, TypedRawReadError>,
+    decode: DecodeBatch<Row>,
+    physical_row: u64,
+) -> Result<TypedRawParquetStream<Row>, TypedRawReadError> {
     if batch_size == 0 {
         return Err(TypedRawReadError::InvalidBatchSize);
     }
@@ -2576,7 +2635,31 @@ pub(crate) fn open_parquet_with_decoder<Row>(
         schema,
         decode,
         byte_window::WindowedFile::new(opened),
+        physical_row,
     )
+}
+
+struct SharedChunkReader<R>(Arc<R>);
+impl<R> Clone for SharedChunkReader<R> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+impl<R: parquet::file::reader::Length> parquet::file::reader::Length for SharedChunkReader<R> {
+    fn len(&self) -> u64 {
+        self.0.len()
+    }
+}
+impl<R: parquet::file::reader::ChunkReader> parquet::file::reader::ChunkReader
+    for SharedChunkReader<R>
+{
+    type T = R::T;
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        self.0.get_read(start)
+    }
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<bytes::Bytes> {
+        self.0.get_bytes(start, length)
+    }
 }
 
 fn stream_with_chunk_reader<Row, R: parquet::file::reader::ChunkReader + 'static>(
@@ -2587,15 +2670,21 @@ fn stream_with_chunk_reader<Row, R: parquet::file::reader::ChunkReader + 'static
     schema: fn(&str, &str) -> Result<SchemaRef, TypedRawReadError>,
     decode: DecodeBatch<Row>,
     reader: R,
+    physical_row: u64,
 ) -> Result<TypedRawParquetStream<Row>, TypedRawReadError> {
     let path = file.path.to_path_buf();
-    let builder = ParquetRecordBatchReaderBuilder::try_new(reader).map_err(|error| {
-        TypedRawReadError::Parquet {
-            path: path.clone(),
-            batch_index: None,
-            detail: error.to_string(),
-        }
-    })?;
+    let retained = SharedChunkReader(Arc::new(reader));
+    let arrow_metadata =
+        parquet::arrow::arrow_reader::ArrowReaderMetadata::load(&retained, Default::default())
+            .map_err(|error| TypedRawReadError::Parquet {
+                path: path.clone(),
+                batch_index: None,
+                detail: error.to_string(),
+            })?;
+    let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
+        retained.clone(),
+        arrow_metadata.clone(),
+    );
     let expected = schema(file.source_kind, file.schema_version)?;
     validate_physical_schema_against(
         file.source_kind,
@@ -2627,7 +2716,44 @@ fn stream_with_chunk_reader<Row, R: parquet::file::reader::ChunkReader + 'static
             actual_rows,
         });
     }
+    let row_group_rows: Vec<u64> = builder
+        .metadata()
+        .row_groups()
+        .iter()
+        .map(|group| group.num_rows() as u64)
+        .collect();
+    let mut offset = physical_row;
+    let mut first_group = 0;
+    while first_group < row_group_rows.len() && offset >= row_group_rows[first_group] {
+        offset -= row_group_rows[first_group];
+        first_group += 1;
+    }
+    let groups: Vec<_> = (first_group..row_group_rows.len()).collect();
+    let seek_groups = row_group_rows.clone();
+    let seek_projection = projection.clone();
+    let seek_path = path.clone();
+    let seek_reader = Box::new(move |physical_row: u64| {
+        let mut offset = physical_row;
+        let mut first = 0;
+        while first < seek_groups.len() && offset >= seek_groups[first] {
+            offset -= seek_groups[first];
+            first += 1;
+        }
+        ParquetRecordBatchReaderBuilder::new_with_metadata(retained.clone(), arrow_metadata.clone())
+            .with_row_groups((first..seek_groups.len()).collect())
+            .with_offset(offset as usize)
+            .with_batch_size(batch_size)
+            .with_projection(seek_projection.clone())
+            .build()
+            .map_err(|error| TypedRawReadError::Parquet {
+                path: seek_path.clone(),
+                batch_index: None,
+                detail: error.to_string(),
+            })
+    });
     let reader = builder
+        .with_row_groups(groups)
+        .with_offset(offset as usize)
         .with_batch_size(batch_size)
         .with_projection(projection)
         .build()
@@ -2638,12 +2764,14 @@ fn stream_with_chunk_reader<Row, R: parquet::file::reader::ChunkReader + 'static
         })?;
     Ok(TypedRawParquetStream {
         reader,
+        row_group_rows,
+        seek_reader: Some(seek_reader),
         decode,
         path,
         source_kind: file.source_kind.to_owned(),
         schema_version: file.schema_version.to_owned(),
         expected_rows: file.rows,
-        next_row_index: 0,
+        next_row_index: physical_row,
         next_batch_index: 0,
         finished: false,
         scope,

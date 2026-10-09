@@ -146,7 +146,7 @@ impl AccountEconomicsReadV1 {
 }
 
 /// 模拟结算宿主只处理原请求的公开观察；没有 LIVE 定时器或自动重试政策。
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct SettlementCoordinatorV1 {
     handled: std::collections::BTreeMap<String, contracts::economics::SettlementObservationV1>,
 }

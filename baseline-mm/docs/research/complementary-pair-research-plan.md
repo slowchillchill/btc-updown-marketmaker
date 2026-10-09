@@ -1,6 +1,6 @@
 # 互补配对策略可执行研究计划
 
-最新适用说明（2026-10-09）：剩余经营比较按[D-0311](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6063365981)使用每候选、每UTC日独立2000 pUSD账户；按[D-0312](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6063577192)形成按日流式供料、日期与候选并行及必要材料／续跑方案。该方向已批准，具体实施安排仍待审，代码实施和真实作业保持暂停。下文历史研究、试制数据和旧入口说明保留原含义，不表示新流式入口或日内恢复已经交付。
+最新适用说明（2026-10-09）：剩余经营比较按[D-0311](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6063365981)使用每候选、每UTC日独立2000 pUSD账户；按[D-0312](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6063577192)形成按日流式供料、日期与候选并行及必要材料／续跑方案。该方向及修改后的A实施安排已批准，2026-10-09恢复工程执行。新原Parquet日入口、独立候选及完整日内恢复的调用与材料责任见[公共历史入口](../../../backtest/README.md#原parquet日作业并行与日内恢复)。本轮工程执行不启动真实经营研究、账户运行或参数采用。下文历史研究、试制数据和旧入口说明保留原含义；工程实现与验证不替代正式经营结果。
 
 当前 A 已恢复。来源健康、无消息重评和发送前失效已由 #241、#185/PR #248 交付。当前来源健康研究直接查询Parquet，按文件或必要重叠文件组即时汇总，不先累计十八日raw表。准确任务见[#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。此前两次完整core准备均未形成完整材料；随后 `fd5581c8` 的全期列式导入又被systemd-oomd终止，study未启动。必要失败证据保持原身份。十八日主要来源原始到达延迟描述统计已完成，但尚不是有效消息健康分布或正式阈值。用户取消新增小样本试验；v7已经生成完整S/A、四折冻结验证和最后开发比较，见[十八日正式研究结果](complementary-pair-source-health-18d-20260909-20260926.md)。prepare/study均退出0，全程2:12:52.154384，经营研究未执行，正式阈值未采用。
 

@@ -4,6 +4,9 @@
 //! 和不透明载荷。本 crate 不是通用存储层或查询层，也不解释排序键的业务语义。
 
 pub mod canonical_run;
+mod day_order;
+pub mod day_producer;
+pub mod day_stream;
 mod dpt_gate_a_cli;
 pub mod finite_recording;
 pub mod finite_source_progress;
@@ -11,6 +14,7 @@ pub mod gate_a;
 mod gate_a_publication;
 mod gate_a_sim_adapter;
 pub mod hidden_preparation;
+pub mod hidden_stream;
 pub mod historical_initialization;
 pub mod historical_preparation_progress;
 pub mod observation;

@@ -435,6 +435,7 @@ impl HiddenIndexReaderV1 {
 }
 
 /// 当前有界索引页的强类型材料，位置仍是唯一原索引位置。
+#[derive(Serialize, Deserialize)]
 pub enum ResolvedHiddenRecordV1 {
     Step {
         stored: HiddenStoredStepV1,

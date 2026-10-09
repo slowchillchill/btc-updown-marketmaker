@@ -13,9 +13,16 @@ async fn memory_execution_with_scenario_capacity<
     memory_execution_with_cash::<P>(path, scenario, role, capacity, rules, "10").await
 }
 async fn memory_execution_with_cash<P: noe_projection::MemoryOrderEvidence + 'static>(
-    path: &Path, scenario: Arc<SealedPlatformScenarioV1>, role: SimCallerRoleV1,
-    capacity: usize, rules: Option<Arc<SealedProcessRuleSnapshotV3>>, cash: &str,
-) -> (PublicSimExecutionV1,noe_projection::MemoryNoeObservation<P>) {
+    path: &Path,
+    scenario: Arc<SealedPlatformScenarioV1>,
+    role: SimCallerRoleV1,
+    capacity: usize,
+    rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
+    cash: &str,
+) -> (
+    PublicSimExecutionV1,
+    noe_projection::MemoryNoeObservation<P>,
+) {
     let rules = match rules {
         Some(rules) => rules,
         None => successful_snapshot_v3_for_sim_tests().await,
@@ -90,15 +97,15 @@ fn close_at<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>
 ) {
     let next = driver.last_receipt.as_ref().unwrap().group.group_position + 1;
     let closure = TrustedPublicTimeClosureV1 {
-            execution_time: driver.time(at),
-            consumption_sequence_ref: driver.consumption_sequence_ref.clone(),
-            next_group_position: next,
-            closure: PublicTimeClosureReasonV1::NextGlobalEventAt(if next <= 5 {
-                26_000
-            } else {
-                TERMINAL_ADMITTED_TIME_MS
-            }),
-        };
+        execution_time: driver.time(at),
+        consumption_sequence_ref: driver.consumption_sequence_ref.clone(),
+        next_group_position: next,
+        closure: PublicTimeClosureReasonV1::NextGlobalEventAt(if next <= 5 {
+            26_000
+        } else {
+            TERMINAL_ADMITTED_TIME_MS
+        }),
+    };
     driver.execution.close_public_time(closure).unwrap();
     driver.drive_position += 1;
     driver.close_pending = false;
@@ -305,7 +312,11 @@ async fn real_memory_noe_delivers_closed_order_feedback_and_cancel_before_finish
         }))
         .unwrap();
     close_at(&mut driver, 26_000);
-    assert_eq!(observation.durable_through(),0,"市场结束前暂停不阻断原业务链");
+    assert_eq!(
+        observation.durable_through(),
+        0,
+        "市场结束前暂停不阻断原业务链"
+    );
     release.send(()).unwrap();
 
     while let Some(required) = driver.execution.actor.next_required_logical_drive() {
@@ -315,9 +326,15 @@ async fn real_memory_noe_delivers_closed_order_feedback_and_cancel_before_finish
         close_at(&mut driver, required.required_at_utc_ms);
     }
     while driver.next_group().unwrap().is_some() {}
-    assert!(driver.execution.actor.unstable_market_ends.is_empty(),"已稳定市场截止不常驻历史集合");
+    assert!(
+        driver.execution.actor.unstable_market_ends.is_empty(),
+        "已稳定市场截止不常驻历史集合"
+    );
     let accepted = observation.accepted_through();
-    assert!(observation.durable_through()>0,"市场结束已自动稳定，无需等Finish");
+    assert!(
+        observation.durable_through() > 0,
+        "市场结束已自动稳定，无需等Finish"
+    );
     driver.complete().unwrap();
     assert_eq!(observation.durable_through(), accepted);
     let references = observation.result_references();
@@ -356,7 +373,9 @@ async fn real_memory_noe_delivers_closed_order_feedback_and_cancel_before_finish
     assert!(std::fs::read_to_string(path).unwrap().contains("RUN_SEAL"));
 }
 
-fn recorded_memory_complete(root: &Path) -> PublicObservationCoreV1 { recorded_memory_with_probe(root, false) }
+fn recorded_memory_complete(root: &Path) -> PublicObservationCoreV1 {
+    recorded_memory_with_probe(root, false)
+}
 fn recorded_memory_with_probe(root: &Path, probe: bool) -> PublicObservationCoreV1 {
     let mut core = core();
     let mut writer = PublicRecordingWriterV1::create(root, core.header(), config()).unwrap();
@@ -415,8 +434,22 @@ fn recorded_memory_with_probe(root: &Path, probe: bool) -> PublicObservationCore
         end(8),
     ];
     if probe {
-        for input in &mut inputs[6..] {input.input_position+=1;}
-        inputs.insert(6,record(6,TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",5,27_000,27_001,book("80"))))));
+        for input in &mut inputs[6..] {
+            input.input_position += 1;
+        }
+        inputs.insert(
+            6,
+            record(
+                6,
+                TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row(
+                    "epoch-a",
+                    5,
+                    27_000,
+                    27_001,
+                    book("80"),
+                ))),
+            ),
+        );
     }
     for input in inputs {
         let result = apply(&mut core, &input);
@@ -493,13 +526,22 @@ async fn real_memory_noe_stage_and_publish_failures_preserve_materials_without_s
         let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
         let mut driver =
             FinitePublicConsumptionV1::new(execution, source, "finite-recorded-times".into());
-        assert_eq!(observation.durable_through(),0);
+        assert_eq!(observation.durable_through(), 0);
         release.send(()).unwrap();
-        let driving_error=loop {
-            match driver.next_group() {Ok(Some(_))=>{},Ok(None)=>break None,Err(error)=>break Some(error)}
+        let driving_error = loop {
+            match driver.next_group() {
+                Ok(Some(_)) => {}
+                Ok(None) => break None,
+                Err(error) => break Some(error),
+            }
         };
-        let error=if let Some(error)=driving_error {error} else {
-            match driver.complete() {Err(error)=>error,Ok(_)=>panic!("损坏现场不能完成")}
+        let error = if let Some(error) = driving_error {
+            error
+        } else {
+            match driver.complete() {
+                Err(error) => error,
+                Ok(_) => panic!("损坏现场不能完成"),
+            }
         };
         if stable_publish {
             assert!(matches!(
@@ -565,15 +607,16 @@ async fn finite_legacy_order_consumer_keeps_noe_v2_context_and_reader() {
     let mut driver =
         FinitePublicConsumptionV1::new(execution, source, "finite-recorded-times".into());
     while driver.next_group().unwrap().is_some() {}
-    assert!(observation.durable_through()>0,"市场结束前缀已自动稳定旧业务版本的新物理容器");
+    assert!(
+        observation.durable_through() > 0,
+        "市场结束前缀已自动稳定旧业务版本的新物理容器"
+    );
     assert_eq!(
         observation.delivered_through(),
         0,
         "无请求的有限例程没有虚构反馈交付"
     );
-    driver
-        .complete()
-        .unwrap();
+    driver.complete().unwrap();
     for reference in observation.result_references() {
         let value = ::execution_normalization::read_noe_result_v2(&reference).unwrap();
         assert_eq!(value.context.contract_version, "execution_normalization_v2");
@@ -627,7 +670,7 @@ async fn training_hidden_prefetch_cannot_advance_public_feedback_visibility_or_o
     driver.next_group().unwrap().unwrap();
     for at in [21_000, 21_001] {
         let bucket = buckets.next_bucket().unwrap().unwrap();
-        assert_eq!(bucket.reference.bucket_time_utc_ms, at);
+        assert_eq!(bucket.reference.bucket_time_utc_ms(), at);
         driver.hidden_bucket(bucket).unwrap();
     }
     let (at_t, old_t_cutoff) = driver.next_group().unwrap().unwrap();
@@ -653,7 +696,7 @@ async fn training_hidden_prefetch_cannot_advance_public_feedback_visibility_or_o
         }))
         .unwrap();
     let bucket = buckets.next_bucket().unwrap().unwrap();
-    let h = bucket.reference.bucket_time_utc_ms;
+    let h = bucket.reference.bucket_time_utc_ms();
     assert_eq!(h, 25_000);
     driver.hidden_bucket(bucket).unwrap();
     let response = completed_post_response(&driver.execution.actor, "memory-buy").unwrap();
@@ -740,19 +783,21 @@ async fn training_hidden_prefetch_cannot_advance_public_feedback_visibility_or_o
         frozen_frame,
         "驱动快照不被新 decision 回写"
     );
-    assert_eq!(observation.durable_through(),0);
+    assert_eq!(observation.durable_through(), 0);
     release.send(()).unwrap();
-    let delivered_before_end=observation.delivered_through();
+    let delivered_before_end = observation.delivered_through();
     while let Some(bucket) = buckets.next_bucket().unwrap() {
         driver.hidden_bucket(bucket).unwrap();
     }
     assert!(driver.execution.actor.unstable_market_ends.is_empty());
-    assert!(observation.durable_through()>0,"隐藏市场结束自动稳定");
-    assert_eq!(observation.delivered_through(),delivered_before_end,"耐久稳定不前移公共反馈交付");
+    assert!(observation.durable_through() > 0, "隐藏市场结束自动稳定");
+    assert_eq!(
+        observation.delivered_through(),
+        delivered_before_end,
+        "耐久稳定不前移公共反馈交付"
+    );
     while driver.next_group().unwrap().is_some() {}
-    driver
-        .complete()
-        .unwrap();
+    driver.complete().unwrap();
     let (_, mut reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
     let mut saw_request = false;
     loop {
@@ -760,7 +805,10 @@ async fn training_hidden_prefetch_cannot_advance_public_feedback_visibility_or_o
         reader = next;
         let Some(group) = group else { break };
         for input in group {
-            if let LoggedBusinessInputV2::PublicRequest { cutoff, request, .. } = input {
+            if let LoggedBusinessInputV2::PublicRequest {
+                cutoff, request, ..
+            } = input
+            {
                 if request.context().global_request_id == "training-visible-cancel" {
                     assert_eq!(cutoff.into_trusted(), new_cutoff);
                     saw_request = true;
@@ -776,12 +824,23 @@ async fn training_hidden_prefetch_cannot_advance_public_feedback_visibility_or_o
     }));
 }
 
-#[cfg(feature="shared-execution")]
+#[cfg(feature = "shared-execution")]
 include!("shared_ledger_tests.rs");
 
 struct SharedRecordedTimes;
 impl PublicConsumptionTimeSourceV1 for SharedRecordedTimes {
-fn execution_time_for_group(&mut self,group:&PublicGroupReferenceV1)->Result<i64,SimRunActorErrorV2>{Ok(match group.group_position {0=>SNAPSHOT_RECEIVED_AT,1..=4=>22_000,5=>26_000,6=>28_000,_=>TERMINAL_ADMITTED_TIME_MS})}
+    fn execution_time_for_group(
+        &mut self,
+        group: &PublicGroupReferenceV1,
+    ) -> Result<i64, SimRunActorErrorV2> {
+        Ok(match group.group_position {
+            0 => SNAPSHOT_RECEIVED_AT,
+            1..=4 => 22_000,
+            5 => 26_000,
+            6 => 28_000,
+            _ => TERMINAL_ADMITTED_TIME_MS,
+        })
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1603,39 +1662,93 @@ async fn finite_paper_gap_closes_receipts_strictly_before_next_real_group() {
         let root = temp.path().join("dpt");
         let core = recorded_memory_complete(&root);
         let context = core.pm_context(CONDITION_ID).unwrap();
-        let scenario = sealed_scenario_for_markets(vec![crate::scenario::PlatformMarketV1::try_new(
-            context.market, context.assets.into_iter().map(|a| a.asset).collect::<Vec<_>>().try_into().unwrap(),
-        ).unwrap()]);
-        let (execution, observation) = memory_execution_with_scenario_capacity::<noe_projection::MeasuredOrderEvidence>(
-            &temp.path().join("sim.jsonl"), scenario, SimCallerRoleV1::Paper, 128, None,
-        ).await;
+        let scenario = sealed_scenario_for_markets(vec![
+            crate::scenario::PlatformMarketV1::try_new(
+                context.market,
+                context
+                    .assets
+                    .into_iter()
+                    .map(|a| a.asset)
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
+            )
+            .unwrap(),
+        ]);
+        let (execution, observation) =
+            memory_execution_with_scenario_capacity::<noe_projection::MeasuredOrderEvidence>(
+                &temp.path().join("sim.jsonl"),
+                scenario,
+                SimCallerRoleV1::Paper,
+                128,
+                None,
+            )
+            .await;
         let next_at = delta.map_or(26_000, |d| original_received.unwrap() + d);
-        let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes).unwrap()
-            .enumerate().map(|(index, value)| value.map(|mut value| {
-                if index == 5 { value.delivered_at_utc_ms = next_at; }
-                value
-            }));
+        let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes)
+            .unwrap()
+            .enumerate()
+            .map(|(index, value)| {
+                value.map(|mut value| {
+                    if index == 5 {
+                        value.delivered_at_utc_ms = next_at;
+                    }
+                    value
+                })
+            });
         let mut driver = FinitePublicConsumptionV1::new(execution, source, "receipt-gap".into());
-        for _ in 0..5 { driver.next_group().unwrap().unwrap(); }
-        driver.decision().unwrap().request(BusinessRequestV2::PostOrder(PostOrderRequestV2 {
-            context: RequestContextV2 { global_request_id: "gap-buy".into(), caller_correlation_id: None },
-            item: post_item("buy", &ConditionId(CONDITION_ID.into()), &TokenId(UP_TOKEN_ID.into()),
-                SimBuyOrderKindV1::GtcLimit { limit_price_pusd_per_share: Decimal::new(2,1), size_shares: Decimal::from(5), post_only: true }),
-        })).unwrap();
+        for _ in 0..5 {
+            driver.next_group().unwrap().unwrap();
+        }
+        driver
+            .decision()
+            .unwrap()
+            .request(BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+                context: RequestContextV2 {
+                    global_request_id: "gap-buy".into(),
+                    caller_correlation_id: None,
+                },
+                item: post_item(
+                    "buy",
+                    &ConditionId(CONDITION_ID.into()),
+                    &TokenId(UP_TOKEN_ID.into()),
+                    SimBuyOrderKindV1::GtcLimit {
+                        limit_price_pusd_per_share: Decimal::new(2, 1),
+                        size_shares: Decimal::from(5),
+                        post_only: true,
+                    },
+                ),
+            }))
+            .unwrap();
         assert!(observation.take_closed_feedback().is_empty());
         let receipt = driver.next_group().unwrap().unwrap().0;
         assert_eq!(receipt.execution_time().logical_time_utc_ms(), next_at);
         let response = completed_post_response(&driver.execution.actor, "gap-buy").unwrap();
         let received = response.metadata.response_received_at_utc_ms;
         assert!(response.metadata.platform_responded_at_utc_ms < received);
-        if let Some(expected) = original_received { assert_eq!(received, expected); }
-        else { original_received = Some(received); }
+        if let Some(expected) = original_received {
+            assert_eq!(received, expected);
+        } else {
+            original_received = Some(received);
+        }
         let records = observation.take_closed_feedback();
         let response_seen = records.iter().any(|r| matches!(r.record().source_reference().record,
             SimV2SourceRecordReferenceV1::DirectResponse { response_received_at_utc_ms, .. } if response_received_at_utc_ms == received));
         assert_eq!(response_seen, received < next_at, "=t及>t不得提前领取");
-        assert_eq!(driver.execution.actor.state.as_ref().unwrap().session.as_ref().unwrap()
-            .public_visibility_frontier.closed_through_utc_ms, Some(next_at - 1));
+        assert_eq!(
+            driver
+                .execution
+                .actor
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .public_visibility_frontier
+                .closed_through_utc_ms,
+            Some(next_at - 1)
+        );
         driver.stop_and_drain().unwrap();
     }
 }

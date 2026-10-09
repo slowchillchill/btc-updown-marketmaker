@@ -12,7 +12,7 @@ thread_local! {
 #[derive(Default)]
 pub(super) struct ResourceState {
     pub bytes: u64,
-    files: usize,
+    pub(super) files: usize,
     pub(super) handles: usize,
     pub(super) workers: usize,
     pub peak_bytes: u64,

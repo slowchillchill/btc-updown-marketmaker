@@ -12,7 +12,7 @@ use std::{
     sync::Arc,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FrozenIntentRefV1 {
     context: Arc<ExecutionNormalizationContextV1>,
     id: String,
@@ -50,7 +50,7 @@ pub struct ExecutionOrderRead<'a, R> {
     pub active_unfilled_shares: ExecutionReadValueV1<ExactDecimal>,
     pub cancellable: ExecutionReadValueV1<bool>,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Order<R> {
     origin: Option<(String, u16)>,
     accepted: Option<Ref<R>>,
@@ -77,7 +77,7 @@ impl<R> Default for Order<R> {
         }
     }
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Submitted<R> {
     origin: FrozenIntentRefV1,
     receipt: Option<MutationRequestReceiptV2>,
@@ -92,7 +92,7 @@ struct Submitted<R> {
 ///     registry.observe(view);
 /// }
 /// ```
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SharedExecutionRegistry<R> {
     context: Arc<ExecutionNormalizationContextV1>,
     intents: BTreeMap<String, Submitted<R>>,

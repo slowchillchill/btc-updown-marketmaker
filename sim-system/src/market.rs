@@ -164,7 +164,7 @@ pub(crate) enum MarketLifecyclePhaseV1 {
     Evicted,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MarketStateStoreV2 {
     markets: BTreeMap<String, MarketStateV2>,
 }
@@ -561,7 +561,7 @@ impl MarketStateStoreV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct MarketStateV2 {
     lifecycle_phase: MarketLifecyclePhaseV1,
     mapped_lifecycle_state: Option<MappedMarketLifecycleStateV1>,
@@ -571,7 +571,7 @@ struct MarketStateV2 {
     source_qualified_resolution: Option<SourceQualifiedResolutionV2>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct SourceQualifiedResolutionV2 {
     resolution_event_id: String,
     resolution_source_event_at_utc_ms: i64,
@@ -849,7 +849,7 @@ impl MarketStateV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct AssetMarketStateV2 {
     initialized: bool,
     current_tick_size_pusd_per_share: Option<Decimal>,
@@ -868,7 +868,7 @@ impl Default for AssetMarketStateV2 {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct ExactExternalBookV2 {
     bids: BTreeMap<Decimal, Decimal>,
     asks: BTreeMap<Decimal, Decimal>,

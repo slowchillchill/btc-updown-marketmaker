@@ -75,7 +75,7 @@ fn book(
         }),
     }
 }
-fn material(root: &Path) -> std::path::PathBuf {
+fn material(root: &Path, base: i64, utc_day: &str) -> std::path::PathBuf {
     let day = root.join("inputs");
     std::fs::create_dir(&day).unwrap();
     let mut metadata_writer = TypedParquetSegmentWriter::create_for_typed_source(
@@ -91,23 +91,23 @@ fn material(root: &Path) -> std::path::PathBuf {
                 FIRST,
                 "3195576",
                 ["20", "3"],
-                BASE,
-                BASE + 1000,
-                BASE + 10000,
+                base,
+                base + 1000,
+                base + 10000,
                 1,
             ),
             metadata(
                 SECOND,
                 "3195577",
                 ["21", "4"],
-                BASE + 6000,
-                BASE + 10000,
-                BASE + 20000,
+                base + 6000,
+                base + 10000,
+                base + 20000,
                 2,
             ),
         ])
         .unwrap();
-    metadata_writer.append_key_value_metadata("data_collect_daily_file_fact_v1", json!({"source_kind":"polymarket_market_metadata","schema_version":"polymarket_market_metadata_v5","utc_hour":"2026-08-24T00","part":0,"rows":2}).to_string()).unwrap();
+    metadata_writer.append_key_value_metadata("data_collect_daily_file_fact_v1", json!({"source_kind":"polymarket_market_metadata","schema_version":"polymarket_market_metadata_v5","utc_hour":format!("{utc_day}T00"),"part":0,"rows":2}).to_string()).unwrap();
     let metadata = metadata_writer.finalize().unwrap();
     let mut pm_writer = TypedParquetSegmentWriter::create_for_typed_source(
         &day,
@@ -119,27 +119,34 @@ fn material(root: &Path) -> std::path::PathBuf {
     pm_writer
         .write_polymarket_orderbook_v3_messages(
             &[
-                book(FIRST, "20", BASE + 1100, BASE + 1100, 1, "0.6"),
-                book(FIRST, "3", BASE + 1100, BASE + 1100, 2, "0.6"),
+                book(FIRST, "20", base + 1100, base + 1100, 1, "0.6"),
+                book(FIRST, "3", base + 1100, base + 1100, 2, "0.6"),
                 // 隐藏撮合先在1700发生；公开直到2200才接收，不能提前更新策略盘口。
-                book(FIRST, "3", BASE + 1300, BASE + 1300, 3, "0.65"),
-                book(FIRST, "20", BASE + 1701, BASE + 2200, 4, "0.5"),
-                book(SECOND, "21", BASE + 10100, BASE + 10200, 5, "0.6"),
-                book(SECOND, "4", BASE + 10100, BASE + 10200, 6, "0.6"),
+                book(FIRST, "3", base + 1300, base + 1300, 3, "0.65"),
+                book(FIRST, "20", base + 1701, base + 2200, 4, "0.5"),
+                book(SECOND, "21", base + 10100, base + 10200, 5, "0.6"),
+                book(SECOND, "4", base + 10100, base + 10200, 6, "0.6"),
             ],
             &mut PolymarketOrderbookV3WriteSequenceState::default(),
         )
         .unwrap();
-    pm_writer.append_key_value_metadata("data_collect_daily_file_fact_v1", json!({"source_kind":"polymarket_market","schema_version":POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,"utc_hour":"2026-08-24T00","part":0,"rows":6}).to_string()).unwrap();
+    pm_writer.append_key_value_metadata("data_collect_daily_file_fact_v1", json!({"source_kind":"polymarket_market","schema_version":POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,"utc_hour":format!("{utc_day}T00"),"part":0,"rows":6}).to_string()).unwrap();
     let pm = pm_writer.finalize().unwrap();
-    let files=[(&metadata,"polymarket_market_metadata","polymarket_market_metadata_v5"),(&pm,"polymarket_market",POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION)].map(|(file,source,version)|json!({"path":file.final_path.file_name().unwrap().to_str().unwrap(),"source_kind":source,"schema_version":version,"utc_hour":"2026-08-24T00","part":0,"rows":file.row_count,"bytes":std::fs::metadata(&file.final_path).unwrap().len(),"sha256":file.sha256}));
-    let manifest = json!({"schema_version":"data_collect_daily_manifest_v3","state":"closed","utc_day":"2026-08-24","closure_reason":"utc_day_barrier","collection_day_coverage":{"schema_version":"data_collect_collection_day_coverage_v1","state":"ended_known","first_started_utc_ms":BASE,"last_started_utc_ms":BASE,"ended_utc_ms":BASE+86400000,"reactivated_within_day":false},"producer_barriers":["binance_aggtrade","binance_depth","polymarket","polymarket_rtds"],"writer_finalize_acks":["binance_aggtrade","binance_depth_snapshot","binance_depth_update","polymarket_market","polymarket_market_metadata","polymarket_rtds_chainlink_btc_usd"],"files":files});
+    let files=[(&metadata,"polymarket_market_metadata","polymarket_market_metadata_v5"),(&pm,"polymarket_market",POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION)].map(|(file,source,version)|json!({"path":file.final_path.file_name().unwrap().to_str().unwrap(),"source_kind":source,"schema_version":version,"utc_hour":format!("{utc_day}T00"),"part":0,"rows":file.row_count,"bytes":std::fs::metadata(&file.final_path).unwrap().len(),"sha256":file.sha256}));
+    let manifest = json!({"schema_version":"data_collect_daily_manifest_v3","state":"closed","utc_day":utc_day,"closure_reason":"utc_day_barrier","collection_day_coverage":{"schema_version":"data_collect_collection_day_coverage_v1","state":"ended_known","first_started_utc_ms":base,"last_started_utc_ms":base,"ended_utc_ms":base+86400000,"reactivated_within_day":false},"producer_barriers":["binance_aggtrade","binance_depth","polymarket","polymarket_rtds"],"writer_finalize_acks":["binance_aggtrade","binance_depth_snapshot","binance_depth_update","polymarket_market","polymarket_market_metadata","polymarket_rtds_chainlink_btc_usd"],"files":files});
     let path = day.join("manifest.json");
     std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     path
 }
 pub(crate) fn setup(root: &Path) -> (HistoricalRunConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
-    let manifest = material(root);
+    setup_day(root, BASE, "2026-08-24")
+}
+pub(crate) fn setup_day(
+    root: &Path,
+    base: i64,
+    utc_day: &str,
+) -> (HistoricalRunConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
+    let manifest = material(root, base, utc_day);
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .find(|path| path.join("sim-system").is_dir())
@@ -150,7 +157,7 @@ pub(crate) fn setup(root: &Path) -> (HistoricalRunConfigV1, Arc<SealedProcessRul
     let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
         snapshot_path: rule_path,
         expected_file_sha256: Sha256Hex(rule_sha),
-        replay_causal_start_utc_ms: BASE,
+        replay_causal_start_utc_ms: base,
     })
     .unwrap();
     let finality_path = root.join("finality.json");
@@ -169,8 +176,8 @@ pub(crate) fn setup(root: &Path) -> (HistoricalRunConfigV1, Arc<SealedProcessRul
         preparation: HistoricalPreparationConfigV1 {
             scope: HistoricalScopeV1 {
                 manifest_paths: vec![manifest],
-                received_start_utc_ms: BASE,
-                received_end_utc_ms: BASE + 12000,
+                received_start_utc_ms: base,
+                received_end_utc_ms: base + 12000,
                 purpose: "合成工程验证；非研究结论".into(),
             },
             metadata_initialization: None,

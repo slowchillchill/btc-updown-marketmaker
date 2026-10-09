@@ -458,14 +458,14 @@ pub(crate) fn duplicate_suppressed_report<E: ReductionEvidenceV1>(
     Ok(report)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct ReferenceLevelState<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     price: ExactDecimal,
     quantity: ExactDecimal,
     direct_evidence: E,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct BinanceDepthBookState<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     snapshot_last_update_id: u64,
     local_u: Option<u64>,
@@ -478,7 +478,7 @@ struct BinanceDepthBookState<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     visibility_frontier_evidence: E,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct BinanceDepthEpochState<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     last_admission_sequence: Option<u64>,
     book: Option<BinanceDepthBookState<E>>,
@@ -488,14 +488,14 @@ struct BinanceDepthEpochState<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     epoch_switch_missing_emitted: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct BinanceDepthSnapshotContinuity {
     received_utc_day: i64,
     depth_ingress_sequence: u64,
     connection_generation: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BinanceDepthReducer<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     canonical_rule_version: String,
     epochs: BTreeMap<String, BinanceDepthEpochState<E>>,
@@ -1233,7 +1233,7 @@ fn binance_depth_evidence<E: ReductionEvidenceV1>(
     )
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BinanceAggTradeReducer<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     canonical_rule_version: String,
     current_trade: Option<(u64, i64, BinanceAggregateTradeReferenceV1, E)>,
@@ -1337,7 +1337,7 @@ impl<E: ReductionEvidenceV1> BinanceAggTradeReducer<E> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PolymarketAssetContextV1 {
     pub asset: AssetIdentityV1,
     pub initial_tick_size_pusd_per_share: ExactDecimal,
@@ -1358,13 +1358,13 @@ pub struct PolymarketTerminalContextV1<E = SourceEvidenceRefV2> {
     pub identity_source_evidence: Vec<E>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PolymarketOrderbookInputV1<E = SourceEvidenceRefV2> {
     pub row: PolymarketOrderbookRow,
     pub evidence: E,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PolymarketMetadataInputV1<E = SourceEvidenceRefV2> {
     pub row: PolymarketMarketMetadataRow,
     pub evidence: E,
@@ -1384,7 +1384,7 @@ impl<E> From<PolymarketMetadataInputV1<E>> for PolymarketTerminalMetadataInputV1
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PolymarketMetadataReducer<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     market: MarketIdentityV2,
     assets: Vec<AssetIdentityV1>,
@@ -1716,7 +1716,7 @@ impl<E: ReductionEvidenceV1> PolymarketMetadataReducer<E> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PolymarketTerminalMerger<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     market: MarketIdentityV2,
     assets: Vec<AssetIdentityV1>,

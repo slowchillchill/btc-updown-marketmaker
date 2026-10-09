@@ -106,7 +106,62 @@ pub(crate) struct SimEventLogV2 {
     fail_next_sync: bool,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SimLogCheckpointV1 {
+    byte_count: u64,
+    next_input_sequence: u64,
+}
 impl SimEventLogV2 {
+    fn checkpoint(&self) -> SimLogCheckpointV1 {
+        SimLogCheckpointV1 {
+            byte_count: self.byte_count,
+            next_input_sequence: self.next_input_sequence,
+        }
+    }
+    pub(crate) fn restore_checkpoint(
+        path: &Path,
+        opened: &RunOpenedV2,
+        saved: SimLogCheckpointV1,
+        max_group_bytes: usize,
+    ) -> Result<Self, SimEventLogErrorV2> {
+        use std::io::{Seek, SeekFrom};
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| io_error("打开原 SIM 检查点日志", e))?;
+        if file
+            .metadata()
+            .map_err(|e| io_error("读取原 SIM 日志长度", e))?
+            .len()
+            < saved.byte_count
+        {
+            return Err(SimEventLogErrorV2::InvalidStructure(
+                "SIM 日志短于完整检查点",
+            ));
+        }
+        file.set_len(saved.byte_count)
+            .map_err(|e| io_error("丢弃 SIM 未提交执行尾", e))?;
+        file.seek(SeekFrom::Start(saved.byte_count))
+            .map_err(|e| io_error("定位 SIM 续写位置", e))?;
+        file.sync_data()
+            .map_err(|e| io_error("稳定 SIM 检查点尾部恢复", e))?;
+        Ok(Self {
+            file,
+            durability_role: opened.durability_role,
+            projection_version: opened.projection_version,
+            byte_count: saved.byte_count,
+            next_input_sequence: saved.next_input_sequence,
+            max_group_bytes,
+            #[cfg(feature = "measurement")]
+            measurement_probe: Arc::new(MeasurementProbe::default()),
+            #[cfg(test)]
+            fail_next_write: false,
+            #[cfg(test)]
+            fail_next_sync: false,
+        })
+    }
+
     pub(crate) fn create(
         path: &Path,
         opened: &RunOpenedV2,
@@ -1133,7 +1188,19 @@ struct BackgroundFinishV1 {
     #[cfg(feature = "shared-execution")]
     ledger: Option<LedgerBatchV2>,
 }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BackgroundCheckpointV1 {
+    pub log: SimLogCheckpointV1,
+    pub noe: Option<crate::run_v2::noe_projection::BackgroundNoeCheckpointV1>,
+    #[cfg(feature = "shared-execution")]
+    pub ledger: Option<ledger::LedgerBackgroundCheckpointV1>,
+}
 enum BackgroundLogCommandV1 {
+    Checkpoint(
+        BackgroundFinishV1,
+        std::sync::mpsc::SyncSender<Result<BackgroundCheckpointV1, SimEventLogErrorV2>>,
+    ),
+
     Group(BackgroundGroupV1),
     Finish(BackgroundFinishV1),
     Stabilize(
@@ -1156,6 +1223,10 @@ enum BackgroundLogCommandV1 {
 pub(crate) struct BackgroundEventLogV1 {
     sender: std::sync::mpsc::SyncSender<BackgroundLogCommandV1>,
     pending: Option<BackgroundGroupV1>,
+    // 有限宿主在每次尚未接纳的提交前等原交接，不重试复合业务操作。
+    finite_recording_wait: bool,
+    #[cfg(test)]
+    finite_wait_notice: Option<std::sync::mpsc::SyncSender<()>>,
     #[cfg(feature = "shared-execution")]
     ledger: Option<(std::path::PathBuf, LedgerIntakeV2)>,
     failure: std::sync::Arc<std::sync::Mutex<Option<SimEventLogErrorV2>>>,
@@ -1168,6 +1239,47 @@ impl BackgroundEventLogV1 {
     fn start_with_hook(
         log: SimEventLogV2,
         capacity: usize,
+        before_encode: impl FnMut() + Send + 'static,
+    ) -> Self {
+        Self::start_with_state(
+            log,
+            capacity,
+            None,
+            #[cfg(feature = "shared-execution")]
+            BackgroundLedgerV2::default(),
+            before_encode,
+        )
+    }
+    pub(crate) fn restore(
+        log: SimEventLogV2,
+        capacity: usize,
+        noe: Option<crate::run_v2::noe_projection::BackgroundNoeWriterV1>,
+        #[cfg(feature = "shared-execution")] saved_ledger: Option<
+            ledger::LedgerBackgroundCheckpointV1,
+        >,
+    ) -> Result<Self, SimEventLogErrorV2> {
+        #[cfg(feature = "shared-execution")]
+        let ledger = BackgroundLedgerV2 {
+            writer: saved_ledger
+                .map(ledger::LedgerBackgroundWriterV2::restore_checkpoint)
+                .transpose()
+                .map_err(ledger_background_error)?,
+            pending: Default::default(),
+        };
+        Ok(Self::start_with_state(
+            log,
+            capacity,
+            noe,
+            #[cfg(feature = "shared-execution")]
+            ledger,
+            || {},
+        ))
+    }
+    fn start_with_state(
+        log: SimEventLogV2,
+        capacity: usize,
+        initial_noe: Option<crate::run_v2::noe_projection::BackgroundNoeWriterV1>,
+        #[cfg(feature = "shared-execution")] initial_ledger: BackgroundLedgerV2,
         mut before_encode: impl FnMut() + Send + 'static,
     ) -> Self {
         let (sender, receiver) = std::sync::mpsc::sync_channel::<BackgroundLogCommandV1>(capacity);
@@ -1176,9 +1288,9 @@ impl BackgroundEventLogV1 {
         let worker = std::thread::spawn(move || {
             let result = (|| {
                 let mut log = log;
-                let mut noe = None;
+                let mut noe = initial_noe;
                 #[cfg(feature = "shared-execution")]
-                let mut ledger = BackgroundLedgerV2::default();
+                let mut ledger = initial_ledger;
                 #[cfg(test)]
                 let mut write_pause: Option<(
                     std::sync::mpsc::SyncSender<()>,
@@ -1231,6 +1343,30 @@ impl BackgroundEventLogV1 {
                             if let Some(error) = group.normalization_error {
                                 return Err(SimEventLogErrorV2::NoeNormalization(error));
                             }
+                        }
+                        Ok(BackgroundLogCommandV1::Checkpoint(_finish, acknowledged)) => {
+                            let result = (|| {
+                                #[cfg(feature = "measurement")]
+                                log.sync_data(MeasurementContext::CommitGroup)?;
+                                #[cfg(not(feature = "measurement"))]
+                                log.sync_data()?;
+                                if let Some(noe) = &mut noe {
+                                    noe.stabilize().map_err(SimEventLogErrorV2::Noe)?;
+                                }
+                                #[cfg(feature = "shared-execution")]
+                                {
+                                    ledger.accept(_finish.ledger)?;
+                                    ledger.finish()?;
+                                }
+                                Ok(BackgroundCheckpointV1 {
+                                    log: log.checkpoint(),
+                                    noe: noe.as_ref().map(|n| n.checkpoint()),
+                                    #[cfg(feature = "shared-execution")]
+                                    ledger: ledger.writer.as_ref().map(|w| w.checkpoint()),
+                                })
+                            })();
+                            let _ = acknowledged.send(result.clone());
+                            result?;
                         }
                         Ok(BackgroundLogCommandV1::Stabilize(_finish, acknowledged)) => {
                             let result = (|| {
@@ -1308,6 +1444,9 @@ impl BackgroundEventLogV1 {
         Self {
             sender,
             pending: None,
+            finite_recording_wait: false,
+            #[cfg(test)]
+            finite_wait_notice: None,
             #[cfg(feature = "shared-execution")]
             ledger: None,
             failure,
@@ -1322,6 +1461,30 @@ impl BackgroundEventLogV1 {
             sink.lock().unwrap().push(material)
         }));
         self.ledger = Some((root.to_owned(), intake));
+    }
+    #[cfg(feature = "shared-execution")]
+    pub(crate) fn reconnect_ledger(&mut self, writer: &mut ledger::LedgerWriterV1, root: &Path) {
+        let intake = LedgerIntakeV2::default();
+        let sink = intake.clone();
+        writer.reconnect_record_sink_v2(Box::new(move |material| {
+            sink.lock().unwrap().push(material)
+        }));
+        self.ledger = Some((root.to_owned(), intake));
+    }
+    pub(crate) fn checkpoint(&mut self) -> Result<BackgroundCheckpointV1, SimEventLogErrorV2> {
+        self.wait_for_capacity()?;
+        let (acknowledged, completed) = std::sync::mpsc::sync_channel(1);
+        let finish = BackgroundFinishV1 {
+            seal_clean_run: false,
+            #[cfg(feature = "shared-execution")]
+            ledger: self.take_ledger(),
+        };
+        self.sender
+            .send(BackgroundLogCommandV1::Checkpoint(finish, acknowledged))
+            .map_err(|_| SimEventLogErrorV2::InvalidStructure("检查点后台已停止"))?;
+        completed
+            .recv()
+            .map_err(|_| SimEventLogErrorV2::InvalidStructure("检查点后台未返回稳定位置"))?
     }
     #[cfg(feature = "shared-execution")]
     fn take_ledger(&mut self) -> Option<LedgerBatchV2> {
@@ -1367,11 +1530,24 @@ impl BackgroundEventLogV1 {
         drop(self.sender);
         self.worker.join().unwrap()
     }
+    #[cfg(test)]
+    pub(crate) fn notify_finite_wait_for_tests(&mut self, notice: std::sync::mpsc::SyncSender<()>) {
+        self.finite_wait_notice = Some(notice);
+    }
+    pub(crate) fn enable_finite_recording_wait(&mut self) {
+        self.finite_recording_wait = true;
+    }
     pub(crate) fn ready(&mut self) -> Result<bool, SimEventLogErrorV2> {
         if let Some(error) = self.failure.lock().unwrap().clone() {
             return Err(error);
         }
-        if let Some(inputs) = self.pending.take() {
+        if self.finite_recording_wait && self.pending.is_some() {
+            #[cfg(test)]
+            if let Some(notice) = self.finite_wait_notice.take() {
+                let _ = notice.send(());
+            }
+            self.wait_for_capacity()?;
+        } else if let Some(inputs) = self.pending.take() {
             self.enqueue_group(inputs)?;
         }
         Ok(self.pending.is_none())

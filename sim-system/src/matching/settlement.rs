@@ -67,13 +67,13 @@ pub(crate) enum SettlementOperationV1 {
         requested_at_utc_ms: i64,
     },
 }
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RequestedSettlementStateV1 {
     pub scenario: Option<Arc<ResolutionRedeemScenarioV1>>,
     external_cash: BTreeSet<String>,
     requests: BTreeMap<String, RequestedSettlementV1>,
 }
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct RequestedSettlementV1 {
     request: SettlementRequestV1,
     first_request_at: i64,

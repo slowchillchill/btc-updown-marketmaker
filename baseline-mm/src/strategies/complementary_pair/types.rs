@@ -169,3 +169,11 @@ pub struct SourceHealthStatusV1 {
     pub scope: SourceStreamScopeV1,
     pub state: SourceHealthStateV1,
 }
+
+/// 同一日原策略实例的完整私有记忆，不包含公共账户投影。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ComplementaryPairCheckpointV1 {
+    pub(super) namespace: String,
+    pub(super) continuity: StrategyContinuityV1,
+    pub(super) signals: BTreeMap<String, SignalMemory>,
+}

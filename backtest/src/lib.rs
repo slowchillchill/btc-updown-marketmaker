@@ -1,11 +1,18 @@
 //! 单次有限公共历史运行。策略通过 StrategyV1 注入，核心不识别具体经营规则。
 #[cfg(test)]
 extern crate self as backtest;
+mod day;
+mod day_economics;
+mod day_state;
+mod day_summary;
 mod preparation;
 mod preparation_progress;
 mod prepared_material;
 mod process_measurement;
 mod run;
+pub use day::*;
+pub use day_economics::HistoricalDayEconomicsSummaryV1;
+pub use day_summary::*;
 mod statistics;
 #[cfg(test)]
 #[allow(dead_code)]

@@ -155,13 +155,28 @@ fn finalize_reference(
     };
     materialize_reference_v2(lineage, time, quality, payload)
 }
-
 pub(crate) fn materialize_reference_v2(
     lineage: EventLineageV3,
     time: EventTimeV2,
     quality: EventQualityV2,
     payload: CanonicalReferenceEventPayloadV2,
 ) -> Result<CanonicalReferenceEventV2, ContractError> {
+    let event_id = materialized_reference_identity_v2(&lineage, &time, &quality, &payload)?;
+    Ok(CanonicalReferenceEventV2 {
+        schema_version: CANONICAL_REFERENCE_EVENT_SCHEMA_V2.to_owned(),
+        event_id,
+        time,
+        lineage,
+        quality,
+        payload,
+    })
+}
+pub(crate) fn materialized_reference_identity_v2(
+    lineage: &EventLineageV3,
+    time: &EventTimeV2,
+    quality: &EventQualityV2,
+    payload: &CanonicalReferenceEventPayloadV2,
+) -> Result<CanonicalEventId, ContractError> {
     #[derive(Serialize)]
     struct Identity<'a> {
         schema_version: &'a str,
@@ -172,26 +187,18 @@ pub(crate) fn materialize_reference_v2(
     }
     let identity = Identity {
         schema_version: CANONICAL_REFERENCE_EVENT_SCHEMA_V2,
-        time: &time,
-        lineage: &lineage,
-        quality: &quality,
-        payload: &payload,
+        time,
+        lineage,
+        quality,
+        payload,
     };
-    let event_id = CanonicalEventId(
+    Ok(CanonicalEventId(
         hash_domain_bytes(
             b"data-pipeline/canonical-event-id/reference-event/v2\0",
             &stable_json(&identity)?,
         )
         .0,
-    );
-    Ok(CanonicalReferenceEventV2 {
-        schema_version: CANONICAL_REFERENCE_EVENT_SCHEMA_V2.to_owned(),
-        event_id,
-        time,
-        lineage,
-        quality,
-        payload,
-    })
+    ))
 }
 
 /// 合法已观察响应中的结算参考规则；未观察或未发布的参数不替换旧规则。
@@ -511,6 +518,22 @@ fn validated_semantic_source_evidence_from_parts(
     Ok(semantic)
 }
 
+/// 原来源身份的窄列入口；与完整 typed-raw 使用同一校验和编码。
+pub fn source_evidence_v3_from_coordinates(
+    source_kind: contracts::CanonicalSourceKind,
+    native: Option<SourceNativeIdentityV1>,
+    source_at: Option<i64>,
+    received: i64,
+    admission: Option<CollectorAdmissionCoordinateV1>,
+) -> Result<SourceEvidenceRefV3, ContractError> {
+    source_evidence_v3_from_parts((source_kind, native, source_at, received, admission))
+}
+/// RTDS 原生载荷身份，不解释价格或应用 freshness 业务状态。
+pub fn rtds_native_identity_v1(payload: &str) -> SourceNativeIdentityV1 {
+    SourceNativeIdentityV1::SemanticEvidenceSha256 {
+        sha256: hash_domain_bytes(crate::RTDS_NATIVE_PAYLOAD_DOMAIN_V1, payload.as_bytes()),
+    }
+}
 fn source_evidence_v3_from_parts(
     parts: crate::TypedSourceEvidenceParts,
 ) -> Result<SourceEvidenceRefV3, ContractError> {
@@ -672,28 +695,36 @@ pub fn canonicalize_historical_price_anchor_batch_v1(
 pub fn twap_source_evidence_v3(
     row: &PolymarketRtdsChainlinkTwapInput,
 ) -> Result<SourceEvidenceRefV3, ContractError> {
-    let common = &row.common;
-    let admission = CollectorAdmissionCoordinateV1 {
-        source_sequence_epoch_id: row.source_sequence_epoch_id.clone(),
-        collector_admission_sequence: row.collector_admission_sequence,
-        admitted_at_utc_ms: row.collector_admission_time_utc_ms,
-    };
-    let native = hash_domain_bytes(
-        b"data-pipeline/source-evidence/rtds-native-payload/v1\0",
-        common.source_native_payload_json.as_bytes(),
-    );
+    twap_source_evidence_v3_from_coordinates(
+        &row.common.source_native_payload_json,
+        (row.common.freshness_status != RtdsFreshnessStatus::InvalidTimestamp)
+            .then_some(row.common.payload_timestamp),
+        row.common.timestamp_received,
+        CollectorAdmissionCoordinateV1 {
+            source_sequence_epoch_id: row.source_sequence_epoch_id.clone(),
+            collector_admission_sequence: row.collector_admission_sequence,
+            admitted_at_utc_ms: row.collector_admission_time_utc_ms,
+        },
+    )
+}
+pub fn twap_source_evidence_v3_from_coordinates(
+    payload: &str,
+    source_at: Option<i64>,
+    received: i64,
+    admission: CollectorAdmissionCoordinateV1,
+) -> Result<SourceEvidenceRefV3, ContractError> {
+    let native = hash_domain_bytes(crate::RTDS_NATIVE_PAYLOAD_DOMAIN_V1, payload.as_bytes());
     Ok(SourceEvidenceRefV3 {
         source_kind: CanonicalSourceKindV2::PolymarketRtdsChainlinkTwap,
         source_message_id: hash_domain_bytes(
             b"data-pipeline/source-message/rtds-twap/v1\0",
-            &stable_json(&(&native, common.timestamp_received, &admission))?,
+            &stable_json(&(&native, received, &admission))?,
         ),
         source_native_identity: Some(SourceNativeIdentityV1::SemanticEvidenceSha256 {
             sha256: native,
         }),
-        source_event_at_utc_ms: (common.freshness_status != RtdsFreshnessStatus::InvalidTimestamp)
-            .then_some(common.payload_timestamp),
-        received_at_utc_ms: common.timestamp_received,
+        source_event_at_utc_ms: source_at,
+        received_at_utc_ms: received,
         collector_admission: Some(admission),
     })
 }

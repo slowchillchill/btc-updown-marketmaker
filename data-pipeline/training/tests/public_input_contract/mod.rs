@@ -19,7 +19,7 @@ use serde_json::json;
 
 const RECEIVED: i64 = 1_785_369_600_050;
 
-fn old_metadata() -> PolymarketMarketMetadataV5Row {
+fn common_metadata() -> PolymarketMarketMetadataRow {
     let payload = r#"{"orderPriceMinTickSize":"0.01"}"#;
     let mut row: PolymarketMarketMetadataRow = serde_json::from_value(json!({
         "metadata_row_kind":"metadata_snapshot", "timestamp_received": RECEIVED,
@@ -38,7 +38,10 @@ fn old_metadata() -> PolymarketMarketMetadataV5Row {
     })).unwrap();
     row.collector_admission_sequence = 1;
     row.collector_admission_time_utc_ms = RECEIVED + 1;
-    PolymarketMarketMetadataV5Row::from_common(row, None, None)
+    row
+}
+fn old_metadata() -> PolymarketMarketMetadataV5Row {
+    PolymarketMarketMetadataV5Row::from_common(common_metadata(), None, None)
 }
 
 fn anchor_row() -> PolymarketMarketMetadataV6Row {
@@ -953,3 +956,6 @@ fn real_metadata_admission_order_survives_file_and_batch_permutations() {
         }
     }
 }
+
+#[path = "day_stream.rs"]
+mod day_stream_tests;

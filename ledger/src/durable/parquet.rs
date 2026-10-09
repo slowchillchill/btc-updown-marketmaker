@@ -12,7 +12,64 @@ pub(crate) struct ParquetLedger {
 fn invalid(e: impl fmt::Display) -> LedgerDurableErrorV1 {
     LedgerDurableErrorV1::InvalidStructure(e.to_string())
 }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct LedgerParquetCheckpointV1 {
+    directory: PathBuf,
+    segment_count: u64,
+    next_record_seq: u64,
+}
 impl ParquetLedger {
+    pub(super) fn checkpoint(&self) -> LedgerParquetCheckpointV1 {
+        debug_assert!(
+            self.writer.is_none() && !self.poisoned,
+            "检查点必须先完成原 Ledger 段稳定"
+        );
+        LedgerParquetCheckpointV1 {
+            directory: self.directory.clone(),
+            segment_count: self.segment_count,
+            next_record_seq: self.next_record_seq,
+        }
+    }
+    pub(super) fn restore_checkpoint(
+        saved: LedgerParquetCheckpointV1,
+    ) -> Result<Self, LedgerDurableErrorV1> {
+        let path = saved.directory.join(MANIFEST);
+        let format: String =
+            serde_json::from_reader(File::open(&path).map_err(invalid)?).map_err(invalid)?;
+        if format != FORMAT {
+            return Err(invalid("不支持的 Ledger 物理格式"));
+        }
+        for entry in fs::read_dir(&saved.directory).map_err(invalid)? {
+            let entry = entry.map_err(invalid)?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let name = name.strip_prefix('.').unwrap_or(&name);
+            if let Some(tail) = name.strip_prefix("ledger-parquet-") {
+                let number = tail
+                    .get(..20)
+                    .filter(|n| n.bytes().all(|b| b.is_ascii_digit()));
+                let suffix = tail.get(20..);
+                if matches!(
+                    suffix,
+                    Some(".parquet" | ".manifest.json" | ".tmp" | ".manifest.json.tmp")
+                ) && number
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .is_some_and(|n| n >= saved.segment_count)
+                {
+                    fs::remove_file(entry.path()).map_err(invalid)?;
+                }
+            }
+        }
+        sync_directory(&saved.directory, "同步 Ledger 检查点尾部恢复")?;
+        Ok(Self {
+            directory: saved.directory,
+            segment_count: saved.segment_count,
+            next_record_seq: saved.next_record_seq,
+            writer: None,
+            poisoned: false,
+        })
+    }
+
     pub(super) fn create(
         directory: &Path,
         genesis: DurablePayloadV1,

@@ -33,7 +33,7 @@ impl ProbabilityEstimateV1 {
         }
     }
 }
-#[derive(Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct SignalMemory {
     chainlink: VecDeque<(i64, f64)>,
     binance_baseline: Option<(f64, f64, i64)>,

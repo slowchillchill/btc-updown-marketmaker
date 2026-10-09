@@ -15,7 +15,7 @@ use rust_decimal::Decimal;
 const MICRO_SCALE: u32 = 6;
 
 #[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PlatformAccountStateV2 {
     account_instance_key: AccountInstanceKeyV1,
     cash_pusd_units: u128,

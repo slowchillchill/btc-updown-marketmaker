@@ -144,7 +144,7 @@ fn decode_error(source: &str, version: &str, row: u64, detail: impl ToString) ->
 }
 
 /// 新格式的价格已是 Utf8；此处只转换文本、布尔和整数，不经过浮点数。
-fn primitive_row(batch: &RecordBatch, row: usize) -> Map<String, Value> {
+pub(crate) fn primitive_row(batch: &RecordBatch, row: usize) -> Map<String, Value> {
     let mut values = Map::new();
     for (field, array) in batch.schema().fields().iter().zip(batch.columns()) {
         let value = if array.is_null(row) {
@@ -335,6 +335,31 @@ pub fn open_validated_public_input_parquet_v1(
         None,
         expected_public_schema,
         decode_public_batch,
+    )
+}
+
+/// 从恢复点的准确物理行定位；跳过完整旧行组，仅解码当前组的剩余部分。
+pub fn open_validated_public_input_at_v1(
+    file: &ValidatedDirectSourceParquetFileV3,
+    batch_size: usize,
+    max_batch_bytes: usize,
+    cursor: &typed_raw::TypedRawCursorV1,
+) -> Result<TypedRawParquetStream<TypedRawRowV2>, TypedRawReadError> {
+    typed_raw::open_parquet_at_with_decoder(
+        ParquetInputFacts {
+            path: file.file_path(),
+            source_kind: file.source_kind(),
+            schema_version: file.schema_version(),
+            bytes: file.bytes(),
+            rows: file.rows(),
+            sha256: file.sha256(),
+        },
+        batch_size,
+        None,
+        Some(max_batch_bytes),
+        expected_public_schema,
+        decode_public_batch,
+        cursor.physical_row,
     )
 }
 

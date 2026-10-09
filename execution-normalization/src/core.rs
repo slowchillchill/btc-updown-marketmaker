@@ -418,7 +418,10 @@ pub struct NormalizationIndexCountsV1 {
     pub economic: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(bound(
+    deserialize = "T: serde::Deserialize<'de>, C: serde::Deserialize<'de>, I: serde::Deserialize<'de> + Ord, F: serde::Deserialize<'de>"
+))]
 pub(crate) struct CoreState<T, C, I, F> {
     logical: BTreeMap<I, StoredLogical<T, C, I>>,
     economic: BTreeMap<SourceNeutralEconomicIdentityV1, SourceNeutralEconomicFactV2<I, F>>,
@@ -430,13 +433,13 @@ pub(crate) struct CoreStateDelta<T, C, I, F> {
     economic: BTreeMap<SourceNeutralEconomicIdentityV1, SourceNeutralEconomicFactV2<I, F>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct StoredLogical<T, C, I> {
     evidence: StoredEvidence<T, C, I>,
     source_reference: SimV2SourceReferenceV1,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 enum StoredEvidence<T, C, I> {
     Evidence(SourceNeutralEvidenceKind<T, C, I>),
     EconomicAlias {
@@ -475,7 +478,10 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I, F> PreparedNormalizationBatc
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(bound(
+    deserialize = "T: serde::Deserialize<'de>, C: serde::Deserialize<'de>, I: serde::Deserialize<'de> + Ord, F: serde::Deserialize<'de>"
+))]
 pub struct NormalizationCore<
     T,
     C = SourceNeutralControlResultV1,

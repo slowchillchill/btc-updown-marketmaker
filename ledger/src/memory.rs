@@ -53,6 +53,23 @@ impl LedgerRecordMaterialV2 {
     }
 }
 impl LedgerWriterV1 {
+    /// 日恢复保存当前权威归约；耐久写入器由原后台在同一完整点重接。
+    pub fn write_checkpoint(
+        &self,
+        writer: impl std::io::Write,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        ciborium::ser::into_writer(self, writer)?;
+        Ok(())
+    }
+    pub fn restore_checkpoint(
+        reader: impl std::io::Read,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(ciborium::de::from_reader(reader)?)
+    }
+    pub fn reconnect_record_sink_v2(&mut self, sink: Box<dyn FnMut(LedgerRecordMaterialV2)>) {
+        self.record_sink = Some(sink);
+    }
+
     /// 新内存实例初始化接线；不同时绑定旧同步耐久路径。
     pub fn bind_record_sink_v2(&mut self, mut sink: Box<dyn FnMut(LedgerRecordMaterialV2)>) {
         sink(LedgerRecordMaterialV2::new(self.genesis()));
@@ -357,7 +374,30 @@ pub struct LedgerBackgroundWriterV2 {
     root: std::path::PathBuf,
     writer: Option<DurableLedgerV1>,
 }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct LedgerBackgroundCheckpointV1 {
+    root: std::path::PathBuf,
+    writer: Option<crate::durable::LedgerParquetCheckpointV1>,
+}
 impl LedgerBackgroundWriterV2 {
+    pub fn checkpoint(&self) -> LedgerBackgroundCheckpointV1 {
+        LedgerBackgroundCheckpointV1 {
+            root: self.root.clone(),
+            writer: self.writer.as_ref().and_then(DurableLedgerV1::checkpoint),
+        }
+    }
+    pub fn restore_checkpoint(
+        saved: LedgerBackgroundCheckpointV1,
+    ) -> Result<Self, LedgerDurableErrorV1> {
+        Ok(Self {
+            root: saved.root,
+            writer: saved
+                .writer
+                .map(DurableLedgerV1::restore_checkpoint)
+                .transpose()?,
+        })
+    }
+
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
             root: root.as_ref().to_owned(),
