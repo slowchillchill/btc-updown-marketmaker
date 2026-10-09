@@ -13,12 +13,13 @@ shared-execution = ["public-consumption", "dep:ledger"]
 gate-b-flow = ["gate-a-measurement", "dep:ledger"]
 
 [dependencies]
+ciborium = "=0.2.2"
 contracts = { path = "../contracts" }
 data-pipeline-core = { path = "../data-pipeline/core" }
 data-pipeline-training = { path = "../data-pipeline/training", optional = true }
 execution-normalization = { path = "../execution-normalization" }
 ledger = { path = "../ledger", optional = true }
-num-bigint = "=0.4.8"
+num-bigint = { version = "=0.4.8", features = ["serde"] }
 num-integer = "=0.1.46"
 num-traits = "=0.2.19"
 polymarket_client_sdk_v2 = { version = "=0.7.0", default-features = false, features = ["clob"] }

@@ -24,7 +24,7 @@ pub(super) struct UnassignedFundsV1 {
     fee: Decimal,
     seq: u64,
 }
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub(super) struct FundsStateV1 {
     orders: BTreeMap<Identity, OrderFundsStateV1>,
     trades: BTreeMap<Identity, Identity>,

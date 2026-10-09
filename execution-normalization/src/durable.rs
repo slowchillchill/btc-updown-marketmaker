@@ -794,6 +794,12 @@ pub struct StagedNormalizationWriter<T, C> {
     payload: std::marker::PhantomData<(T, C)>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StagedNormalizationCheckpointV1 {
+    context_directory: PathBuf,
+    context: ExecutionNormalizationContextV1,
+    published: u64,
+}
 impl<
     T: NoeTradePayload<C>,
     C: Clone + std::fmt::Debug + Eq + Serialize + serde::de::DeserializeOwned,
@@ -816,6 +822,57 @@ impl<
         })
     }
 
+    pub fn checkpoint(&self) -> StagedNormalizationCheckpointV1 {
+        debug_assert!(self.staged.is_empty(), "检查点必须先稳定原 NOE 材料");
+        StagedNormalizationCheckpointV1 {
+            context_directory: self.context_directory.clone(),
+            context: self.context.clone(),
+            published: self.published,
+        }
+    }
+    /// 只丢弃同一写入器在完整检查点之后生成的尾部，不归一化已提交正文。
+    pub fn restore_checkpoint(
+        saved: StagedNormalizationCheckpointV1,
+    ) -> Result<Self, DurableErrorV1> {
+        let directory = saved.context_directory.join(COMMITS_DIRECTORY_NAME);
+        for entry in
+            fs::read_dir(&directory).map_err(|e| io_error("读取 NOE 检查点尾部", &directory, e))?
+        {
+            let entry = entry.map_err(|e| io_error("读取 NOE 检查点尾部项", &directory, e))?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let name = name.strip_prefix('.').unwrap_or(&name);
+            let number = name
+                .strip_suffix(".parquet")
+                .or_else(|| name.strip_suffix(".manifest.json"))
+                .or_else(|| name.strip_suffix(".parquet.tmp"))
+                .or_else(|| name.strip_suffix(".manifest.json.tmp"));
+            if let Some(number) =
+                number.filter(|n| n.len() == 20 && n.bytes().all(|b| b.is_ascii_digit()))
+            {
+                if number
+                    .parse::<u64>()
+                    .ok()
+                    .is_some_and(|n| n >= saved.published)
+                {
+                    fs::remove_file(entry.path())
+                        .map_err(|e| io_error("丢弃 NOE 未提交经济尾", &entry.path(), e))?;
+                }
+            }
+        }
+        File::open(&directory)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| io_error("同步 NOE 检查点尾部", &directory, e))?;
+        Ok(Self {
+            context_directory: saved.context_directory,
+            context: saved.context,
+            staged: Default::default(),
+            published: saved.published,
+            payload: std::marker::PhantomData,
+            #[cfg(test)]
+            publish_fault: PublishFaultV1::default(),
+        })
+    }
     pub fn stage<MT: Serialize, MC: Serialize, I: Serialize, F: Serialize>(
         &mut self,
         batch: &crate::core::NormalizationBatch<MT, MC, I, F>,

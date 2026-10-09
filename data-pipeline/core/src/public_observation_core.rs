@@ -6,6 +6,7 @@ use crate::reduction::*;
 use crate::typed_raw::*;
 use crate::{ContractError, invalid};
 use contracts::*;
+use rayon::prelude::*;
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -23,7 +24,7 @@ pub struct PmEvidenceObjectCountsV1 {
     pub selected: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PmOwnedStateV1<E = SourceEvidenceRefV3> {
     context: PmMarketContextV1<E>,
     epoch: Option<String>,
@@ -419,20 +420,24 @@ impl std::fmt::Display for DptCoreErrorV1 {
 }
 impl std::error::Error for DptCoreErrorV1 {}
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct AssetProjection {
     tick: ObservedFactV1<ExactDecimal>,
     bba: ObservedFactV1<CanonicalBbaFactV1>,
+    #[serde(with = "checkpoint_observed")]
     valuation_bba: ObservedFactV1<Option<ExactDecimal>>,
     valuation_bba_version: Option<crate::pm_reduction::PmL2SelectionVersionV1>,
     trade: ObservedFactV1<PublicTradeV2>,
+    #[serde(with = "checkpoint_observed")]
     book: ObservedFactV1<()>,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 struct MarketState {
     metadata: PolymarketMetadataReducer<E>,
     terminal: PolymarketTerminalMerger<E>,
     pm: PmOwnedStateV1<E>,
     assets: BTreeMap<String, AssetProjection>,
+    #[serde(with = "checkpoint_level_anchors")]
     level_anchors: BTreeMap<LevelKey, ObservedFactV1<()>>,
     seen_epochs: BTreeSet<String>,
     seen_messages: BTreeSet<u64>,
@@ -443,31 +448,35 @@ struct MarketState {
     accepting_orders: ObservedFactV1<bool>,
     resolution: ObservedFactV1<MarketResolutionTerminalV3>,
 }
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct PublicMarketReferenceStateV1 {
     pub official: ObservedFactV1<MarketPriceAnchorV1>,
     pub rule: ObservedFactV1<BtcSettlementReferenceV1>,
     pub temporary: Option<TemporaryTwapReferenceV1>,
     pub(crate) changed_rule_record: Option<CanonicalInputRecordRefV1>,
 }
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct GlobalReferences {
     spot: ObservedFactV1<ChainlinkBtcUsdReferenceV1>,
     thirty: ObservedFactV1<ChainlinkBtcUsdTwapReferenceV1>,
     sixty: ObservedFactV1<ChainlinkBtcUsdTwapReferenceV1>,
+    #[serde(with = "checkpoint_observed")]
     depth: ObservedFactV1<()>,
     trade: ObservedFactV1<BinanceAggregateTradeReferenceV1>,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 struct PendingMetadata {
     input: PolymarketMetadataInputV1<E>,
     outcomes: Vec<MetadataOutcomeEvidence>,
     position: u64,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 struct PendingWs {
     input: PolymarketOrderbookInputV1<E>,
     group_id: Sha256Hex,
     position: u64,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 struct PendingTerminal {
     first_position: u64,
     metadata: Option<PendingMetadata>,
@@ -495,6 +504,7 @@ pub struct PublicCoreObjectCountsV1 {
     pub binance_depth_retained_entries: usize,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PublicObservationCoreV1 {
     header: PublicInputStreamHeaderV1,
     next_input_position: u64,
@@ -505,11 +515,96 @@ pub struct PublicObservationCoreV1 {
     global: GlobalReferences,
     binance_depth: BinanceDepthReducer<E>,
     // 只读派生的当前值；唯一数量归约器及事实仍是权威。旧组自行持有旧 Arc。
+    #[serde(skip)]
     current_depth_projection: Option<Arc<ObservedFactV1<BinanceDepthStateReferenceV1>>>,
     binance_trade: BinanceAggTradeReducer<E>,
     pending: BTreeMap<(String, u64), PendingTerminal>,
     source_progress_enabled: bool,
     source_progress: BTreeMap<SourceStreamScopeV1, SourceStreamProgressV1>,
+}
+
+/// 内部恢复表示。公共证据沿原编码保存，派生缓存由来源重建。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PublicCoreCheckpointV1 {
+    core: PublicObservationCoreV1,
+}
+#[derive(serde::Serialize)]
+struct PublicCoreCheckpointRefV1<'a> {
+    core: &'a PublicObservationCoreV1,
+}
+
+// 仅用于 Core 内部恢复。CBOR 的 null 无法区分 Some(()) / Some(None) 与 None；
+// 显式保存原存在状态，公共 ObservedFactV1 的正式表示保持原样。
+mod checkpoint_observed {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    #[derive(Serialize, Deserialize)]
+    enum Value<T> {
+        Missing,
+        Present(T),
+    }
+    #[derive(Serialize, Deserialize)]
+    struct Saved<T> {
+        value: Value<T>,
+        quality: MarketDataQuality,
+        direct_anchors: Vec<DirectObservationAnchorV1>,
+        dependency_frontier: Option<AppliedIngressPrefixV1>,
+    }
+    pub fn serialize<T: Serialize, S: serde::Serializer>(
+        fact: &ObservedFactV1<T>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        Saved {
+            value: match &fact.value {
+                Some(value) => Value::Present(value),
+                None => Value::Missing,
+            },
+            quality: fact.quality,
+            direct_anchors: fact.direct_anchors.clone(),
+            dependency_frontier: fact.dependency_frontier.clone(),
+        }
+        .serialize(serializer)
+    }
+    pub fn deserialize<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<ObservedFactV1<T>, D::Error> {
+        let saved = Saved::<T>::deserialize(deserializer)?;
+        Ok(ObservedFactV1 {
+            value: match saved.value {
+                Value::Missing => None,
+                Value::Present(value) => Some(value),
+            },
+            quality: saved.quality,
+            direct_anchors: saved.direct_anchors,
+            dependency_frontier: saved.dependency_frontier,
+        })
+    }
+}
+mod checkpoint_level_anchors {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    #[derive(Serialize)]
+    struct Ref<'a>(#[serde(with = "checkpoint_observed")] &'a ObservedFactV1<()>);
+    #[derive(Deserialize)]
+    struct Owned(#[serde(with = "checkpoint_observed")] ObservedFactV1<()>);
+    pub fn serialize<S: serde::Serializer>(
+        anchors: &BTreeMap<LevelKey, ObservedFactV1<()>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        anchors
+            .iter()
+            .map(|(key, fact)| (key, Ref(fact)))
+            .collect::<BTreeMap<_, _>>()
+            .serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<LevelKey, ObservedFactV1<()>>, D::Error> {
+        Ok(BTreeMap::<LevelKey, Owned>::deserialize(deserializer)?
+            .into_iter()
+            .map(|(key, fact)| (key, fact.0))
+            .collect())
+    }
 }
 
 fn observed<T>(
@@ -633,6 +728,34 @@ impl PublicObservationCoreV1 {
         self.references.get(condition)
     }
     /// 仅投影已知固定身份；来源准备可借此构造规范消息。
+    /// 保存原状态，不生成事实、重放前缀或丢弃待配对终态。
+    pub fn write_checkpoint(&self, writer: impl std::io::Write) -> std::io::Result<()> {
+        ciborium::into_writer(&PublicCoreCheckpointRefV1 { core: self }, writer)
+            .map_err(std::io::Error::other)
+    }
+    pub fn read_checkpoint(reader: impl std::io::Read) -> std::io::Result<Self> {
+        ciborium::from_reader::<PublicCoreCheckpointV1, _>(reader)
+            .map(|saved| saved.core)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    }
+    /// 待配对终局仍可能在后续输入封组；其来源时刻约束隐藏桶关闭。
+    pub fn pending_terminal_source_lower_bound(&self) -> Option<i64> {
+        self.pending
+            .values()
+            .flat_map(|pending| {
+                pending
+                    .metadata
+                    .iter()
+                    .filter_map(|m| m.input.evidence.source_time())
+                    .chain(
+                        pending
+                            .ws
+                            .iter()
+                            .filter_map(|w| w.input.evidence.source_time()),
+                    )
+            })
+            .min()
+    }
     pub fn fixed_markets(&self) -> impl Iterator<Item = MarketIdentityV2> + '_ {
         self.markets.values().map(|m| m.pm.context.market.clone())
     }
@@ -1559,9 +1682,9 @@ impl PublicObservationCoreV1 {
         }));
         let progress: Arc<[SourceStreamProgressV1]> =
             self.source_progress.values().cloned().collect();
-        let observations = self
-            .markets
-            .iter()
+        let markets = self.markets.iter().collect::<Vec<_>>();
+        let observations = markets
+            .par_iter()
             .map(|(id, state)| {
                 let mut observation = state.observation(
                     &group_id,
@@ -1571,7 +1694,7 @@ impl PublicObservationCoreV1 {
                         next_input_position: self.next_input_position + 1,
                     },
                     &records,
-                    self.references.get(id),
+                    self.references.get(*id),
                     &self.global,
                     &depth,
                     &self.header.observation_version,

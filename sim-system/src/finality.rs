@@ -140,7 +140,7 @@ pub struct TradeFinalityPolicyV2 {
     failure_overrides: Vec<TradeFinalityFailureOverrideV2>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum SelectedTradeFinalityPathV2 {
     Normal,
     FailureOverride(usize),

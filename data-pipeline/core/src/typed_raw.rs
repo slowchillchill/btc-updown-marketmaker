@@ -582,13 +582,13 @@ pub struct MetadataInitialTickEvidence {
     pub exact: ExactDecimal,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MetadataOutcomePriceEvidence {
     pub raw_text: String,
     pub exact: ExactDecimal,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MetadataOutcomeEvidence {
     pub asset_id: String,
     pub outcome: Option<String>,

@@ -23,6 +23,7 @@ use std::{path::Path, sync::Arc, time::Instant};
 
 // 只观测真实策略，所有业务决定、期限、资格和通知仍委托同一实现。
 struct Trace {
+    checkpoint_capture: Option<(std::path::PathBuf, std::path::PathBuf)>,
     strategy: ComplementaryPairV1,
     decisions: Vec<(i64, ComplementaryPairDiagnosticV1, Vec<String>)>,
     sent: Vec<(i64, String)>,
@@ -342,6 +343,7 @@ async fn run(
     let mut config = config.clone();
     config.strategy.effective_parameters = serde_json::to_value(&c).unwrap();
     let mut trace = Trace {
+        checkpoint_capture: None,
         strategy: ComplementaryPairV1::new(
             c,
             rules.clone(),
@@ -1100,4 +1102,129 @@ async fn real_strategy_normal_boundary_keeps_risk_orders_and_max_boundary_cancel
         }
         assert!(!trace.decisions.is_empty());
     }
+}
+
+impl CheckpointStrategyV1 for Trace {
+    fn write_strategy_checkpoint(
+        &self,
+        writer: &mut dyn std::io::Write,
+    ) -> Result<(), MaterialError> {
+        if let Some((root, archive)) = &self.checkpoint_capture {
+            if let Ok(file) = std::fs::File::open(root.join("checkpoint.json")) {
+                let pointer: serde_json::Value = serde_json::from_reader(file)?;
+                let name = format!("checkpoint-{:020}", pointer["generation"].as_u64().unwrap());
+                let directory = archive.join(&name);
+                std::fs::create_dir_all(&directory)?;
+                for file in pointer["files"].as_array().unwrap() {
+                    let name = file["path"].as_str().unwrap();
+                    std::fs::copy(
+                        root.join(format!(
+                            "checkpoint-{:020}",
+                            pointer["generation"].as_u64().unwrap()
+                        ))
+                        .join(name),
+                        directory.join(name),
+                    )?;
+                }
+            }
+        }
+        self.strategy.write_strategy_checkpoint(writer)
+    }
+    fn restore_strategy_checkpoint(
+        &mut self,
+        reader: &mut dyn std::io::Read,
+    ) -> Result<(), MaterialError> {
+        self.strategy.restore_strategy_checkpoint(reader)
+    }
+}
+#[test]
+fn actual_baseline_day_restores_signal_memory_pending_calculation_and_execution_tail() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, rules) = fixture(temp.path(), "100010", &[800, 1500, 3000]);
+    add_binance(&config);
+    let mut candidate = HistoricalPreparedRunConfigV1::from(&config);
+    candidate.strategy_request_namespace = Some("health-history".into());
+    let day = HistoricalDayConfigV1 {
+        preparation: config.preparation.clone(),
+        candidates: vec![candidate],
+        checkpoint_root: temp.path().join("daily-state"),
+        checkpoint_interval_seconds: 60,
+        progress_interval_seconds: 0,
+        checkpoint_every_applied_inputs: None,
+        checkpoint_every_candidate_events: Some(1),
+        producer_lead_groups: Some(1),
+    };
+    let archive = temp.path().join("test-signal-points");
+    let factory = |_: &HistoricalPreparedRunConfigV1| -> Result<Trace, MaterialError> {
+        Ok(Trace {
+            strategy: ComplementaryPairV1::new(
+                strategy_config(),
+                rules.clone(),
+                "health-history".into(),
+                StrategyContinuityV1::new_account(),
+            )?,
+            checkpoint_capture: Some((day.checkpoint_root.clone(), archive.clone())),
+            decisions: vec![],
+            sent: vec![],
+            invalidated: 0,
+            qualify_ns: 0,
+            deadline_ns: std::cell::Cell::new(0),
+            qualified_at: Default::default(),
+            qualification_invalidations: vec![],
+        })
+    };
+    let before = run_historical_days_v1(&[day.clone()], rules.clone(), &factory).unwrap();
+    let original = std::fs::read(&day.candidates[0].sim_log).unwrap();
+    let latest: serde_json::Value = serde_json::from_reader(
+        std::fs::File::open(day.checkpoint_root.join("checkpoint.json")).unwrap(),
+    )
+    .unwrap();
+    #[derive(serde::Deserialize)]
+    struct Loop {
+        pending: Option<serde_json::Value>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Candidate {
+        strategy: Vec<u8>,
+        state: Loop,
+    }
+    let mut selected = None;
+    for entry in std::fs::read_dir(&archive).unwrap() {
+        let directory = entry.unwrap().path();
+        if let Ok(file) = std::fs::File::open(directory.join("candidate-000000.cbor")) {
+            let candidate: Candidate = ciborium::de::from_reader(file).unwrap();
+            let strategy: ComplementaryPairCheckpointV1 =
+                ciborium::de::from_reader(candidate.strategy.as_slice()).unwrap();
+            let value = serde_json::to_value(strategy).unwrap();
+            if candidate.state.pending.is_some()
+                && !value["signals"].as_object().unwrap().is_empty()
+            {
+                selected = Some(directory);
+                break;
+            }
+        }
+    }
+    let selected = selected.expect("完整点须实际保存非空SignalMemory及待发送计算");
+    let directory = day.checkpoint_root.join(selected.file_name().unwrap());
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut files = Vec::new();
+    for name in ["day.cbor", "candidate-000000.cbor"] {
+        std::fs::copy(selected.join(name), directory.join(name)).unwrap();
+        files.push(json!({"path":name,"sha256":format!("{:x}",Sha256::digest(std::fs::read(directory.join(name)).unwrap()))}));
+    }
+    let generation = selected
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_start_matches("checkpoint-")
+        .parse::<u64>()
+        .unwrap();
+    std::fs::write(day.checkpoint_root.join("checkpoint.json"),serde_json::to_vec(&json!({"format":latest["format"],"identity":latest["identity"],"generation":generation,"files":files})).unwrap()).unwrap();
+    let after = run_historical_days_v1(&[day.clone()], rules.clone(), &factory).unwrap();
+    assert_eq!(
+        before[0].candidates[0].report,
+        after[0].candidates[0].report
+    );
+    assert_eq!(std::fs::read(&config.sim_log).unwrap(), original);
 }

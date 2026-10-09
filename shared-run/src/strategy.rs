@@ -35,18 +35,19 @@ pub struct StrategyCurrentReadV1<'a> {
     pub markets: Vec<PublicObservationFrameV1<'a>>,
 }
 /// 每笔新增资金的原腿序号与预留；取消意图没有新增资金项。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct IntentReserveV1 {
     pub batch_item_ordinal: u16,
     pub reserve: ReserveIntentV1,
 }
 /// 调用方保留原意图及独立请求身份；预留金额由消费者按其批准成本口径提供。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ReservedIntentV1 {
     pub context: RequestContextV2,
     pub intent: Arc<ModelIntentV1>,
     pub reserves: Vec<IntentReserveV1>,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum StrategyOutputV1<D = ()> {
     Continue {
         intents: Vec<ReservedIntentV1>,
@@ -142,11 +143,14 @@ pub trait StrategyV1 {
     ) {
     }
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StrategyCalculationV1<D = ()> {
+    #[serde(with = "sim_system::public_consumption::checkpoint::cutoff")]
     pub input_cutoff: TrustedGroupDecisionCutoffV1,
     pub calculation_started_at_utc_ms: i64,
     pub output: StrategyOutputV1<D>,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CompletedStrategyCalculationV1<D = ()> {
     pub calculation: StrategyCalculationV1<D>,
     pub calculation_completed_at_utc_ms: i64,
@@ -691,4 +695,16 @@ impl SharedExecutionV2 {
         }
         errors
     }
+}
+
+/// 策略自身持有的私有记忆；宿主只协调其检查点，不解释策略规则。
+pub trait CheckpointStrategyV1: StrategyV1 {
+    fn write_strategy_checkpoint(
+        &self,
+        writer: &mut dyn std::io::Write,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn restore_strategy_checkpoint(
+        &mut self,
+        reader: &mut dyn std::io::Read,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }

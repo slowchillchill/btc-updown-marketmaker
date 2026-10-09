@@ -81,6 +81,22 @@ impl ComplementaryPairV1 {
             signals: BTreeMap::new(),
         })
     }
+    pub fn checkpoint(&self) -> ComplementaryPairCheckpointV1 {
+        ComplementaryPairCheckpointV1 {
+            namespace: self.namespace.clone(),
+            continuity: self.continuity(),
+            signals: self.signals.clone(),
+        }
+    }
+    pub fn restore(
+        config: ComplementaryPairConfigV1,
+        rules: Arc<SealedProcessRuleSnapshotV3>,
+        saved: ComplementaryPairCheckpointV1,
+    ) -> Result<Self, StrategyErrorV1> {
+        let mut strategy = Self::new(config, rules, saved.namespace, saved.continuity)?;
+        strategy.signals = saved.signals;
+        Ok(strategy)
+    }
     pub fn config(&self) -> &ComplementaryPairConfigV1 {
         &self.config
     }
@@ -109,5 +125,23 @@ impl ComplementaryPairV1 {
             }),
             reserves: vec![],
         })
+    }
+}
+
+impl shared_run::CheckpointStrategyV1 for ComplementaryPairV1 {
+    fn write_strategy_checkpoint(
+        &self,
+        writer: &mut dyn std::io::Write,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        ciborium::ser::into_writer(&self.checkpoint(), writer)?;
+        Ok(())
+    }
+    fn restore_strategy_checkpoint(
+        &mut self,
+        reader: &mut dyn std::io::Read,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let saved = ciborium::de::from_reader(reader)?;
+        *self = Self::restore(self.config.clone(), self.rules.clone(), saved)?;
+        Ok(())
     }
 }

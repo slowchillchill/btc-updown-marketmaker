@@ -217,6 +217,80 @@ fn apply(
     core.push(&prepared).unwrap().into_owned()
 }
 
+#[test]
+fn checkpoint_prepared_groups_keep_nonempty_empty_and_unknown_valuation() {
+    let mut core = core();
+    apply(&mut core, &meta(0));
+    for input in [
+        pm(1, 1, 20_001, book("100")),
+        pm(
+            2,
+            2,
+            20_002,
+            PolymarketOrderbookEvent::BestBidAsk {
+                asset_id: UP_TOKEN_ID.into(),
+                best_bid: None,
+                best_ask: Some("0.6".into()),
+                spread: None,
+            },
+        ),
+    ] {
+        let canonical_position = core.next_canonical_position();
+        let prepared = prepare_public_ingress_v1(&core, &input, &BTreeMap::new(), &[]).unwrap();
+        let applied = core.push(&prepared).unwrap().into_owned();
+        let pm = match prepared.current {
+            PreparedCanonicalInputV1::PolymarketMessage(pm) => Some(pm),
+            _ => panic!("真实PM输入"),
+        };
+        let position = input.input_position;
+        let mut day = data_pipeline_training::day_producer::DayAppliedV1 {
+            input,
+            applied: applied.applied,
+            first_canonical_position: canonical_position,
+            prepared_pm: pm,
+            contexts: BTreeMap::from([(
+                CONDITION_ID.into(),
+                core.prepared_pm_context(CONDITION_ID).unwrap(),
+            )]),
+            initialization_binding: None,
+            hidden: vec![],
+        };
+        for delivery in PreparedPublicGroupV1::from_day(&mut day) {
+            let group = delivery.prepared;
+            let assets = &group.group.observations[0].assets;
+            assert_eq!(
+                assets
+                    .iter()
+                    .find(|a| a.asset.token_id.0 == UP_TOKEN_ID)
+                    .unwrap()
+                    .valuation_best_bid
+                    .value,
+                if position == 1 {
+                    Some(Some(ExactDecimal("0.5".into())))
+                } else {
+                    Some(None)
+                }
+            );
+            assert_eq!(
+                assets
+                    .iter()
+                    .find(|a| a.asset.token_id.0 == DOWN_TOKEN_ID)
+                    .unwrap()
+                    .valuation_best_bid
+                    .value,
+                None
+            );
+            let saved = checkpoint::PreparedGroup::capture(&group);
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&saved, &mut bytes).unwrap();
+            let restored: checkpoint::PreparedGroup =
+                ciborium::from_reader(bytes.as_slice()).unwrap();
+            let restored = restored.restore().unwrap();
+            assert_eq!(group.group, restored.group);
+        }
+    }
+}
+
 struct RecordedTimes;
 impl PublicConsumptionTimeSourceV1 for RecordedTimes {
     fn execution_time_for_group(
@@ -701,7 +775,10 @@ async fn public_normal_end_reads_original_groups_and_own_pm_bindings() {
     reader.finish_sealed_clean_run().unwrap();
     assert_eq!(groups, 6);
     assert!(!original_reports.is_empty());
-    assert_eq!(reports, original_reports, "报告来源、处置和顺序沿原公共归约保留");
+    assert_eq!(
+        reports, original_reports,
+        "报告来源、处置和顺序沿原公共归约保留"
+    );
     assert!(
         pm_bindings > 0,
         "模拟器当次前序材料已后台物化，日志不只剩 DPT 引用"
@@ -748,7 +825,7 @@ async fn hidden_index_pages_preserve_real_steps_market_facts_and_execution_isola
     while let Some(bucket) = small.next_bucket().unwrap() {
         let other = wide.next_bucket().unwrap().unwrap();
         assert_eq!(bucket, other, "页边界不改变桶或索引序材料");
-        times.push(bucket.reference.bucket_time_utc_ms);
+        times.push(bucket.reference.bucket_time_utc_ms());
         for record in bucket.records.iter() {
             match record {
                 HiddenExecutionRecordV1::Step { step, .. } => {
@@ -776,7 +853,7 @@ async fn hidden_index_pages_preserve_real_steps_market_facts_and_execution_isola
                 _ => {}
             }
         }
-        let at = bucket.reference.bucket_time_utc_ms;
+        let at = bucket.reference.bucket_time_utc_ms();
         driver.hidden_bucket(bucket).unwrap();
         if at == 21_000 {
             let session = driver
@@ -936,11 +1013,11 @@ async fn decision_cutoff_uses_delivered_feedback_and_frame_borrows_original_obse
     }
     let last = driver.last_receipt.as_ref().unwrap().clone();
     let closure = TrustedPublicTimeClosureV1 {
-            execution_time: driver.time(22_000),
-            consumption_sequence_ref: driver.consumption_sequence_ref.clone(),
-            next_group_position: 5,
-            closure: PublicTimeClosureReasonV1::NextGlobalEventAt(TERMINAL_ADMITTED_TIME_MS),
-        };
+        execution_time: driver.time(22_000),
+        consumption_sequence_ref: driver.consumption_sequence_ref.clone(),
+        next_group_position: 5,
+        closure: PublicTimeClosureReasonV1::NextGlobalEventAt(TERMINAL_ADMITTED_TIME_MS),
+    };
     driver.execution.close_public_time(closure).unwrap();
     driver.close_pending = false;
     let required = driver
@@ -949,11 +1026,11 @@ async fn decision_cutoff_uses_delivered_feedback_and_frame_borrows_original_obse
         .next_required_logical_drive()
         .unwrap();
     let closure = TrustedPublicTimeClosureV1 {
-            execution_time: driver.time(required.required_at_utc_ms),
-            consumption_sequence_ref: driver.consumption_sequence_ref.clone(),
-            next_group_position: 5,
-            closure: PublicTimeClosureReasonV1::NextGlobalEventAt(TERMINAL_ADMITTED_TIME_MS),
-        };
+        execution_time: driver.time(required.required_at_utc_ms),
+        consumption_sequence_ref: driver.consumption_sequence_ref.clone(),
+        next_group_position: 5,
+        closure: PublicTimeClosureReasonV1::NextGlobalEventAt(TERMINAL_ADMITTED_TIME_MS),
+    };
     driver.execution.close_public_time(closure).unwrap();
     let response = delivered.responses.borrow()[0].clone();
     delivered.deliver_through(response.response_received_at_utc_ms - 1);
@@ -1057,13 +1134,13 @@ async fn hidden_cross_epoch_index_keeps_the_real_predecessor_failure() {
     .unwrap();
     let mut source = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
     let first = source.next_bucket().unwrap().unwrap();
-    assert_eq!(first.reference.bucket_time_utc_ms, 20_050);
+    assert_eq!(first.reference.bucket_time_utc_ms(), 20_050);
     execution.hidden_bucket(first).unwrap();
     let recovery = source.next_bucket().unwrap().unwrap();
-    assert_eq!(recovery.reference.bucket_time_utc_ms, 20_100);
+    assert_eq!(recovery.reference.bucket_time_utc_ms(), 20_100);
     execution.hidden_bucket(recovery).unwrap();
     let late = source.next_bucket().unwrap().unwrap();
-    assert_eq!(late.reference.bucket_time_utc_ms, 20_200);
+    assert_eq!(late.reference.bucket_time_utc_ms(), 20_200);
     assert!(late.records.iter().any(|record| matches!(record, HiddenExecutionRecordV1::Step { step, .. }
         if matches!(&step.change, data_pipeline_core::pm_reduction::PmStepChangeV1::LevelChange { transition, .. }
         if transition.quantity_before_shares.0 == "10" && transition.quantity_after_shares.0 == "20"))));
@@ -1343,7 +1420,7 @@ async fn pure_reference_bucket_closes_without_market_effect_and_missing_time_is_
     .unwrap();
     let mut source = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
     let bucket = source.next_bucket().unwrap().unwrap();
-    assert_eq!(bucket.reference.bucket_time_utc_ms, 21_000);
+    assert_eq!(bucket.reference.bucket_time_utc_ms(), 21_000);
     assert_eq!(bucket.records.len(), 1);
     assert!(matches!(
         bucket.records[0],
@@ -1355,7 +1432,7 @@ async fn pure_reference_bucket_closes_without_market_effect_and_missing_time_is_
             .unwrap()
             .unwrap()
             .reference
-            .bucket_time_utc_ms,
+            .bucket_time_utc_ms(),
         22_000
     );
     assert!(
@@ -1429,7 +1506,6 @@ async fn enrolled_market_has_the_same_snapshot_rule_frame() {
     assert_eq!(frames[0].decision_cutoff, cutoff);
 }
 
-
 // 与两个真实有限例程共用供料策略；不向生产 API 暴露后台测试屏障。
 pub(super) mod finite_feeding {
     use crate as sim_system;
@@ -1458,8 +1534,10 @@ async fn finite_public_feed_continues_after_closed_time_and_due_action_without_r
     let core = recorded_complete(&root);
     let mut reference = None;
     let mut prior_steps = 0;
-    for blocked in [false, true] {
-        let path = temp.path().join(format!("public-{blocked}.jsonl"));
+    for (blocked, automatic) in [(false, false), (true, false), (true, true)] {
+        let path = temp
+            .path()
+            .join(format!("public-{blocked}-{automatic}.jsonl"));
         let (execution, delivered) = public_execution_capacity(
             &path,
             &core,
@@ -1519,6 +1597,24 @@ async fn finite_public_feed_continues_after_closed_time_and_due_action_without_r
                 .unwrap()
                 .pause_for_tests(false)
         });
+        let automatic_release = if automatic {
+            driver.enable_finite_recording_wait().unwrap();
+            let (notice, entered) = std::sync::mpsc::sync_channel(1);
+            driver
+                .execution
+                .actor
+                .background_log
+                .as_mut()
+                .unwrap()
+                .notify_finite_wait_for_tests(notice);
+            let release = release.take().unwrap();
+            Some(std::thread::spawn(move || {
+                entered.recv().unwrap();
+                release.send(()).unwrap();
+            }))
+        } else {
+            None
+        };
         let before = driver.execution.actor.applied_input_sequence;
         let drive_before = driver.drive_position;
         let mut waits = 0;
@@ -1562,7 +1658,10 @@ async fn finite_public_feed_continues_after_closed_time_and_due_action_without_r
         )
         .unwrap()
         .unwrap();
-        assert_eq!(waits, usize::from(blocked));
+        if let Some(worker) = automatic_release {
+            worker.join().unwrap();
+        }
+        assert_eq!(waits, usize::from(blocked && !automatic));
         if !blocked {
             prior_steps = driver.execution.actor.applied_input_sequence - before - 1;
         }
@@ -1584,9 +1683,7 @@ async fn finite_public_feed_continues_after_closed_time_and_due_action_without_r
         } else {
             reference = Some(actual);
         }
-        driver
-            .complete()
-            .unwrap();
+        driver.complete().unwrap();
     }
 }
 
@@ -1697,7 +1794,7 @@ async fn finite_hidden_feed_resumes_after_due_actions_and_applies_each_bucket_on
                                 .actor
                                 .next_required_logical_drive()
                                 .is_none_or(|required| required.required_at_utc_ms
-                                    >= bucket.reference.bucket_time_utc_ms)
+                                    >= bucket.reference.bucket_time_utc_ms())
                         );
                         release.send(()).unwrap();
                     }
@@ -1717,7 +1814,7 @@ async fn finite_hidden_feed_resumes_after_due_actions_and_applies_each_bucket_on
                 .session
                 .as_ref()
                 .unwrap();
-            if bucket.reference.bucket_time_utc_ms == 21_001 {
+            if bucket.reference.bucket_time_utc_ms() == 21_001 {
                 assert_eq!(
                     session
                         .hidden_platform_markets
@@ -1751,75 +1848,113 @@ async fn finite_hidden_feed_resumes_after_due_actions_and_applies_each_bucket_on
 
 #[tokio::test(flavor = "current_thread")]
 async fn finite_feed_wait_propagates_original_background_io_and_stops_without_seal() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("dpt");
-    let core = recorded_books(&root);
-    let path = temp.path().join("sim.jsonl");
-    let (mut execution, _) =
-        public_execution_capacity(&path, &core, SimCallerRoleV1::Paper, 0, None).await;
-    execution.wait_for_recording_capacity().unwrap();
-    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
-    let mut driver = FinitePublicConsumptionV1::new(execution, source, "finite-times".into());
-    let first = finite_feeding::feed(&mut driver, FinitePublicConsumptionV1::next_group,
-        FinitePublicConsumptionV1::wait_for_recording_capacity).unwrap().unwrap();
-    driver.wait_for_recording_capacity().unwrap();
-    let (entered, release) = driver.execution.actor.background_log.as_ref().unwrap().pause_write_for_tests();
-    // 先让真实上一组闭合占住后台写屏障，再测空档闭合后的原背压错误传播。
-    driver.state.close_at(10_000, PublicTimeClosureReasonV1::NextGlobalEventAt(22_000)).unwrap();
-    driver.wait_for_recording_capacity().unwrap();
-    entered.recv().unwrap();
-    let before = driver.execution.actor.applied_input_sequence;
-    let mut waits = 0;
-    let mut outputs = Vec::new();
-    let result = finite_feeding::feed(
-        &mut driver,
-        FinitePublicConsumptionV1::next_group,
-        |driver| {
-            waits += 1;
-            assert_eq!(driver.execution.actor.applied_input_sequence, before + 1);
-            assert_eq!(
-                driver
-                    .source
-                    .peek()
-                    .unwrap()
-                    .as_ref()
-                    .unwrap()
-                    .prepared
-                    .reference
-                    .group_position,
-                1
-            );
-            release.send(()).unwrap();
-            driver.wait_for_recording_capacity()
-        },
-    );
-    if let Ok(Some(value)) = &result {
-        outputs.push(value.clone());
-    }
-    let Err(SimRunActorErrorV2::Log(error @ crate::event_log::SimEventLogErrorV2::Io { .. })) =
-        result
-    else {
-        panic!("必须传播真实后台写错误")
-    };
-    assert_eq!(waits, 1);
-    assert!(outputs.is_empty());
-    assert_eq!(driver.last_receipt.as_ref(), Some(&first.0));
-    assert_eq!(driver.execution.actor.applied_input_sequence, before + 1);
-    let background = driver.execution.actor.background_log.take().unwrap();
-    assert_eq!(background.abort_and_join_for_tests().unwrap_err(), error);
-    assert!(!fs::read_to_string(&path).unwrap().contains("RUN_SEAL"));
-    let (_, mut reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
-    loop {
-        let (next, group) = reader.next_group().unwrap();
-        reader = next;
-        if group.is_none() {
-            break;
+    for automatic in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dpt");
+        let core = recorded_books(&root);
+        let path = temp.path().join("sim.jsonl");
+        let (mut execution, _) =
+            public_execution_capacity(&path, &core, SimCallerRoleV1::Paper, 0, None).await;
+        execution.wait_for_recording_capacity().unwrap();
+        let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+        let mut driver = FinitePublicConsumptionV1::new(execution, source, "finite-times".into());
+        let first = finite_feeding::feed(
+            &mut driver,
+            FinitePublicConsumptionV1::next_group,
+            FinitePublicConsumptionV1::wait_for_recording_capacity,
+        )
+        .unwrap()
+        .unwrap();
+        driver.wait_for_recording_capacity().unwrap();
+        let (entered, release) = driver
+            .execution
+            .actor
+            .background_log
+            .as_ref()
+            .unwrap()
+            .pause_write_for_tests();
+        // 先让真实上一组闭合占住后台写屏障，再测空档闭合后的原背压错误传播。
+        driver
+            .state
+            .close_at(10_000, PublicTimeClosureReasonV1::NextGlobalEventAt(22_000))
+            .unwrap();
+        driver.wait_for_recording_capacity().unwrap();
+        entered.recv().unwrap();
+        let mut release = Some(release);
+        let automatic_release = if automatic {
+            driver.enable_finite_recording_wait().unwrap();
+            let (notice, waiting) = std::sync::mpsc::sync_channel(1);
+            driver
+                .execution
+                .actor
+                .background_log
+                .as_mut()
+                .unwrap()
+                .notify_finite_wait_for_tests(notice);
+            let release = release.take().unwrap();
+            Some(std::thread::spawn(move || {
+                waiting.recv().unwrap();
+                release.send(()).unwrap();
+            }))
+        } else {
+            None
+        };
+        let before = driver.execution.actor.applied_input_sequence;
+        let mut waits = 0;
+        let mut outputs = Vec::new();
+        let result = finite_feeding::feed(
+            &mut driver,
+            FinitePublicConsumptionV1::next_group,
+            |driver| {
+                waits += 1;
+                assert_eq!(driver.execution.actor.applied_input_sequence, before + 1);
+                assert_eq!(
+                    driver
+                        .source
+                        .peek()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .prepared
+                        .reference
+                        .group_position,
+                    1
+                );
+                release.take().unwrap().send(()).unwrap();
+                driver.wait_for_recording_capacity()
+            },
+        );
+        if let Ok(Some(value)) = &result {
+            outputs.push(value.clone());
         }
+        let Err(SimRunActorErrorV2::Log(error @ crate::event_log::SimEventLogErrorV2::Io { .. })) =
+            result
+        else {
+            panic!("必须传播真实后台写错误")
+        };
+        if let Some(worker) = automatic_release {
+            worker.join().unwrap();
+        }
+        assert_eq!(waits, usize::from(!automatic));
+        assert!(outputs.is_empty());
+        assert_eq!(driver.last_receipt.as_ref(), Some(&first.0));
+        assert_eq!(driver.execution.actor.applied_input_sequence, before + 1);
+        let background = driver.execution.actor.background_log.take().unwrap();
+        assert_eq!(background.abort_and_join_for_tests().unwrap_err(), error);
+        assert!(!fs::read_to_string(&path).unwrap().contains("RUN_SEAL"));
+        let (_, mut reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+        loop {
+            let (next, group) = reader.next_group().unwrap();
+            reader = next;
+            if group.is_none() {
+                break;
+            }
+        }
+        assert!(matches!(
+            reader.finish_sealed_clean_run(),
+            Err(crate::event_log::SimEventLogErrorV2::UnsealedCleanRun)
+        ));
     }
-    assert!(matches!(
-        reader.finish_sealed_clean_run(),
-        Err(crate::event_log::SimEventLogErrorV2::UnsealedCleanRun)
-    ));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2117,7 +2252,11 @@ async fn continuous_actual_clock_splits_old_source_times_and_drains_earlier_due_
         execution_state.next_rebate_clock_at_utc_ms(),
         Some(MARKET_END_AT)
     );
-    assert_eq!(execution_state.next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()), None);
+    assert_eq!(
+        execution_state
+            .next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()),
+        None
+    );
     assert_eq!(execution_state.next_scheduled_finality_at_utc_ms(), None);
     assert_eq!(
         driver.next_wake_after(),
@@ -2395,7 +2534,10 @@ async fn continuous_equal_time_finality_gtd_and_rebate_keep_original_pre_market_
         .as_ref()
         .unwrap()
         .execution_state;
-    assert_eq!(state.next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()), Some(deadline));
+    assert_eq!(
+        state.next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()),
+        Some(deadline)
+    );
     let finality_at = state.next_scheduled_finality_at_utc_ms().unwrap();
     for (at, class) in [
         (finality_at, "finality"),
@@ -2428,7 +2570,12 @@ async fn continuous_equal_time_finality_gtd_and_rebate_keep_original_pre_market_
                 session.execution_state.next_scheduled_finality_at_utc_ms(),
                 Some(at)
             ),
-            "gtd" => assert_eq!(session.execution_state.next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()), None),
+            "gtd" => assert_eq!(
+                session
+                    .execution_state
+                    .next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()),
+                None
+            ),
             _ => assert_ne!(
                 session.execution_state.next_rebate_clock_at_utc_ms(),
                 Some(at)
@@ -2677,9 +2824,19 @@ async fn paper_send_samples_clock_at_request_instead_of_capability_acquisition()
     clock.store(22_050, Ordering::SeqCst);
     let receipt = send
         .request(BusinessRequestV2::PostOrder(PostOrderRequestV2 {
-            context: RequestContextV2 { global_request_id: "paper-time".into(), caller_correlation_id: None },
-            item: post_item("buy", &ConditionId(CONDITION_ID.into()), &TokenId(UP_TOKEN_ID.into()),
-                SimBuyOrderKindV1::FokMarket { spend_pusd: Decimal::from(3), worst_price_pusd_per_share: Decimal::new(6, 1) }),
+            context: RequestContextV2 {
+                global_request_id: "paper-time".into(),
+                caller_correlation_id: None,
+            },
+            item: post_item(
+                "buy",
+                &ConditionId(CONDITION_ID.into()),
+                &TokenId(UP_TOKEN_ID.into()),
+                SimBuyOrderKindV1::FokMarket {
+                    spend_pusd: Decimal::from(3),
+                    worst_price_pusd_per_share: Decimal::new(6, 1),
+                },
+            ),
         }))
         .unwrap();
     assert_eq!(send.cutoff(), &observed);
@@ -2703,7 +2860,10 @@ async fn paper_send_samples_clock_at_request_instead_of_capability_acquisition()
     let due = driver.required_at().unwrap();
     clock.store(due, Ordering::SeqCst);
     driver.observe().unwrap();
-    assert!(completed_post_response(&driver.execution.actor, "paper-time").is_none(), "观察不关闭当前毫秒的 BUY");
+    assert!(
+        completed_post_response(&driver.execution.actor, "paper-time").is_none(),
+        "观察不关闭当前毫秒的 BUY"
+    );
     clock.store(due + 1, Ordering::SeqCst);
     driver.observe().unwrap();
     assert!(completed_post_response(&driver.execution.actor, "paper-time").is_some());

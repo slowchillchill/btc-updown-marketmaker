@@ -66,6 +66,9 @@ pub struct HistoricalRunConfigV1 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoricalPreparedRunConfigV1 {
+    /// 日作业将策略的固定请求命名空间纳入恢复身份；旧入口由原命令提供。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_request_namespace: Option<String>,
     pub timing: HistoricalTimingV1,
     pub session: HistoricalSessionV1,
     pub strategy: StrategyDescriptorV1,
@@ -89,6 +92,7 @@ pub struct HistoricalPreparedRunConfigV1 {
 impl From<&HistoricalRunConfigV1> for HistoricalPreparedRunConfigV1 {
     fn from(c: &HistoricalRunConfigV1) -> Self {
         Self {
+            strategy_request_namespace: None,
             timing: c.timing.clone(),
             session: c.session.clone(),
             strategy: c.strategy.clone(),
@@ -115,7 +119,7 @@ pub enum HistoricalEndReasonV1 {
     StrategyExit,
     Failure,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CalculationTimingRecordV1 {
     pub observation_at_utc_ms: i64,
     pub calculation_started_at_utc_ms: i64,
@@ -124,7 +128,7 @@ pub struct CalculationTimingRecordV1 {
     pub actual_sent_at_utc_ms: Option<i64>,
 }
 /// 只汇总实际公开交付，不复制逐决策账本；来源与经营阶段分别记录。
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HistoricalDeliveryPhaseSummaryV1 {
     pub groups: u64,
     pub initialization_source_groups: u64,
@@ -145,13 +149,13 @@ impl HistoricalDeliveryPhaseSummaryV1 {
         self.last_delivered_at_utc_ms = Some(at);
     }
 }
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HistoricalDeliverySummaryV1 {
     pub before_operating_start: HistoricalDeliveryPhaseSummaryV1,
     pub within_operating_range: HistoricalDeliveryPhaseSummaryV1,
 }
 /// 经济读取与未闭合对象来自同一公共状态。Exit/失败的内存读取不声称已经落盘。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SourceHealthRunSummaryV1 {
     pub qualification_calls: u64,
     pub deadline_wakeups: u64,
@@ -160,6 +164,7 @@ pub struct SourceHealthRunSummaryV1 {
 }
 #[derive(Debug, Serialize)]
 pub struct HistoricalRunReportV1 {
+    pub day_economics: HistoricalDayEconomicsSummaryV1,
     pub end_reason: HistoricalEndReasonV1,
     pub last_observed_at_utc_ms: Option<i64>,
     pub observation_cutoff: Option<TrustedGroupDecisionCutoffV1>,
@@ -203,7 +208,8 @@ pub struct HistoricalRunFailureV1<E> {
     pub cause: HistoricalFailureCauseV1<E>,
     pub report: Option<HistoricalRunReportV1>,
 }
-struct Pending<D> {
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Pending<D> {
     calculation: CompletedStrategyCalculationV1<D>,
     completed_at: i64,
     send_at: i64,
@@ -308,6 +314,23 @@ fn assemble(
     }
     Ok((execution, shared, observation))
 }
+fn sample_day_economics<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>(
+    driver: &FinitePublicConsumptionV1<I>,
+    shared: &SharedExecutionV2,
+    at: i64,
+    state: &mut crate::day_economics::DayEconomicsStateV1,
+) {
+    if let Some(read) = shared.ledger().economic_read() {
+        let frames = driver.frames_at_observation();
+        let economics = AccountEconomicsReadV2::from_ledger_and_observations(
+            &read,
+            frames.iter().map(|f| f.observation),
+        );
+        state.sample(at, Some((&read, &economics)));
+    } else {
+        state.sample(at, None);
+    }
+}
 fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>(
     driver: &FinitePublicConsumptionV1<I>,
     shared: &SharedExecutionV2,
@@ -353,6 +376,7 @@ fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         calculation_count: count,
         source_health: None,
         delivery_summary: None,
+        day_economics: crate::day_economics::DayEconomicsStateV1::default().summary(),
     }
 }
 /// 一个账户、一个共享执行与一个策略贯穿整个显式历史范围。策略错误与原分派错误原样交回。
@@ -420,80 +444,201 @@ async fn run_material<S: StrategyV1>(
     rules: Arc<SealedProcessRuleSnapshotV3>,
     strategy: &mut S,
 ) -> Result<HistoricalRunReportV1, HistoricalRunFailureV1<S::Error>> {
+    let mut source = RecordedPublicGroupSourceV1::open_committed(
+        &prepared.public_root,
+        prepared.hidden.prefix.clone(),
+        material.preparation.read_page_rows,
+        material.preparation.max_read_batch_bytes,
+        crate::timing::DeliveryTimes {
+            delays: config.timing.public_delivery_delay_ms.clone(),
+            last: None,
+        },
+    )
+    .map_err(material_failure)?;
+    if source.header() != &material.preparation.header {
+        return Err(material_failure("描述与公共流头不符".into()));
+    }
+    if strategy.uses_source_health() {
+        source.enable_source_progress();
+    }
+    source.set_progress(
+        std::time::Duration::from_secs(config.replay_progress_interval_seconds),
+        std::io::stderr(),
+    );
+    let mut hidden = RecordedHiddenBucketSourceV1::open(
+        &prepared.hidden,
+        &prepared.public_root,
+        material.preparation.read_page_rows,
+        material.preparation.max_read_batch_bytes,
+    )
+    .map_err(material_failure)?;
+    run_material_with_sources(
+        config,
+        material,
+        prepared,
+        metadata_config,
+        rules,
+        strategy,
+        source,
+        std::iter::from_fn(move || hidden.next_bucket().transpose()),
+    )
+    .await
+}
+/// 原账户循环接收已准备的公共组与完整隐藏桶；不另建回测、撮合或账本循环。
+pub(crate) async fn run_material_with_sources<S, I, H>(
+    config: &HistoricalPreparedRunConfigV1,
+    material: &PreparedHistoricalMaterialV1,
+    prepared: PreparedHistoricalRunV1,
+    metadata_config: serde_json::Value,
+    rules: Arc<SealedProcessRuleSnapshotV3>,
+    strategy: &mut S,
+    source: I,
+    hidden: H,
+) -> Result<HistoricalRunReportV1, HistoricalRunFailureV1<S::Error>>
+where
+    S: StrategyV1,
+    I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
+    H: Iterator<
+        Item = Result<sim_system::public_consumption::AcceptedHiddenStepBucketV1, MaterialError>,
+    >,
+{
     let metadata = serde_json::json!({"config": metadata_config, "prepared_material": material, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "source_identity_sha256": prepared.source_identity_sha256, "initialization": prepared.initialization, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "caller_role": SimCallerRoleV1::HistoricalBacktest, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
+    let context = HistoricalRuntimeContextV1 {
+        start: material.preparation.scope.received_start_utc_ms,
+        source_identity: prepared.source_identity_sha256,
+        end: material.preparation.scope.received_end_utc_ms,
+        operating_start: material
+            .preparation
+            .metadata_initialization
+            .as_ref()
+            .map(|_| material.preparation.scope.received_start_utc_ms),
+        catalog: Arc::new(std::sync::RwLock::new(HistoricalRuntimeCatalogV1 {
+            markets: prepared.markets,
+            initialization: prepared.initialization,
+        })),
+    };
+    run_context_with_sources(config, context, metadata, rules, strategy, source, hidden).await
+}
+#[derive(Default, Serialize, Deserialize)]
+pub(crate) struct HistoricalRuntimeCatalogV1 {
+    pub markets: std::collections::BTreeMap<String, PlatformMarketV1>,
+    pub initialization: HistoricalInitializationProvenanceV1,
+}
+pub(crate) struct HistoricalRuntimeContextV1 {
+    pub start: i64,
+    pub source_identity: Sha256Hex,
+    pub end: i64,
+    pub operating_start: Option<i64>,
+    pub catalog: Arc<std::sync::RwLock<HistoricalRuntimeCatalogV1>>,
+}
+pub(crate) async fn run_context_with_sources<S, I, H>(
+    config: &HistoricalPreparedRunConfigV1,
+    context: HistoricalRuntimeContextV1,
+    metadata: serde_json::Value,
+    rules: Arc<SealedProcessRuleSnapshotV3>,
+    strategy: &mut S,
+    source: I,
+    hidden: H,
+) -> Result<HistoricalRunReportV1, HistoricalRunFailureV1<S::Error>>
+where
+    S: StrategyV1,
+    I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
+    H: Iterator<Item = Result<AcceptedHiddenStepBucketV1, MaterialError>>,
+{
+    run_context_with_hook(
+        config,
+        context,
+        metadata,
+        rules,
+        strategy,
+        source,
+        hidden,
+        NoRuntimeCheckpointV1,
+    )
+    .await
+}
+pub(crate) async fn run_context_with_hook<S, I, H, C>(
+    config: &HistoricalPreparedRunConfigV1,
+    context: HistoricalRuntimeContextV1,
+    metadata: serde_json::Value,
+    rules: Arc<SealedProcessRuleSnapshotV3>,
+    strategy: &mut S,
+    source: I,
+    mut hidden: H,
+    mut checkpoint: C,
+) -> Result<HistoricalRunReportV1, HistoricalRunFailureV1<S::Error>>
+where
+    S: StrategyV1,
+    I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
+    H: Iterator<Item = Result<AcceptedHiddenStepBucketV1, MaterialError>>,
+    C: RuntimeCheckpointV1<S, I>,
+{
     let health_enabled = strategy.uses_source_health();
+    let resumed = checkpoint
+        .restore(config, rules.clone(), strategy)
+        .map_err(material_failure)?;
+    let mut saved_loop = None;
     let start = || -> Result<_, MaterialError> {
         serde_json::to_writer(std::fs::File::create(&config.metadata_path)?, &metadata)?;
-        let (execution, shared, observation) =
-            assemble(config, rules, prepared.source_identity_sha256.clone())?;
-        let mut source = RecordedPublicGroupSourceV1::open_committed(
-            &prepared.public_root,
-            prepared.hidden.prefix.clone(),
-            material.preparation.read_page_rows,
-            material.preparation.max_read_batch_bytes,
-            crate::timing::DeliveryTimes {
-                delays: config.timing.public_delivery_delay_ms.clone(),
-                last: None,
-            },
-        )?;
-        if source.header() != &material.preparation.header {
-            return Err("描述与公共流头不符".into());
+        if let Some((state, shared, observation, saved)) = resumed {
+            saved_loop = Some(saved);
+            Ok((
+                FinitePublicConsumptionV1::from_checkpoint_state(state, source),
+                shared,
+                observation,
+            ))
+        } else {
+            let (execution, shared, observation) =
+                assemble(config, rules, context.source_identity.clone())?;
+            Ok((
+                FinitePublicConsumptionV1::new(
+                    execution,
+                    source,
+                    config.consumption_sequence_ref.clone(),
+                ),
+                shared,
+                observation,
+            ))
         }
-        if health_enabled {
-            source.enable_source_progress();
-        }
-        source.set_progress(
-            std::time::Duration::from_secs(config.replay_progress_interval_seconds),
-            std::io::stderr(),
-        );
-        let hidden = RecordedHiddenBucketSourceV1::open(
-            &prepared.hidden,
-            &prepared.public_root,
-            material.preparation.read_page_rows,
-            material.preparation.max_read_batch_bytes,
-        )?;
-        Ok((
-            FinitePublicConsumptionV1::new(
-                execution,
-                source,
-                config.consumption_sequence_ref.clone(),
-            ),
-            shared,
-            observation,
-            hidden,
-        ))
     };
-    let (mut driver, mut shared, observation, mut hidden) =
+    let (mut driver, mut shared, observation) =
         start().map_err(|cause| HistoricalRunFailureV1 {
             cause: HistoricalFailureCauseV1::Material(cause),
             report: None,
         })?;
-    let mut pending: Option<Pending<S::Diagnostics>> = None;
-    let mut start_at = None;
-    let mut dirty = false;
-    let mut calculation_index = 0;
-    let mut timing = None;
-    let mut evaluation_at = None;
-    let mut health_at = None;
-    let mut health_summary = SourceHealthRunSummaryV1 {
-        qualification_calls: 0,
-        deadline_wakeups: 0,
-        invalidated_batches: 0,
-        last_invalidated_calculation_timing: None,
-    };
-    let mut unconsumed_required_trigger_at = None;
-    let mut coordinator = SettlementCoordinatorV1::default();
-    let mut delivery_summary = HistoricalDeliverySummaryV1::default();
-    let end = material.preparation.scope.received_end_utc_ms;
-    // 无初始化的旧调用保持原触发行为；新调用严格以经营区间控制回调。
-    let operating_start = material
-        .preparation
-        .metadata_initialization
-        .as_ref()
-        .map(|_| material.preparation.scope.received_start_utc_ms);
+    driver
+        .enable_finite_recording_wait()
+        .map_err(|cause| HistoricalRunFailureV1 {
+            cause: HistoricalFailureCauseV1::Sim(cause),
+            report: None,
+        })?;
+    checkpoint.started();
+    let fresh = saved_loop.is_none();
+    let RuntimeLoopCheckpointV1 {
+        mut pending,
+        mut start_at,
+        mut dirty,
+        mut calculation_index,
+        mut timing,
+        mut evaluation_at,
+        mut health_at,
+        mut health_summary,
+        mut unconsumed_required_trigger_at,
+        mut coordinator,
+        mut delivery_summary,
+        mut day_economics,
+    } = saved_loop.unwrap_or_default();
+    let end = context.end;
+    let operating_start = context.operating_start;
+    let economics_start = context.start.max(operating_start.unwrap_or(context.start));
+    if fresh {
+        sample_day_economics(&driver, &shared, economics_start, &mut day_economics);
+    }
     let running = async {
-        let mut next_hidden = hidden
-            .next_bucket()
+        let mut next_hidden = checkpoint
+            .restored_hidden()
+            .or_else(|| hidden.next())
+            .transpose()
             .map_err(HistoricalFailureCauseV1::Material)?;
         loop {
             let public_at = driver
@@ -501,7 +646,7 @@ async fn run_material<S: StrategyV1>(
                 .map_err(HistoricalFailureCauseV1::Sim)?;
             let hidden_at = next_hidden
                 .as_ref()
-                .map(|bucket| bucket.reference().bucket_time_utc_ms);
+                .map(|bucket| bucket.reference().bucket_time_utc_ms());
             let required = driver
                 .next_required_logical_drive()
                 .map(|next| next.required_at_utc_ms);
@@ -541,6 +686,7 @@ async fn run_material<S: StrategyV1>(
                     )
                 })
             {
+                sample_day_economics(&driver, &shared, at, &mut day_economics);
                 return Ok(HistoricalEndReasonV1::StrategyExit);
             }
             let health_due = health_at == Some(at);
@@ -581,31 +727,35 @@ async fn run_material<S: StrategyV1>(
                     .map_err(HistoricalFailureCauseV1::Sim)?
                 {
                     if operating_start.is_some() {
-                        let initial = prepared
+                        let catalog = context.catalog.read().unwrap();
+                        let initial = catalog
                             .initialization
                             .group_is_initialization(&group.group.member_input_positions);
                         let dependency =
-                            prepared.initialization.group_has_initialization_dependency(
+                            catalog.initialization.group_has_initialization_dependency(
                                 &group.group.member_input_positions,
                                 group.group.closed_at_input_position,
                             ) || group.group.observations.iter().any(|o| {
-                                prepared
+                                catalog
                                     .initialization
                                     .observation_has_initialization_dependency(o)
                             });
                         delivered_group = Some((group.group.group_position, initial, dependency));
                     }
-                    for context in &group.pm_contexts {
-                        if !driver.has_enrolled_market(&context.market.condition_id) {
+                    for pm_context in &group.pm_contexts {
+                        if !driver.has_enrolled_market(&pm_context.market.condition_id) {
                             driver
                                 .wait_for_recording_capacity()
                                 .map_err(HistoricalFailureCauseV1::Sim)?;
                             driver
                                 .enroll_market(MarketEnrollmentRequestV1 {
-                                    enrollment_request_id: context.market.condition_id.0.clone(),
-                                    market: prepared
+                                    enrollment_request_id: pm_context.market.condition_id.0.clone(),
+                                    market: context
+                                        .catalog
+                                        .read()
+                                        .unwrap()
                                         .markets
-                                        .get(&context.market.condition_id.0)
+                                        .get(&pm_context.market.condition_id.0)
                                         .ok_or_else(|| {
                                             HistoricalFailureCauseV1::Material(
                                                 "已准备材料缺少公开市场目录项".into(),
@@ -778,7 +928,10 @@ async fn run_material<S: StrategyV1>(
                         driver
                             .enroll_market(MarketEnrollmentRequestV1 {
                                 enrollment_request_id: market.condition_id.0.clone(),
-                                market: prepared
+                                market: context
+                                    .catalog
+                                    .read()
+                                    .unwrap()
                                     .markets
                                     .get(&market.condition_id.0)
                                     .ok_or_else(|| {
@@ -799,7 +952,8 @@ async fn run_material<S: StrategyV1>(
                     .map_err(HistoricalFailureCauseV1::Sim)?;
                 unconsumed_required_trigger_at = None;
                 next_hidden = hidden
-                    .next_bucket()
+                    .next()
+                    .transpose()
                     .map_err(HistoricalFailureCauseV1::Material)?;
             }
             driver
@@ -907,17 +1061,49 @@ async fn run_material<S: StrategyV1>(
                     .map_err(HistoricalFailureCauseV1::Sim)?;
                 unconsumed_required_trigger_at = None;
             }
+            // 初始化及隐藏来源可早于经营范围；保留其业务时刻，不让统计前沿倒退。
+            if at >= economics_start {
+                sample_day_economics(&driver, &shared, at, &mut day_economics);
+            }
+            checkpoint
+                .save(
+                    &mut driver,
+                    &shared,
+                    strategy,
+                    RuntimeLoopCheckpointRefV1 {
+                        pending: &pending,
+                        start_at,
+                        dirty,
+                        calculation_index,
+                        timing: &timing,
+                        evaluation_at,
+                        health_at,
+                        health_summary: &health_summary,
+                        unconsumed_required_trigger_at,
+                        coordinator: &coordinator,
+                        delivery_summary: &delivery_summary,
+                        day_economics: &day_economics,
+                    },
+                    next_hidden.as_ref(),
+                )
+                .map_err(HistoricalFailureCauseV1::Material)?;
         }
+        let tail_at = end.checked_sub(1).ok_or_else(|| {
+            HistoricalFailureCauseV1::Sim(SimRunActorErrorV2::InvalidBusinessRequest(
+                "历史范围结束时刻溢出",
+            ))
+        })?;
         driver
-            .finish_input_at(end.checked_sub(1).ok_or_else(|| {
-                HistoricalFailureCauseV1::Sim(SimRunActorErrorV2::InvalidBusinessRequest(
-                    "历史范围结束时刻溢出",
-                ))
-            })?)
+            .finish_input_at(tail_at)
             .map_err(HistoricalFailureCauseV1::Sim)?;
         shared
             .advance_settlement(&mut coordinator, &mut driver)
             .map_err(HistoricalFailureCauseV1::Settlement)?;
+        // 原尾观察已领取经济反馈；在该观察时点更新统计，随后延续至范围结束。
+        if tail_at >= economics_start {
+            sample_day_economics(&driver, &shared, tail_at, &mut day_economics);
+        }
+        day_economics.finish_duration(end);
         Ok(HistoricalEndReasonV1::RangeEnd)
     }
     .await;
@@ -934,6 +1120,7 @@ async fn run_material<S: StrategyV1>(
                 calculation_index,
             );
             result.delivery_summary = operating_start.map(|_| delivery_summary.clone());
+            result.day_economics = day_economics.summary();
             result.source_health = health_enabled.then_some(health_summary);
             if normal {
                 driver
@@ -971,11 +1158,113 @@ async fn run_material<S: StrategyV1>(
                 calculation_index,
             );
             failure_report.delivery_summary = operating_start.map(|_| delivery_summary.clone());
+            failure_report.day_economics = day_economics.summary();
             failure_report.source_health = health_enabled.then_some(health_summary);
             Err(HistoricalRunFailureV1 {
                 cause,
                 report: Some(failure_report),
             })
         }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct RuntimeLoopCheckpointV1<D> {
+    pending: Option<Pending<D>>,
+    start_at: Option<i64>,
+    dirty: bool,
+    calculation_index: usize,
+    timing: Option<CalculationTimingRecordV1>,
+    evaluation_at: Option<i64>,
+    health_at: Option<i64>,
+    health_summary: SourceHealthRunSummaryV1,
+    unconsumed_required_trigger_at: Option<i64>,
+    coordinator: SettlementCoordinatorV1,
+    delivery_summary: HistoricalDeliverySummaryV1,
+    day_economics: crate::day_economics::DayEconomicsStateV1,
+}
+impl<D> Default for RuntimeLoopCheckpointV1<D> {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            start_at: None,
+            dirty: false,
+            calculation_index: 0,
+            timing: None,
+            evaluation_at: None,
+            health_at: None,
+            health_summary: SourceHealthRunSummaryV1 {
+                qualification_calls: 0,
+                deadline_wakeups: 0,
+                invalidated_batches: 0,
+                last_invalidated_calculation_timing: None,
+            },
+            unconsumed_required_trigger_at: None,
+            coordinator: Default::default(),
+            delivery_summary: Default::default(),
+            day_economics: Default::default(),
+        }
+    }
+}
+#[derive(Serialize)]
+pub(crate) struct RuntimeLoopCheckpointRefV1<'a, D> {
+    pending: &'a Option<Pending<D>>,
+    start_at: Option<i64>,
+    dirty: bool,
+    calculation_index: usize,
+    timing: &'a Option<CalculationTimingRecordV1>,
+    evaluation_at: Option<i64>,
+    health_at: Option<i64>,
+    health_summary: &'a SourceHealthRunSummaryV1,
+    unconsumed_required_trigger_at: Option<i64>,
+    coordinator: &'a SettlementCoordinatorV1,
+    delivery_summary: &'a HistoricalDeliverySummaryV1,
+    day_economics: &'a crate::day_economics::DayEconomicsStateV1,
+}
+pub(crate) type RestoredRuntimeV1<D> = (
+    PublicConsumptionStateV1,
+    SharedExecutionV2,
+    MemoryNoeObservationV4,
+    RuntimeLoopCheckpointV1<D>,
+);
+pub(crate) trait RuntimeCheckpointV1<
+    S: StrategyV1,
+    I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
+>
+{
+    fn started(&mut self) {}
+    fn restore(
+        &mut self,
+        _config: &HistoricalPreparedRunConfigV1,
+        _rules: Arc<SealedProcessRuleSnapshotV3>,
+        _strategy: &mut S,
+    ) -> Result<Option<RestoredRuntimeV1<S::Diagnostics>>, MaterialError> {
+        Ok(None)
+    }
+    fn restored_hidden(&mut self) -> Option<Result<AcceptedHiddenStepBucketV1, MaterialError>> {
+        None
+    }
+    fn save(
+        &mut self,
+        driver: &mut FinitePublicConsumptionV1<I>,
+        shared: &SharedExecutionV2,
+        strategy: &S,
+        state: RuntimeLoopCheckpointRefV1<'_, S::Diagnostics>,
+        next_hidden: Option<&AcceptedHiddenStepBucketV1>,
+    ) -> Result<(), MaterialError>;
+}
+struct NoRuntimeCheckpointV1;
+impl<S: StrategyV1, I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
+    RuntimeCheckpointV1<S, I> for NoRuntimeCheckpointV1
+{
+    fn save(
+        &mut self,
+        _driver: &mut FinitePublicConsumptionV1<I>,
+        _shared: &SharedExecutionV2,
+        _strategy: &S,
+        _state: RuntimeLoopCheckpointRefV1<'_, S::Diagnostics>,
+        _next_hidden: Option<&AcceptedHiddenStepBucketV1>,
+    ) -> Result<(), MaterialError> {
+        Ok(())
     }
 }

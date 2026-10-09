@@ -105,7 +105,7 @@ impl PmEvidenceV1 for SourceEvidenceRefV3 {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PmMarketContextV1<E = SourceEvidenceRefV3> {
     pub market: MarketIdentityV2,
     pub assets: Vec<PolymarketAssetContextV1>,
@@ -151,7 +151,7 @@ pub struct PmSelectedLevelV1<E = SourceEvidenceRefV3> {
     pub confirmation: E,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct PmBbaStateV1<E = SourceEvidenceRefV3> {
     pub best_bid: Option<ExactDecimal>,
     pub best_ask: Option<ExactDecimal>,
@@ -159,7 +159,7 @@ pub struct PmBbaStateV1<E = SourceEvidenceRefV3> {
 }
 
 /// 小量状态元数据；数量和价位键通过 PmStateReadV1 借用查询。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PmAssetStateV1<E = SourceEvidenceRefV3> {
     pub has_initial_snapshot: bool,
     pub book_ready: bool,
@@ -468,6 +468,137 @@ pub struct PmReductionStepV1<'m, E = SourceEvidenceRefV3, I = CanonicalEventId> 
     pub direct_time: EventTimeV2,
     pub dependency_time: EventTimeV2,
     pub quality: EventQualityV2,
+}
+
+impl<'m> PmReductionStepV1<'m, PreparedPmEvidenceV1<SourceEvidenceRefV3>> {
+    /// 去除准备缓存，保留原来源事实和步骤身份；不经中间编码。
+    pub fn into_source_step(self) -> PmReductionStepV1<'static> {
+        fn source(e: PreparedPmEvidenceV1<SourceEvidenceRefV3>) -> SourceEvidenceRefV3 {
+            e.source().clone()
+        }
+        fn pair(
+            p: PmEvidencePairV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>,
+        ) -> PmEvidencePairV1 {
+            PmEvidencePairV1 {
+                direct: source(p.direct),
+                frontier: source(p.frontier),
+            }
+        }
+        fn selected(
+            p: PmSelectedLevelV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>,
+        ) -> PmSelectedLevelV1 {
+            PmSelectedLevelV1 {
+                version: p.version,
+                present: p.present,
+                confirmation: source(p.confirmation),
+            }
+        }
+        let change = match self.change {
+            PmStepChangeV1::Epoch {
+                source_sequence_epoch_id,
+            } => PmStepChangeV1::Epoch {
+                source_sequence_epoch_id,
+            },
+            PmStepChangeV1::ResetAsset {
+                asset,
+                absence_baseline,
+                bba_reanchor_frontier,
+            } => PmStepChangeV1::ResetAsset {
+                asset,
+                absence_baseline: absence_baseline.map(pair),
+                bba_reanchor_frontier: bba_reanchor_frontier.map(source),
+            },
+            PmStepChangeV1::InitialSnapshot {
+                asset,
+                initial_tick_size_pusd_per_share,
+                source_sequence_epoch_id,
+                source_cursor,
+                book_digest_sha256,
+                bids,
+                asks,
+                evidence,
+            } => PmStepChangeV1::InitialSnapshot {
+                asset,
+                initial_tick_size_pusd_per_share,
+                source_sequence_epoch_id,
+                source_cursor,
+                book_digest_sha256,
+                bids: std::borrow::Cow::Owned(bids.into_owned()),
+                asks: std::borrow::Cow::Owned(asks.into_owned()),
+                evidence: pair(evidence),
+            },
+            PmStepChangeV1::LevelChange {
+                transition,
+                evidence,
+            } => PmStepChangeV1::LevelChange {
+                transition,
+                evidence: pair(evidence),
+            },
+            PmStepChangeV1::LevelEvidenceOnly {
+                asset,
+                side,
+                price,
+                evidence,
+            } => PmStepChangeV1::LevelEvidenceOnly {
+                asset,
+                side,
+                price,
+                evidence: pair(evidence),
+            },
+            PmStepChangeV1::Selection {
+                asset,
+                side,
+                price,
+                selected: value,
+                previous,
+                absence_baseline,
+            } => PmStepChangeV1::Selection {
+                asset,
+                side,
+                price,
+                selected: selected(value),
+                previous: previous.map(selected),
+                absence_baseline: absence_baseline.map(selected),
+            },
+            PmStepChangeV1::AbsenceBaseline {
+                asset,
+                evidence,
+                selected: value,
+            } => PmStepChangeV1::AbsenceBaseline {
+                asset,
+                evidence: pair(evidence),
+                selected: value.map(selected),
+            },
+            PmStepChangeV1::BookReady { asset } => PmStepChangeV1::BookReady { asset },
+            PmStepChangeV1::BestBidAsk { quote, evidence } => PmStepChangeV1::BestBidAsk {
+                quote,
+                evidence: pair(evidence),
+            },
+            PmStepChangeV1::Tick { tick, evidence } => PmStepChangeV1::Tick {
+                tick,
+                evidence: pair(evidence),
+            },
+            PmStepChangeV1::PublicConfirmation { asset, kind } => {
+                PmStepChangeV1::PublicConfirmation { asset, kind }
+            }
+            PmStepChangeV1::PublicTrade { trade } => PmStepChangeV1::PublicTrade { trade },
+            PmStepChangeV1::Quality { boundary } => PmStepChangeV1::Quality { boundary },
+        };
+        PmReductionStepV1 {
+            canonical_fact_id: self.canonical_fact_id,
+            member_index: self.member_index,
+            step_index: self.step_index,
+            derived_id: self.derived_id,
+            change,
+            direct: source(self.direct),
+            prestate: self.prestate.map(pair),
+            absence: self.absence.map(pair),
+            dependencies: self.dependencies.into_iter().map(source).collect(),
+            direct_time: self.direct_time,
+            dependency_time: self.dependency_time,
+            quality: self.quality,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1876,6 +2007,13 @@ impl<E: Serialize> Serialize for PreparedPmEvidenceV1<E> {
         self.0.value.serialize(serializer)
     }
 }
+// 恢复只持久化来源事实；准备键和摘要缓存由原来源重建，编码与正式来源一致。
+impl<'de> Deserialize<'de> for PreparedPmEvidenceV1<SourceEvidenceRefV3> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let source = SourceEvidenceRefV3::deserialize(deserializer)?;
+        Self::prepare(source, None).map_err(serde::de::Error::custom)
+    }
+}
 impl<E: PartialEq> PartialEq for PreparedPmEvidenceV1<E> {
     fn eq(&self, other: &Self) -> bool {
         self.0.value == other.0.value
@@ -1991,10 +2129,13 @@ impl<E: PmEvidenceV1> PmEvidenceV1 for PreparedPmEvidenceV1<E> {
     fn prepared_book_digest(
         &self,
         asset: &AssetIdentityV1,
-        _: &BTreeMap<Decimal, &PriceLevelV1>,
-        _: &BTreeMap<Decimal, &PriceLevelV1>,
+        bids: &BTreeMap<Decimal, &PriceLevelV1>,
+        asks: &BTreeMap<Decimal, &PriceLevelV1>,
     ) -> Result<Sha256Hex, ContractError> {
-        Ok(self.0.book_digests_by_member[&asset.token_id.0].clone())
+        match self.0.book_digests_by_member.get(&asset.token_id.0) {
+            Some(digest) => Ok(digest.clone()),
+            None => book_digest(asset, bids, asks),
+        }
     }
 }
 
@@ -2420,5 +2561,56 @@ impl<E, I> PmMessageReductionV1<'_, E, I> {
             materialization_market: self.materialization_market,
             materialization_rule_version: self.materialization_rule_version,
         }
+    }
+}
+
+/// 内部恢复保留同次物化上下文；正式 PM reduction 编码继续省略该私有字段。
+pub mod recovery {
+    use super::*;
+    #[derive(Serialize)]
+    struct SavedRef<'a, 'm, E, I> {
+        steps: &'a [PmReductionStepV1<'m, E, I>],
+        reports: &'a [PmReductionReportV2<E, I>],
+        touched_level_entries: usize,
+        market: &'a MarketIdentityV2,
+        rule_version: &'a str,
+    }
+    #[derive(Deserialize)]
+    struct Saved<E, I> {
+        steps: Vec<PmReductionStepV1<'static, E, I>>,
+        reports: Vec<PmReductionReportV2<E, I>>,
+        touched_level_entries: usize,
+        market: MarketIdentityV2,
+        rule_version: String,
+    }
+    pub fn serialize<E: Serialize, I: Serialize, S: serde::Serializer>(
+        value: &PmMessageReductionV1<'_, E, I>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        SavedRef {
+            steps: &value.steps,
+            reports: &value.reports,
+            touched_level_entries: value.touched_level_entries,
+            market: &value.materialization_market,
+            rule_version: &value.materialization_rule_version,
+        }
+        .serialize(serializer)
+    }
+    pub fn deserialize<
+        'de,
+        E: Deserialize<'de>,
+        I: Deserialize<'de>,
+        D: serde::Deserializer<'de>,
+    >(
+        deserializer: D,
+    ) -> Result<PmMessageReductionV1<'static, E, I>, D::Error> {
+        let saved = Saved::<E, I>::deserialize(deserializer)?;
+        Ok(PmMessageReductionV1 {
+            steps: saved.steps,
+            reports: saved.reports,
+            touched_level_entries: saved.touched_level_entries,
+            materialization_market: saved.market,
+            materialization_rule_version: saved.rule_version,
+        })
     }
 }

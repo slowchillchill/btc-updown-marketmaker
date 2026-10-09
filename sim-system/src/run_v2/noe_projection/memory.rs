@@ -127,6 +127,11 @@ impl std::fmt::Display for MemoryNoeErrorV1 {
 }
 impl std::error::Error for MemoryNoeErrorV1 {}
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(
+    serialize = "MemoryNoeBatch<P>: serde::Serialize, P::Completion: serde::Serialize",
+    deserialize = "MemoryNoeBatch<P>: serde::Deserialize<'de>, P::Completion: serde::Deserialize<'de>"
+))]
 struct ObservationState<P: MemoryOrderEvidence> {
     accepted: u64,
     durable: u64,
@@ -152,6 +157,11 @@ impl<P: MemoryOrderEvidence> Default for ObservationState<P> {
     }
 }
 // 消费者仅保留同一不可变批的 Arc 与未交付记录坐标，不复制归一化正文。
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(
+    serialize = "MemoryNoeBatch<P>: serde::Serialize",
+    deserialize = "MemoryNoeBatch<P>: serde::Deserialize<'de>"
+))]
 struct PendingFeedback<P: MemoryOrderEvidence> {
     batch: Arc<MemoryNoeBatch<P>>,
     ordinals: Vec<usize>,
@@ -337,6 +347,12 @@ pub enum AcceptedNoeProjectionV1 {
     Measured(AcceptedMemoryProjection<MeasuredOrderEvidence>),
     Cancellation(AcceptedMemoryProjection<MeasuredCancellationEvidence>),
 }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) enum BackgroundNoeCheckpointV1 {
+    Legacy(execution_normalization::durable::StagedNormalizationCheckpointV1),
+    Measured(execution_normalization::durable::StagedNormalizationCheckpointV1),
+    Cancellation(execution_normalization::durable::StagedNormalizationCheckpointV1),
+}
 pub(crate) enum BackgroundNoeWriterV1 {
     Legacy(BackgroundNoeWriter<LegacyOrderEvidence>),
     Measured(BackgroundNoeWriter<MeasuredOrderEvidence>),
@@ -395,6 +411,30 @@ where
     }
 }
 impl BackgroundNoeWriterV1 {
+    pub(crate) fn checkpoint(&self) -> BackgroundNoeCheckpointV1 {
+        match self {
+            Self::Legacy(w) => BackgroundNoeCheckpointV1::Legacy(w.writer.checkpoint()),
+            Self::Measured(w) => BackgroundNoeCheckpointV1::Measured(w.writer.checkpoint()),
+            Self::Cancellation(w) => BackgroundNoeCheckpointV1::Cancellation(w.writer.checkpoint()),
+        }
+    }
+    pub(crate) fn restore_v4(
+        saved: BackgroundNoeCheckpointV1,
+        observation: MemoryNoeObservationV4,
+    ) -> Result<Self, DurableErrorV1> {
+        let BackgroundNoeCheckpointV1::Cancellation(saved) = saved else {
+            return Err(DurableErrorV1::ContainerDecode {
+                path: PathBuf::new(),
+                message: "检查点 NOE 表示与原 V4 端口不同".into(),
+            });
+        };
+        Ok(Self::Cancellation(BackgroundNoeWriter {
+            writer: Writer::<MeasuredCancellationEvidence>::restore_checkpoint(saved)?,
+            observation,
+            pending_mappings: Default::default(),
+        }))
+    }
+
     pub(crate) fn stage(
         writer: &mut Option<Self>,
         accepted: AcceptedNoeProjectionV1,
@@ -556,6 +596,17 @@ impl<P: MemoryOrderEvidence> MemoryNoeProjectionPort<P> {
     }
 }
 impl<P: MemoryOrderEvidence> BusinessProjectionPortV2 for MemoryNoeProjectionPort<P> {
+    fn checkpoint_state(&self) -> Result<Option<Vec<u8>>, MemoryNoeErrorV1> {
+        let mut bytes = Vec::new();
+        self.write_checkpoint(&mut bytes).map_err(|e| {
+            MemoryNoeErrorV1::Durable(DurableErrorV1::ContainerDecode {
+                path: (*self.root).clone(),
+                message: e.to_string(),
+            })
+        })?;
+        Ok(Some(bytes))
+    }
+
     fn try_accept(&mut self, _: Arc<BusinessProjectionBatchV2>) -> bool {
         false
     }
@@ -594,5 +645,78 @@ impl<P: MemoryOrderEvidence> crate::public_consumption::PublicProjectionPortV1
         } else {
             0
         }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(
+    serialize = "Core<P>:serde::Serialize, ObservationState<P>:serde::Serialize",
+    deserialize = "Core<P>:serde::Deserialize<'de>, ObservationState<P>:serde::Deserialize<'de>"
+))]
+struct MemoryNoePortCheckpointV1<P: MemoryOrderEvidence> {
+    root: Arc<PathBuf>,
+    opened: RunOpenedV2,
+    run_opened_reference: DurableSourceReferenceV1,
+    account_opening_reference: DurableSourceReferenceV1,
+    account_opening_evidence_identity: String,
+    implementation_identity: String,
+    context: Option<Arc<ExecutionNormalizationContextV1>>,
+    core: Option<Core<P>>,
+    observation: ObservationState<P>,
+}
+#[derive(serde::Serialize)]
+#[serde(bound(serialize = "Core<P>:serde::Serialize, ObservationState<P>:serde::Serialize"))]
+struct MemoryNoePortCheckpointRefV1<'a, P: MemoryOrderEvidence> {
+    root: &'a Arc<PathBuf>,
+    opened: &'a RunOpenedV2,
+    run_opened_reference: &'a DurableSourceReferenceV1,
+    account_opening_reference: &'a DurableSourceReferenceV1,
+    account_opening_evidence_identity: &'a str,
+    implementation_identity: &'a str,
+    context: &'a Option<Arc<ExecutionNormalizationContextV1>>,
+    core: &'a Option<Core<P>>,
+    observation: &'a ObservationState<P>,
+}
+impl<P: MemoryOrderEvidence> MemoryNoeProjectionPort<P> {
+    pub fn write_checkpoint(
+        &self,
+        writer: impl std::io::Write,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let observation = self.observation.0.lock().unwrap();
+        ciborium::ser::into_writer(
+            &MemoryNoePortCheckpointRefV1 {
+                root: &self.root,
+                opened: &self.opened,
+                run_opened_reference: &self.run_opened_reference,
+                account_opening_reference: &self.account_opening_reference,
+                account_opening_evidence_identity: &self.account_opening_evidence_identity,
+                implementation_identity: &self.implementation_identity,
+                context: &self.context,
+                core: &self.core,
+                observation: &observation,
+            },
+            writer,
+        )?;
+        Ok(())
+    }
+    pub fn restore_checkpoint(
+        reader: impl std::io::Read,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>>
+    where
+        P::Completion: serde::de::DeserializeOwned,
+        Control<P>: serde::de::DeserializeOwned,
+    {
+        let saved: MemoryNoePortCheckpointV1<P> = ciborium::de::from_reader(reader)?;
+        Ok(Self {
+            root: saved.root,
+            opened: saved.opened,
+            run_opened_reference: saved.run_opened_reference,
+            account_opening_reference: saved.account_opening_reference,
+            account_opening_evidence_identity: saved.account_opening_evidence_identity,
+            implementation_identity: saved.implementation_identity,
+            context: saved.context,
+            core: saved.core,
+            observation: MemoryNoeObservation(Arc::new(Mutex::new(saved.observation))),
+        })
     }
 }

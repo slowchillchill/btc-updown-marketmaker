@@ -154,7 +154,7 @@ let report = backtest::run_prepared_historical_v1(
 
 旧 `run_historical_v1` 保持完整配置和原 prepare 后运行方式，与新入口共用同一装配及经营循环。新入口按描述的固定凭据使用原 `open_committed`，更晚的稳定目录不进入本次视图；候选、保存依赖及历史身份修复扫描也沿同一前缀，保留原完整 EOF/计数责任。描述只做必要版本、相对定位和固定市场/流绑定结构校验，实际公共载荷仍在原读取位置校验。市场目录缺项返回材料错误，避免下标 panic。hidden 在实际索引页引用的 Step 被消费时，核对完整 `HiddenDerivedStepRefV1` 与 consumer 身份；不预扫未消费的尾部，不重hash，不声称这种绑定是不存在的 hidden 内容摘要。正常结束、策略 Exit、原材料/策略错误及不自动重试规则保持。
 
-CLI 使用三个明确模式：
+CLI 使用四个明确模式；原三个兼容模式如下，`day`见下节：
 
 ```bash
 # 原方式兼容；省略 --mode 时仍为 run。
@@ -185,3 +185,29 @@ JSON/TOML 解析、完整策略参数覆盖和显式 `false` 沿原命令层复�
 只在选用时返回 `HistoricalRunReportV1::source_health`，包含实际资格调用次数、期限唤醒次数、失效批数及最近失效计算的原时序。它不保存逐决策账本；未发送失效的 `actual_sent_at_utc_ms` 为 `None`。旧消费者保留原公开组、回调和 `next_evaluation_at_utc_ms` 语义。
 
 工程反例在 `tests/historical.rs`、`shared-run/tests/strategy_boundary.rs` 与 DPT 原测试入口覆盖静默期限、接收持续但事件滞后、已发前缀/未发后缀和无新行情重算。`source_health_finite_overhead_measurement` 是显式忽略的合成测量入口，以 `SOURCE_HEALTH_MEASUREMENT_ENABLED=0/1` 和已有 `SOURCE_HEALTH_MEASUREMENT_ROOT` 运行同一有限夹具；可用 `/usr/bin/time -v` 分进程记录 CPU 与峰值内存。其参数、输入和结果不构成正式健康阈值、历史断网证明或在线性能承诺。
+
+## 原Parquet日作业、并行与日内恢复
+
+D-0311/D-0312 下的 `run_historical_days_v1` 接收 `HistoricalDayConfigV1` 日期列表和原 `CheckpointStrategyV1` 工厂。每日期只创建一个公共 `PublicObservationCoreV1`。每候选在线程内创建自己的策略、SIM、NOE、Ledger、共享执行和时序；这些运行对象无需跨线程传递。默认日期并发按可用CPU数和最大候选数安排，调用方也可用 `run_historical_days_with_parallelism_v1` 明确日期并发。同日独立候选同时消费不可变公共组和完整隐藏桶；同一市场、同一账户的原业务因果顺序保持。
+
+新日入口直接使用原每日清单和原Parquet，复用正式准入、解码及初始化选择。它先按文件并行读取必要窄列，形成身份／物理定位／来源顺序的最小索引。索引覆盖全部相关未读行，允许Footer时间统计缺失。索引不保存完整Canonical、盘口或观察录制；随后使用原文件／行组／组内行定位读取实际输入。同一天公共Core只归约一次，已创建各独立账户后才开始公共生产，候选不会从空Core重复归约公共前缀。组内不同市场观察及隐藏分市场计算可并行，收集后保留原顺序。该入口不调用旧全期 `HistoricalMergeV1::prepare`，不以完整公共／隐藏宽录制作为账户前置。
+
+公共输入使用 `historical-source-head-v2`：来源内按原准入关系，六逻辑来源的头按原接收／来源／身份合流；Binance snapshot/update保持同逻辑深度流。隐藏PM先按epoch／源时间／序号／Canonical位置归约私有数量，再按全局源时间及原派生先后组成完整同刻桶。BBA、参考事实和未读下界均保留。新隐藏来源绑定为 `ClosedStreamingHiddenStepBucketV1`，排序版本 `hidden-reference-before-pm-source-v1`，同刻参考先于PM、PM保持原相对派生顺序；不伪造旧V1的全期参考数量或 `CommittedIngressPrefixV1` 存储引用。SIM沿同一隐藏算法接纳新表示；旧录制和旧V1继续读取。
+
+`checkpoint_interval_seconds` 是完整日点的保存周期，0关闭周期保存；正常完成仍发布完成引用。`checkpoint_every_applied_inputs`、`checkpoint_every_candidate_events` 可显式指定事件周期。保存发生在各候选的安全事件边界，候选模拟时刻不必相同，公共生产可领先。周期是请求保存的时机，不是最长暂停或可重做时长承诺；实际重新执行范围是上一完整引用之后尚未提交的尾部。长期作业的 `progress_interval_seconds` 控制已处理公共输入及耗时输出，总量不能可靠确定时写 `unknown`。`producer_lead_groups` 是队列领先软目标，默认按可用CPU数取1024组／核；它控制普通生产推进，关闭消费者仍需的隐藏桶时允许继续必要供料，不拒绝输入、不丢同刻材料。公共组和隐藏桶只保留当前消费者仍需范围及最近完整点中的范围。
+
+日点由原模块导出自己的状态：DPT保存原文件游标、预读、六头、Core、TWAP定位、私有隐藏归约和未闭桶；SIM保存订单、在途、随机、到期及反馈；NOE保留幂等、真实消费引用和尚不可见反馈；Ledger保存当前账户／成本归约与原持久位置；共享执行保存注册和已领取却缺前驱的记录、结算协调的handled状态；策略保存continuity及SignalMemory；backtest保存各消费位置、交付时序、完整待发送计算、调度和小型日内汇总。
+
+每个候选先稳定SIM、发布原NOE、封闭原Ledger写入段，再保存模块状态。协调器写完整日状态，校验引用并同步目录，最后原子发布 `checkpoint.json`，同步日根目录。任阶段中断保留此前完整引用；恢复校验完整点全部列明文件后才重新接原写入器、处理其准确尾部。它不重扫数小时SIM／NOE／Ledger日志，也不新建账本配旧策略。新点耐久后仅回收上一清单明确列出的文件；未知或未发布文件不作为完整点，也不被猜测清理。不可变 `source-order.cbor` 只保存一次，周期状态保存其摘要引用。日根、原输入、版本、初始化、业务配置、规则／finality及原持久写入器位置共同定义恢复；进度、保存周期和生产领先等调度参数可重启调整。
+
+有限宿主在运行装配或恢复后、首条公共输入前，开启原记录器的逐次交接等待。每次尚未成功的 SIM 提交遇到原通道暂满时，只等待已有待交接组；不重试已成功的关闭、观察或经济步骤，不增加容量。后台写入失败仍返回原错误。其他使用原非阻塞调用和外层供料重试的消费者保留原行为；账户角色不用于推导宿主是否允许等待。此项线程调度方式不进入业务恢复身份。
+
+正常范围结束、失败和成功 `StrategyExit` 分别保留原原因。Exit沿原立即结束语义，不为保存追加排空等待。合法日末未闭合订单、持仓、待发送计算和应收不会被强行关闭。完成引用复用对应原报告，不重新创建策略或账户。SIM继续保存原必要执行记录（公共引用、执行时刻、PM绑定／归约报告，隐藏桶引用），不会逐候选另存完整公共观察序列；恢复所需的尚未消费公共组保存在同日点内。
+
+`HistoricalRunReportV1.day_economics` 在原事件边界读取同一次 `AccountEconomicsReadV2`，累计公共NAV最大回撤和资金占用。公共NAV回撤与baseline扣除未到账确认返佣后的风险权益／30%高水位分开。资金占用明确为原实际预留（含原在途经济占用）加未赎回成功成交剩余本金，以及已经济扣款尚未成功归约的成交本金；不是另建现金或利润账本。金额按原精确数值，时间积分单位为pUSD·毫秒。未知NAV采样保留 `Unavailable`，已观察最大回撤另列为局部证据；未知资金区间不补零。峰值、积分、采样前沿和未知量均随候选点恢复。
+
+`summarize_independent_historical_days_v1` 按策略配置、四项时序、准入、实现及规则身份汇总独立日结果。原确认净损益相加，平均日确认收益率为总确认净损益／各日原初始本金之和；另列扣除未到账确认返佣后的净结果。它保留最差每日公共NAV回撤、未闭合数、待消费NOE及Exit／未完成日数，不串接净值或算复利，不把未知净结果当零。确认结果仍以每日报告的原已消费前缀为界，未闭合日不冒充最终结算。
+
+CLI使用 `--mode day --config <JSON或TOML> --progress-interval-seconds <秒>`。配置顶层提供 `rules`（原规则快照配置）、可选 `parallel_dates` 和 `days`。每个日期提供 `preparation`、`checkpoint_root`、`checkpoint_interval_seconds`、上述可选事件周期／领先目标，以及 `candidates`。每个候选提供原独立宿主 `run: HistoricalPreparedRunConfigV1`、完整43字段 `strategy: ComplementaryPairConfigV1` 和固定 `request_namespace`；宿主时序、规则、账户和命名空间不由策略参数文件自动补齐。CLI沿原字段类型覆盖 `--strategy.<字段> <值>`，day模式把显式覆盖应用到各候选，记录完整有效参数和请求命名空间。再次调用同一日根自动恢复或完成复用；stdout输出 `days` 及上述 `summaries`。旧run／prepare／reuse入口保持原调用。
+
+A的36份策略配置分布在对应五折（7/8/7/7/7），每份只含原43策略字段。调用方按获批比较窗和相应冻结配置装配日期及每候选每日独立2000pUSD账户；入口不自动把36候选用于所有日期，也不自动启动经营研究。
