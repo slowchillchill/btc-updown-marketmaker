@@ -285,6 +285,9 @@ pub(crate) enum LoggedBusinessInputV2 {
     PlatformPrefixAdvance(PlatformPrefixAdvanceV2),
     RetentionAdvance(RetentionAdvanceV2),
     ClosedMarketBucket(LoggedClosedMarketBucketV2),
+    /// 日紧凑位置需要原输入重建，不能冒充完整旧公共日志。
+    DayPublicGroup(crate::public_consumption::LoggedDayPublicGroupV1),
+    DayHiddenStepBucket(crate::public_consumption::LoggedDayHiddenBucketV1),
     PublicGroup(crate::public_consumption::LoggedPublicGroupV1),
     HiddenStepBucket(crate::public_consumption::LoggedHiddenStepBucketV1),
     PublicObserveTime(crate::public_consumption::ActorTimeRecordV1),

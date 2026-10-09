@@ -299,6 +299,33 @@ impl crate::market::MarketEventIdentityV1 for PublicExecutionIdentityV1 {
     }
 }
 
+/// 历史日记录头的既有来源和时序绑定；不是新的来源身份。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoricalDayLogBindingV1 {
+    pub input_stream_id: String,
+    pub consumption_sequence_ref: String,
+    pub hidden_input_set_identity_sha256: Sha256Hex,
+    pub hidden_consumer_stream_id: String,
+    pub hidden_ordering_version: String,
+}
+/// 仅保存原公共输入位置；必须由原输入和同版本Core重建完整组及PM材料。
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) struct LoggedDayPublicGroupV1 {
+    pub execution_time: ActorTimeRecordV1,
+    pub next_input_position: u64,
+    pub group_position: u64,
+    pub closed_at_input_position: u64,
+}
+/// 仅保存完整隐藏桶位置；必须从原输入重建桶事实，不是空的完整记录。
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) struct LoggedDayHiddenBucketV1 {
+    pub applied_input_position: u64,
+    pub bucket_time_utc_ms: i64,
+    pub index_start: u64,
+    pub index_end: u64,
+    pub closure: ReplayIndexClosureV1,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct LoggedPublicGroupV1 {
     pub reference: PublicGroupReferenceV1,
