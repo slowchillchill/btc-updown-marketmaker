@@ -657,7 +657,8 @@ impl MarketStateV2 {
                 }
             }
             NormalizedMarketEventV2::BestBidAsk { best, .. } => {
-                self.initialized_admitted_asset_mut(&best.asset)?;
+                // BBA 是独立价格事实，不要求或建立完整 L2；资产仍须已经准入。
+                self.admitted_asset_mut(&best.asset);
             }
             NormalizedMarketEventV2::TickSizeChange {
                 change,

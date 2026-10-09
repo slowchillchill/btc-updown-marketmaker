@@ -791,6 +791,279 @@ async fn public_normal_end_reads_original_groups_and_own_pm_bindings() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn price_change_bba_before_initial_books_preserves_preloading_and_private_quantities() {
+    // 09-12 首 price_change 的真实资产、价格、局部数量和三项时间。
+    // 后续完整 book 是独立构造的有效夹具，不冒称真实日回放。
+    const START: i64 = 1_789_171_200_000;
+    const UP: &str =
+        "107908796001205601126362103961466850840177701751257482698676558640773709147754";
+    const DOWN: &str =
+        "19032856667784098829291953695654902969996580284236420719127791921975594839098";
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let mut metadata = metadata_snapshot_row();
+    metadata.asset_ids = format!(r#"["{UP}","{DOWN}"]"#);
+    metadata.market_start_utc = START;
+    metadata.market_end_utc = START + 300_000;
+    metadata.timestamp_received = START - 299_934;
+    metadata.collector_admission_time_utc_ms = metadata.timestamp_received + 1;
+    metadata.fixed_identity_verified_at_utc = metadata.timestamp_received - 1;
+    metadata.source_evidence_received_at_utc = Some(metadata.timestamp_received);
+    metadata.row_evidence_validation_completed_at_utc = Some(metadata.timestamp_received + 1);
+    metadata.metadata_fetch_start_utc = Some(metadata.timestamp_received - 10);
+    let message = |position, source, received, admitted, event| {
+        let mut value = row("epoch-a", position, source, received, event);
+        value.collector_admission_time_utc_ms = admitted;
+        record(
+            position,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(value)),
+        )
+    };
+    let initial_book = |token: &str| PolymarketOrderbookEvent::Book {
+        asset_id: token.into(),
+        bids: vec![PolymarketPriceLevel {
+            price: "0.50".into(),
+            size: "100".into(),
+        }],
+        asks: vec![PolymarketPriceLevel {
+            price: "0.51".into(),
+            size: "80".into(),
+        }],
+        last_trade_price: None,
+    };
+    let inputs = [
+        record(
+            0,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata))),
+        ),
+        message(
+            1,
+            START,
+            START + 12,
+            START + 2331,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![
+                    PolymarketPriceChangeEntry {
+                        asset_id: UP.into(),
+                        price: "0.35".into(),
+                        size: Some("40".into()),
+                        side: PolymarketSide::Buy,
+                        best_bid: Some("0.50".into()),
+                        best_ask: Some("0.51".into()),
+                    },
+                    PolymarketPriceChangeEntry {
+                        asset_id: DOWN.into(),
+                        price: "0.65".into(),
+                        size: Some("40".into()),
+                        side: PolymarketSide::Sell,
+                        best_bid: Some("0.49".into()),
+                        best_ask: Some("0.50".into()),
+                    },
+                ],
+            },
+        ),
+        message(
+            2,
+            START + 100_000,
+            START + 100_012,
+            START + 100_013,
+            initial_book(UP),
+        ),
+        message(
+            3,
+            START + 110_000,
+            START + 110_012,
+            START + 110_013,
+            initial_book(DOWN),
+        ),
+        message(
+            4,
+            START + 120_000,
+            START + 120_012,
+            START + 120_013,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![PolymarketPriceChangeEntry {
+                    asset_id: UP.into(),
+                    price: "0.50".into(),
+                    size: Some("80".into()),
+                    side: PolymarketSide::Buy,
+                    best_bid: None,
+                    best_ask: None,
+                }],
+            },
+        ),
+        end(5),
+    ];
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    for input in inputs {
+        let result = apply(&mut core, &input);
+        if input.input_position == 1 {
+            let reports = &result.pm_reductions[0].1.reports;
+            assert_eq!(
+                reports
+                    .iter()
+                    .map(|r| r.reason_code.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "POLYMARKET_PRICE_CHANGE_FULL_BOOK_REQUIRED",
+                    "POLYMARKET_BBA_UPDATE",
+                    "POLYMARKET_PRICE_CHANGE_FULL_BOOK_REQUIRED",
+                    "POLYMARKET_BBA_UPDATE",
+                ]
+            );
+        }
+        writer.record(input, result).unwrap();
+    }
+    writer.stabilize().unwrap();
+    let path = temp.path().join("sim.jsonl");
+    let (execution, _) = public_execution(&path, &core, SimCallerRoleV1::HistoricalBacktest).await;
+    let hidden = prepare_hidden_v1(
+        core,
+        PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap(),
+        &temp.path().join("hidden"),
+        &config(),
+        "hidden-test".into(),
+    )
+    .unwrap();
+    let mut recorded = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+    // 本夹具不添加宿主延迟，公共组沿正式来源可见时刻交付。
+    let source = std::iter::from_fn(move || recorded.next_visible_group());
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "preloading-bba".into());
+    driver.enable_finite_recording_wait().unwrap();
+    driver.next_group().unwrap().unwrap(); // 元数据准入先于任何隐藏价格事实。
+    let mut buckets = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
+    let mut seen = Vec::new();
+    while let Some(bucket) = buckets.next_bucket().unwrap() {
+        let at = bucket.reference.bucket_time_utc_ms();
+        if at == START {
+            let quotes = bucket
+                .records
+                .iter()
+                .filter_map(|r| match r {
+                    HiddenExecutionRecordV1::Step { step, .. } => match &step.change {
+                        data_pipeline_core::pm_reduction::PmStepChangeV1::BestBidAsk {
+                            quote,
+                            ..
+                        } => Some(quote),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(quotes.len(), 2);
+            // 正式十进制文本去除尾零；独立期望保留精确价格，不复用被测转换。
+            for (token, bid, ask) in [(UP, "0.5", "0.51"), (DOWN, "0.49", "0.5")] {
+                let quote = quotes.iter().find(|q| q.asset.token_id.0 == token).unwrap();
+                assert_eq!(
+                    quote.best_bid_pusd_per_share,
+                    Some(ExactDecimal(bid.into()))
+                );
+                assert_eq!(
+                    quote.best_ask_pusd_per_share,
+                    Some(ExactDecimal(ask.into()))
+                );
+            }
+            assert!(!bucket.records.iter().any(|r| matches!(r,
+                HiddenExecutionRecordV1::Step { step, .. } if matches!(&step.change,
+                    data_pipeline_core::pm_reduction::PmStepChangeV1::InitialSnapshot { .. }
+                    | data_pipeline_core::pm_reduction::PmStepChangeV1::LevelChange { .. }))));
+        }
+        driver.hidden_bucket(bucket).unwrap();
+        driver.next_group().unwrap().unwrap();
+        seen.push(at);
+        let session = driver
+            .execution
+            .actor
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap();
+        let platform = session.hidden_platform_markets.as_ref().unwrap();
+        if at <= START + 100_000 {
+            assert_eq!(
+                platform.buy_admission(CONDITION_ID, UP, at, START + 300_000),
+                crate::market::MarketBuyAdmissionV2::EvidenceUnknownNoEffect(
+                    crate::market::MarketBuyEvidenceUnknownV2::Preloading
+                )
+            );
+        } else {
+            assert!(matches!(
+                platform.buy_admission(CONDITION_ID, UP, at, START + 300_000),
+                crate::market::MarketBuyAdmissionV2::Ready { .. }
+            ));
+        }
+        assert_eq!(
+            platform.pm_quantity(CONDITION_ID, UP, BookSide::Bid, Decimal::new(5, 1)),
+            if at == START {
+                Decimal::ZERO
+            } else if at == START + 120_000 {
+                Decimal::from(80)
+            } else {
+                Decimal::from(100)
+            }
+        );
+        if at == START {
+            for asset in &driver.frames()[0].observation.assets {
+                assert!(asset.bids.value.is_none() && asset.asks.value.is_none());
+                assert!(asset.best_bid_ask.value.is_some());
+            }
+            let before = session.execution_state.next_account_transition_seq();
+            let receipt = driver
+                .decision()
+                .unwrap()
+                .request(BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+                    context: RequestContextV2 {
+                        global_request_id: "preloading-buy".into(),
+                        caller_correlation_id: None,
+                    },
+                    item: post_item(
+                        "preloading-buy",
+                        &ConditionId(CONDITION_ID.into()),
+                        &TokenId(UP.into()),
+                        SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: "0.2".parse().unwrap(),
+                            size_shares: "5".parse().unwrap(),
+                            post_only: true,
+                        },
+                    ),
+                }))
+                .unwrap();
+            assert!(receipt.platform_arrived_at_utc_ms < START + 100_000);
+            driver
+                .observe_at(receipt.platform_arrived_at_utc_ms + 1)
+                .unwrap();
+            let session = driver
+                .execution
+                .actor
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                session.execution_state.next_account_transition_seq(),
+                before
+            );
+            assert!(
+                session
+                    .execution_state
+                    .active_platform_order_ids()
+                    .is_empty()
+            );
+        }
+    }
+    assert_eq!(
+        seen,
+        [START, START + 100_000, START + 110_000, START + 120_000]
+    );
+    driver.stop_and_drain().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn hidden_index_pages_preserve_real_steps_market_facts_and_execution_isolation() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
