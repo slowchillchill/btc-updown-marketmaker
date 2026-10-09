@@ -340,7 +340,9 @@ bootstrap的位置。进入更新前用已保存的相邻合法观察经济前�
 奖励由同一公共经济读取和已批准Reward合同产生，最终奖励是无量纲训练分数。WCM、
 原始做市收益及真实账户金额继续用pUSD；WCM不等于实际账户净利润，含惩罚的训练分数
 不是实际收益率。训练器保留原始账户净收益和方向中性做市收益两套报告；不把单市场
-1000pUSD验收变成动作限额，也不新增临近结束惩罚。
+1000pUSD验收变成动作限额，也不新增临近结束惩罚。共同评价沿[#5技术§11.5](https://github.com/slowchillchill/btc-updown-marketmaker/issues/5#issuecomment-5565139746)：
+最差5%账户根条件平均做市回报保留报告，不设该项数值下限或独立性能否决；报告完整性
+及计算正确性仍须满足，其他全部评价条件和既有排名保持。
 按[本次用户决定](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6073369497)，
 100ms首轮采用与Actor共享编码器/GRU的传播预测辅助任务：以一个预测时距预测Up、Down
 两腿各自的中间价变化。适用边界沿[#5技术§8.3.1](https://github.com/slowchillchill/btc-updown-marketmaker/issues/5#issuecomment-5565139746)，
