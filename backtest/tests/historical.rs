@@ -30,6 +30,27 @@ struct Probe {
     failed_callback_sent: Option<usize>,
     calculation_budget: Option<usize>,
 }
+// 小夹具读取所选真实布局，保留帧/接纳组边界；不把省略材料伪装为旧完整日志。
+fn sim_log_values(path: &std::path::Path) -> Vec<serde_json::Value> {
+    let bytes = std::fs::read(path).unwrap();
+    if !bytes.starts_with(b"SIMDAY01") {
+        return std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    }
+    let mut offset = 8;
+    let mut frames = Vec::new();
+    while offset < bytes.len() {
+        let length = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()) as usize;
+        offset += 8;
+        frames.push(ciborium::de::from_reader(&bytes[offset..offset + length]).unwrap());
+        offset += length;
+    }
+    frames
+}
+
 impl StrategyV1 for Probe {
     type Error = &'static str;
     type Diagnostics = ();
@@ -1765,8 +1786,8 @@ fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
         !config.preparation.work_root.exists(),
         "日入口不得生成完整宽录制"
     );
-    let fast = std::fs::read_to_string(&config.sim_log).unwrap();
-    let slow = std::fs::read_to_string(tmp.path().join("slow-sim.jsonl")).unwrap();
+    let fast = serde_json::to_string(&sim_log_values(&config.sim_log)).unwrap();
+    let slow = serde_json::to_string(&sim_log_values(&tmp.path().join("slow-sim.jsonl"))).unwrap();
     assert!(fast.contains("day-fast"));
     assert!(!fast.contains("day-slow"));
     assert!(slow.contains("day-slow"));
@@ -1946,11 +1967,9 @@ fn partial_fill_cancel_in_flight_before_publication_restores_previous_complete_p
     normalize_output_paths(&mut after_report, &fault_root);
     assert_eq!(before_report, after_report);
     let normalize_log = |path: &std::path::Path, root: &std::path::Path| {
-        std::fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .map(|line| {
-                let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+        sim_log_values(path)
+            .into_iter()
+            .map(|mut value| {
                 normalize_output_paths(&mut value, root);
                 value
             })
@@ -2004,13 +2023,15 @@ fn two_original_dates_keep_two_thousand_and_same_day_cross_market_continuity() {
             candidate.initial_available_pusd,
             ExactDecimal("2000".into())
         );
-        let log = std::fs::read_to_string(&day.candidates[0].sim_log).unwrap();
+        let frames = sim_log_values(&day.candidates[0].sim_log);
         assert_eq!(
-            log.lines()
-                .filter(|line| line.contains("\"kind\":\"RUN_OPENED\""))
+            frames
+                .iter()
+                .filter(|frame| frame[0]["run_id"].is_string())
                 .count(),
             1
         );
+        assert_eq!(frames[0][0]["run_id"], day.candidates[0].session.run_id);
         assert!(
             candidate.report["account_economics_memory"]["markets"]
                 .as_array()

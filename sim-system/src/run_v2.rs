@@ -2528,6 +2528,12 @@ where
     ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
 {
     Ok(match input {
+        LoggedBusinessInputV2::DayPublicGroup(_)
+        | LoggedBusinessInputV2::DayHiddenStepBucket(_) => {
+            return Err(SimRunActorErrorV2::CompletionNotReady(
+                "历史日紧凑记录需要原输入和同版本公共模块重建",
+            ));
+        }
         LoggedBusinessInputV2::CancelScenario(operation) => {
             BusinessInputV2::CancelScenario(operation)
         }
@@ -2939,6 +2945,30 @@ impl SimRunActorV2 {
         projection_port: Box<dyn BusinessProjectionPortV2>,
         max_group_bytes: usize,
     ) -> Result<Self, SimRunActorErrorV2> {
+        Self::create_new_with_day_binding(
+            path,
+            opened,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            projection_port,
+            max_group_bytes,
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn create_new_with_day_binding(
+        path: &Path,
+        opened: RunOpenedV2,
+        rule_snapshot: Arc<SealedProcessRuleSnapshotV3>,
+        finality_policy: Arc<TradeFinalityPolicyV2>,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        latency_profile: Arc<EmpiricalDelayProfile>,
+        projection_port: Box<dyn BusinessProjectionPortV2>,
+        max_group_bytes: usize,
+        day_binding: Option<crate::public_consumption::HistoricalDayLogBindingV1>,
+    ) -> Result<Self, SimRunActorErrorV2> {
         validate_run_dependencies_v2(
             &opened,
             &rule_snapshot,
@@ -2946,8 +2976,13 @@ impl SimRunActorV2 {
             &scenario,
             &latency_profile,
         )?;
-        let log = SimEventLogV2::create(path, &opened, max_group_bytes)
-            .map_err(SimRunActorErrorV2::Log)?;
+        let log = match day_binding {
+            Some(binding) => {
+                SimEventLogV2::create_historical_day(path, &opened, max_group_bytes, binding)
+            }
+            None => SimEventLogV2::create(path, &opened, max_group_bytes),
+        }
+        .map_err(SimRunActorErrorV2::Log)?;
         #[cfg(feature = "measurement")]
         let measurement_probe = log.measurement_probe();
         Ok(Self {
@@ -19556,6 +19591,7 @@ impl PublicSimExecutionV1 {
             max_group_bytes,
             finite_in_flight_groups,
             RunDurabilityRoleV2::CleanRun,
+            None,
         )
     }
     /// 真实有限历史运行记录；不能调用 complete 冒充完整经济终局。
@@ -19582,6 +19618,35 @@ impl PublicSimExecutionV1 {
             max_group_bytes,
             finite_in_flight_groups,
             RunDurabilityRoleV2::FiniteHistorical,
+            None,
+        )
+    }
+    /// 原Parquet日入口的必要记录；普通历史/PAPER保持旧布局。
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_new_historical_day(
+        path: &Path,
+        opened: PublicRunOpenedV1,
+        rules: Arc<SealedProcessRuleSnapshotV3>,
+        finality: Arc<TradeFinalityPolicyV2>,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        latency: Arc<EmpiricalDelayProfile>,
+        projection: Box<dyn PublicProjectionPortV1>,
+        max_group_bytes: usize,
+        finite_in_flight_groups: usize,
+        binding: crate::public_consumption::HistoricalDayLogBindingV1,
+    ) -> Result<Self, SimRunActorErrorV2> {
+        Self::create_new_with_role(
+            path,
+            opened,
+            rules,
+            finality,
+            scenario,
+            latency,
+            projection,
+            max_group_bytes,
+            finite_in_flight_groups,
+            RunDurabilityRoleV2::FiniteHistorical,
+            Some(binding),
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -19596,10 +19661,11 @@ impl PublicSimExecutionV1 {
         max_group_bytes: usize,
         finite_in_flight_groups: usize,
         role: RunDurabilityRoleV2,
+        day_binding: Option<crate::public_consumption::HistoricalDayLogBindingV1>,
     ) -> Result<Self, SimRunActorErrorV2> {
         let mut record = opened.into_record();
         record.durability_role = role;
-        let mut actor = SimRunActorV2::create_new(
+        let mut actor = SimRunActorV2::create_new_with_day_binding(
             path,
             record,
             rules,
@@ -19608,6 +19674,7 @@ impl PublicSimExecutionV1 {
             latency,
             Box::new(PublicProjectionAdapterV1(projection)),
             max_group_bytes,
+            day_binding,
         )?;
         let log = actor.log.take().expect("新建运行唯一日志");
         actor.background_log = Some(BackgroundEventLogV1::start(log, finite_in_flight_groups));

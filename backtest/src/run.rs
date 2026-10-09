@@ -220,6 +220,7 @@ fn assemble(
     config: &HistoricalPreparedRunConfigV1,
     rules: Arc<SealedProcessRuleSnapshotV3>,
     input_identity: Sha256Hex,
+    day_binding: Option<HistoricalDayLogBindingV1>,
 ) -> Result<
     (
         PublicSimExecutionV1,
@@ -275,17 +276,31 @@ fn assemble(
         implementation_identity: opened.implementation_identity,
         market_event_source_identity_sha256: opened.market_event_source_identity_sha256,
     };
-    let mut execution = PublicSimExecutionV1::create_new_historical(
-        &config.sim_log,
-        public,
-        rules,
-        finality,
-        scenario,
-        latency,
-        Box::new(port),
-        config.max_group_bytes,
-        config.finite_in_flight_groups,
-    )?;
+    let mut execution = match day_binding {
+        Some(binding) => PublicSimExecutionV1::create_new_historical_day(
+            &config.sim_log,
+            public,
+            rules,
+            finality,
+            scenario,
+            latency,
+            Box::new(port),
+            config.max_group_bytes,
+            config.finite_in_flight_groups,
+            binding,
+        ),
+        None => PublicSimExecutionV1::create_new_historical(
+            &config.sim_log,
+            public,
+            rules,
+            finality,
+            scenario,
+            latency,
+            Box::new(port),
+            config.max_group_bytes,
+            config.finite_in_flight_groups,
+        ),
+    }?;
     loop {
         match execution.create_session(config.session.spec()) {
             Err(SimRunActorErrorV2::RecordingBackpressured) => {
@@ -506,6 +521,7 @@ where
     let context = HistoricalRuntimeContextV1 {
         start: material.preparation.scope.received_start_utc_ms,
         source_identity: prepared.source_identity_sha256,
+        day_log_binding: None,
         end: material.preparation.scope.received_end_utc_ms,
         operating_start: material
             .preparation
@@ -527,6 +543,7 @@ pub(crate) struct HistoricalRuntimeCatalogV1 {
 pub(crate) struct HistoricalRuntimeContextV1 {
     pub start: i64,
     pub source_identity: Sha256Hex,
+    pub day_log_binding: Option<HistoricalDayLogBindingV1>,
     pub end: i64,
     pub operating_start: Option<i64>,
     pub catalog: Arc<std::sync::RwLock<HistoricalRuntimeCatalogV1>>,
@@ -588,8 +605,12 @@ where
                 observation,
             ))
         } else {
-            let (execution, shared, observation) =
-                assemble(config, rules, context.source_identity.clone())?;
+            let (execution, shared, observation) = assemble(
+                config,
+                rules,
+                context.source_identity.clone(),
+                context.day_log_binding.clone(),
+            )?;
             Ok((
                 FinitePublicConsumptionV1::new(
                     execution,

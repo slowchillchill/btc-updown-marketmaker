@@ -418,6 +418,20 @@ async fn public_execution_with_scenario_capacity(
     capacity: usize,
     rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
 ) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
+    public_execution_with_scenario_capacity_layout(
+        path, scenario, role, capacity, rules, None, false,
+    )
+    .await
+}
+async fn public_execution_with_scenario_capacity_layout(
+    path: &Path,
+    scenario: Arc<SealedPlatformScenarioV1>,
+    role: SimCallerRoleV1,
+    capacity: usize,
+    rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
+    day_binding: Option<HistoricalDayLogBindingV1>,
+    finite_historical: bool,
+) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
     let rules = match rules {
         Some(rules) => rules,
         None => successful_snapshot_v3_for_sim_tests().await,
@@ -442,20 +456,46 @@ async fn public_execution_with_scenario_capacity(
         market_event_source_identity_sha256: opened.market_event_source_identity_sha256,
     };
     let delivered = Rc::new(DeliveredFeedbackState::default());
-    let mut execution = PublicSimExecutionV1::create_new(
-        path,
-        spec_opened,
-        rules,
-        finality,
-        scenario,
-        latency,
-        Box::new(DeliveredProjection {
-            accepted: 0,
-            delivered: delivered.clone(),
-        }),
-        MAX_GROUP_BYTES,
-        capacity,
-    )
+    let projection: Box<dyn PublicProjectionPortV1> = Box::new(DeliveredProjection {
+        accepted: 0,
+        delivered: delivered.clone(),
+    });
+    let mut execution = match (day_binding, finite_historical) {
+        (Some(binding), _) => PublicSimExecutionV1::create_new_historical_day(
+            path,
+            spec_opened,
+            rules,
+            finality,
+            scenario,
+            latency,
+            projection,
+            MAX_GROUP_BYTES,
+            capacity,
+            binding,
+        ),
+        (None, true) => PublicSimExecutionV1::create_new_historical(
+            path,
+            spec_opened,
+            rules,
+            finality,
+            scenario,
+            latency,
+            projection,
+            MAX_GROUP_BYTES,
+            capacity,
+        ),
+        (None, false) => PublicSimExecutionV1::create_new(
+            path,
+            spec_opened,
+            rules,
+            finality,
+            scenario,
+            latency,
+            projection,
+            MAX_GROUP_BYTES,
+            capacity,
+        ),
+    }
     .unwrap();
     let mut session = spec("public-consumption-test", "create-public");
     session.caller_role = role;
@@ -795,8 +835,133 @@ async fn public_normal_end_reads_original_groups_and_own_pm_bindings() {
     );
 }
 
+// 同一原录制夹具同时验证旧日志和原输入可重建的日布局；不是新真实日作业。
+fn fixture_log_counts(
+    path: &Path,
+    root: &Path,
+    hidden: &data_pipeline_training::hidden_preparation::HiddenPreparationV1,
+) {
+    let bytes = std::fs::metadata(path).unwrap().len();
+    let (opened, mut recovery) = SimEventLogRecoveryV2::open(path, MAX_GROUP_BYTES).unwrap();
+    let layout = if recovery.historical_day_binding_for_tests().is_some() {
+        "SIMDAY01"
+    } else {
+        "JSON"
+    };
+    let mut original_hidden = RecordedHiddenBucketSourceV1::open(hidden, root, 1, 1 << 20).unwrap();
+    let mut frames = 0;
+    let mut categories = BTreeMap::<&str, u64>::new();
+    loop {
+        let (next, inputs) = recovery.next_group().unwrap();
+        recovery = next;
+        let Some(inputs) = inputs else { break };
+        frames += 1;
+        for input in inputs {
+            if let LoggedBusinessInputV2::DayHiddenStepBucket(locator) = &input {
+                let original = original_hidden.next_bucket().unwrap().unwrap();
+                let HiddenBucketReferenceV2::Recorded(reference) = original.reference else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    locator.applied_input_position,
+                    reference.committed_prefix.next_input_position
+                );
+                assert_eq!(locator.bucket_time_utc_ms, reference.bucket_time_utc_ms);
+                assert_eq!(
+                    (locator.index_start, locator.index_end),
+                    (reference.index_start, reference.index_end)
+                );
+                assert_eq!(locator.closure, reference.closure);
+                assert_eq!(
+                    original.records.len() as u64,
+                    locator.index_end - locator.index_start
+                );
+            }
+            let category = match input {
+                LoggedBusinessInputV2::PublicGroup(_)
+                | LoggedBusinessInputV2::DayPublicGroup(_) => "public",
+                LoggedBusinessInputV2::HiddenStepBucket(_)
+                | LoggedBusinessInputV2::DayHiddenStepBucket(_) => "hidden",
+                LoggedBusinessInputV2::PublicObserveTime(_) => "observe",
+                LoggedBusinessInputV2::PublicCloseTime(_) => "close",
+                LoggedBusinessInputV2::PlatformPrefixAdvance(_) => "prefix",
+                _ => "full-business",
+            };
+            *categories.entry(category).or_default() += 1;
+        }
+    }
+    eprintln!(
+        "fixture SIM layout={layout}, role={:?}, bytes={bytes}, accepted_frames={frames}, inputs={categories:?}",
+        opened.durability_role
+    );
+}
+fn fixture_day_binding(
+    core: &PublicObservationCoreV1,
+    sequence: &str,
+    hidden: &str,
+) -> HistoricalDayLogBindingV1 {
+    HistoricalDayLogBindingV1 {
+        input_stream_id: core.header().input_stream_id.clone(),
+        consumption_sequence_ref: sequence.into(),
+        hidden_input_set_identity_sha256: Sha256Hex("a".repeat(64)),
+        hidden_consumer_stream_id: hidden.into(),
+        hidden_ordering_version:
+            data_pipeline_training::hidden_stream::STREAMING_HIDDEN_ORDERING_VERSION.into(),
+    }
+}
+fn fixture_day_bucket(
+    bucket: AcceptedHiddenStepBucketV1,
+    binding: &HistoricalDayLogBindingV1,
+) -> AcceptedHiddenStepBucketV1 {
+    let HiddenBucketReferenceV2::Recorded(reference) = bucket.reference else {
+        return bucket;
+    };
+    AcceptedHiddenStepBucketV1 {
+        reference: HiddenBucketReferenceV2::Streaming(ClosedStreamingHiddenStepBucketV1 {
+            source: StreamingHiddenSourceBindingV1 {
+                input_stream_id: binding.input_stream_id.clone(),
+                input_set_identity_sha256: binding.hidden_input_set_identity_sha256.clone(),
+                applied_prefix: AppliedIngressPrefixV1 {
+                    input_stream_id: reference.committed_prefix.input_stream_id,
+                    next_input_position: reference.committed_prefix.next_input_position,
+                },
+                ordering_version: binding.hidden_ordering_version.clone(),
+            },
+            bucket_time_utc_ms: reference.bucket_time_utc_ms,
+            index_start: reference.index_start,
+            index_end: reference.index_end,
+            closure: reference.closure,
+        }),
+        records: bucket.records,
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn historical_day_layout_rebuilds_original_inputs_and_preserves_business_sequence() {
+    // 两布局均使用正式HistoricalBacktest/FiniteHistorical入口；原CleanRun/Paper用例保留。
+    for day_log in [false, true] {
+        price_change_bba_before_initial_books_preserves_preloading_and_private_quantities_layout(
+            day_log, true,
+        )
+        .await;
+        midnight_resolution_without_initial_books_redeems_zero_balance_once_layout(day_log, true)
+            .await;
+        trusted_observation_keeps_source_prefix_and_sends_at_independent_time_layout(day_log, true)
+            .await;
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn price_change_bba_before_initial_books_preserves_preloading_and_private_quantities() {
+    price_change_bba_before_initial_books_preserves_preloading_and_private_quantities_layout(
+        false, false,
+    )
+    .await;
+}
+
+async fn price_change_bba_before_initial_books_preserves_preloading_and_private_quantities_layout(
+    day_log: bool,
+    finite_historical: bool,
+) {
     // 09-12 首 price_change 的真实资产、价格、局部数量和三项时间。
     // 后续完整 book 是独立构造的有效夹具，不冒称真实日回放。
     const START: i64 = 1_789_171_200_000;
@@ -922,7 +1087,31 @@ async fn price_change_bba_before_initial_books_preserves_preloading_and_private_
     }
     writer.stabilize().unwrap();
     let path = temp.path().join("sim.jsonl");
-    let (execution, _) = public_execution(&path, &core, SimCallerRoleV1::HistoricalBacktest).await;
+    let binding = fixture_day_binding(&core, "preloading-bba", "hidden-test");
+    let context = core.pm_context(CONDITION_ID).unwrap();
+    let scenario = sealed_scenario_for_markets(vec![
+        crate::scenario::PlatformMarketV1::try_new(
+            context.market,
+            context
+                .assets
+                .into_iter()
+                .map(|a| a.asset)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap(),
+    ]);
+    let (execution, _) = public_execution_with_scenario_capacity_layout(
+        &path,
+        scenario,
+        SimCallerRoleV1::HistoricalBacktest,
+        32,
+        None,
+        day_log.then(|| binding.clone()),
+        finite_historical,
+    )
+    .await;
     let hidden = prepare_hidden_v1(
         core,
         PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap(),
@@ -940,6 +1129,11 @@ async fn price_change_bba_before_initial_books_preserves_preloading_and_private_
     let mut buckets = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
     let mut seen = Vec::new();
     while let Some(bucket) = buckets.next_bucket().unwrap() {
+        let bucket = if day_log {
+            fixture_day_bucket(bucket, &binding)
+        } else {
+            bucket
+        };
         let at = bucket.reference.bucket_time_utc_ms();
         if at == START {
             let quotes = bucket
@@ -970,9 +1164,9 @@ async fn price_change_bba_before_initial_books_preserves_preloading_and_private_
                 );
             }
             assert!(!bucket.records.iter().any(|r| matches!(r,
-                HiddenExecutionRecordV1::Step { step, .. } if matches!(&step.change,
-                    data_pipeline_core::pm_reduction::PmStepChangeV1::InitialSnapshot { .. }
-                    | data_pipeline_core::pm_reduction::PmStepChangeV1::LevelChange { .. }))));
+            HiddenExecutionRecordV1::Step { step, .. } if matches!(&step.change,
+                data_pipeline_core::pm_reduction::PmStepChangeV1::InitialSnapshot { .. }
+                | data_pipeline_core::pm_reduction::PmStepChangeV1::LevelChange { .. }))));
         }
         driver.hidden_bucket(bucket).unwrap();
         driver.next_group().unwrap().unwrap();
@@ -1066,10 +1260,18 @@ async fn price_change_bba_before_initial_books_preserves_preloading_and_private_
         [START, START + 100_000, START + 110_000, START + 120_000]
     );
     driver.stop_and_drain().unwrap();
+    fixture_log_counts(&path, &root, &hidden);
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn midnight_resolution_without_initial_books_redeems_zero_balance_once() {
+    midnight_resolution_without_initial_books_redeems_zero_balance_once_layout(false, false).await;
+}
+
+async fn midnight_resolution_without_initial_books_redeems_zero_balance_once_layout(
+    day_log: bool,
+    finite_historical: bool,
+) {
     // 已发生失败的旧市场：午夜仅登记 metadata，不带前日盘口或账户。
     // 终态 source/received/admitted、WS epoch/sequence 和赢家均取原事故证据。
     const CONDITION: &str = "0x958f8bdb135b6b06eb2943729196ec066aa5499599fb6f9fe00e718b44169af9";
@@ -1210,10 +1412,15 @@ async fn midnight_resolution_without_initial_books_redeems_zero_balance_once() {
         )
         .unwrap(),
     ]);
-    let (execution, delivered) = public_execution_with_scenario(
+    let binding = fixture_day_binding(&core, "midnight-terminal", "midnight-terminal");
+    let (execution, delivered) = public_execution_with_scenario_capacity_layout(
         &temp.path().join("sim.jsonl"),
         scenario,
         SimCallerRoleV1::HistoricalBacktest,
+        32,
+        None,
+        day_log.then(|| binding.clone()),
+        finite_historical,
     )
     .await;
     let hidden = prepare_hidden_v1(
@@ -1244,6 +1451,11 @@ async fn midnight_resolution_without_initial_books_redeems_zero_balance_once() {
     let mut buckets = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
     let mut terminal_count = 0;
     while let Some(bucket) = buckets.next_bucket().unwrap() {
+        let bucket = if day_log {
+            fixture_day_bucket(bucket, &binding)
+        } else {
+            bucket
+        };
         let at = bucket.reference.bucket_time_utc_ms();
         while driver
             .next_group_at()
@@ -1331,7 +1543,12 @@ async fn midnight_resolution_without_initial_books_redeems_zero_balance_once() {
             .all(|balance| balance.balance_shares.0 == "0")
     );
     drop(feedback);
-    driver.complete().unwrap();
+    if finite_historical {
+        driver.stop_and_drain().unwrap();
+    } else {
+        driver.complete().unwrap();
+    }
+    fixture_log_counts(&temp.path().join("sim.jsonl"), &root, &hidden);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -3131,12 +3348,48 @@ async fn continuous_equal_time_finality_gtd_and_rebate_keep_original_pre_market_
 
 #[tokio::test(flavor = "current_thread")]
 async fn trusted_observation_keeps_source_prefix_and_sends_at_independent_time() {
+    trusted_observation_keeps_source_prefix_and_sends_at_independent_time_layout(false, false)
+        .await;
+}
+
+async fn trusted_observation_keeps_source_prefix_and_sends_at_independent_time_layout(
+    day_log: bool,
+    finite_historical: bool,
+) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let core = recorded_books(&root);
     let path = temp.path().join("sim.jsonl");
     let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
-    let (execution, _) = public_execution(&path, &core, SimCallerRoleV1::Paper).await;
+    let binding = fixture_day_binding(&core, "time-test", "hidden-test");
+    let context = core.pm_context(CONDITION_ID).unwrap();
+    let scenario = sealed_scenario_for_markets(vec![
+        crate::scenario::PlatformMarketV1::try_new(
+            context.market,
+            context
+                .assets
+                .into_iter()
+                .map(|a| a.asset)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap(),
+    ]);
+    let (execution, _) = public_execution_with_scenario_capacity_layout(
+        &path,
+        scenario,
+        if finite_historical {
+            SimCallerRoleV1::HistoricalBacktest
+        } else {
+            SimCallerRoleV1::Paper
+        },
+        32,
+        None,
+        day_log.then(|| binding.clone()),
+        finite_historical,
+    )
+    .await;
     let mut driver = FinitePublicConsumptionV1::new(execution, source, "time-test".into());
     for _ in 0..3 {
         driver.next_group().unwrap().unwrap();
@@ -3280,12 +3533,38 @@ async fn trusted_observation_keeps_source_prefix_and_sends_at_independent_time()
         pm_materials: Vec::new(),
     };
     let mut sequence = 1;
+    let mut saw_observation = false;
+    if day_log {
+        assert_eq!(recovery.historical_day_binding_for_tests(), Some(&binding));
+    }
     loop {
         let (next, inputs) = recovery.next_group().unwrap();
         recovery = next;
         let Some(inputs) = inputs else { break };
         for logged in inputs {
+            saw_observation |= matches!(logged, LoggedBusinessInputV2::PublicObserveTime(_));
             let input = match logged {
+                LoggedBusinessInputV2::DayPublicGroup(group) => {
+                    let prepared = source.next().unwrap().unwrap().prepared;
+                    assert_eq!(prepared.reference.input_stream_id, binding.input_stream_id);
+                    assert_eq!(
+                        prepared.reference.applied_prefix.next_input_position,
+                        group.next_input_position
+                    );
+                    assert_eq!(prepared.reference.group_position, group.group_position);
+                    assert_eq!(
+                        prepared.reference.closed_at_input_position,
+                        group.closed_at_input_position
+                    );
+                    BusinessInputV2::PublicGroup(AcceptedPublicGroupV1 {
+                        reference: prepared.reference.clone(),
+                        execution_time: TrustedActorExecutionTimeV1(group.execution_time),
+                        prepared,
+                        pm_materials: Vec::new(),
+                        pm_step_bindings: Vec::new(),
+                        pm_reports: Vec::new(),
+                    })
+                }
                 LoggedBusinessInputV2::PublicGroup(group) => {
                     let prepared = source.next().unwrap().unwrap().prepared;
                     assert_eq!(prepared.reference, group.reference);
@@ -3336,8 +3615,11 @@ async fn trusted_observation_keeps_source_prefix_and_sends_at_independent_time()
         })
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
-    let log = std::fs::read_to_string(path).unwrap();
-    assert!(log.contains("PUBLIC_OBSERVE_TIME"));
+    assert!(saw_observation);
+    let log = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+    if !day_log {
+        assert!(log.contains("PUBLIC_OBSERVE_TIME"));
+    }
     assert!(!log.contains("EndOfInput"));
     assert!(!log.contains("RUN_SEAL"));
 }

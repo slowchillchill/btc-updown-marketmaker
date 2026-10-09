@@ -315,6 +315,15 @@ where
             let context = HistoricalRuntimeContextV1 {
                 start: config.scope.received_start_utc_ms,
                 source_identity: source_identity.clone(),
+                day_log_binding: Some(sim_system::public_consumption::HistoricalDayLogBindingV1 {
+                    input_stream_id: config.header.input_stream_id.clone(),
+                    consumption_sequence_ref: candidate.consumption_sequence_ref.clone(),
+                    hidden_input_set_identity_sha256: input_identity.clone(),
+                    hidden_consumer_stream_id: config.hidden_stream_id.clone(),
+                    hidden_ordering_version:
+                        data_pipeline_training::hidden_stream::STREAMING_HIDDEN_ORDERING_VERSION
+                            .into(),
+                }),
                 end: config.scope.received_end_utc_ms,
                 operating_start: config
                     .metadata_initialization
