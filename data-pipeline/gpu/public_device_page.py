@@ -20,6 +20,8 @@ from binance_state import PublicBinanceState
 VERSION = 'public_device_page_v3'
 PREVIOUS_VERSION = 'public_device_page_v2'
 LEGACY_VERSION = 'public_device_page_v1'
+CHILD_VERSION = 'public_device_page_block_v1'
+ROOT_VERSION = 'public_device_page_blocks_v1'
 BASE_PM_PREFIXES = ('quantities','selections','resets','initialized','ready','ticks',
     'level_anchors','book_quality','book_anchors','bba','trades','observed_ticks')
 from valuation_state import PREFIXES as VALUATION_PREFIXES
@@ -136,6 +138,11 @@ def build_public_device_page(binary, material, destination, *, device='cuda', pr
     source=json.loads(source_manifest)
     if columns['input_stream_id']!=source['header']['input_stream_id'] or not source['normal_end']:
         raise ValueError('公共设备页必须绑定原完整输入流')
+    return _write_public_columns(columns,source_manifest,destination,device=device,progress=progress)
+
+
+def _write_public_columns(columns,source_manifest,destination,*,device,progress=None,child=False):
+    source=json.loads(source_manifest)
     if progress: progress('exact_and_prefix_build',groups=len(columns['groups']))
     pm=PublicPmState(columns,device=device)
     market=PublicMarketState(pm,columns)
@@ -184,7 +191,7 @@ def build_public_device_page(binary, material, destination, *, device='cuda', pr
     # 完整原身份与proof独立于数值等值；不按相同时间或值合并。
     omitted=set(TABLES)|set(PREFIXES)|set(BANKS)|{'decimals','anchor_sets','terminal_payouts'}
     metadata={key:value for key,value in columns.items() if key not in omitted}
-    manifest={'version':VERSION,'members':members,'metadata':metadata,
+    manifest={'version':CHILD_VERSION if child else VERSION,'members':members,'metadata':metadata,
         'source_manifest_sha256':hashlib.sha256(source_manifest).hexdigest(),
         'source_applied_prefix':source['applied_prefix'],'source_members':source['files']}
     with (destination/'manifest.json').open('xb') as stream: stream.write(_json_bytes(manifest))
@@ -194,14 +201,14 @@ def build_public_device_page(binary, material, destination, *, device='cuda', pr
 
 class PreparedPublicPage:
     """验收页后复用预排数组与精确bank；所有根共享此不可变对象。"""
-    def __init__(self,directory,material,*,device='cuda'):
+    def __init__(self,directory,material,*,device='cuda',_child=False):
         self.directory=Path(directory); self.material=Path(material)
         self.device=torch.device(device); self._tensors={}; self._prefixes={}
         manifest_bytes=(self.directory/'manifest.json').read_bytes()
         manifest=json.loads(manifest_bytes)
         legacy=manifest['version']==LEGACY_VERSION
-        current=manifest['version']==VERSION
-        if manifest['version'] not in (VERSION,PREVIOUS_VERSION,LEGACY_VERSION): raise ValueError('公共设备页版本错误')
+        current=manifest['version']==VERSION or (_child and manifest['version']==CHILD_VERSION)
+        if manifest['version'] not in ((VERSION,PREVIOUS_VERSION,LEGACY_VERSION,CHILD_VERSION) if _child else (VERSION,PREVIOUS_VERSION,LEGACY_VERSION)): raise ValueError('公共设备页版本错误')
         tables = TABLES if current else BASE_TABLES
         prefixes = PREFIXES if current else BASE_PREFIXES
         banks = BANKS if current else BASE_BANKS
@@ -237,11 +244,11 @@ class PreparedPublicPage:
         for name,ndim in derived.items(): self._array(name,'i8',ndim)
         groups=self.arrays['groups']; count=len(groups)
         if (len(self.columns['group_ids'])!=count or len(self.columns['group_members'])!=count
-                or count!=source['groups'] or len(self.columns['facts'])!=source['facts']
-                or (count and not np.array_equal(groups[:,0],np.arange(count)))):
+                or (not _child and (count!=source['groups'] or len(self.columns['facts'])!=source['facts']))
+                or (count and not np.array_equal(groups[:,0],np.arange(self.columns.get('group_base',0),self.columns.get('group_base',0)+count)))):
             raise ValueError('公共设备页原组/事实身份人口错误')
         causal=self._array('causal_visible_at','i8',1)
-        if not np.array_equal(causal,np.maximum.accumulate(groups[:,2])):
+        if not np.array_equal(causal,np.maximum.accumulate(np.maximum(groups[:,2],self.columns.get('causal_before',np.iinfo(np.int64).min)))):
             raise ValueError('公共设备页因果可见列错误')
         anchors=self.columns['anchors']; markets=self.columns['markets']
         anchor_times=self.arrays['anchor_times']
@@ -372,3 +379,186 @@ class PreparedPublicPage:
         pm=PublicPmState(self.columns,device=self.device,prepared=self)
         market=PublicMarketState(pm,self.columns,prepared=self)
         return pm,market,PublicReferenceState(market,self.columns,prepared=self),PublicBinanceState(pm,self.columns,prepared=self)
+
+
+def _carry_public_projection(columns,previous):
+    """只搬移原prefix最后选中值；保留原序号/组/版本，不生成新事实。"""
+    if previous is None:return
+    pm,market,reference,binance,old=previous
+    memo={}; decimals={text:index for index,text in enumerate(columns['decimals'])}
+    def copy(bank,index):
+        key=(bank,int(index))
+        if bank=='pm_versions' and index==0:return 0
+        if key in memo:return memo[key]
+        value=old[bank][index]
+        if bank=='decimals':
+            if value not in decimals:
+                decimals[value]=len(columns[bank]);columns[bank].append(value)
+            result=decimals[value]
+        else:
+            value=dict(value) if isinstance(value,dict) else list(value) if not isinstance(value,str) else value
+            if bank=='anchor_sets': value=[copy('anchors',i) for i in value]
+            elif bank=='terminal_payouts': value=[[a,copy('decimals',d)] for a,d in value]
+            else:
+                for field,dependency in dependencies.get(bank,()):value[field]=copy(dependency,value[field])
+                if bank=='lifecycle_values' and value[0]:value[1]=copy('lifecycle_states',value[1])
+            result=len(columns[bank]);columns[bank].append(value)
+        memo[key]=result
+        return result
+    dependencies={
+        'bba_values':((1,'decimals'),(3,'decimals'),(5,'decimals'),(6,'anchor_sets')),
+        'trade_values':((0,'decimals'),(1,'decimals'),(4,'decimals'),(5,'anchor_sets')),
+        'observed_tick_values':((1,'decimals'),(2,'anchor_sets')),
+        'lifecycle_values':((2,'anchor_sets'),),'trading_values':((6,'anchor_sets'),),
+        'terminal_values':((2,'terminal_payouts'),(3,'anchor_sets')),
+        'reference_values':((0,'decimals'),(1,'anchor_sets')),
+        'reference_rule_values':((1,'anchor_sets'),),
+        'reference_official_values':((1,'decimals'),(2,'anchor_sets')),
+        'reference_temporary_values':((1,'decimals'),(2,'anchor_sets')),
+        'binance_depth_values':((1,'anchor_sets'),),
+        'binance_trade_values':((0,'decimals'),(1,'decimals'),(3,'anchor_sets'))}
+    value_banks={'quantities':'decimals','ticks':'decimals','level_anchors':'anchors','book_anchors':'anchors',
+        'bba':'bba_values','trades':'trade_values','observed_ticks':'observed_tick_values',
+        'selection_versions':'pm_versions','absence_versions':'pm_versions',
+        'valuation_bba':'bba_values','valuation_bba_versions':'pm_versions',
+        'market_lifecycle':'lifecycle_values','market_trading':'trading_values','market_terminal':'terminal_values',
+        'global_references':'reference_values','reference_rules':'reference_rule_values',
+        'reference_official':'reference_official_values','reference_temporary':'reference_temporary_values',
+        'binance_quantities':'decimals','binance_depth':'binance_depth_values','binance_trades':'binance_trade_values'}
+    for names,state in ((PM_PREFIXES,pm),(MARKET_PREFIXES,market),(REFERENCE_PREFIXES,reference),(BINANCE_PREFIXES,binance)):
+        for name in names:
+            prefix=getattr(state,name)
+            counts=prefix.offsets[1:]-prefix.offsets[:-1]
+            rows=prefix.rows[(prefix.offsets[1:][counts>0]-1)].cpu().tolist()
+            if name in value_banks:
+                for row in rows:row[3]=copy(value_banks[name],row[3])
+            columns[name]=rows+columns[name]
+
+
+def build_public_device_blocks(binary,material,destination,*,groups_per_block=256,device='cuda',progress=None):
+    """顺序读当前完整组块；上块仅保留原已选择投影，写成独立内部typed子块。"""
+    material,destination=Path(material),Path(destination)
+    source_manifest=(material/'manifest.json').read_bytes()
+    destination.mkdir(parents=True,exist_ok=False)
+    raw=destination/'columns'
+    subprocess.run([str(binary),'--pm-device-blocks',str(material),'268435456',str(raw),str(groups_per_block)],check=True)
+    if (material/'manifest.json').read_bytes()!=source_manifest:raise ValueError('构建期间原材料manifest改变')
+    root=json.loads((raw/'manifest.json').read_bytes())
+    if root['version']!='public_pm_device_column_blocks_v1':raise ValueError('公共分块根版本错误')
+    previous=None;causal_before=np.iinfo(np.int64).min;parts=[]
+    for entry in root['parts']:
+        path=raw/entry['directory']/'columns.json'
+        if path.stat().st_size!=entry['bytes'] or _sha(path)!=entry['sha256']:raise ValueError('公共原列块损坏')
+        block=json.loads(path.read_bytes())
+        if (block['version']!='public_pm_device_column_block_v1'
+                or block['group_begin']!=entry['group_begin'] or block['group_end']!=entry['group_end']):
+            raise ValueError('公共原列块范围不符')
+        columns=block['columns'];catalog=root['catalog']
+        for name in ('assets','markets','market_assets','fact_types','binance_symbols','pm_epochs','reference_preparation_complete'):
+            columns[name]=catalog[name]
+        decimals={text:i for i,text in enumerate(columns['decimals'])}
+        for name in ('slots','binance_slots'):
+            slots=[]
+            for asset,side,text in catalog[name]:
+                if text not in decimals:decimals[text]=len(columns['decimals']);columns['decimals'].append(text)
+                slots.append([asset,side,decimals[text]])
+            columns[name]=slots
+        columns.update(group_base=entry['group_begin'],group_count=entry['group_end'],causal_before=int(causal_before))
+        _carry_public_projection(columns,previous)
+        directory=destination/entry['directory']
+        previous=_write_public_columns(columns,source_manifest,directory,device=device,progress=progress,child=True)
+        causal_before=int(previous[0].causal_visible_at[-1].cpu())
+        parts.append({**entry,'manifest_sha256':_sha(directory/'manifest.json')})
+        # block正文只有当前和供下一块承接的上一投影；不收集全部块。
+        del block,columns
+    empty_state=None
+    if not parts:
+        columns=root['empty_columns']
+        _write_public_columns(columns,source_manifest,destination/'empty-state',device=device,progress=progress,child=True)
+        empty_state={'directory':'empty-state','manifest_sha256':_sha(destination/'empty-state'/'manifest.json')}
+    manifest={**root,'version':ROOT_VERSION,'parts':parts,'empty_state':empty_state}
+    with (destination/'manifest.json').open('xb') as stream:stream.write(_json_bytes(manifest))
+    return PreparedPublicBlocks(destination,material,device=device)
+
+
+class _GroupMetadataField:
+    def __init__(self,raw,offsets,field):self.raw,self.offsets,self.field=raw,offsets,field
+    def __len__(self):return len(self.offsets)-1
+    def __getitem__(self,index):
+        if isinstance(index,slice):return [self[i] for i in range(*index.indices(len(self)))]
+        if index<0:index+=len(self)
+        if not 0<=index<len(self):raise IndexError(index)
+        return json.loads(bytes(self.raw[self.offsets[index]:self.offsets[index+1]]))[self.field]
+
+
+class PreparedPublicBlocks:
+    """全根身份及原位置冷旁证；设备仅安装当前块，旧冻结持有旧块自己的值。"""
+    def __init__(self,directory,material,*,device='cuda'):
+        self.directory,self.material=Path(directory),Path(material);self.device=torch.device(device)
+        root=json.loads((self.directory/'manifest.json').read_bytes())
+        if root['version']!=ROOT_VERSION:raise ValueError('公共分块根版本错误')
+        original=(self.material/'manifest.json').read_bytes();source=json.loads(original)
+        if (root['input_stream_id']!=source['header']['input_stream_id']
+                or hashlib.sha256(original).hexdigest()!=root['source_manifest_sha256']
+                or root['source_applied_prefix']!=source['applied_prefix'] or root['source_members']!=source['files']
+                or not source['normal_end'] or root['groups']!=source['groups'] or root['facts']!=source['facts']):
+            raise ValueError('公共分块根来源绑定错误')
+        self.source_manifest_sha256=root['source_manifest_sha256'];self.normal_end=source['normal_end']
+        self.parts=root['parts'];end=0
+        for entry in self.parts:
+            name=entry['directory']
+            if Path(name).name!=name or name in ('','.', '..') or entry['group_begin']!=end or entry['group_end']<=end:
+                raise ValueError('公共分块根范围/路径错误')
+            if _sha(self.directory/name/'manifest.json')!=entry['manifest_sha256']:raise ValueError('公共子块manifest损坏')
+            end=entry['group_end']
+        if end!=root['groups']:raise ValueError('公共分块根缺失原完整组')
+        raw=self.directory/'columns'
+        expected={'group_metadata.utf8','group_metadata.offsets.u64le','causal_visible_at.i64le'}
+        if len(root['files'])!=len(expected) or {entry['name'] for entry in root['files']}!=expected:
+            raise ValueError('公共分块原旁列成员不完整')
+        for entry in root['files']:
+            path=raw/entry['name']
+            if Path(entry['name']).name!=entry['name'] or path.stat().st_size!=entry['bytes'] or _sha(path)!=entry['sha256']:
+                raise ValueError('公共分块原旁列损坏')
+        count=root['groups']
+        offsets=np.memmap(raw/'group_metadata.offsets.u64le',dtype='<u8',mode='r')
+        text=(np.memmap(raw/'group_metadata.utf8',dtype='u1',mode='r')
+            if (raw/'group_metadata.utf8').stat().st_size else np.empty(0,dtype='u1'))
+        if len(offsets)!=count+1 or offsets[0]!=0 or offsets[-1]!=len(text) or np.any(np.diff(offsets.astype('<i8'))<0):
+            raise ValueError('公共分块组旁列布局错误')
+        self.causal=(np.memmap(raw/'causal_visible_at.i64le',dtype='<i8',mode='r',shape=(count,))
+            if count else np.empty(0,dtype='<i8'))
+        groups=(np.memmap(self.material/'group_columns.i64le',dtype='<i8',mode='r',shape=(count,5))[:,:3]
+            if count else np.empty((0,3),dtype='<i8'))
+        self.columns={**root['catalog'],'input_stream_id':root['input_stream_id'],'groups':groups,
+            'group_ids':_GroupMetadataField(text,offsets,'group_id'),'group_members':_GroupMetadataField(text,offsets,'members'),
+            'source_progress_changes':_GroupMetadataField(text,offsets,'progress'),
+            'group_applied_prefixes':_GroupMetadataField(text,offsets,'applied_prefix')}
+        self.current=None;self.current_index=None
+        self.empty_state=root.get('empty_state')
+
+    def ensure_group_lineage(self,binary=None):return
+
+    def load(self,index):
+        entry=self.parts[index]
+        child=PreparedPublicPage(self.directory/entry['directory'],self.material,device=self.device,_child=True)
+        if (child.columns['group_base']!=entry['group_begin'] or child.columns['group_count']!=entry['group_end']
+                or len(child.columns['groups'])!=entry['group_end']-entry['group_begin']
+                or not np.array_equal(child.columns['groups'],self.columns['groups'][entry['group_begin']:entry['group_end']])
+                or not np.array_equal(child.arrays['causal_visible_at'],self.causal[entry['group_begin']:entry['group_end']])):
+            raise ValueError('公共子块与全根原组关联错误')
+        self.current_index,self.current=index,child
+        return child
+
+    def install(self):
+        if not self.parts:
+            entry=self.empty_state
+            if (entry is None or entry['directory']!='empty-state'
+                    or _sha(self.directory/entry['directory']/'manifest.json')!=entry['manifest_sha256']):
+                raise ValueError('公共零组原状态缺失或损坏')
+            if self.current is None:
+                self.current=PreparedPublicPage(self.directory/entry['directory'],self.material,device=self.device,_child=True)
+                if len(self.current.columns['groups']) or len(self.current.columns['facts']):
+                    raise ValueError('公共零组状态人口错误')
+            return self.current.install()
+        return (self.current or self.load(0)).install()

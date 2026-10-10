@@ -18,11 +18,14 @@ class ContinuousActorRun:
     freeze接实际当前公开账户并返回模型自有冻结材料；models拥有模型队列、
     hidden及权重版本。receive只续原waiting。显式horizon保持开放，不排空未来。
     """
-    def __init__(self,clock,first_observation,models,freeze,receive,*,trading_until=None,settlement=None):
+    def __init__(self,clock,first_observation,models,freeze,receive,*,trading_until=None,settlement=None,inputs=None):
         self.clock=clock;self.next_observation=first_observation.clone()
         self.models=models;self.freeze=freeze;self.receive=receive
         self.trading_until=trading_until;self.settlement=settlement
         self.economic_resume=torch.zeros_like(first_observation,dtype=torch.bool)
+        owner=inputs if inputs is not None else getattr(freeze,'__self__',None)
+        self.input_owner=owner if hasattr(owner,'bind_source') else None
+        if self.input_owner is not None:self.input_owner.bind_source(clock.source)
 
     def advance_before(self,horizon,enabled,*,progress=None):
         blocked=torch.zeros_like(enabled);fault=torch.zeros_like(horizon,dtype=torch.int32)
@@ -30,6 +33,7 @@ class ContinuousActorRun:
         while True:
             event=self.models.next_event()
             observing=torch.ones_like(enabled) if self.trading_until is None else self.next_observation<self.trading_until
+            if self.input_owner is not None and not bool(observing.any().cpu()):self.input_owner.stop_observations()
             observe=observing&((~event.present)|(self.next_observation<=event.at))
             at=torch.where(observe,self.next_observation,event.at)
             kind=torch.where(observe,torch.zeros_like(event.kind),event.kind)

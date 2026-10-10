@@ -80,7 +80,8 @@ def _endpoint_commit(candidate,previous,active):
 class MarketInputs100ms:
     def __init__(self, shared, market, reference, binance, source_history, process_rules, columns, delivered_cutoffs):
         self.shared,self.market,self.source_history = shared,market,source_history
-        if (delivered_cutoffs.shape!=(shared.group_count,) or delivered_cutoffs.dtype!=torch.int64
+        self.process_rules=process_rules
+        if (delivered_cutoffs.shape!=(len(shared.groups),) or delivered_cutoffs.dtype!=torch.int64
                 or delivered_cutoffs.device!=shared.slots.device):
             raise ValueError('需全部完整组的同设备实际交付cutoff')
         # 上游必须提供真实delay与跨块前沿；这里不选择正式延迟profile。
@@ -107,7 +108,7 @@ class MarketInputs100ms:
             if need>capacity: setattr(owner,name,1<<(need-1).bit_length())
 
     def prefix_at(self, observation_ms):
-        return torch.searchsorted(self.delivered_cutoffs,observation_ms,right=True)-1
+        return torch.searchsorted(self.delivered_cutoffs,observation_ms,right=True)-1+self.shared.group_base
 
     def freeze(self, observation_ms, market_indices, root_started_at, source_memory, endpoint_memory, *, applied_prefix=None, events=None):
         """观察时刻固定在UTC100ms；调用方先接纳截至C的全部完整组，再冻结。

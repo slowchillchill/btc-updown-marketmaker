@@ -195,6 +195,98 @@ def validate_valuation(args,root):
     args.output.write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report),flush=True)
 
 
+def validate_public_blocks(args,columns,states,destination):
+    """同一原Core材料跨完整组块；旧整页仅作有限独立调度对照。"""
+    import shutil,resource
+    from public_device_page import build_public_device_blocks,PreparedPublicPage,PreparedPublicBlocks
+    from input_history import SourceHistoryInputs
+    from input_100ms import MarketInputs100ms
+    from model_train.continuous_inputs import ContinuousActorInputs
+    from input_events import EventInputs
+    from fact_window import PublicFactWindow,PublicTradeWindow
+    from input_trades import TradeInputs
+    from input_pm_fields import pm_fields
+    from input_reference import ReferenceInputs
+    from prepare import _numbers
+    destination=Path(destination);destination.mkdir(exist_ok=False)
+    material=destination/'original-public';shutil.copytree(args.material,material)
+    if args.original_reference:shutil.copyfile(args.original_reference,destination/'original-reference.json')
+    started=time.perf_counter();blocks=build_public_device_blocks(args.binary,material,destination/'blocks',groups_per_block=2)
+    pm,market,reference,binance=states
+    registry=SourceHistoryInputs(pm,market,reference,columns).registry
+    indices=torch.tensor([0],device='cuda');start=market.times[:1,0]-30000
+    expected_history=SourceHistoryInputs(pm,market,reference,columns,identity_registry=registry)
+    memory=expected_history.empty(1,start);segments=[];checked=0
+    for index,entry in enumerate(blocks.parts):
+        page=blocks.load(index);current=page.install();cp,cm,cr,cb=current
+        groups=torch.arange(entry['group_begin'],entry['group_end'],device='cuda')
+        now=cp.causal_visible_at
+        assets=cm.asset_pairs[:1].expand(len(groups),-1)
+        af,ef=cp.frame(groups),pm.frame(groups)
+        for field in ('present','initialized','ready','quality','fault','prefix_fault'):
+            assert torch.equal(getattr(af,field),getattr(ef,field)),(entry,field)
+        assert list(zip(af.quantity.numerator.report_values(),af.quantity.denominator.report_values()))==list(zip(
+            ef.quantity.numerator.report_values(),ef.quantity.denominator.report_values()))
+        a=pm_fields(cp,cp.observation(groups),assets,now);e=pm_fields(pm,pm.observation(groups),assets,now)
+        for field in ('bba','trade','fault'):assert torch.equal(getattr(a,field),getattr(e,field)),(index,field)
+        ar=ReferenceInputs(cr).encode(cr.frame(groups),cm.frame(groups),indices.expand(len(groups)),now)
+        er=ReferenceInputs(reference).encode(reference.frame(groups),market.frame(groups),indices.expand(len(groups)),now)
+        assert torch.equal(ar.values,er.values) and torch.equal(ar.fault,er.fault),(index,'reference')
+        av,ev=cp.valuation_bid(groups),pm.valuation_bid(groups)
+        for field in ('value_present','bid_present','quality','fault','prefix_fault'):
+            assert torch.equal(getattr(av,field),getattr(ev,field)),(index,'valuation',field)
+        for r in range(len(groups)):
+            for target in range(len(cp.assets)):
+                assert Fraction(page.columns['decimals'][int(av.price_ids[r,target])])==Fraction(columns['decimals'][int(ev.price_ids[r,target])])
+        history=SourceHistoryInputs(cp,cm,cr,page.columns,identity_registry=registry)
+        memory,error=history.consume(groups,now,indices,start,memory)
+        assert not error.any().cpu().item()
+        segments.append(MarketInputs100ms(cp,cm,cr,cb,history,None,page.columns,now))
+        checked+=len(groups)
+    frozen=history.freeze(memory)
+    whole,error=expected_history.consume(torch.arange(len(columns['groups']),device='cuda'),pm.causal_visible_at,
+        indices,start,expected_history.empty(1,start))
+    assert not error.any().cpu().item()
+    whole=expected_history.freeze(whole)
+    assert torch.equal(frozen.history,whole.history) and torch.equal(frozen.path,whole.path)
+    assert torch.equal(frozen.memory.identities,whole.memory.identities)
+    # 真实尚未冻结窗口片段调用生产合并入口，不逐块投影后相加。
+    owner=ContinuousActorInputs.__new__(ContinuousActorInputs);owner.encoder=segments[-1];owner.pending_inputs=segments
+    events,trades=_numbers().run_exact_batch(owner._window_inputs)
+    expected_events=EventInputs(PublicFactWindow(columns));expected_trades=TradeInputs(pm,PublicTradeWindow(columns))
+    previous=indices-1;end=indices+len(columns['groups'])-1;now=pm.causal_visible_at[-1:]+100
+    for owner in (events,expected_events):
+        owner.window.fact_capacity=len(columns['facts']) or 1;owner.window.source_capacity=len(columns['fact_sources']) or 1
+    for owner in (trades,expected_trades):owner.window.capacity=len(columns['raw_trades']) or 1
+    ae,ee=events.encode(previous,end,now),expected_events.encode(previous,end,now)
+    at,et=trades.encode(previous,end,market.asset_pairs[:1],now),expected_trades.encode(previous,end,market.asset_pairs[:1],now)
+    for a,e in ((ae,ee),(at,et)):
+        assert torch.equal(a.values,e.values) and torch.equal(a.fault,e.fault)
+        assert torch.equal(a.required,e.required) and a.enough.all().cpu().item()
+    assert len(columns['raw_trades'])>0 and at.values.abs().sum().cpu().item()>0
+    try:PreparedPublicPage(blocks.directory/blocks.parts[-1]['directory'],material)
+    except ValueError:pass
+    else:raise AssertionError('内部末子块被完整页入口接纳')
+    # 一个真实缺失成员边界；原根不能把坏块当EOF。
+    path=blocks.directory/blocks.parts[-1]['directory']/'groups.bin'
+    path.rename(path.with_suffix('.saved'))
+    try:
+        try:blocks.load(len(blocks.parts)-1)
+        except (ValueError,FileNotFoundError):pass
+        else:raise AssertionError('缺失组列被当作合法EOF')
+    finally:path.with_suffix('.saved').rename(path)
+    report={'groups':checked,'parts':len(blocks.parts),'raw_trades':len(columns['raw_trades']),
+        'history_samples':frozen.memory.counts.cpu().tolist(),'global_prefix_and_previous_selected_projection':True,
+        'old_twap_and_native_window_vs_original_full_page':True,'last_child_rejected_as_whole':True,
+        'missing_group_member_rejected':True,'device':'cuda','seconds':time.perf_counter()-started,
+        'max_rss_kib':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
+        'resource_scope':'finite original Core validation plus full reference, all pending unobserved window segments; not production15days'}
+    (destination/'report.json').write_text(json.dumps(report,indent=2)+'\n')
+    print(json.dumps({'public_blocks':report}),flush=True)
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary',type=Path,required=True)
@@ -1108,13 +1200,17 @@ def main():
         passed.append('missing_reference_preparation_retains_fault')
     if native_freeze_reference is not None:
         passed.append('native_fast626_rule30_freeze_original_closed_group_clock')
+    blocks_report=None
+    if os.environ.get('B_GPU_PUBLIC_BLOCK_VALIDATION_DIR'):
+        blocks_report=validate_public_blocks(args,columns,(state,market_state,reference_state,binance_state),
+            os.environ['B_GPU_PUBLIC_BLOCK_VALIDATION_DIR'])
     report = {'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
               'identity':('engineering_real_public_pm_book_inputs_only' if len(columns['slots'])
                           else 'engineering_missing_book_boundary'),'device':torch.cuda.get_device_name(),
               'groups':len(columns['groups']),'original_pm_steps':columns['original_pm_steps'],
               'assets':len(columns['assets']),'slots':len(columns['slots']),
               'decimal_dictionary':len(columns['decimals']),'derived_column_wire_bytes':len(wire),
-              'public_device_page':page_report,
+              'public_device_page':page_report,'public_blocks':blocks_report,
               'encoded_positive_rows':positive_rows,'raw_trade_facts':len(columns['raw_trades']),'public_facts':len(columns['facts']),
               'binance_positive_rows':int(native_binance.packed.mask.sum().cpu()),
               'direct_sources':len(columns['fact_sources']),

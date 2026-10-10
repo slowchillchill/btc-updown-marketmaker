@@ -93,7 +93,8 @@ class PublicPmState:
         self.markets = columns['markets']
         self.market_assets = columns['market_assets']
         assets, slots, groups = len(self.assets), len(columns['slots']), len(columns['groups'])
-        self.group_count = groups
+        self.group_base = columns.get('group_base',0)
+        self.group_count = columns.get('group_count',groups)
         for asset, side, price in columns['slots']:
             if not (0 <= asset < assets and side in (0, 1) and 0 <= price < len(columns['decimals'])):
                 raise ValueError('公共设备价位身份或精确值引用越界')
@@ -102,7 +103,7 @@ class PublicPmState:
         self.groups = (torch.tensor(columns['groups'], dtype=torch.int64, device=device).reshape(-1, 3)
             if prepared is None else prepared.tensor('groups'))
         # 原组时间可回退；宿主按原组顺序累计可见时间，不改变原事实或重排。
-        self.causal_visible_at = (torch.cummax(self.groups[:,2],dim=0).values.contiguous()
+        self.causal_visible_at = (torch.cummax(self.groups[:,2].clamp_min(columns.get('causal_before',torch.iinfo(torch.int64).min)),dim=0).values.contiguous()
             if prepared is None else prepared.tensor('causal_visible_at'))
         if prepared is None:
             raw, offsets = bytearray(), [0]
@@ -128,7 +129,7 @@ class PublicPmState:
             previous = {}
             for target, sequence, group, value in columns[name]:
                 if not (0 <= target < target_count and 0 <= sequence < columns['original_pm_steps']
-                        and 0 <= group < groups):
+                        and 0 <= group < self.group_count):
                     raise ValueError('公共设备列位置越界')
                 prior = previous.get(target, (-1, -1))
                 if sequence < prior[0] or group < prior[1]:
@@ -169,7 +170,7 @@ class PublicPmState:
             previous = {}
             for target, sequence, group, value in columns[name]:
                 if not (0 <= target < assets and 0 <= sequence < columns['field_updates']
-                        and 0 <= group < groups and 0 <= value < len(table)):
+                        and 0 <= group < self.group_count and 0 <= value < len(table)):
                     raise ValueError('公共观察字段原位置或载荷引用越界')
                 prior = previous.get(target,(-1,-1))
                 if sequence < prior[0] or group < prior[1]:
@@ -187,7 +188,7 @@ class PublicPmState:
         """UTC观察选择完整合法前缀；后组必须同时等到全部前组可见。"""
         if observation_ms.dtype != torch.int64 or observation_ms.ndim != 1 or observation_ms.device != self.groups.device:
             raise ValueError('需同设备int64观察UTC批次')
-        return torch.searchsorted(self.causal_visible_at,observation_ms,right=True)-1
+        return torch.searchsorted(self.causal_visible_at,observation_ms,right=True)-1+self.group_base
 
     def frame(self, prefixes):
         qseq, qid, qfound, qfault = self.quantities.query(prefixes)

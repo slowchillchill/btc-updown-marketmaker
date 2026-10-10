@@ -105,7 +105,7 @@ pub struct PublicPmDeviceColumnsV1 {
     pub binance_trade_values: Vec<[i64;5]>,
     pub binance_trades: Vec<[i64;4]>,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct PublicLevelAnchorV1 {
     pub direct: SourceEvidenceRefV3,
     pub position: PublicFactPositionV1,
@@ -167,7 +167,74 @@ struct Builder {
     binance_symbols: BTreeMap<String,i64>, binance_slots: BTreeMap<(i64,i64,i64),i64>,
     epochs:BTreeMap<String,i64>,versions:BTreeMap<(String,i64,u64,Option<u32>),i64>,
 }
+// 物理块值句柄收窄；原值/来源正文不变，0号缺值sentinel始终保留。
+fn retain_rows<T>(table: &mut Vec<T>, wanted: impl IntoIterator<Item=i64>) -> RecordingResult<Vec<i64>> {
+    let mut keep=std::collections::BTreeSet::new();keep.insert(0_i64);keep.extend(wanted);
+    let mut mapping=vec![-1;table.len()]; let old=std::mem::take(table);
+    for (index,value) in old.into_iter().enumerate() {
+        if keep.contains(&i64::try_from(index)?) {
+            mapping[index]=i64::try_from(table.len())?;table.push(value);
+        }
+    }
+    Ok(mapping)
+}
+
 impl Builder {
+    fn release_emitted_block(&mut self) -> RecordingResult<()> {
+        let c=&mut self.columns;
+        let bba=retain_rows(&mut c.bba_values,self.last_bba.values().copied())?;
+        for id in self.last_bba.values_mut() {*id=bba[*id as usize];}
+        let ticks=retain_rows(&mut c.observed_tick_values,self.last_tick.values().copied())?;
+        for id in self.last_tick.values_mut() {*id=ticks[*id as usize];}
+        let terminal=retain_rows(&mut c.terminal_values,self.last_terminal.values().copied())?;
+        for id in self.last_terminal.values_mut() {*id=terminal[*id as usize];}
+        let payouts=retain_rows(&mut c.terminal_payouts,c.terminal_values.iter().map(|row|row[2]))?;
+        for row in &mut c.terminal_values {row[2]=payouts[row[2] as usize];}
+        let sets=retain_rows(&mut c.anchor_sets,c.bba_values.iter().map(|row|row[6])
+            .chain(c.observed_tick_values.iter().map(|row|row[2])).chain(c.terminal_values.iter().map(|row|row[3])))?;
+        for row in &mut c.bba_values {row[6]=sets[row[6] as usize];}
+        for row in &mut c.observed_tick_values {row[2]=sets[row[2] as usize];}
+        for row in &mut c.terminal_values {row[3]=sets[row[3] as usize];}
+        // anchors没有sentinel；空表合法，只保存仍由原转换前值引用的来源。
+        let wanted:std::collections::BTreeSet<_>=c.anchor_sets.iter().flatten().copied().collect();
+        let old=std::mem::take(&mut c.anchors);let mut anchors=vec![-1;old.len()];
+        for (index,value) in old.into_iter().enumerate() {
+            if wanted.contains(&(index as i64)) {anchors[index]=c.anchors.len() as i64;c.anchors.push(value);}
+        }
+        for members in &mut c.anchor_sets {for id in members {*id=anchors[*id as usize];}}
+        let decimals=retain_rows(&mut c.decimals,c.slots.iter().map(|row|row[2])
+            .chain(c.binance_slots.iter().map(|row|row[2]))
+            .chain(c.bba_values.iter().flat_map(|row|[row[1],row[3],row[5]]))
+            .chain(c.observed_tick_values.iter().map(|row|row[1]))
+            .chain(c.terminal_payouts.iter().flatten().map(|row|row[1])))?;
+        for row in &mut c.slots {row[2]=decimals[row[2] as usize];}
+        for row in &mut c.binance_slots {row[2]=decimals[row[2] as usize];}
+        for row in &mut c.bba_values {for field in [1,3,5] {row[field]=decimals[row[field] as usize];}}
+        for row in &mut c.observed_tick_values {row[1]=decimals[row[1] as usize];}
+        for row in c.terminal_payouts.iter_mut().flatten() {row[1]=decimals[row[1] as usize];}
+        self.decimals=c.decimals.iter().enumerate().map(|(id,value)|(value.clone(),id as i64)).collect();
+        self.slots=c.slots.iter().enumerate().map(|(id,row)|((row[0],row[1],row[2]),id as i64)).collect();
+        self.binance_slots=c.binance_slots.iter().enumerate().map(|(id,row)|((row[0],row[1],row[2]),id as i64)).collect();
+        self.versions.clear();c.pm_versions.clear();c.pm_versions.push([-1,0,0,0,-1]);
+        macro_rules! clear {($($field:ident),*)=>{$(c.$field.clear();)*};}
+        clear!(groups,group_ids,group_members,source_progress_changes,group_applied_prefixes,
+            facts,fact_sources,raw_trades,quantities,selections,resets,initialized,ready,ticks,
+            level_anchors,book_quality,book_anchors,bba,trades,observed_ticks,
+            current_pm_epoch,selection_versions,absence_versions,valuation_bba,valuation_bba_versions,
+            market_admitted,market_lifecycle,market_trading,market_terminal,lifecycle_states,
+            global_references,reference_rules,reference_official,reference_temporary,
+            binance_quantities,binance_resets,binance_depth,binance_trades);
+        c.trade_values.clear();c.trade_values.push([0,0,0,0,0,0,3]);
+        c.lifecycle_values.clear();c.lifecycle_values.push([0,0,0,3]);
+        c.trading_values.clear();c.trading_values.push([0,0,0,0,0,0,0,3]);
+        c.reference_values.clear();c.reference_values.push([0,0,3,0]);
+        c.reference_rule_values.clear();c.reference_rule_values.push([3,0,3]);
+        c.reference_official_values.clear();c.reference_official_values.push([0,0,0,3]);
+        c.reference_temporary_values.clear();c.reference_temporary_values.push([0,0,0,0]);
+        c.binance_depth_values.clear();c.binance_depth_values.push([0,0,3]);
+        c.binance_trade_values.clear();c.binance_trade_values.push([0,0,0,0,3]);
+        Ok(())
+    }
     fn epoch(&mut self,text:&str) -> RecordingResult<i64> {
         if let Some(id)=self.epochs.get(text) {return Ok(*id);}
         let id=i64::try_from(self.columns.pm_epochs.len())?;
@@ -303,8 +370,22 @@ impl Builder {
         Ok(slot)
     }
 }
-/// 一次冷准备/加载；输出共享只读外生列，不作为完整GPU观察或hidden材料验收。
+/// 一次冷准备/加载；旧完整页继续沿同一转换，分块只改变输出拥有权。
 pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
+    progress: impl FnMut(u64)) -> RecordingResult<PublicPmDeviceColumnsV1> {
+    convert_public_columns(reader,None,|_|Ok(()),progress)
+}
+
+/// 顺序交付已闭合的原公共组；返回固定身份/价位目录及必要转换前值，不积累块正文。
+pub fn public_pm_device_blocks_v1(reader: &mut PublicCompactReaderV1, groups_per_block: usize,
+    output: impl FnMut(&PublicPmDeviceColumnsV1) -> RecordingResult<()>,
+    progress: impl FnMut(u64)) -> RecordingResult<PublicPmDeviceColumnsV1> {
+    if groups_per_block==0 {return Err("物理公共块容量须为正".into());}
+    convert_public_columns(reader,Some(groups_per_block),output,progress)
+}
+
+fn convert_public_columns(reader: &mut PublicCompactReaderV1, block: Option<usize>,
+    mut output: impl FnMut(&PublicPmDeviceColumnsV1) -> RecordingResult<()>,
     mut progress: impl FnMut(u64)) -> RecordingResult<PublicPmDeviceColumnsV1> {
     let mut builder = Builder { columns: PublicPmDeviceColumnsV1 {
         version:"public_pm_device_columns_v2",input_stream_id:reader.manifest.header.input_stream_id.clone(),
@@ -331,13 +412,9 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
     let mut snapshots = BTreeMap::new();
     let mut raw_pm: BTreeMap<u64,PolymarketOrderbookRow> = BTreeMap::new();
     let mut pm_types: BTreeMap<u64,&'static str> = BTreeMap::new();
-    let mut temporary_sources = BTreeMap::new();
     let mut retained_depth_ids = BTreeMap::new();
     while let Some(packet) = reader.next_packet()? {
         builder.columns.reference_preparation_complete &= packet.reference_preparation.is_some();
-        if let DptIngressV1::Message {row:TypedRawRowV2::PolymarketRtdsChainlinkTwap(_),source_evidence} = &packet.input.ingress {
-            temporary_sources.insert(packet.input.input_position,source_evidence.clone());
-        }
         if let DptIngressV1::Message { row:TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row)), .. } = &packet.input.ingress {
             // 只保存原枚举坐标；实际事实是否存在由闭组决定，不能计入被抑制重试。
             if !matches!(&row.event,PolymarketOrderbookEvent::MarketResolved {..}) {
@@ -779,9 +856,11 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                     (&selection.selected_record_ref,&selection.selected_value,&selection.direct_anchor) {
                     let group = packet.groups.last().ok_or("实际参考提交没有闭组可见位置")?;
                     let market = *builder.markets.get(&market.condition_id.0).ok_or("临时参考缺原市场身份")?;
-                    let source = temporary_sources.get(&record.input_position).ok_or("临时参考缺原TWAP输入")?;
+                    let original = reader.cold_input_record(record)?;
+                    let DptIngressV1::Message {row:TypedRawRowV2::PolymarketRtdsChainlinkTwap(_),source_evidence:source} = original.ingress
+                        else {return Err("临时参考缺原TWAP输入".into());};
                     let price = builder.decimal(&value.price_usd_per_btc)?;
-                    let anchors = builder.anchor_set(std::slice::from_ref(source),&anchor.position,&anchor.group_id)?;
+                    let anchors = builder.anchor_set(std::slice::from_ref(&source),&anchor.position,&anchor.group_id)?;
                     let id = i64::try_from(builder.columns.reference_temporary_values.len())?;
                     builder.columns.reference_temporary_values.push([1,price,anchors,i64::try_from(value.window_s)?]);
                     let row = builder.field_row(market,i64::try_from(group.group_position)?,id)?;
@@ -794,6 +873,15 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
             for member in &group.member_input_positions { raw_pm.remove(member); pm_types.remove(member); }
         }
         progress(packet.input.input_position+1);
+        // 输入包的所有已闭组及其原参考提交先完成；不拆完整组/包内后继。
+        if block.is_some_and(|limit|builder.columns.groups.len()>=limit) {
+            output(&builder.columns)?;
+            builder.release_emitted_block()?;
+        }
+    }
+    if block.is_some() && !builder.columns.groups.is_empty() {
+        output(&builder.columns)?;
+        builder.release_emitted_block()?;
     }
     Ok(builder.columns)
 }

@@ -111,16 +111,19 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                 pending=diagnostic_columns(world.requests.next_pending(),('request_key','item_ref','ordinal','effective_at','fault')))
         return candidate,projected,batches,effect
     clock.handlers[5]=diagnostic_mutation
-    history=SourceHistoryInputs(pm,market,reference,clock.source.prepared.columns)
-    encoder=MarketInputs100ms(pm,market,reference,binance,history,rule,clock.source.prepared.columns,pm.causal_visible_at)
-    memory=history.empty(len(market_indices),start[row_roots]);endpoints=MarketFreezeMemory(clock.source.prefix_at(pm,T([first_observation-100]))[row_roots],T([first_observation-100])[row_roots],None,None)
+    initial_columns=(clock.source.initial_input_pages[0].columns if clock.source.initial_input_pages else clock.source.prepared.columns)
+    history=SourceHistoryInputs(pm,market,reference,initial_columns)
+    encoder=MarketInputs100ms(pm,market,reference,binance,history,rule,initial_columns,pm.causal_visible_at)
+    memory=history.empty(len(market_indices),start[row_roots]);endpoints=MarketFreezeMemory(clock.source.initial_prefix_at(pm,T([first_observation-100]))[row_roots],T([first_observation-100])[row_roots],None,None)
     valuation=PortfolioValuation(pm,tokens,clock.public.ledger.success_pools.asset_roots)
     known={name:yes for name in ('executed_prefix_known','success_prefix_known','rebate_prefix_known','settlement_prefix_known',
         'ledger_prefix_known','economic_liability_prefix_known','economic_prefix_known')}
     request_end=(2900 if full_warmup else 2800)+offset if two else (2000 if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") else 1900)
     request_ids=[source['request_id']]+['continuous-'+str(at) for at in range(first_observation,request_end,100)]
     ranks={key:i for i,key in enumerate(sorted(request_ids))}
-    def account_builder(public,frozen,bank,market_indices,row_identities):
+    def account_builder(encoder,public,frozen,bank,market_indices,row_identities):
+        market=encoder.market
+        valuation=PortfolioValuation(encoder.shared,tokens,public.ledger.success_pools.asset_roots)
         frame=market.frame(frozen.prefixes)
         markets=CancelObjectDirectory(frame.admitted,market.times[:,0][None,:],condition_slots[None,:],yes[:,None].expand(1,len(condition_slots)),
             empty.bool(),empty.reshape(1,0,2),empty)
@@ -168,7 +171,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     if source.get('nonzero_history_samples'):
         # 原PublicFactWindow允许正初始容量；两条真实1413/1414事实形成已知窄窗需求。
         from fact_window import PublicFactWindow
-        encoder.events.window=PublicFactWindow(clock.source.prepared.columns,initial_capacity=1)
+        encoder.events.window=PublicFactWindow(initial_columns,initial_capacity=1)
     material=ContinuousActorInputs(encoder,history,memory,endpoints,market_indices,start,identities,account_builder,word_capacity=16,row_roots=row_roots)
     torch.manual_seed(181606)
     template=Policy100ms(ModelShape100ms(2,64)).cuda().eval();policies={}
@@ -221,14 +224,14 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         before=stored_actual(material.memory);endpoint=stored_actual(material.endpoints)
         observed,accepted=material.freeze(world,at,enabled)
         required=observed.market.required.max(0).values.cpu().tolist()
-        shortfall=required[2]>encoder.events.window.fact_capacity
+        shortfall=required[2]>material.encoder.events.window.fact_capacity
         if source.get('nonzero_history_samples') and not two and now==1500 and not history_retry:
             assert shortfall
         if shortfall:
             assert not observed.market.resources_fit.any().cpu().item() and not accepted.any().cpu().item()
             assert stored_actual(material.memory)==before
             assert_endpoints_uncommitted(endpoint,stored_actual(material.endpoints))
-            stage('history_resource_retry',at=now,capacity=encoder.events.window.fact_capacity,required=required,
+            stage('history_resource_retry',at=now,capacity=material.encoder.events.window.fact_capacity,required=required,
                 committed_history=material.memory.counts.cpu().tolist(),candidate_fit=accepted.cpu().tolist(),
                 memory_before=before,memory_after=stored_actual(material.memory),
                 endpoint_before=endpoint,endpoint_after=stored_actual(material.endpoints))
@@ -336,7 +339,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                     for batch in public.ledger.columns.projection_batches])
         return receive_current(public,delivery,stage,enabled)
     shared=ContinuousActorRun(clock,T([first_observation]),models,freeze,receive_observation,
-        trading_until=T([2000]) if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") and not two else None)
+        trading_until=T([2000]) if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") and not two else None,inputs=material)
     continuations=0
     while True:
         result=shared.advance_before(T([2801+offset if two else 1901]),yes,progress=stage)
@@ -389,7 +392,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                 assert probe.hidden[:,0].abs().sum().cpu().item()==0
                 assert torch.equal(probe.hidden[:,1],hidden_before[:,1])
                 end_retry=True
-            encoder.grow_resources(required);history_retry=True;resource_candidate=None
+            material.encoder.grow_resources(required);history_retry=True;resource_candidate=None
             stage('whole_root_input_growth',at=shared.next_observation.cpu().tolist(),required=required,end_retry=end_retry)
             continue
         required_requests=max([clock.runtime.requests.capacity]+[int(s.receipt.required_requests.max().cpu()) for s in senders if s.receipt is not None])
@@ -411,6 +414,20 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         frozen=observations[-1] if observations else None
         if frozen is not None:stage('blocked_unknown',fault=frozen.frozen.fault.cpu().tolist(),required=frozen.market.required.cpu().tolist())
         raise AssertionError('真实连续路径未完成且尚无已报告物理需求')
+    if os.environ.get('B_GPU_PUBLIC_BLOCKS'):
+        # 有限正确性代表的原整页调度对照；不安装到生产来源或SIM/Ledger。
+        from public_device_page import build_public_device_page
+        _,_,_,_,full_columns=build_public_device_page(os.environ['B_GPU_COLUMNS_BINARY'],
+            clock.source.prepared.material,artifact/'independent-full-window')
+        from public_state import PublicPmState
+        from market_state import PublicMarketState
+        from reference_state import PublicReferenceState
+        from binance_state import PublicBinanceState
+        epm=PublicPmState(full_columns);emarket=PublicMarketState(epm,full_columns)
+        ereference=PublicReferenceState(emarket,full_columns);ebinance=PublicBinanceState(epm,full_columns)
+        history=SourceHistoryInputs(epm,emarket,ereference,full_columns,identity_registry=material.history.registry)
+        encoder=MarketInputs100ms(epm,emarket,ereference,ebinance,history,rule,full_columns,epm.causal_visible_at)
+        pm,market,reference,binance=epm,emarket,ereference,ebinance
     if two:
         assert page_changes and hidden_pages
         return verify_two_market_continuous(source,clock,material,models,observations,senders,history_retry,

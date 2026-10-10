@@ -18,7 +18,7 @@ class PublicFactWindow:
     def __init__(self, columns, *, device='cuda', initial_capacity=128):
         if initial_capacity < 1:
             raise ValueError('事实区间资源容量须为正')
-        self.group_count = len(columns['groups'])
+        self.group_count = columns.get('group_count',len(columns['groups']))
         self.types = tuple(columns['fact_types'])
         if len(set(self.types)) != len(self.types):
             raise ValueError('公共事实类型字典重复')
@@ -87,7 +87,7 @@ class PublicTradeWindow:
         if initial_capacity < 1:
             raise ValueError('原成交区间容量须为正')
         self.capacity = initial_capacity
-        self.group_count = len(columns['groups'])
+        self.group_count = columns.get('group_count',len(columns['groups']))
         self.asset_count = len(columns['assets'])
         previous = -1
         for group,asset,price,qp,q,side,fp,fee,sp,_,_ in columns['raw_trades']:

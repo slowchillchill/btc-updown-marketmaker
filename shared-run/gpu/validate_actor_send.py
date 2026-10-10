@@ -17,7 +17,7 @@ from scheduling import ScheduledTime
 from core import EvidenceBank
 from market_economics import UnresolvedMarkets
 from queues import Numbers
-from public_device_page import PreparedPublicPage,build_public_device_page
+from public_device_page import PreparedPublicPage,build_public_device_page,build_public_device_blocks
 from hidden_device_page import PreparedHiddenMaterial,build_hidden_device_columns
 from validate_joint_freeze import install_opening
 from registry import FrozenIntentOrders,PublicCancellationState
@@ -58,9 +58,13 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
     assert all(next(iter(p['item']['order']['kind'])) in ('GtcLimit','FokMarket') for p in source['posts'])
     assert not source['opening_ledger']['resolutions'] and not source['opening_ledger']['settlement_costs']
     compact=artifact/'public-compact';page=artifact/'public-page'
-    build_public_device_page(os.environ['B_GPU_COLUMNS_BINARY'],compact,page)
-    prepared=PreparedPublicPage(page,compact);pm,market,reference,binance=prepared.install()
-    public_source=PublicGroupSource(prepared,1,page_groups=3 if source.get('continuous_two_markets') else 2)
+    if os.environ.get('B_GPU_PUBLIC_BLOCKS'):
+        prepared=build_public_device_blocks(os.environ['B_GPU_COLUMNS_BINARY'],compact,page,groups_per_block=2)
+    else:
+        build_public_device_page(os.environ['B_GPU_COLUMNS_BINARY'],compact,page)
+        prepared=PreparedPublicPage(page,compact)
+    pm,market,reference,binance=prepared.install()
+    public_source=PublicGroupSource(prepared,1,page_groups=3 if source.get('continuous_two_markets') else 2,observation_inputs=continuous is not None)
     hidden_source=source['bounded_hidden']
     assets=hidden_source['assets'];tokens=[asset['token_id'] for asset in assets]
     block=HiddenPmBlock(assets,[(tokens[a],side.upper().removesuffix('S'),_decimal(price)) for a,side,price in slots],

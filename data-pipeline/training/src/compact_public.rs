@@ -223,7 +223,7 @@ pub struct CompactPublicationProgressV1<'a> {
 fn file_sha256(path: &Path) -> io::Result<String> {
     file_sha256_with_progress(path, Duration::from_secs(10), |_, _| {})
 }
-pub(crate) fn file_sha256_with_progress(
+pub fn file_sha256_with_progress(
     path: &Path, interval: Duration, mut progress: impl FnMut(u64, u64),
 ) -> io::Result<String> {
     let mut file = File::open(path)?;
@@ -1227,6 +1227,11 @@ mod tests {
                 .arg("--material").arg(&target).arg("--output").arg(temp.path().join("report.json"))
                 .status().unwrap();
             assert!(status.success());
+            if !metadata && let Ok(validator)=std::env::var("B_GPU_PUBLIC_ZERO_BLOCK_VALIDATOR") {
+                let status=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+                    .arg(validator).arg(&target).status().unwrap();
+                assert!(status.success());
+            }
         }
     }
 
