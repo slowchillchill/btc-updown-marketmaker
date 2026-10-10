@@ -430,8 +430,16 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         pm,market,reference,binance=epm,emarket,ereference,ebinance
     if two:
         assert page_changes and hidden_pages
-        return verify_two_market_continuous(source,clock,material,models,observations,senders,history_retry,
+        result=verify_two_market_continuous(source,clock,material,models,observations,senders,history_retry,
             history,encoder,random,evidence,started,artifact,stage,end_retry,release_calls)
+        import shutil
+        registry=material.history.registry
+        result['source_identity_index']={'entries':registry.identity_count,'disk_bytes':registry.path.stat().st_size,
+            'shared_across_current_next_market':history.registry is registry,'cache_hint_kib':2048}
+        shutil.copyfile(registry.path,artifact/'source-identities.sqlite3')
+        registry.close()
+        (artifact/'two-market-report.json').write_text(json.dumps(result,indent=2))
+        return result
     assert [int(o.frozen.cutoff.cpu()[0]) for o in observations]==[1300,1400,1500,1600,1700,1800,1900]
     assert page_changes>=1 and continuations>=1
     assert bound==[1300,1400,1500,1600,1700,1800]

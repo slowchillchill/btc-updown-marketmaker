@@ -1,6 +1,10 @@
 """按完整公共组接纳的Native history16及窗口路径；纯计算后由协调器提交。"""
 from dataclasses import dataclass
 import json
+import sqlite3
+import tempfile
+from pathlib import Path
+from contextlib import contextmanager
 import torch
 from prepare import _numbers
 from public_state import _take
@@ -20,9 +24,44 @@ def _join(values, dim, shapes):
 
 class SourceIdentityRegistry:
     """跨材料块复用的冷身份表；完整原DirectObservationAnchor向量决定等价性。"""
-    def __init__(self):
-        self.identities = {}
+    def __init__(self, *, directory=None):
+        # 运行所属临时目录；训练环境TMPDIR指向数据盘。不跨运行复用或恢复。
+        self._directory = tempfile.TemporaryDirectory(prefix='source-identities-',dir=directory)
+        self.path = Path(self._directory.name)/'identities.sqlite3'
+        self._connection = self._connect()
+        self._connection.execute('CREATE TABLE identities (id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE)')
         self.markets = {}
+
+    def _connect(self):
+        connection = sqlite3.connect(self.path,isolation_level=None,cached_statements=4)
+        connection.execute('PRAGMA cache_size=-2048')
+        return connection
+
+    @contextmanager
+    def binding(self):
+        """当前块冷绑定的一个事务；不将键列表留到下一块。"""
+        self._connection.execute('BEGIN')
+        try:
+            yield self
+        except BaseException:
+            self._connection.rollback()
+            raise
+        else:
+            self._connection.commit()
+
+    @property
+    def identity_count(self):
+        return self._connection.execute('SELECT count(*) FROM identities').fetchone()[0]
+
+    def close(self):
+        connection=getattr(self,'_connection',None)
+        if connection is not None:
+            connection.close();self._connection=None
+        directory=getattr(self,'_directory',None)
+        if directory is not None:directory.cleanup()
+
+    def __del__(self):
+        self.close()
 
     def market_id(self, market):
         key = json.dumps(market,sort_keys=True,separators=(',',':'))
@@ -35,8 +74,8 @@ class SourceIdentityRegistry:
                     for a in (anchors[index] for index in members)]
         if not identity: return 0
         key = json.dumps(identity,sort_keys=True,separators=(',',':'))
-        if key not in self.identities: self.identities[key] = len(self.identities)+1
-        return self.identities[key]
+        self._connection.execute('INSERT INTO identities(key) VALUES(?) ON CONFLICT(key) DO NOTHING',(key,))
+        return self._connection.execute('SELECT id FROM identities WHERE key=?',(key,)).fetchone()[0]
 
 
 @dataclass(frozen=True)
@@ -72,11 +111,12 @@ class SourceHistoryInputs:
         device = shared.slots.device
         self.market_ids = torch.tensor([self.registry.market_id(market) for market in columns['markets']],
                                        dtype=torch.int64,device=device)
-        self.bba_identity = torch.tensor([self.registry.register(shared.anchors,columns['anchor_sets'][row[6]],
-            'best_bid_ask') for row in columns['bba_values']],dtype=torch.int64,device=device)
-        self.reference_identity = torch.tensor([self.registry.register(shared.anchors,columns['anchor_sets'][row[1]],
-            ('chainlink_spot' if row[3]==0 else 'chainlink_twap_thirty' if row[3]==30 else 'chainlink_twap_sixty'))
-            for row in columns['reference_values']],dtype=torch.int64,device=device)
+        with self.registry.binding():
+            self.bba_identity = torch.tensor([self.registry.register(shared.anchors,columns['anchor_sets'][row[6]],
+                'best_bid_ask') for row in columns['bba_values']],dtype=torch.int64,device=device)
+            self.reference_identity = torch.tensor([self.registry.register(shared.anchors,columns['anchor_sets'][row[1]],
+                ('chainlink_spot' if row[3]==0 else 'chainlink_twap_thirty' if row[3]==30 else 'chainlink_twap_sixty'))
+                for row in columns['reference_values']],dtype=torch.int64,device=device)
         numbers = _numbers()
         def units():
             source = shared.decimal_columns

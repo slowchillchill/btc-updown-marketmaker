@@ -197,9 +197,9 @@ def validate_valuation(args,root):
 
 def validate_public_blocks(args,columns,states,destination):
     """同一原Core材料跨完整组块；旧整页仅作有限独立调度对照。"""
-    import shutil,resource
+    import shutil,resource,tracemalloc
     from public_device_page import build_public_device_blocks,PreparedPublicPage,PreparedPublicBlocks
-    from input_history import SourceHistoryInputs
+    from input_history import SourceHistoryInputs,SourceIdentityRegistry
     from input_100ms import MarketInputs100ms
     from model_train.continuous_inputs import ContinuousActorInputs
     from input_events import EventInputs
@@ -213,10 +213,11 @@ def validate_public_blocks(args,columns,states,destination):
     if args.original_reference:shutil.copyfile(args.original_reference,destination/'original-reference.json')
     started=time.perf_counter();blocks=build_public_device_blocks(args.binary,material,destination/'blocks',groups_per_block=2)
     pm,market,reference,binance=states
-    registry=SourceHistoryInputs(pm,market,reference,columns).registry
+    registry=SourceIdentityRegistry(directory=destination)
+    assert registry.identity_count==0
     indices=torch.tensor([0],device='cuda');start=market.times[:1,0]-30000
-    expected_history=SourceHistoryInputs(pm,market,reference,columns,identity_registry=registry)
-    memory=expected_history.empty(1,start);segments=[];checked=0
+    memory=None;segments=[];checked=0;binding_seconds=0.
+    tracemalloc.start()
     for index,entry in enumerate(blocks.parts):
         page=blocks.load(index);current=page.install();cp,cm,cr,cb=current
         groups=torch.arange(entry['group_begin'],entry['group_end'],device='cuda')
@@ -238,12 +239,32 @@ def validate_public_blocks(args,columns,states,destination):
         for r in range(len(groups)):
             for target in range(len(cp.assets)):
                 assert Fraction(page.columns['decimals'][int(av.price_ids[r,target])])==Fraction(columns['decimals'][int(ev.price_ids[r,target])])
+        binding_start=time.perf_counter()
         history=SourceHistoryInputs(cp,cm,cr,page.columns,identity_registry=registry)
+        binding_seconds+=time.perf_counter()-binding_start
+        if memory is None:memory=history.empty(1,start)
         memory,error=history.consume(groups,now,indices,start,memory)
         assert not error.any().cpu().item()
         segments.append(MarketInputs100ms(cp,cm,cr,cb,history,None,page.columns,now))
         checked+=len(groups)
     frozen=history.freeze(memory)
+    cold_python_live,cold_python_peak=tracemalloc.get_traced_memory();tracemalloc.stop()
+    production_entries=registry.identity_count
+    production_disk_bytes=registry.path.stat().st_size
+    # 完整真实多anchor向量及旧引用；完成生产空表多块阶段后才引入整页参考。
+    members=next(members for members in columns['anchor_sets'] if len(members)>1)
+    oldest=next(columns['anchor_sets'][row[6]] for row in columns['bba_values'] if len(columns['anchor_sets'][row[6]]))
+    older=registry.register(columns['anchors'],oldest,'best_bid_ask')
+    count_before=registry.identity_count
+    multi=registry.register(columns['anchors'],members,'best_bid_ask')
+    assert registry.register(columns['anchors'],list(members),'best_bid_ask')==multi
+    assert registry.register(columns['anchors'],list(reversed(members)),'best_bid_ask')!=multi
+    assert registry.register(columns['anchors'],members[:1],'best_bid_ask')!=multi
+    # 关闭原连接释放所有SQLite页/语句缓存，同运行同数据库冷重开；不是重建编号。
+    registry._connection.close();registry._connection=registry._connect()
+    assert registry.register(columns['anchors'],oldest,'best_bid_ask')==older
+    assert registry.register(columns['anchors'],members,'best_bid_ask')==multi
+    expected_history=SourceHistoryInputs(pm,market,reference,columns,identity_registry=registry)
     whole,error=expected_history.consume(torch.arange(len(columns['groups']),device='cuda'),pm.causal_visible_at,
         indices,start,expected_history.empty(1,start))
     assert not error.any().cpu().item()
@@ -276,12 +297,22 @@ def validate_public_blocks(args,columns,states,destination):
         else:raise AssertionError('缺失组列被当作合法EOF')
     finally:path.with_suffix('.saved').rename(path)
     report={'groups':checked,'parts':len(blocks.parts),'raw_trades':len(columns['raw_trades']),
-        'history_samples':frozen.memory.counts.cpu().tolist(),'global_prefix_and_previous_selected_projection':True,
+        'history_samples':frozen.memory.counts.cpu().tolist(),
+        'source_identity_index':{'empty_before_first_block':True,'production_entries':production_entries,
+            'production_disk_bytes':production_disk_bytes,'block_history_construction_seconds':binding_seconds,
+            'python_traced_cold_live_bytes':cold_python_live,'python_traced_cold_peak_bytes':cold_python_peak,
+            'cache_hint_kib':2048,'same_ordered_multi_anchor_key_same_id':True,
+            'reversed_or_truncated_multi_anchor_key_distinct':True,'old_id_after_connection_cache_release':older,
+            'full_reference_created_after_production_blocks':True,
+            'scope':'47group finite cold loop with24pending unobserved segments and semantic queries; excludes SQLite C/Torch/OS cache; cache2MiB is physical initial hint, not tuned or15day bound'},
+        'global_prefix_and_previous_selected_projection':True,
         'old_twap_and_native_window_vs_original_full_page':True,'last_child_rejected_as_whole':True,
         'missing_group_member_rejected':True,'device':'cuda','seconds':time.perf_counter()-started,
         'max_rss_kib':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'resource_scope':'finite original Core validation plus full reference, all pending unobserved window segments; not production15days'}
+    shutil.copyfile(registry.path,destination/'source-identities.sqlite3')
+    registry.close()
     (destination/'report.json').write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps({'public_blocks':report}),flush=True)
     return report
