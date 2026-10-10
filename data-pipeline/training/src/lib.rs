@@ -5,6 +5,9 @@
 
 pub mod canonical_run;
 pub mod compact_public;
+mod day_order;
+pub mod day_producer;
+pub mod day_stream;
 mod dpt_gate_a_cli;
 pub mod finite_recording;
 pub mod finite_source_progress;
@@ -16,6 +19,7 @@ pub mod hidden_preparation;
 pub mod compact_hidden;
 pub mod compact_hidden_material;
 pub mod compact_hidden_gpu;
+pub mod hidden_stream;
 pub mod historical_initialization;
 pub mod historical_preparation_progress;
 pub mod observation;

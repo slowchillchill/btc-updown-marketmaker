@@ -89,25 +89,32 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
 #[tokio::test(flavor="current_thread")]
 #[ignore="AutoDL真实紧凑TWAP/空Book/Terminal→一次原Resolved与后继Lifecycle"]
 async fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_effects() {
-    gpu_hidden_terminal_source(false,false).await;
+    gpu_hidden_terminal_source(false,false,false).await;
 }
 
 #[cfg(feature="shared-execution")]
 #[tokio::test(flavor="current_thread")]
 #[ignore="AutoDL真实空Book→外层GTC挂单→Terminal市场关闭/释放→同NOE/Ledger"]
 async fn gpu_compact_hidden_terminal_closes_real_resting_gtc_and_releases_once() {
-    gpu_hidden_terminal_source(true,false).await;
+    gpu_hidden_terminal_source(true,false,false).await;
 }
 
 #[cfg(feature="shared-execution")]
 #[tokio::test(flavor="current_thread")]
 #[ignore="AutoDL真实Maker→Terminal→实际最终性关闭请求前驱"]
 async fn gpu_compact_hidden_terminal_keeps_actual_maker_pending_until_terminal() {
-    gpu_hidden_terminal_source(true,true).await;
+    gpu_hidden_terminal_source(true,true,false).await;
 }
 
 #[cfg(feature="shared-execution")]
-async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
+#[tokio::test(flavor="current_thread")]
+#[ignore="AutoDL真实无初始Book的Terminal→原Resolved/NOE/Ledger"]
+async fn gpu_compact_hidden_terminal_without_initial_books_resolves_once() {
+    gpu_hidden_terminal_source(false,false,true).await;
+}
+
+#[cfg(feature="shared-execution")]
+async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, without_initial_books: bool) {
     use data_pipeline_training::{compact_public::{PublicCompactWriterV1, CompactFactPayloadV1},
         compact_hidden_material::{prepare_compact_hidden_material_v1, CompactHiddenMaterialReaderV1},
         compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1, gpu_initial_sort::GpuInitialRunOrderV1};
@@ -145,6 +152,13 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
         inputs.insert(7,pm(7,4,27000,delta("0")));
     }
     inputs.push(end(if with_pending {10} else {8}));
+    if without_initial_books {
+        assert!(!with_order && !with_pending);
+        inputs.drain(4..6);
+        for (position,input) in inputs.iter_mut().enumerate() {
+            input.input_position = position as u64;
+        }
+    }
     for input in inputs {
         let prepared = prepare_public_ingress_v1(&public, &input, &BTreeMap::new(), &[]).unwrap();
         let applied = public.push_facts(&prepared).unwrap();
@@ -187,7 +201,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
         }
         buckets.push(bucket);
     }
-    assert_eq!(buckets.iter().map(|b| b.bucket.bucket_time_utc_ms).collect::<Vec<_>>(), if with_pending {vec![21000,22000,26000,27000,31000]} else {vec![21000,22000,31000]});
+    assert_eq!(buckets.iter().map(|b| b.bucket.bucket_time_utc_ms).collect::<Vec<_>>(), if without_initial_books {vec![21000,31000]} else if with_pending {vec![21000,22000,26000,27000,31000]} else {vec![21000,22000,31000]});
     assert_eq!(buckets[0].references.len(), 2);
     assert!(buckets[0].steps.is_empty());
     assert!(buckets[0].references.iter().all(|r| matches!(r.payload,
@@ -490,7 +504,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
                 "paired_receivable":r.paired_receivable_pusd,"orphan_receivable":r.winner_orphan_receivable_pusd})).collect::<Vec<_>>()}));
 
     }
-    let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,"with_pending":with_pending,
+    let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,"with_pending":with_pending,"without_initial_books":without_initial_books,
         "settlement_reference":settlement_reference,"settlement_success_reference":settlement_success_reference,
         "with_query":with_query,"settlement_query_reference":settlement_query_reference,
         "engineering_finality_path":finality_path,"maker_checkpoints":maker_checkpoints,"finality_reference":finality_reference,

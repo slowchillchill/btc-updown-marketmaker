@@ -142,11 +142,44 @@ fn phase_progress_preserves_full_material_statistics_and_reconciles_consecutive_
         1 << 20,
     )
     .unwrap();
-    let mut records = 0;
+    let mut logical_records = 0_u64;
     while reader.next_row().unwrap().is_some() {
-        records += 1;
+        logical_records += 1;
     }
-    assert_eq!(work["hidden_records_read"], records);
+    // 隐藏扫描读取紧凑物理行；公共读取会展开 GroupObservationRange。
+    // 用原 Parquet footer 独立核对物理数量，不复用隐藏扫描的计数实现。
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    let mut physical_records = 0_u64;
+    for entry in std::fs::read_dir(&on.prepared.public_root).unwrap() {
+        let segment = entry.unwrap().path();
+        if !segment
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("stable-")
+        {
+            continue;
+        }
+        let manifest = segment.join("captured.parts.json");
+        let parts = if manifest.exists() {
+            serde_json::from_reader::<_, data_pipeline_training::SortedRun>(
+                std::fs::File::open(manifest).unwrap(),
+            )
+            .unwrap()
+            .parts
+        } else {
+            vec!["captured.parquet".into()]
+        };
+        for part in parts {
+            let parquet =
+                SerializedFileReader::new(std::fs::File::open(segment.join(part)).unwrap())
+                    .unwrap();
+            physical_records +=
+                u64::try_from(parquet.metadata().file_metadata().num_rows()).unwrap();
+        }
+    }
+    assert!(logical_records > physical_records, "夹具实际覆盖紧凑行展开");
+    assert_eq!(work["hidden_records_read"], physical_records);
     let wall_sum = phases
         .iter()
         .map(|p| p["measurement"]["wall_seconds"].as_f64().unwrap())

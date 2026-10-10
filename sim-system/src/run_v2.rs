@@ -100,25 +100,28 @@ pub enum SessionInitializationControlResultV2 {
     ExistingFailedClosed,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum SessionInitializationV2 {
     PreparedLedgerInit,
     Active { activation_id: String },
     InitializationFailedClosed { failure_id: String },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 struct MutationActionKeyV2 {
     effective_processing_at_utc_ms: i64,
     input_sequence: u64,
     batch_item_ordinal: u16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 enum MutationActionV2 {
     PostItem {
         global_request_id: String,
         item: PostOrderItemV1,
+        #[serde(with = "checkpoint_gtd_normalization")]
         normalized_gtd_expires_at_utc_ms: Option<Option<i64>>,
     },
     CancelTarget {
@@ -150,7 +153,36 @@ enum MutationActionV2 {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// 私有在途状态中的“尚未规范化”与“已规范化且无 GTD”必须分别恢复。
+// 原请求、执行日志和公共 Option 表示不使用此编码。
+mod checkpoint_gtd_normalization {
+    use serde::{Deserialize, Serialize};
+    #[derive(Serialize, Deserialize)]
+    enum Saved {
+        Missing,
+        Present(Option<i64>),
+    }
+    pub fn serialize<S: serde::Serializer>(
+        value: &Option<Option<i64>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            None => Saved::Missing,
+            Some(value) => Saved::Present(*value),
+        }
+        .serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Option<i64>>, D::Error> {
+        Ok(match Saved::deserialize(deserializer)? {
+            Saved::Missing => None,
+            Saved::Present(value) => Some(value),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum MutationMethodV2 {
     PostOrder,
     PostOrders,
@@ -216,20 +248,20 @@ enum MutationActionBusinessEffect<R> {
     Query(Arc<QueryActionBusinessEffectV2>),
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum QueryActionResultV2 {
     Order(OrderQueryResultV2),
     Orders(OrdersQueryResultV2),
     Trades(TradesQueryResultV2),
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct QueryActionBusinessEffectV2 {
     effective_processing_at_utc_ms: i64,
     result: QueryActionResultV2,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum DirectResponsePayloadDraft<R> {
     PostOrder(Arc<PostOrderItemBusinessEffectV2>),
     PostOrders(Vec<Arc<PostOrderItemBusinessEffectV2>>),
@@ -242,7 +274,7 @@ enum DirectResponsePayloadDraft<R> {
     Trades(Arc<QueryActionBusinessEffectV2>),
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct DirectResponseDraft<R> {
     global_request_id: String,
     caller_correlation_id: Option<String>,
@@ -252,7 +284,7 @@ struct DirectResponseDraft<R> {
     payload: DirectResponsePayloadDraft<R>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum StoredDirectResponse<R> {
     Draft(DirectResponseDraft<R>),
     Final(BusinessDirectResponse<R>),
@@ -270,7 +302,7 @@ impl<R> std::ops::Deref for StoredDirectResponse<R> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BusinessDirectResponse<R> {
     PostOrder(PostOrderDirectResponseV2),
     PostOrders(PostOrdersDirectResponseV2),
@@ -283,7 +315,7 @@ pub enum BusinessDirectResponse<R> {
     Trades(TradesDirectResponseV2),
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BusinessProjectionBatch<T, R = CancelNotCanceledReasonV2> {
     pub initial_markets: Vec<contracts::economics::SourceNeutralInitialMarketV1>,
     pub run_id: String,
@@ -313,7 +345,7 @@ pub type BusinessProjectionBatchV4 = BusinessProjectionBatch<
     contracts::TradeLifecycleFeedbackV3,
     contracts::CancelNotCanceledReasonV3,
 >;
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum BusinessProjectionBatchPayloadV1 {
     V2(Arc<BusinessProjectionBatchV2>),
     V3(Arc<BusinessProjectionBatchV3>),
@@ -453,6 +485,11 @@ fn legacy_direct_responses(
         .collect()
 }
 pub trait BusinessProjectionPortV2 {
+    /// 仅保存当前模块状态；旧端口没有日作业恢复状态。
+    fn checkpoint_state(&self) -> Result<Option<Vec<u8>>, noe_projection::MemoryNoeErrorV1> {
+        Ok(None)
+    }
+
     fn uses_background_normalization(&self) -> bool {
         false
     }
@@ -483,6 +520,7 @@ pub trait BusinessProjectionPortV2 {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct PendingProjectionBatchV2 {
     batch: Arc<BusinessProjectionBatchPayloadV1>,
 
@@ -496,7 +534,7 @@ pub(crate) struct MutationActionTransitionEffectsV2 {
     completed_response: Option<Arc<StoredDirectResponseV3>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct MutationRequestRecordV2 {
     method: MutationMethodV2,
     caller_correlation_id: Option<String>,
@@ -512,13 +550,13 @@ struct MutationRequestRecordV2 {
     completed_response: Option<Arc<StoredDirectResponseV3>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct MutationRequestStateV2 {
     requests_by_id: BTreeMap<String, MutationRequestRecordV2>,
     pending_actions: BTreeMap<MutationActionKeyV2, MutationActionV2>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 struct OrdersQueryKeyV2 {
     condition_id: Option<String>,
     token_id: Option<String>,
@@ -536,7 +574,7 @@ impl From<&OrdersFilterV1> for OrdersQueryKeyV2 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 struct TradesQueryKeyV2 {
     trade_id: Option<String>,
     condition_id: Option<String>,
@@ -560,7 +598,7 @@ impl From<&TradesFilterV1> for TradesQueryKeyV2 {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct QueryStateV2 {
     current_revision: u64,
     earliest_retained_root_sequence: u64,
@@ -681,7 +719,7 @@ fn trades_page_from_root_v2(
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MutationRequestReceiptV2 {
     input_sequence: u64,
     platform_arrived_at_utc_ms: i64,
@@ -705,7 +743,7 @@ impl MutationRequestReceiptV2 {
 type PostOrderItemBusinessEffectV2 = SubmissionResponseItemV2;
 type PostOrderItemOutcomeV2 = SubmissionItemOutcomeV2;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct LogicalPathFrontierV2 {
     closed_through_utc_ms: Option<i64>,
     next_index_position: u64,
@@ -713,7 +751,7 @@ struct LogicalPathFrontierV2 {
     sealed: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct UniqueSessionStateV2 {
     opening_fact: Arc<AccountOpeningFactV2>,
     response_bridge_binding_id: String,
@@ -732,7 +770,7 @@ struct UniqueSessionStateV2 {
     public_visibility_frontier: LogicalPathFrontierV2,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct MarketEnrollmentStateV2 {
     records: Vec<MarketEnrollmentV2>,
     records_by_request_id: BTreeMap<String, usize>,
@@ -741,7 +779,7 @@ struct MarketEnrollmentStateV2 {
     paper_candidate_token_ids: BTreeSet<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct BusinessReducerStateV2 {
     session: Option<UniqueSessionStateV2>,
 
@@ -2493,6 +2531,12 @@ where
     ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
 {
     Ok(match input {
+        LoggedBusinessInputV2::DayPublicGroup(_)
+        | LoggedBusinessInputV2::DayHiddenStepBucket(_) => {
+            return Err(SimRunActorErrorV2::CompletionNotReady(
+                "历史日紧凑记录需要原输入和同版本公共模块重建",
+            ));
+        }
         LoggedBusinessInputV2::CancelScenario(operation) => {
             BusinessInputV2::CancelScenario(operation)
         }
@@ -2904,6 +2948,30 @@ impl SimRunActorV2 {
         projection_port: Box<dyn BusinessProjectionPortV2>,
         max_group_bytes: usize,
     ) -> Result<Self, SimRunActorErrorV2> {
+        Self::create_new_with_day_binding(
+            path,
+            opened,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            projection_port,
+            max_group_bytes,
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn create_new_with_day_binding(
+        path: &Path,
+        opened: RunOpenedV2,
+        rule_snapshot: Arc<SealedProcessRuleSnapshotV3>,
+        finality_policy: Arc<TradeFinalityPolicyV2>,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        latency_profile: Arc<EmpiricalDelayProfile>,
+        projection_port: Box<dyn BusinessProjectionPortV2>,
+        max_group_bytes: usize,
+        day_binding: Option<crate::public_consumption::HistoricalDayLogBindingV1>,
+    ) -> Result<Self, SimRunActorErrorV2> {
         validate_run_dependencies_v2(
             &opened,
             &rule_snapshot,
@@ -2911,8 +2979,13 @@ impl SimRunActorV2 {
             &scenario,
             &latency_profile,
         )?;
-        let log = SimEventLogV2::create(path, &opened, max_group_bytes)
-            .map_err(SimRunActorErrorV2::Log)?;
+        let log = match day_binding {
+            Some(binding) => {
+                SimEventLogV2::create_historical_day(path, &opened, max_group_bytes, binding)
+            }
+            None => SimEventLogV2::create(path, &opened, max_group_bytes),
+        }
+        .map_err(SimRunActorErrorV2::Log)?;
         #[cfg(feature = "measurement")]
         let measurement_probe = log.measurement_probe();
         Ok(Self {
@@ -5623,9 +5696,9 @@ pub(crate) fn drive_business_input_at_v2(
             finality_policy,
         } => (
             MarketEventPathV1::HiddenPlatform,
-            bucket.reference.bucket_time_utc_ms,
-            bucket.reference.index_end,
-            Some(bucket.reference.index_start),
+            bucket.reference.bucket_time_utc_ms(),
+            bucket.reference.index_end(),
+            Some(bucket.reference.index_start()),
             None,
             rules,
             finality_policy,
@@ -5753,11 +5826,11 @@ pub(crate) fn drive_business_input_at_v2(
         start_index_position.is_some_and(|start| start < frontier.next_index_position)
     } else if let Some(hidden) = hidden_bucket {
         start_index_position.is_some_and(|start| start < frontier.next_index_position)
-            || next_index_position < hidden.reference.index_start
+            || next_index_position < hidden.reference.index_start()
             || frontier
                 .next_event_at_utc_ms
                 .is_some_and(|expected| logical_at_utc_ms != expected)
-            || matches!(hidden.reference.closure, contracts::ReplayIndexClosureV1::NextGlobalEventAt(next_at) if next_at <= logical_at_utc_ms)
+            || matches!(hidden.reference.closure(), contracts::ReplayIndexClosureV1::NextGlobalEventAt(next_at) if next_at <= logical_at_utc_ms)
     } else if public_closure.is_some() || public_observation.is_some() {
         false
     } else if let Some(bucket) = &bucket {
@@ -5923,7 +5996,7 @@ pub(crate) fn drive_business_input_at_v2(
                 })?,
             );
         }
-        if hidden.reference.closure == contracts::ReplayIndexClosureV1::EndOfInput
+        if hidden.reference.closure() == contracts::ReplayIndexClosureV1::EndOfInput
             && caller_role != SimCallerRoleV1::HistoricalBacktest
         {
             state
@@ -5988,7 +6061,7 @@ pub(crate) fn drive_business_input_at_v2(
     let successful_execution_eof = successful_execution_eof
         || (drives_execution
             && hidden_bucket.is_some_and(|b| {
-                b.reference.closure == contracts::ReplayIndexClosureV1::EndOfInput
+                b.reference.closure() == contracts::ReplayIndexClosureV1::EndOfInput
             }));
     if successful_execution_eof && caller_role != SimCallerRoleV1::HistoricalBacktest {
         while let Some(next_at) = next_scheduled_obligation_at_v2(&state, rules) {
@@ -6023,7 +6096,7 @@ pub(crate) fn drive_business_input_at_v2(
         }
     }
     if let Some(hidden) = hidden_bucket {
-        match hidden.reference.closure {
+        match hidden.reference.closure() {
             contracts::ReplayIndexClosureV1::NextGlobalEventAt(at) => {
                 frontier.next_event_at_utc_ms = Some(at)
             }
@@ -8027,6 +8100,54 @@ mod tests {
                 token_id: token_id.clone(),
                 kind,
             },
+        }
+    }
+
+    #[test]
+    fn checkpoint_post_action_preserves_original_gtd_normalization_states() {
+        let market = market('1', "1", "2", "3");
+        for (expires, expected) in [
+            (None, None),
+            (Some(2000), Some(None)),
+            (Some(100_000), Some(Some(100_000))),
+        ] {
+            let kind = match expires {
+                None => SimBuyOrderKindV1::GtcLimit {
+                    limit_price_pusd_per_share: "0.2".parse().unwrap(),
+                    size_shares: "5".parse().unwrap(),
+                    post_only: false,
+                },
+                Some(expires_at_utc_ms) => SimBuyOrderKindV1::GtdLimit {
+                    limit_price_pusd_per_share: "0.2".parse().unwrap(),
+                    size_shares: "5".parse().unwrap(),
+                    post_only: false,
+                    expires_at_utc_ms,
+                },
+            };
+            // 使用原规范化函数构造已调度状态：非GTD、无效GTD、有效GTD。
+            let normalized = expires.map(|at| normalize_gtd_expiration(at, 2000, 60, 0).unwrap());
+            assert_eq!(normalized, expected);
+            let action = MutationActionV2::PostItem {
+                global_request_id: "checkpoint-gtd".into(),
+                item: post_item(
+                    "item",
+                    &market.market().condition_id,
+                    &market.assets()[0].token_id,
+                    kind,
+                ),
+                normalized_gtd_expires_at_utc_ms: normalized,
+            };
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&action, &mut bytes).unwrap();
+            let restored: MutationActionV2 = ciborium::from_reader(bytes.as_slice()).unwrap();
+            let MutationActionV2::PostItem {
+                normalized_gtd_expires_at_utc_ms,
+                ..
+            } = restored
+            else {
+                panic!("原PostItem必须恢复")
+            };
+            assert_eq!(normalized_gtd_expires_at_utc_ms, expected);
         }
     }
 
@@ -19391,6 +19512,7 @@ impl PublicSimExecutionV1 {
             max_group_bytes,
             finite_in_flight_groups,
             RunDurabilityRoleV2::CleanRun,
+            None,
         )
     }
     /// 真实有限历史运行记录；不能调用 complete 冒充完整经济终局。
@@ -19417,6 +19539,35 @@ impl PublicSimExecutionV1 {
             max_group_bytes,
             finite_in_flight_groups,
             RunDurabilityRoleV2::FiniteHistorical,
+            None,
+        )
+    }
+    /// 原Parquet日入口的必要记录；普通历史/PAPER保持旧布局。
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_new_historical_day(
+        path: &Path,
+        opened: PublicRunOpenedV1,
+        rules: Arc<SealedProcessRuleSnapshotV3>,
+        finality: Arc<TradeFinalityPolicyV2>,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        latency: Arc<EmpiricalDelayProfile>,
+        projection: Box<dyn PublicProjectionPortV1>,
+        max_group_bytes: usize,
+        finite_in_flight_groups: usize,
+        binding: crate::public_consumption::HistoricalDayLogBindingV1,
+    ) -> Result<Self, SimRunActorErrorV2> {
+        Self::create_new_with_role(
+            path,
+            opened,
+            rules,
+            finality,
+            scenario,
+            latency,
+            projection,
+            max_group_bytes,
+            finite_in_flight_groups,
+            RunDurabilityRoleV2::FiniteHistorical,
+            Some(binding),
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -19431,10 +19582,11 @@ impl PublicSimExecutionV1 {
         max_group_bytes: usize,
         finite_in_flight_groups: usize,
         role: RunDurabilityRoleV2,
+        day_binding: Option<crate::public_consumption::HistoricalDayLogBindingV1>,
     ) -> Result<Self, SimRunActorErrorV2> {
         let mut record = opened.into_record();
         record.durability_role = role;
-        let mut actor = SimRunActorV2::create_new(
+        let mut actor = SimRunActorV2::create_new_with_day_binding(
             path,
             record,
             rules,
@@ -19443,6 +19595,7 @@ impl PublicSimExecutionV1 {
             latency,
             Box::new(PublicProjectionAdapterV1(projection)),
             max_group_bytes,
+            day_binding,
         )?;
         let log = actor.log.take().expect("新建运行唯一日志");
         actor.background_log = Some(BackgroundEventLogV1::start(log, finite_in_flight_groups));
@@ -19629,7 +19782,7 @@ impl PublicSimExecutionV1 {
     ) -> Result<(), SimRunActorErrorV2> {
         while let Some(required) = self.actor.next_required_logical_drive() {
             if required.path != MarketEventPathV1::HiddenPlatform
-                || required.required_at_utc_ms >= bucket.reference.bucket_time_utc_ms
+                || required.required_at_utc_ms >= bucket.reference.bucket_time_utc_ms()
             {
                 break;
             }
@@ -19756,6 +19909,17 @@ impl PublicConsumptionStateV1 {
     }
     pub fn wait_for_recording_capacity(&mut self) -> Result<(), SimRunActorErrorV2> {
         self.execution.wait_for_recording_capacity()
+    }
+    /// 有限宿主逐次等待原日志交接；不推进业务时间，不重试已成功步骤。
+    /// 重启后由同一有限宿主重新启用，线程调度策略不进入业务恢复状态。
+    pub fn enable_finite_recording_wait(&mut self) -> Result<(), SimRunActorErrorV2> {
+        self.execution
+            .actor
+            .background_log
+            .as_mut()
+            .ok_or(SimRunActorErrorV2::Closed)?
+            .enable_finite_recording_wait();
+        Ok(())
     }
     pub fn stabilize_recording(&mut self) -> Result<(), SimRunActorErrorV2> {
         self.execution.stabilize_recording()
@@ -20005,6 +20169,7 @@ pub struct FinitePublicConsumptionV1<
 > {
     state: PublicConsumptionStateV1,
     source: std::iter::Peekable<I>,
+    source_peeked: bool,
     source_failure: Option<String>,
 }
 impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>> std::ops::Deref
@@ -20033,6 +20198,7 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         Self {
             state: PublicConsumptionStateV1::new(execution, consumption_sequence_ref),
             source: source.peekable(),
+            source_peeked: false,
             source_failure: None,
         }
     }
@@ -20044,6 +20210,7 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         if let Some(message) = &self.source_failure {
             return Err(SimRunActorErrorV2::PublicConsumptionSource(message.clone()));
         }
+        self.source_peeked = true;
         let next_time = match self.source.peek() {
             Some(Ok(item)) => Some(item.delivered_at_utc_ms),
             Some(Err(error)) => {
@@ -20205,6 +20372,7 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         );
         let result = self.state.apply_group(prepared, at)?;
         self.source.next();
+        self.source_peeked = false;
         Ok(Some(result))
     }
     /// 有限宿主在明确范围尾部结束公开供料；不生成市场终态或 CleanRun。
@@ -20496,7 +20664,7 @@ fn reduce_hidden_step_bucket_v1(
         let (next, applied) = reduce_normalized_market_slice_v1(
             state,
             MarketEventPathV1::HiddenPlatform,
-            bucket.reference.bucket_time_utc_ms,
+            bucket.reference.bucket_time_utc_ms(),
             &[header],
             &[normalized],
             rules,
@@ -20648,3 +20816,195 @@ impl PublicGroupDecisionV1<'_> {
 
 #[cfg(test)]
 type StoredDirectResponseV2 = StoredDirectResponse<CancelNotCanceledReasonV2>;
+
+/// 有限日作业保存原模块当前状态和原持久位置，不重放日志前缀。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PublicConsumptionCheckpointV1 {
+    opened: RunOpenedV2,
+    log_path: PathBuf,
+    background: crate::event_log::BackgroundCheckpointV1,
+    state: Option<BusinessReducerStateV2>,
+    unstable_market_ends: BTreeSet<i64>,
+    applied_input_sequence: u64,
+    pending_projections: VecDeque<PendingProjectionBatchV2>,
+    noe: Vec<u8>,
+    consumption_sequence_ref: String,
+    last_cutoff: Option<Vec<u8>>,
+    last_prepared: Option<crate::public_consumption::checkpoint::PreparedGroup>,
+    rules: BTreeMap<String, Arc<contracts::PublicTradingRuleContextV1>>,
+    close_pending: bool,
+    drive_position: u64,
+}
+impl PublicConsumptionStateV1 {
+    pub fn write_checkpoint(
+        &mut self,
+        writer: impl std::io::Write,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let actor = &mut self.execution.actor;
+        let background = actor
+            .background_log
+            .as_mut()
+            .ok_or(SimRunActorErrorV2::Closed)?
+            .checkpoint()?;
+        let noe = actor.projection_port.checkpoint_state()?.ok_or(
+            SimRunActorErrorV2::CompletionNotReady("原端口没有日作业恢复表示"),
+        )?;
+        #[derive(serde::Serialize)]
+        struct Saved<'a> {
+            opened: &'a RunOpenedV2,
+            log_path: &'a PathBuf,
+            background: crate::event_log::BackgroundCheckpointV1,
+            state: &'a Option<BusinessReducerStateV2>,
+            unstable_market_ends: &'a BTreeSet<i64>,
+            applied_input_sequence: u64,
+            pending_projections: &'a VecDeque<PendingProjectionBatchV2>,
+            noe: Vec<u8>,
+            consumption_sequence_ref: &'a str,
+            last_cutoff: Option<Vec<u8>>,
+            last_prepared: Option<crate::public_consumption::checkpoint::PreparedGroup>,
+            rules: &'a BTreeMap<String, Arc<contracts::PublicTradingRuleContextV1>>,
+            close_pending: bool,
+            drive_position: u64,
+        }
+        let last_cutoff = self
+            .last_cutoff
+            .as_ref()
+            .map(|c| {
+                let mut bytes = Vec::new();
+                ciborium::ser::into_writer(c, &mut bytes).map(|_| bytes)
+            })
+            .transpose()?;
+        ciborium::ser::into_writer(
+            &Saved {
+                opened: &actor.opened,
+                log_path: &actor.log_path,
+                background,
+                state: &actor.state,
+                unstable_market_ends: &actor.unstable_market_ends,
+                applied_input_sequence: actor.applied_input_sequence,
+                pending_projections: &actor.pending_projections,
+                noe,
+                consumption_sequence_ref: &self.consumption_sequence_ref,
+                last_cutoff,
+                last_prepared: self
+                    .last_prepared
+                    .as_ref()
+                    .map(|g| crate::public_consumption::checkpoint::PreparedGroup::capture(g)),
+                rules: &self.rules,
+                close_pending: self.close_pending,
+                drive_position: self.drive_position,
+            },
+            writer,
+        )?;
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore_checkpoint(
+        reader: impl std::io::Read,
+        rules: Arc<SealedProcessRuleSnapshotV3>,
+        finality: Arc<TradeFinalityPolicyV2>,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        latency: Arc<EmpiricalDelayProfile>,
+        max_group_bytes: usize,
+        finite_in_flight_groups: usize,
+    ) -> Result<(Self, MemoryNoeObservationV4), Box<dyn std::error::Error + Send + Sync>> {
+        let saved: PublicConsumptionCheckpointV1 = ciborium::de::from_reader(reader)?;
+        validate_run_dependencies_v2(&saved.opened, &rules, &finality, &scenario, &latency)?;
+        let port = MemoryNoeProjectionPortV4::restore_checkpoint(saved.noe.as_slice())?;
+        let observation = port.observation();
+        let log = SimEventLogV2::restore_checkpoint(
+            &saved.log_path,
+            &saved.opened,
+            saved.background.log,
+            max_group_bytes,
+        )?;
+        let noe = saved
+            .background
+            .noe
+            .map(|s| noe_projection::BackgroundNoeWriterV1::restore_v4(s, observation.clone()))
+            .transpose()?;
+        let background = BackgroundEventLogV1::restore(
+            log,
+            finite_in_flight_groups,
+            noe,
+            #[cfg(feature = "shared-execution")]
+            saved.background.ledger,
+        )?;
+        let actor = SimRunActorV2 {
+            opened: saved.opened,
+            _rule_snapshot: rules,
+            _finality_policy: finality,
+            scenario,
+            _latency_profile: latency,
+            log_path: saved.log_path,
+            log: None,
+            unstable_market_ends: saved.unstable_market_ends,
+            background_log: Some(background),
+            applied_input_sequence: saved.applied_input_sequence,
+            state: saved.state,
+            projection_port: Box::new(PublicProjectionAdapterV1(Box::new(port))),
+            pending_projections: saved.pending_projections,
+            #[cfg(feature = "measurement")]
+            measurement_probe: Arc::new(MeasurementProbe::default()),
+        };
+        let last_cutoff = saved
+            .last_cutoff
+            .map(|bytes| {
+                ciborium::de::from_reader::<LoggedGroupCutoffV1, _>(bytes.as_slice())
+                    .map(LoggedGroupCutoffV1::into_trusted)
+            })
+            .transpose()?;
+        let last_receipt = last_cutoff.as_ref().map(|c| c.receipt.clone());
+        Ok((
+            Self {
+                execution: PublicSimExecutionV1 { actor },
+                consumption_sequence_ref: saved.consumption_sequence_ref,
+                last_receipt,
+                last_cutoff,
+                last_prepared: saved.last_prepared.map(|g| g.restore()).transpose()?,
+                rules: saved.rules,
+                close_pending: saved.close_pending,
+                drive_position: saved.drive_position,
+            },
+            observation,
+        ))
+    }
+    #[cfg(feature = "shared-execution")]
+    pub fn reconnect_ledger_recording(
+        &mut self,
+        ledger: &mut ledger::LedgerWriterV1,
+        root: &Path,
+    ) -> Result<(), SimRunActorErrorV2> {
+        self.execution
+            .actor
+            .background_log
+            .as_mut()
+            .ok_or(SimRunActorErrorV2::Closed)?
+            .reconnect_ledger(ledger, root);
+        Ok(())
+    }
+}
+impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
+    FinitePublicConsumptionV1<I>
+{
+    pub fn from_checkpoint_state(state: PublicConsumptionStateV1, source: I) -> Self {
+        Self {
+            state,
+            source: source.peekable(),
+            source_peeked: false,
+            source_failure: None,
+        }
+    }
+    pub fn prefetched_group(
+        &mut self,
+    ) -> Result<Option<PublicGroupDeliveryV1>, SimRunActorErrorV2> {
+        if !self.source_peeked {
+            return Ok(None);
+        }
+        match self.source.peek() {
+            Some(Ok(g)) => Ok(Some(g.clone())),
+            Some(Err(e)) => Err(SimRunActorErrorV2::PublicConsumptionSource(e.to_string())),
+            None => Ok(None),
+        }
+    }
+}

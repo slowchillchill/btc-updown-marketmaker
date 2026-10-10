@@ -153,7 +153,7 @@ impl QueueSegmentV2 {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct PriceQueueV2 {
     segments: VecDeque<QueueSegmentV2>,
     account_taker_depletion_debt_units: u128,
@@ -193,7 +193,7 @@ struct AssetQueueEffectsV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AssetQueueV2 {
     bids: BTreeMap<Decimal, PriceQueueV2>,
     asks: BTreeMap<Decimal, PriceQueueV2>,
@@ -626,12 +626,12 @@ impl AssetQueueV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct ExecutionQueueStateV2 {
     markets: BTreeMap<String, MarketQueueStateV2>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct MarketQueueStateV2 {
     matching_closed: bool,
     assets: BTreeMap<String, AssetQueueV2>,
@@ -756,7 +756,7 @@ impl ExecutionQueueStateV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum BuyOrderTermsV2 {
     Gtc {
         limit_price_pusd_per_share: Decimal,
@@ -895,8 +895,7 @@ pub(crate) struct BuyOrderActionV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize))]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum OrderQuantityStateV2 {
     Base {
         accepted_base_units: u128,
@@ -926,7 +925,7 @@ enum OrderQuantityStateV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct SimOrderRecordV2 {
     platform_order_id: String,
     global_request_id: String,
@@ -944,7 +943,7 @@ struct SimOrderRecordV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct SimFillRecordV2 {
     trade_id: String,
     platform_order_id: String,
@@ -960,7 +959,9 @@ struct SimFillRecordV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 struct ScheduledFinalityTransitionKeyV2 {
     platform_event_at_utc_ms: i64,
     fill_sequence: u64,
@@ -968,7 +969,7 @@ struct ScheduledFinalityTransitionKeyV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct RebateDayStateV2 {
     contribution_trade_ids: Vec<String>,
     pending_predecessor_count: u64,
@@ -978,7 +979,7 @@ struct RebateDayStateV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct TakerRebateStateV2 {
     days: BTreeMap<i64, RebateDayStateV2>,
     clocks: BTreeSet<(i64, i64)>,
@@ -1005,7 +1006,7 @@ impl TakerRebateStateV2 {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct MakerRebateMarketStateV2 {
     end_reached: bool,
     pending_fill_count: u64,
@@ -1017,6 +1018,7 @@ struct MakerRebateMarketStateV2 {
 #[allow(dead_code)]
 #[derive(Debug, Default, PartialEq, Eq)]
 // 成熟前驱由各市场总数和日归属持有；兑付另有 MarketResolution 的实际成交屏障。
+#[derive(serde::Serialize, serde::Deserialize)]
 struct MakerRebateStateV2 {
     markets: BTreeMap<String, MakerRebateMarketStateV2>,
     days: BTreeMap<i64, RebateDayStateV2>,
@@ -1080,7 +1082,7 @@ impl MakerRebateStateV2 {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct MarketResolutionObligationV2 {
     resolution_event_id: String,
     resolution_source_event_at_utc_ms: i64,
@@ -1263,7 +1265,7 @@ pub(crate) struct TradeLifecycleEffectV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SettlementLifecycleEffectV2 {
     /// 重发保留原事件时间，以实际重发时刻起算原入站延迟。
     pub(crate) repeated_at_utc_ms: Option<i64>,
@@ -2503,7 +2505,7 @@ pub(crate) enum BuyOrderDispositionV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ExecutionStateV2 {
     cancel_scenario: BTreeMap<(String, String), u64>,
     pub(crate) cancel_scenario_hits: Vec<crate::runtime_v2::CancelScenarioHitV1>,
@@ -5136,7 +5138,7 @@ pub(crate) enum SimLiquidityRoleV1 {
     MakerInferred,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum TradeEconomicDispositionStateV1 {
     PendingUnapplied,
     PendingApplied,
@@ -5145,7 +5147,7 @@ pub(crate) enum TradeEconomicDispositionStateV1 {
     FinalFailureCompensated,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum TakerTargetV1 {
     LimitBase {
         total_base_units: u128,
@@ -5769,7 +5771,7 @@ pub(crate) fn exact_taker_fee_contribution_v1(
     )
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ExactRatioV1 {
     pub(crate) numerator: BigUint,
     pub(crate) denominator: BigUint,

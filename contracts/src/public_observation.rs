@@ -506,6 +506,24 @@ pub struct ClosedHiddenStepBucketV1 {
     pub closure: ReplayIndexClosureV1,
 }
 
+/// 原始日流的完整隐藏桶来源；不声称完整录制材料已经耐久发布。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamingHiddenSourceBindingV1 {
+    pub input_stream_id: String,
+    pub input_set_identity_sha256: Sha256Hex,
+    pub applied_prefix: AppliedIngressPrefixV1,
+    /// 同刻先参考，再按 epoch／来源时刻／准入／规范位置的 PM 派生先后。
+    pub ordering_version: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClosedStreamingHiddenStepBucketV1 {
+    pub source: StreamingHiddenSourceBindingV1,
+    pub bucket_time_utc_ms: i64,
+    pub index_start: u64,
+    pub index_end: u64,
+    pub closure: ReplayIndexClosureV1,
+}
+
 /// DPT 已应用组的原位置，不代表磁盘稳定或受信 UTC。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicGroupReferenceV1 {

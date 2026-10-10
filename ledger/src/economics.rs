@@ -77,7 +77,7 @@ pub(crate) struct CashAttribution {
     pub unpaid_taker: Decimal,
     pub unpaid_settlement: Decimal,
 }
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub(crate) struct EconomicsState {
     pub external_cash: BTreeMap<Identity, bool>,
     pub cash: CashAttribution,

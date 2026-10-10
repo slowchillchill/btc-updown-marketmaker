@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+ciborium = "=0.2.2"
 contracts = { path = "../contracts" }
 execution-normalization = { path = "../execution-normalization" }
 ledger = { path = "../ledger" }

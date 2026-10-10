@@ -172,15 +172,12 @@ class BaseSimRuntime:
         source_market = block.asset_markets[source_assets.clamp(0,len(block.assets)-1)]
         members = source_market == market[owner]
         population = torch.zeros(roots,dtype=torch.int64,device=owner.device).scatter_add(0,owner,members.to(torch.int64))
-        uninitialized = torch.zeros(roots,dtype=torch.int32,device=owner.device).scatter_reduce(
-            0,owner,(members & ~self.hidden.initialized).to(torch.int32),reduce='amax') != 0
-        initialized = (population == block.asset_markets.eq(market[:,None]).sum(1)) & ~uninitialized
-        initialized &= population > 0
+        admitted = (population == block.asset_markets.eq(market[:,None]).sum(1)) & (population > 0)
         original_fault = grouped_fault(self.hidden.fault,owner,roots) | self.orders.fault | self.account.fault
         fault = original_fault | self.market_controls.fault | self.resolution_obligations.fault
         fault |= torch.where(enabled,grouped_fault(source_invalid.to(torch.int32),owner,roots),0)
         stable_reference = block.stable_reference(indices)
-        source, transition = self.source_resolutions.observe(stable_reference,market,end,initialized,
+        source, transition = self.source_resolutions.observe(stable_reference,market,end,admitted,
             enabled & (fault == 0),torch.zeros_like(enabled))
         fault |= transition.fault
         obligations, resolved = self.resolution_obligations.register(transition,self.fills,condition,

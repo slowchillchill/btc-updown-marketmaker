@@ -200,3 +200,84 @@ fn prepare_mode_publishes_without_strategy_or_account_and_reuse_mode_uses_only_t
     assert_eq!(results[0], results[1]);
     assert_eq!(std::fs::read(description).unwrap(), material_before);
 }
+
+#[test]
+fn day_command_uses_full_candidate_configuration_and_reuses_completed_outputs() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, _) = common::setup(temp.path());
+    let strategy = ComplementaryPairConfigV1::parse_toml(include_str!(
+        "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering.toml"
+    ))
+    .unwrap();
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .find(|p| p.join("sim-system").is_dir())
+        .unwrap();
+    let rules = workspace.join("sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
+    let mut run =
+        serde_json::to_value(backtest::HistoricalPreparedRunConfigV1::from(&config)).unwrap();
+    run.as_object_mut().unwrap().remove("strategy");
+    let checkpoint_root = temp.path().join("day-checkpoints");
+    let value = json!({"rules":{"snapshot_path":rules,"expected_file_sha256":format!("{:x}",Sha256::digest(std::fs::read(&rules).unwrap())),"replay_causal_start_utc_ms":common::BASE},
+        "parallel_dates":2,"days":[{"preparation":config.preparation,"candidates":[{"run":run,"strategy":strategy,"request_namespace":"day-cli-engineering"}],
+        "checkpoint_root":checkpoint_root,"checkpoint_interval_seconds":0,"checkpoint_every_candidate_events":1,"producer_lead_groups":1}]});
+    let path = temp.path().join("day-command.json");
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let execute = || {
+        Command::new(env!("CARGO_BIN_EXE_backtest-cli"))
+            .args([
+                "--mode",
+                "day",
+                "--config",
+                path.to_str().unwrap(),
+                "--progress-interval-seconds",
+                "0",
+                "--strategy.repair.enable_active_repair",
+                "false",
+            ])
+            .output()
+            .unwrap()
+    };
+    let first = execute();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(
+        first["days"][0]["candidates"][0]["report"]["end_reason"],
+        "RangeEnd"
+    );
+    assert_eq!(first["days"][0]["candidates"][0]["reused"], false);
+    assert_eq!(first["summaries"][0]["days"], 1);
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config.metadata_path).unwrap()).unwrap();
+    assert_eq!(
+        metadata["config"]["strategy_request_namespace"],
+        "day-cli-engineering"
+    );
+    assert_eq!(
+        metadata["config"]["strategy"]["effective_parameters"]["repair"]["enable_active_repair"],
+        false
+    );
+    assert!(
+        !config.preparation.work_root.join("public").exists(),
+        "新day调用不创建完整公共录制"
+    );
+    let sim = std::fs::read(&config.sim_log).unwrap();
+    let second = execute();
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(second["days"][0]["candidates"][0]["reused"], true);
+    assert_eq!(
+        first["days"][0]["candidates"][0]["report"],
+        second["days"][0]["candidates"][0]["report"]
+    );
+    assert_eq!(first["summaries"], second["summaries"]);
+    assert_eq!(std::fs::read(&config.sim_log).unwrap(), sim);
+}

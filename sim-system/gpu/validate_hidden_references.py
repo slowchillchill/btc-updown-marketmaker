@@ -1,4 +1,4 @@
-"""原紧凑TWAP/空Book→无订单Terminal/Resolved→真实后继Lifecycle对照。"""
+"""原紧凑TWAP、有或无初始Book→无订单Terminal/Resolved→真实后继Lifecycle对照。"""
 from dataclasses import replace
 from pathlib import Path
 import json
@@ -193,13 +193,15 @@ def main():
         compare(getattr(runtime, name), getattr(frozen, name), 'reference_business_unchanged_'+name)
     pure_reference_freeze = storage.snapshot()
     progress('two_actual_TWAP_references_closed', actual_references=2)
-    # 同一固定图/输入地址进入下一完整Book桶，不从reference价格填盘口。
+    # 同一固定图推进到Book时点；无Book源保持未初始化，不从reference价格填盘口。
+    without_initial_books=source.get("without_initial_books",False)
+    pre_terminal_close=21000 if without_initial_books else 22000
     horizon.fill_(22000)
     loop.replay()
     torch.cuda.synchronize()
-    assert storage.runtime.hidden.initialized.cpu().tolist() == [True]*len(block.assets)
+    assert storage.runtime.hidden.initialized.cpu().tolist() == [not without_initial_books]*len(block.assets)
     assert storage.runtime.hidden.queues.rows == 0
-    assert storage.runtime.hidden_frontier.closed_at.cpu().tolist() == [22000]
+    assert storage.runtime.hidden_frontier.closed_at.cpu().tolist() == [pre_terminal_close]
     assert loop.reference_iterations.cpu().tolist() == [0] and loop.page.count.cpu().item() == 0
     compare(pure_reference_freeze.hidden, frozen.hidden, 'old_reference_freeze_not_backfilled')
     if page_mode:
@@ -235,7 +237,7 @@ def main():
     frontier = storage.runtime.hidden_frontier
     assert block.reference_tags[frontier.next_reference].cpu().tolist() == [9]
     assert frontier.next_reference.cpu().tolist() == [0 if page_mode else source['terminal_reference_index']]
-    assert frontier.closed_at.cpu().tolist() == [22000] and frontier.applying.cpu().tolist() == [True]
+    assert frontier.closed_at.cpu().tolist() == [pre_terminal_close] and frontier.applying.cpu().tolist() == [True]
     assert loop.closed.cpu().tolist() == [False]
     assert loop.reference_iterations.cpu().tolist() == [(0 if page_mode else source['terminal_reference_index'])-before.hidden_frontier.next_reference.cpu().item()]
     assert frontier.fault.cpu().tolist() == [0] and loop.page.count.cpu().item() == 0
@@ -269,6 +271,7 @@ def main():
     projection=projected
     batch=committed.batch
     runtime=storage.runtime
+    assert runtime.hidden.initialized.cpu().tolist()==[not without_initial_books]*len(block.assets)
     assert runtime.source_resolutions.present.cpu().tolist()==[[True]]
     assert runtime.resolution_obligations.reference_indices.cpu().tolist()==[[source['terminal_reference_index']]]
     assert not runtime.resolution_obligations.pending.any().cpu().item()
@@ -406,10 +409,11 @@ def main():
     compare(storage.runtime,held,'closed_Terminal_bucket_replay_no_duplicate')
     compare(pure_reference_freeze.source_resolutions,frozen.source_resolutions,'old_freeze_has_no_future_resolution')
     progress('actual_Terminal_Resolved_then_Lifecycle_closed',actual_resolved=1,actual_controls=len(source['original_controls']))
-    report={'actual_typedraw_TWAP_references':2, 'actual_bucket_times':[21000,22000,31000],
+    report={'actual_typedraw_TWAP_references':2, 'actual_bucket_times':[bucket['bucket']['bucket_time_utc_ms'] for bucket in source['buckets']],
         'pure_reference_bucket_closed_without_SIM_business_effects':True,
         'missing_source_time_did_not_fabricate_bucket':True,
-        'same_graph_reference_then_actual_empty_Books_checked':True,
+        'same_graph_reference_then_actual_empty_Books_checked':not without_initial_books,
+        'actual_Terminal_without_initial_books_checked':without_initial_books,
         'actual_Terminal_Resolved_then_Lifecycle_consumed_and_complete_bucket_closed':True,
         'original_SIM_control_reducer_receives_actual_post_Terminal_Lifecycle_checked':True,
         'canonical_market_facts_exactly_restored_against_original_materialization':source['canonical_market_facts_checked'],

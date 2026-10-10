@@ -4,11 +4,14 @@ use common::*;
 use contracts::*;
 use ledger::*;
 use rust_decimal::Decimal;
+use sha2::Digest;
 use shared_run::*;
 use sim_system::{execution::*, platform_rules::*};
 use std::sync::Arc;
 #[derive(Default)]
 struct Probe {
+    checkpoint_capture: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    checkpoint_publication_interrupt: Option<std::path::PathBuf>,
     rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
     cancel_first: bool,
     canceled: bool,
@@ -27,6 +30,27 @@ struct Probe {
     failed_callback_sent: Option<usize>,
     calculation_budget: Option<usize>,
 }
+// 小夹具读取所选真实布局，保留帧/接纳组边界；不把省略材料伪装为旧完整日志。
+fn sim_log_values(path: &std::path::Path) -> Vec<serde_json::Value> {
+    let bytes = std::fs::read(path).unwrap();
+    if !bytes.starts_with(b"SIMDAY01") {
+        return std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    }
+    let mut offset = 8;
+    let mut frames = Vec::new();
+    while offset < bytes.len() {
+        let length = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()) as usize;
+        offset += 8;
+        frames.push(ciborium::de::from_reader(&bytes[offset..offset + length]).unwrap());
+        offset += length;
+    }
+    frames
+}
+
 impl StrategyV1 for Probe {
     type Error = &'static str;
     type Diagnostics = ();
@@ -438,6 +462,8 @@ async fn range_tail_reports_final_public_economics_after_the_last_strategy_callb
         report.worst_case_maker_nav_pusd.as_ref(),
         Some(&economics.worst_case_maker_nav_pusd)
     );
+    assert_range_tail_capital_observation_times(&config);
+    assert_range_tail_day_economics(&report, 1900);
     // 沿既有正常结束产物保留同一快照和原截止，不把精确金额变成JSON浮点。
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&config.result_path).unwrap()).unwrap();
@@ -455,6 +481,113 @@ async fn range_tail_reports_final_public_economics_after_the_last_strategy_callb
         saved["ledger_consumed_memory"]["ledger_entry_seq"],
         ledger.ledger_entry_seq
     );
+}
+
+fn assert_range_tail_capital_observation_times(config: &HistoricalRunConfigV1) {
+    // 原SIM执行日志独立确定积分分界，不能用被测统计值生成期望。
+    let wire = std::fs::read_to_string(&config.sim_log).unwrap();
+    let observations = wire
+        .lines()
+        .flat_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            value["body"]["inputs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|input| input["input"] == "PUBLIC_OBSERVE_TIME")
+                .map(|input| input["body"]["logical_time_utc_ms"].as_i64().unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    for offset in [1622, 1632, 1899] {
+        assert!(observations.contains(&(BASE + offset)));
+    }
+}
+
+fn assert_range_tail_day_economics(report: &HistoricalRunReportV1, duration_ms: u64) {
+    use contracts::economics::EconomicRational as R;
+    let amount = |text: &str| R::from_decimal(Decimal::from_str_exact(text).unwrap());
+    let statistics = &report.day_economics;
+    assert_eq!(statistics.measured_duration_ms, duration_ms);
+    assert_eq!(statistics.unknown_capital_duration_ms, 0);
+    assert_eq!(statistics.unknown_nav_samples, 0);
+    // 原公开买价0.4，10份本金6和费用0.168；未成熟返佣不计入公共NAV。
+    assert_eq!(
+        statistics.maximum_nav_drawdown_pusd,
+        ExecutionReadValueV1::Known(amount("2.168").public())
+    );
+    assert_eq!(
+        statistics.maximum_nav_drawdown_fraction,
+        ExecutionReadValueV1::Known(amount("2.168").divided_by(&amount("2000")).public())
+    );
+    // 固定规则rate=.07、exponent=1：非post-only买单按最坏价.5预留费，
+    // 10*.07*.5*(1-.5)=.175；实际.6成交费为10*.07*.6*(1-.6)=.168。
+    let principal = amount("10").mul(&amount("0.6"));
+    let down = amount("10").mul(&amount("0.45"));
+    let reserved_fee = amount("10")
+        .mul(&amount("0.07"))
+        .mul(&amount("0.5"))
+        .mul(&amount("0.5"));
+    let actual_fee = amount("10")
+        .mul(&amount("0.07"))
+        .mul(&amount("0.6"))
+        .mul(&amount("0.4"));
+    let submitted = principal.add(&reserved_fee).add(&down);
+    let accepted = principal.add(&actual_fee);
+    // 1601提交；1622账户先接到Up接受事实，原SubmittedUnknown仍占可用现金；
+    // 1632响应转换旧预留。原cash_balances同时包含两项真实现金约束，峰值尚无trade。
+    let transitional = submitted.add(&accepted);
+    let converted = down.add(&accepted);
+    // 1899原尾观察才领取成功成交/费用；占用为剩余Down预留+成功剩余本金。
+    // 只按这些原公共观察时点积分，不回填隐藏成交时刻或追加驱动事件。
+    let tail = down.add(&principal);
+    let integral = submitted
+        .mul(&amount("21"))
+        .add(&transitional.mul(&amount("10")))
+        .add(&converted.mul(&amount("267")))
+        .add(&tail);
+    assert_eq!(
+        statistics.maximum_committed_capital_pusd,
+        ExecutionReadValueV1::Known(transitional.public())
+    );
+    assert_eq!(
+        statistics.committed_capital_pusd_milliseconds,
+        ExecutionReadValueV1::Known(integral.public())
+    );
+    assert_eq!(
+        statistics.average_committed_capital_pusd,
+        ExecutionReadValueV1::Known(
+            integral
+                .divided_by(&R::from_decimal(duration_ms.into()))
+                .public()
+        )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn initialization_before_operating_range_does_not_extend_day_economics() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = setup(temp.path());
+    config.preparation.scope.received_end_utc_ms = BASE + 1900;
+    initialize_at(&mut config, BASE + 1000, &[FIRST]);
+    let mut probe = Probe {
+        rules: Some(rules.clone()),
+        ..Default::default()
+    };
+    let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
+    // 真实原元数据接收于BASE，初始化交付早于经营开始；策略仍从原经营输入开始。
+    assert_eq!(probe.observed.first().unwrap().0, BASE + 1201);
+    assert_eq!(
+        report
+            .delivery_summary
+            .as_ref()
+            .unwrap()
+            .before_operating_start
+            .groups,
+        1
+    );
+    assert_range_tail_capital_observation_times(&config);
+    assert_range_tail_day_economics(&report, 900);
 }
 #[tokio::test(flavor = "current_thread")]
 async fn exit_returns_without_drain_result_write_or_future_public_observation() {
@@ -1467,5 +1600,467 @@ async fn source_health_finite_overhead_measurement() {
         "health_deadline_wakeups": report.source_health.as_ref().map_or(0, |s| s.deadline_wakeups),
         "last_decision_to_dispatch_ms": timing.actual_sent_at_utc_ms.unwrap() - timing.calculation_started_at_utc_ms,
         "purpose": "合成工程开销；不是盈利、历史静默事故或实际在线性能证据" })
+    );
+}
+
+#[test]
+fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (config, rules) = setup(tmp.path());
+    let mut first = HistoricalPreparedRunConfigV1::from(&config);
+    // 原零容量通道迫使实际日入口逐次等交接；不改变生产默认或业务时间。
+    first.finite_in_flight_groups = 0;
+    let mut second = first.clone();
+    first.session.run_id = "day-fast".into();
+    second.session.run_id = "day-slow".into();
+    second.session.account_id = "independent-slow-account".into();
+    second.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(300);
+    second.sim_log = tmp.path().join("slow-sim.jsonl");
+    second.noe_root = tmp.path().join("slow-noe");
+    second.ledger_root = tmp.path().join("slow-ledger");
+    second.metadata_path = tmp.path().join("slow-metadata.json");
+    second.result_path = tmp.path().join("slow-result.json");
+    let day = HistoricalDayConfigV1 {
+        preparation: config.preparation.clone(),
+        candidates: vec![first, second],
+        checkpoint_root: tmp.path().join("day-state"),
+        checkpoint_interval_seconds: 60,
+        progress_interval_seconds: 0,
+        checkpoint_every_applied_inputs: None,
+        checkpoint_every_candidate_events: Some(1),
+        producer_lead_groups: Some(1),
+    };
+    let archive = tmp.path().join("test-retained-points");
+    let results = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| {
+        Ok(Probe {
+            rules: Some(rules.clone()),
+            checkpoint_capture: Some((day.checkpoint_root.clone(), archive.clone())),
+            ..Default::default()
+        })
+    })
+    .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].public_applied_inputs, 9);
+    assert_eq!(results[0].candidates.len(), 2);
+    for candidate in &results[0].candidates {
+        assert_eq!(candidate.report["end_reason"], "RangeEnd");
+        assert!(candidate.report["recording_drained"].as_bool().unwrap());
+        assert!(candidate.report["calculation_count"].as_u64().unwrap() > 0);
+    }
+    let mut adjusted = day.clone();
+    adjusted.progress_interval_seconds = 17;
+    adjusted.checkpoint_interval_seconds = 23;
+    adjusted.producer_lead_groups = Some(7);
+    let reused = run_historical_days_v1(&[adjusted], rules.clone(), &|_| -> Result<
+        Probe,
+        MaterialError,
+    > {
+        panic!("完成复用不应创建策略或运行账户")
+    })
+    .unwrap();
+    assert!(reused[0].candidates.iter().all(|c| c.reused));
+    assert_eq!(
+        std::fs::read_dir(&day.checkpoint_root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("checkpoint-"))
+            .count(),
+        1,
+        "生产只保留最近完整点"
+    );
+    let uninterrupted_logs = day
+        .candidates
+        .iter()
+        .map(|c| std::fs::read(&c.sim_log).unwrap())
+        .collect::<Vec<_>>();
+    // 已完成执行的尾部模拟检查点发布前中断：恢复旧的完整点并撤回同一写入器尾部。
+    let latest: serde_json::Value = serde_json::from_reader(
+        std::fs::File::open(day.checkpoint_root.join("checkpoint.json")).unwrap(),
+    )
+    .unwrap();
+    let latest_generation = latest["generation"].as_u64().unwrap();
+    assert!(latest_generation > 1);
+    let mut target = None;
+    for generation in 0..latest_generation {
+        let directory = archive.join(format!("checkpoint-{generation:020}"));
+        #[derive(serde::Deserialize)]
+        struct State {
+            pending: Option<serde_json::Value>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Saved {
+            state: State,
+        }
+        if let Ok(file) = std::fs::File::open(directory.join("candidate-000000.cbor")) {
+            let saved: Saved = ciborium::de::from_reader(file).unwrap();
+            if saved.state.pending.is_some() {
+                target = Some(generation);
+                break;
+            }
+        }
+    }
+    let generation = target.expect("必须在待发送计算处保存完整检查点");
+    let directory = day
+        .checkpoint_root
+        .join(format!("checkpoint-{generation:020}"));
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut files = vec![];
+    for name in ["day.cbor", "candidate-000000.cbor", "candidate-000001.cbor"] {
+        std::fs::copy(
+            archive
+                .join(format!("checkpoint-{generation:020}"))
+                .join(name),
+            directory.join(name),
+        )
+        .unwrap();
+        files.push(serde_json::json!({"path":name,"sha256":format!("{:x}",sha2::Sha256::digest(std::fs::read(directory.join(name)).unwrap()))}));
+    }
+    let previous = serde_json::json!({"format":latest["format"],"identity":latest["identity"],"generation":generation,"files":files});
+    std::fs::write(
+        day.checkpoint_root.join("checkpoint.json"),
+        serde_json::to_vec(&previous).unwrap(),
+    )
+    .unwrap();
+    let resumed = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| {
+        Ok(Probe {
+            rules: Some(rules.clone()),
+            ..Default::default()
+        })
+    })
+    .unwrap();
+    assert_eq!(
+        resumed[0].public_applied_inputs, results[0].public_applied_inputs,
+        "恢复不重新归约已提交公共前缀"
+    );
+    for (before, after) in results[0].candidates.iter().zip(&resumed[0].candidates) {
+        assert_eq!(before.report, after.report);
+    }
+    for (candidate, before) in day.candidates.iter().zip(uninterrupted_logs) {
+        assert_eq!(
+            std::fs::read(&candidate.sim_log).unwrap(),
+            before,
+            "请求/成交/反馈执行日志与不中断运行逐字一致"
+        );
+    }
+    // 尚未发布的局部文件不覆盖完整引用，也不阻止完成复用。
+    let latest: serde_json::Value = serde_json::from_reader(
+        std::fs::File::open(day.checkpoint_root.join("checkpoint.json")).unwrap(),
+    )
+    .unwrap();
+    let generation = latest["generation"].as_u64().unwrap();
+    let incomplete = day
+        .checkpoint_root
+        .join(format!("checkpoint-{:020}", generation + 1));
+    std::fs::create_dir_all(&incomplete).unwrap();
+    std::fs::write(incomplete.join("day.cbor"), [0xa1]).unwrap();
+    let reuse = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| -> Result<
+        Probe,
+        MaterialError,
+    > {
+        panic!("未发布点不得创建新账户")
+    })
+    .unwrap();
+    assert!(reuse[0].candidates.iter().all(|c| c.reused));
+    // 发布点损坏须在创建策略及修改任何经济尾之前失败。
+    let path = day
+        .checkpoint_root
+        .join(format!("checkpoint-{generation:020}"))
+        .join("day.cbor");
+    std::fs::write(path, [0xa1]).unwrap();
+    let logs = day
+        .candidates
+        .iter()
+        .map(|c| std::fs::read(&c.sim_log).unwrap())
+        .collect::<Vec<_>>();
+    let damaged = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| -> Result<
+        Probe,
+        MaterialError,
+    > {
+        panic!("损坏点不得创建新账户")
+    });
+    assert!(damaged.is_err());
+    for (candidate, log) in day.candidates.iter().zip(logs) {
+        assert_eq!(std::fs::read(&candidate.sim_log).unwrap(), log);
+    }
+    assert!(
+        !config.preparation.work_root.exists(),
+        "日入口不得生成完整宽录制"
+    );
+    let fast = serde_json::to_string(&sim_log_values(&config.sim_log)).unwrap();
+    let slow = serde_json::to_string(&sim_log_values(&tmp.path().join("slow-sim.jsonl"))).unwrap();
+    assert!(fast.contains("day-fast"));
+    assert!(!fast.contains("day-slow"));
+    assert!(slow.contains("day-slow"));
+    assert!(slow.contains("independent-slow-account"));
+    assert_ne!(
+        results[0].candidates[0].report["last_dispatched_calculation_timing"],
+        results[0].candidates[1].report["last_dispatched_calculation_timing"]
+    );
+}
+
+#[test]
+fn candidate_unwind_publishes_failure_and_wakes_daily_waiters() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (config, rules) = setup(tmp.path());
+    let day = HistoricalDayConfigV1 {
+        preparation: config.preparation.clone(),
+        candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
+        checkpoint_root: tmp.path().join("state"),
+        checkpoint_interval_seconds: 60,
+        progress_interval_seconds: 0,
+        checkpoint_every_applied_inputs: None,
+        checkpoint_every_candidate_events: None,
+        producer_lead_groups: Some(1),
+    };
+    let error = run_historical_days_v1(&[day], rules, &|_| -> Result<Probe, MaterialError> {
+        panic!("fixture candidate unwind")
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("候选线程异常退出"));
+    assert!(!config.result_path.exists());
+}
+
+impl CheckpointStrategyV1 for Probe {
+    fn write_strategy_checkpoint(
+        &self,
+        writer: &mut dyn std::io::Write,
+    ) -> Result<(), MaterialError> {
+        if let Some(root) = &self.checkpoint_publication_interrupt {
+            if self.saw_cancel_in_flight_after_one_leg_fill
+                && root.join("checkpoint.json").exists()
+                && !root.join(".checkpoint.json.tmp").exists()
+            {
+                // 经济已稳定且候选仍有在途撤单/已成交腿；阻断最后的发布文件创建。
+                std::fs::create_dir(root.join(".checkpoint.json.tmp"))?;
+            }
+        }
+        // 仅夹具保存此前已发布点：生产协调器仍只保留最近一个完整点。
+        if let Some((root, archive)) = &self.checkpoint_capture {
+            if let Ok(file) = std::fs::File::open(root.join("checkpoint.json")) {
+                let pointer: serde_json::Value = serde_json::from_reader(file)?;
+                let name = format!("checkpoint-{:020}", pointer["generation"].as_u64().unwrap());
+                let destination = archive.join(&name);
+                std::fs::create_dir_all(&destination)?;
+                for file in pointer["files"].as_array().unwrap() {
+                    let path = file["path"].as_str().unwrap();
+                    std::fs::copy(root.join(&name).join(path), destination.join(path))?;
+                }
+            }
+        }
+        ciborium::ser::into_writer(
+            &(
+                self.cancel_first,
+                self.canceled,
+                self.saw_cancel_in_flight_after_one_leg_fill,
+                self.saw_later_down_quote,
+                self.frozen_down_price,
+                self.bought_first,
+                self.bought_second,
+                self.exit,
+                self.fail,
+                self.bad_batch,
+                self.observed.clone(),
+                self.dispatched,
+                self.failed_callback_sent,
+                self.calculation_budget,
+            ),
+            writer,
+        )?;
+        Ok(())
+    }
+    fn restore_strategy_checkpoint(
+        &mut self,
+        reader: &mut dyn std::io::Read,
+    ) -> Result<(), MaterialError> {
+        let saved = ciborium::de::from_reader(reader)?;
+        (
+            self.cancel_first,
+            self.canceled,
+            self.saw_cancel_in_flight_after_one_leg_fill,
+            self.saw_later_down_quote,
+            self.frozen_down_price,
+            self.bought_first,
+            self.bought_second,
+            self.exit,
+            self.fail,
+            self.bad_batch,
+            self.observed,
+            self.dispatched,
+            self.failed_callback_sent,
+            self.calculation_budget,
+        ) = saved;
+        Ok(())
+    }
+}
+
+#[test]
+fn partial_fill_cancel_in_flight_before_publication_restores_previous_complete_point() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, rules) = setup(temp.path());
+    let before_day = HistoricalDayConfigV1 {
+        preparation: config.preparation.clone(),
+        candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
+        checkpoint_root: temp.path().join("complete-state"),
+        checkpoint_interval_seconds: 60,
+        progress_interval_seconds: 0,
+        checkpoint_every_applied_inputs: None,
+        checkpoint_every_candidate_events: Some(1),
+        producer_lead_groups: Some(1),
+    };
+    let before = run_historical_days_v1(&[before_day], rules.clone(), &|_| {
+        Ok(Probe {
+            rules: Some(rules.clone()),
+            cancel_first: true,
+            ..Default::default()
+        })
+    })
+    .unwrap();
+    let fault_root = temp.path().join("interrupted-output");
+    let candidate = reuse_outputs(&config, &fault_root);
+    let day = HistoricalDayConfigV1 {
+        preparation: config.preparation.clone(),
+        candidates: vec![candidate.clone()],
+        checkpoint_root: temp.path().join("interrupted-state"),
+        checkpoint_interval_seconds: 60,
+        progress_interval_seconds: 0,
+        checkpoint_every_applied_inputs: None,
+        checkpoint_every_candidate_events: Some(1),
+        producer_lead_groups: Some(1),
+    };
+    let interrupted = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| {
+        Ok(Probe {
+            rules: Some(rules.clone()),
+            cancel_first: true,
+            checkpoint_publication_interrupt: Some(day.checkpoint_root.clone()),
+            ..Default::default()
+        })
+    });
+    assert!(interrupted.is_err());
+    assert!(!candidate.result_path.exists());
+    assert!(day.checkpoint_root.join("checkpoint.json").is_file());
+    #[derive(serde::Deserialize)]
+    struct Candidate {
+        strategy: Vec<u8>,
+    }
+    let mut actual_partial_state = false;
+    for entry in std::fs::read_dir(&day.checkpoint_root).unwrap() {
+        if let Ok(file) = std::fs::File::open(entry.unwrap().path().join("candidate-000000.cbor")) {
+            let saved: Candidate = ciborium::de::from_reader(file).unwrap();
+            let saved: serde_json::Value =
+                ciborium::de::from_reader(saved.strategy.as_slice()).unwrap();
+            actual_partial_state |= saved[3].as_bool() == Some(true);
+        }
+    }
+    assert!(actual_partial_state, "故障边界必须实际含已成交腿及在途撤单");
+    std::fs::remove_dir(day.checkpoint_root.join(".checkpoint.json.tmp")).unwrap();
+    let after = run_historical_days_v1(&[day], rules.clone(), &|_| {
+        Ok(Probe {
+            rules: Some(rules.clone()),
+            cancel_first: true,
+            ..Default::default()
+        })
+    })
+    .unwrap();
+    let mut before_report = before[0].candidates[0].report.clone();
+    let mut after_report = after[0].candidates[0].report.clone();
+    normalize_output_paths(&mut before_report, temp.path());
+    normalize_output_paths(&mut after_report, &fault_root);
+    assert_eq!(before_report, after_report);
+    let normalize_log = |path: &std::path::Path, root: &std::path::Path| {
+        sim_log_values(path)
+            .into_iter()
+            .map(|mut value| {
+                normalize_output_paths(&mut value, root);
+                value
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        normalize_log(&config.sim_log, temp.path()),
+        normalize_log(&candidate.sim_log, &fault_root)
+    );
+}
+
+#[test]
+fn two_original_dates_keep_two_thousand_and_same_day_cross_market_continuity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut days = Vec::new();
+    let mut shared_rules = None;
+    for (index, date) in ["2026-08-24", "2026-08-25"].iter().enumerate() {
+        let root = tmp.path().join(date);
+        std::fs::create_dir(&root).unwrap();
+        let (config, rules) = setup_day(&root, BASE + index as i64 * 86_400_000, date);
+        shared_rules = Some(rules);
+        let candidate = HistoricalPreparedRunConfigV1::from(&config);
+        days.push(HistoricalDayConfigV1 {
+            preparation: config.preparation,
+            candidates: vec![candidate],
+            checkpoint_root: root.join("state"),
+            checkpoint_interval_seconds: 60,
+            progress_interval_seconds: 0,
+            checkpoint_every_applied_inputs: None,
+            checkpoint_every_candidate_events: None,
+            producer_lead_groups: Some(1),
+        });
+    }
+    let rules = shared_rules.unwrap();
+    let reports = run_historical_days_with_parallelism_v1(
+        &days,
+        rules.clone(),
+        &|_| {
+            Ok(Probe {
+                rules: Some(rules.clone()),
+                ..Default::default()
+            })
+        },
+        2,
+    )
+    .unwrap();
+    assert_eq!(reports.len(), 2);
+    for (day, result) in days.iter().zip(&reports) {
+        let candidate = &result.candidates[0];
+        assert_eq!(
+            candidate.initial_available_pusd,
+            ExactDecimal("2000".into())
+        );
+        let frames = sim_log_values(&day.candidates[0].sim_log);
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame[0]["run_id"].is_string())
+                .count(),
+            1
+        );
+        assert_eq!(frames[0][0]["run_id"], day.candidates[0].session.run_id);
+        assert!(
+            candidate.report["account_economics_memory"]["markets"]
+                .as_array()
+                .unwrap()
+                .len()
+                >= 2,
+            "同日原账户连续跨两个市场"
+        );
+    }
+    let summaries = summarize_independent_historical_days_v1(&reports).unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].days, 2);
+    assert_eq!(
+        summaries[0].initial_capital_pusd,
+        contracts::economics::EconomicRational::from_decimal(Decimal::from(4000)).public()
+    );
+    let pnl = match &summaries[0].total_confirmed_net_pnl_pusd {
+        ExecutionReadValueV1::Known(pnl) => {
+            contracts::economics::EconomicRational::try_from(pnl).unwrap()
+        }
+        _ => panic!("有效日夹具净结果应已知"),
+    };
+    assert_eq!(
+        summaries[0].capital_weighted_average_day_confirmed_return,
+        ExecutionReadValueV1::Known(
+            pnl.divided_by(&contracts::economics::EconomicRational::from_decimal(
+                Decimal::from(4000)
+            ))
+            .public()
+        )
     );
 }

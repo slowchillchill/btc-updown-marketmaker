@@ -2445,3 +2445,116 @@ fn compact_observation_closed_position_overflow_returns_invalid_data() {
         io::ErrorKind::InvalidData
     );
 }
+
+#[test]
+fn core_checkpoint_restores_exact_quantity_dedup_and_reference_state_without_replay() {
+    let mut original = core();
+    let inputs = [
+        meta(0),
+        pm(1, 1, 20_001, book("100")),
+        pm(
+            2,
+            2,
+            20_002,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![change(Some("70"))],
+            },
+        ),
+        record(
+            3,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot(
+                "snapshot-checkpoint",
+                100,
+                1,
+            ))),
+        ),
+        twap_record(4, 30, 22_004, "65010000000000000000000"),
+    ];
+    for input in &inputs {
+        apply(&mut original, input);
+    }
+    let before = original.object_counts();
+    let mut bytes = Vec::new();
+    original.write_checkpoint(&mut bytes).unwrap();
+    let mut restored = PublicObservationCoreV1::read_checkpoint(bytes.as_slice()).unwrap();
+    assert_eq!(before, restored.object_counts());
+    assert_eq!(original.applied_prefix(), restored.applied_prefix());
+    // 恢复构造没有push；已提交5输入保持原位置，不从空Core计算。
+    assert_eq!(restored.applied_prefix().next_input_position, 5);
+    for input in [
+        pm(
+            5,
+            2,
+            20_002,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![change(Some("70"))],
+            },
+        ),
+        pm(
+            6,
+            3,
+            20_003,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![change(Some("30"))],
+            },
+        ),
+        end(7),
+    ] {
+        assert_eq!(
+            fingerprint(&apply(&mut original, &input)),
+            fingerprint(&apply(&mut restored, &input))
+        );
+    }
+}
+
+#[test]
+fn core_checkpoint_preserves_observed_empty_bid_and_unknown_asset() {
+    let mut original = core();
+    apply(&mut original, &meta(0));
+    apply(&mut original, &pm(1, 1, 20_001, book("100")));
+    let quote = pm(
+        2,
+        2,
+        20_002,
+        PolymarketOrderbookEvent::BestBidAsk {
+            asset_id: UP_TOKEN_ID.into(),
+            best_bid: None,
+            best_ask: Some("0.6".into()),
+            spread: None,
+        },
+    );
+    let result = apply(&mut original, &quote);
+    let assets = &result.applied.closed_groups[0].observations[0].assets;
+    assert_eq!(
+        assets
+            .iter()
+            .find(|a| a.asset.token_id.0 == UP_TOKEN_ID)
+            .unwrap()
+            .valuation_best_bid
+            .value,
+        Some(None),
+        "真实BBA明确没有买价，不是尚未观察"
+    );
+    assert_eq!(
+        assets
+            .iter()
+            .find(|a| a.asset.token_id.0 != UP_TOKEN_ID)
+            .unwrap()
+            .valuation_best_bid
+            .value,
+        None,
+        "另一资产尚未观察"
+    );
+    let mut bytes = Vec::new();
+    original.write_checkpoint(&mut bytes).unwrap();
+    let mut restored = PublicObservationCoreV1::read_checkpoint(bytes.as_slice()).unwrap();
+    for input in [
+        twap_record(3, 30, 22_004, "65010000000000000000000"),
+        end(4),
+    ] {
+        assert_eq!(
+            fingerprint(&apply(&mut original, &input)),
+            fingerprint(&apply(&mut restored, &input))
+        );
+    }
+}

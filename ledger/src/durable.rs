@@ -144,7 +144,20 @@ pub(crate) enum DurableLedgerV1 {
     Legacy(LegacyDurableLedgerV1),
     Parquet(Box<parquet::ParquetLedger>),
 }
+pub use parquet::LedgerParquetCheckpointV1;
 impl DurableLedgerV1 {
+    pub(crate) fn checkpoint(&self) -> Option<LedgerParquetCheckpointV1> {
+        match self {
+            Self::Parquet(writer) => Some(writer.checkpoint()),
+            Self::Legacy(_) => None,
+        }
+    }
+    pub(crate) fn restore_checkpoint(
+        saved: LedgerParquetCheckpointV1,
+    ) -> Result<Self, LedgerDurableErrorV1> {
+        parquet::ParquetLedger::restore_checkpoint(saved).map(|w| Self::Parquet(Box::new(w)))
+    }
+
     pub(crate) fn create(
         directory: &Path,
         policy: &AccountAdmissionPolicyV1,

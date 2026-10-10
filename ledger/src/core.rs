@@ -346,10 +346,12 @@ impl LedgerCommittedEffectV1 {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 enum AdmissionPolicy {
     Legacy(AccountAdmissionPolicyV1),
     DualCash(crate::projection::AccountAdmissionPolicyV2),
 }
+#[derive(Serialize, Deserialize)]
 pub struct LedgerWriterV1 {
     policy: AdmissionPolicy,
     account: Option<OpenedAccountStateV1>,
@@ -358,8 +360,10 @@ pub struct LedgerWriterV1 {
     lifecycle: LifecycleStateV1,
     current_ledger_entry_seq: u64,
     applied_references: BTreeMap<NoeReferenceKeyV1, u64>,
+    #[serde(skip)]
     durable: Option<DurableLedgerV1>,
     applied_memory: BTreeMap<NoeRecordPositionV1, u64>,
+    #[serde(skip)]
     record_sink: Option<Box<dyn FnMut(self::memory::LedgerRecordMaterialV2)>>,
     funds: self::funds::FundsStateV1,
     economics: self::economics::EconomicsState,

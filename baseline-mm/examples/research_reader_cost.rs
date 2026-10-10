@@ -338,6 +338,13 @@ impl Summary {
                 self.canonical_positions.add(*canonical_position);
                 "canonical"
             }
+            PublicStoredRowV1::BinanceDepthReference {
+                canonical_position, ..
+            } => {
+                self.canonical_positions.add(*canonical_position);
+                "binance_depth_reference"
+            }
+            PublicStoredRowV1::GroupObservationRange(_) => "group_observation_range",
             PublicStoredRowV1::Report { .. } => "report",
             PublicStoredRowV1::PmReport { .. } => "pm_report",
             PublicStoredRowV1::PmStepBinding(_) => "pm_step_binding",

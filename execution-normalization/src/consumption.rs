@@ -52,14 +52,14 @@ impl NoeBatchDurabilityV1 {
         let _ = self.0.set(container.clone());
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Batch<R> {
     context: Arc<ExecutionNormalizationContextV1>,
     batch: Arc<NoeMemoryBatch<R>>,
     durable: NoeBatchDurabilityV1,
 }
 /// 原批及已建立可见性的借用；私有字段不等于任意公开生产者调用的来源认证。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NoeConsumedRecordRef<R> {
     batch: Arc<Batch<R>>,
     ordinal: usize,
@@ -171,7 +171,7 @@ fn durable_record_view<R>(
 /// 正式接线由运行源拥有；只接受本运行的实际规范化批和真实驱动时点。
 /// 这些公开方法用于受信进程内协作：调用方仍可手工重建批并自填时点取得引用，
 /// 因此来源真实性由宿主接线负责，不以该类型、私有字段或直接类型编译反例证明。
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NoeConsumptionSource<R> {
     opening: Option<NoeConsumedRecordRef<R>>,
     admitted: Vec<NoeConsumedRecordRef<R>>,
@@ -324,3 +324,20 @@ pub type NoeDurableRecordViewV1 = NoeDurableRecordView<NoCancellationRequestComp
 pub type NoeDurableRecordViewV2 = NoeDurableRecordView<CancellationRequestCompletedV1>;
 pub type NoeConsumptionSourceV1 = NoeConsumptionSource<NoCancellationRequestCompletionV0>;
 pub type NoeConsumptionSourceV2 = NoeConsumptionSource<CancellationRequestCompletedV1>;
+
+// 恢复保留原发布结果，不分配新提交号，也不把未领取耐久记录签发为反馈。
+impl Serialize for NoeBatchDurabilityV1 {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.get().serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for NoeBatchDurabilityV1 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let published = Option::<NoePublishedContainerReferenceV1>::deserialize(deserializer)?;
+        let value = Self(Arc::new(OnceLock::new()));
+        if let Some(container) = published {
+            value.publish(&container);
+        }
+        Ok(value)
+    }
+}

@@ -20,6 +20,78 @@ struct HistoricalProcessSnapshotRequestConfig {
     replay_causal_start_utc_ms: i64,
 }
 type CommandError = Box<dyn std::error::Error + Send + Sync>;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DayCandidateCommand {
+    run: HistoricalPreparedRunConfigV1,
+    strategy: ComplementaryPairConfigV1,
+    request_namespace: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DayCommand {
+    preparation: HistoricalPreparationConfigV1,
+    candidates: Vec<DayCandidateCommand>,
+    checkpoint_root: PathBuf,
+    checkpoint_interval_seconds: u64,
+    #[serde(default)]
+    checkpoint_every_applied_inputs: Option<u64>,
+    #[serde(default)]
+    checkpoint_every_candidate_events: Option<u64>,
+    #[serde(default)]
+    producer_lead_groups: Option<usize>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DaysCommand {
+    rules: HistoricalProcessSnapshotRequestConfig,
+    days: Vec<DayCommand>,
+    #[serde(default)]
+    parallel_dates: Option<usize>,
+}
+fn load_days_command(mut value: serde_json::Value) -> Result<DaysCommand, CommandError> {
+    let overrides = value
+        .as_object_mut()
+        .ok_or("日配置不是对象")?
+        .remove("strategy");
+    let days = value
+        .get_mut("days")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or("日配置缺少days")?;
+    for day in days {
+        for candidate in day
+            .get_mut("candidates")
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or("日期缺少candidates")?
+        {
+            if let Some(overrides) = &overrides {
+                let strategy = candidate
+                    .get_mut("strategy")
+                    .and_then(serde_json::Value::as_object_mut)
+                    .ok_or("候选缺少完整strategy")?;
+                for (section, fields) in overrides.as_object().ok_or("策略覆盖不是对象")? {
+                    let target = strategy
+                        .get_mut(section)
+                        .and_then(serde_json::Value::as_object_mut)
+                        .ok_or("完整策略缺少覆盖区段")?;
+                    for (field, value) in fields.as_object().ok_or("策略覆盖区段不是对象")?
+                    {
+                        target.insert(field.clone(), value.clone());
+                    }
+                }
+            }
+            let strategy: ComplementaryPairConfigV1 = serde_json::from_value(
+                candidate
+                    .get("strategy")
+                    .cloned()
+                    .ok_or("候选缺少完整strategy")?,
+            )?;
+            candidate.get_mut("run").and_then(serde_json::Value::as_object_mut).ok_or("候选缺少宿主run")?
+                .insert("strategy".into(),serde_json::json!({"strategy_id":STRATEGY_ID,"strategy_rule_version":RULE_VERSION,"effective_parameters":strategy}));
+        }
+    }
+    Ok(serde_json::from_value(value)?)
+}
 #[derive(Clone, Copy)]
 enum ParameterType {
     Decimal,
@@ -196,6 +268,7 @@ enum Mode {
     Run,
     Prepare,
     Reuse,
+    Day,
 }
 fn mode_args(
     args: impl IntoIterator<Item = String>,
@@ -212,7 +285,8 @@ fn mode_args(
                     Some("run") => Mode::Run,
                     Some("prepare") => Mode::Prepare,
                     Some("reuse") => Mode::Reuse,
-                    _ => return Err("--mode 必须为run、prepare或reuse".into()),
+                    Some("day") => Mode::Day,
+                    _ => return Err("--mode 必须为run、prepare、reuse或day".into()),
                 }
             }
             "--prepared" => {
@@ -230,7 +304,7 @@ fn mode_args(
 async fn main() {
     if std::env::args().any(|arg| arg == "--help") {
         println!(
-            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\n--progress-interval-seconds <秒>（prepare/reuse默认30，0关闭）\n全部策略字段可覆盖：\n{}",
+            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，checkpoint_root存在时恢复，完成点复用\n--progress-interval-seconds <秒>（默认30，0关闭）\n全部策略字段可覆盖（day对各候选显式覆盖）：\n{}",
             PARAMETERS
                 .iter()
                 .map(|(field, _)| *field)
@@ -241,6 +315,33 @@ async fn main() {
     }
     let outcome = async {
         let (mode, interval, description, args) = mode_args(std::env::args().skip(1))?;
+        if mode==Mode::Day {
+            let command=load_days_command(load_value(args)?)?;
+            let rules=load_rules(command.rules)?;
+            let mut days=Vec::new();
+            for day in command.days {
+                let mut candidates=Vec::new();
+                for candidate in day.candidates {
+                    let mut run=candidate.run;
+                    run.strategy=StrategyDescriptorV1 {strategy_id:STRATEGY_ID.into(),strategy_rule_version:RULE_VERSION.into(),effective_parameters:serde_json::to_value(&candidate.strategy)?};
+                    run.replay_progress_interval_seconds=interval;
+                    run.strategy_request_namespace=Some(candidate.request_namespace);
+                    candidates.push(run);
+                }
+                days.push(HistoricalDayConfigV1 {preparation:day.preparation,candidates,checkpoint_root:day.checkpoint_root,
+                    checkpoint_interval_seconds:day.checkpoint_interval_seconds,progress_interval_seconds:interval,
+                    checkpoint_every_applied_inputs:day.checkpoint_every_applied_inputs,checkpoint_every_candidate_events:day.checkpoint_every_candidate_events,producer_lead_groups:day.producer_lead_groups});
+            }
+            let factory=|run:&HistoricalPreparedRunConfigV1|->Result<ComplementaryPairV1,MaterialError> {
+                let strategy=serde_json::from_value(run.strategy.effective_parameters.clone())?;
+                let namespace=run.strategy_request_namespace.as_ref().ok_or("候选请求命名空间缺失")?.clone();
+                Ok(ComplementaryPairV1::new(strategy,rules.clone(),namespace,StrategyContinuityV1::new_account())?)
+            };
+            let results=if let Some(parallel)=command.parallel_dates {run_historical_days_with_parallelism_v1(&days,rules.clone(),&factory,parallel)?}
+                else {run_historical_days_v1(&days,rules.clone(),&factory)?};
+            let summaries=summarize_independent_historical_days_v1(&results)?;
+            println!("{}",serde_json::json!({"days":results,"summaries":summaries}));return Ok(());
+        }
         if mode == Mode::Prepare {
             let config: HistoricalPreparationConfigV1 = serde_json::from_value(load_value(args)?)?;
             let path = prepare_and_publish_historical_run_v1(&config,

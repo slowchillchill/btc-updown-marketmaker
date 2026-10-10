@@ -409,3 +409,50 @@ impl ActionBeforeReadV2 {
         self.registry.cancellation_requests(scope)
     }
 }
+
+/// 原登记与尚缺前驱的已领取引用，不重建领取时点。
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(
+    serialize = "R:serde::Serialize",
+    deserialize = "R:serde::Deserialize<'de>"
+))]
+struct SharedExecutionCheckpointV1<R> {
+    registry: SharedExecutionRegistry<R>,
+    pending: Vec<NoeConsumedRecordRef<R>>,
+}
+impl<P: SharedOrderEvidence> SharedExecution<P>
+where
+    P::Completion: serde::de::DeserializeOwned,
+{
+    pub fn write_checkpoint(
+        &self,
+        writer: impl std::io::Write,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        #[derive(serde::Serialize)]
+        struct Saved<'a, R: serde::Serialize> {
+            registry: &'a SharedExecutionRegistry<R>,
+            pending: &'a [NoeConsumedRecordRef<R>],
+        }
+        ciborium::ser::into_writer(
+            &Saved {
+                registry: &self.registry,
+                pending: &self.pending,
+            },
+            writer,
+        )?;
+        Ok(())
+    }
+    pub fn restore_checkpoint(
+        ledger: LedgerWriterV1,
+        observation: sim_system::execution::MemoryNoeObservation<P>,
+        reader: impl std::io::Read,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let saved: SharedExecutionCheckpointV1<P::Completion> = ciborium::de::from_reader(reader)?;
+        Ok(Self {
+            ledger,
+            registry: saved.registry,
+            observation,
+            pending: saved.pending,
+        })
+    }
+}

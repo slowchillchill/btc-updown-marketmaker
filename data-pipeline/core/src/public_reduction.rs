@@ -523,3 +523,62 @@ pub fn bind_prepared_reference_facts_v1(
         prepared_reference_ids,
     }
 }
+
+/// 流式隐藏分支只交接深度身份与时间；不复制整本深度到派生材料。
+pub enum CompactCanonicalReferenceV1 {
+    Record {
+        binding: PublicFactBindingV1,
+        record: CanonicalEventRecordV2,
+    },
+    BinanceDepth {
+        binding: PublicFactBindingV1,
+        time: EventTimeV2,
+    },
+}
+pub fn materialize_compact_public_reduction_v1(
+    mut batch: PublicReductionBatchV1,
+) -> Result<Vec<CompactCanonicalReferenceV1>, ContractError> {
+    let mut depths = Vec::new();
+    let mut retained = Vec::new();
+    for fact in batch.facts.iter() {
+        if let PublicBusinessPayloadV1::ReferenceFact(
+            payload @ CanonicalReferenceEventPayloadV2::BinanceDepthState(_),
+        ) = &fact.payload
+        {
+            let binding = if let Some(binding) = batch
+                .prepared_reference_ids
+                .iter()
+                .find(|b| b.position == fact.position)
+            {
+                binding.clone()
+            } else {
+                PublicFactBindingV1 {
+                    position: fact.position.clone(),
+                    event_id: crate::public_reference::materialized_reference_identity_v2(
+                        &fact.lineage,
+                        &fact.dependency_time,
+                        &fact.quality,
+                        payload,
+                    )?,
+                }
+            };
+            depths.push(CompactCanonicalReferenceV1::BinanceDepth {
+                binding,
+                time: fact.dependency_time.clone(),
+            });
+        } else {
+            retained.push(fact.clone());
+        }
+    }
+    batch.facts = retained.into();
+    batch.reports.clear();
+    let material = materialize_public_reduction_v1(batch)?;
+    depths.extend(
+        material
+            .records
+            .into_iter()
+            .zip(material.bindings)
+            .map(|(record, binding)| CompactCanonicalReferenceV1::Record { binding, record }),
+    );
+    Ok(depths)
+}

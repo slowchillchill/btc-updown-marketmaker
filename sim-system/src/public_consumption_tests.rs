@@ -217,6 +217,80 @@ fn apply(
     core.push(&prepared).unwrap().into_owned()
 }
 
+#[test]
+fn checkpoint_prepared_groups_keep_nonempty_empty_and_unknown_valuation() {
+    let mut core = core();
+    apply(&mut core, &meta(0));
+    for input in [
+        pm(1, 1, 20_001, book("100")),
+        pm(
+            2,
+            2,
+            20_002,
+            PolymarketOrderbookEvent::BestBidAsk {
+                asset_id: UP_TOKEN_ID.into(),
+                best_bid: None,
+                best_ask: Some("0.6".into()),
+                spread: None,
+            },
+        ),
+    ] {
+        let canonical_position = core.next_canonical_position();
+        let prepared = prepare_public_ingress_v1(&core, &input, &BTreeMap::new(), &[]).unwrap();
+        let applied = core.push(&prepared).unwrap().into_owned();
+        let pm = match prepared.current {
+            PreparedCanonicalInputV1::PolymarketMessage(pm) => Some(pm),
+            _ => panic!("真实PM输入"),
+        };
+        let position = input.input_position;
+        let mut day = data_pipeline_training::day_producer::DayAppliedV1 {
+            input,
+            applied: applied.applied,
+            first_canonical_position: canonical_position,
+            prepared_pm: pm,
+            contexts: BTreeMap::from([(
+                CONDITION_ID.into(),
+                core.prepared_pm_context(CONDITION_ID).unwrap(),
+            )]),
+            initialization_binding: None,
+            hidden: vec![],
+        };
+        for delivery in PreparedPublicGroupV1::from_day(&mut day) {
+            let group = delivery.prepared;
+            let assets = &group.group.observations[0].assets;
+            assert_eq!(
+                assets
+                    .iter()
+                    .find(|a| a.asset.token_id.0 == UP_TOKEN_ID)
+                    .unwrap()
+                    .valuation_best_bid
+                    .value,
+                if position == 1 {
+                    Some(Some(ExactDecimal("0.5".into())))
+                } else {
+                    Some(None)
+                }
+            );
+            assert_eq!(
+                assets
+                    .iter()
+                    .find(|a| a.asset.token_id.0 == DOWN_TOKEN_ID)
+                    .unwrap()
+                    .valuation_best_bid
+                    .value,
+                None
+            );
+            let saved = checkpoint::PreparedGroup::capture(&group);
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&saved, &mut bytes).unwrap();
+            let restored: checkpoint::PreparedGroup =
+                ciborium::from_reader(bytes.as_slice()).unwrap();
+            let restored = restored.restore().unwrap();
+            assert_eq!(group.group, restored.group);
+        }
+    }
+}
+
 struct RecordedTimes;
 impl PublicConsumptionTimeSourceV1 for RecordedTimes {
     fn execution_time_for_group(
@@ -236,6 +310,7 @@ impl PublicConsumptionTimeSourceV1 for RecordedTimes {
 struct DeliveredFeedbackState {
     sequence: std::cell::Cell<u64>,
     responses: RefCell<Vec<contracts::DirectResponseMetadataV2>>,
+    settlements: RefCell<Vec<SettlementLifecycleFeedbackV2>>,
 }
 impl DeliveredFeedbackState {
     fn deliver_through(&self, at: i64) {
@@ -254,6 +329,10 @@ struct DeliveredProjection {
 impl BusinessProjectionPortV2 for DeliveredProjection {
     fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool {
         self.accepted = batch.projection_batch_sequence;
+        self.delivered
+            .settlements
+            .borrow_mut()
+            .extend(batch.settlement_lifecycle.iter().cloned());
         for response in batch.direct_responses() {
             if let BusinessDirectResponseV2::CancelAllOrders(response) = response {
                 self.delivered
@@ -439,6 +518,34 @@ async fn public_execution_with_scenario_capacity_and_projection(
     make_projection: Option<Box<dyn FnOnce(&Path,&mut RunOpenedV2)->Box<dyn PublicProjectionPortV1>>>,
     finality: Option<Arc<TradeFinalityPolicyV2>>,
 ) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
+    public_execution_with_scenario_capacity_configuration(
+        path,scenario,role,capacity,rules,make_projection,finality,None,false,
+    ).await
+}
+async fn public_execution_with_scenario_capacity_layout(
+    path: &Path,
+    scenario: Arc<SealedPlatformScenarioV1>,
+    role: SimCallerRoleV1,
+    capacity: usize,
+    rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
+    day_binding: Option<HistoricalDayLogBindingV1>,
+    finite_historical: bool,
+) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
+    public_execution_with_scenario_capacity_configuration(
+        path,scenario,role,capacity,rules,None,None,day_binding,finite_historical,
+    ).await
+}
+async fn public_execution_with_scenario_capacity_configuration(
+    path: &Path,
+    scenario: Arc<SealedPlatformScenarioV1>,
+    role: SimCallerRoleV1,
+    capacity: usize,
+    rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
+    make_projection: Option<Box<dyn FnOnce(&Path,&mut RunOpenedV2)->Box<dyn PublicProjectionPortV1>>>,
+    finality: Option<Arc<TradeFinalityPolicyV2>>,
+    day_binding: Option<HistoricalDayLogBindingV1>,
+    finite_historical: bool,
+) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
     let rules = match rules {
         Some(rules) => rules,
         None => successful_snapshot_v3_for_sim_tests().await,
@@ -467,17 +574,42 @@ async fn public_execution_with_scenario_capacity_and_projection(
         implementation_identity: opened.implementation_identity,
         market_event_source_identity_sha256: opened.market_event_source_identity_sha256,
     };
-    let mut execution = PublicSimExecutionV1::create_new(
-        path,
-        spec_opened,
-        rules,
-        finality,
-        scenario,
-        latency,
-        projection,
-        MAX_GROUP_BYTES,
-        capacity,
-    )
+    let mut execution = match (day_binding, finite_historical) {
+        (Some(binding), _) => PublicSimExecutionV1::create_new_historical_day(
+            path,
+            spec_opened,
+            rules,
+            finality,
+            scenario,
+            latency,
+            projection,
+            MAX_GROUP_BYTES,
+            capacity,
+            binding,
+        ),
+        (None, true) => PublicSimExecutionV1::create_new_historical(
+            path,
+            spec_opened,
+            rules,
+            finality,
+            scenario,
+            latency,
+            projection,
+            MAX_GROUP_BYTES,
+            capacity,
+        ),
+        (None, false) => PublicSimExecutionV1::create_new(
+            path,
+            spec_opened,
+            rules,
+            finality,
+            scenario,
+            latency,
+            projection,
+            MAX_GROUP_BYTES,
+            capacity,
+        ),
+    }
     .unwrap();
     let mut session = spec("public-consumption-test", "create-public");
     session.caller_role = role;
@@ -802,7 +934,10 @@ async fn public_normal_end_reads_original_groups_and_own_pm_bindings() {
     reader.finish_sealed_clean_run().unwrap();
     assert_eq!(groups, 6);
     assert!(!original_reports.is_empty());
-    assert_eq!(reports, original_reports, "报告来源、处置和顺序沿原公共归约保留");
+    assert_eq!(
+        reports, original_reports,
+        "报告来源、处置和顺序沿原公共归约保留"
+    );
     assert!(
         pm_bindings > 0,
         "模拟器当次前序材料已后台物化，日志不只剩 DPT 引用"
@@ -812,6 +947,722 @@ async fn public_normal_end_reads_original_groups_and_own_pm_bindings() {
         !wire.contains("quantity_after_shares"),
         "模拟器原日志不复制 DPT 正文"
     );
+}
+
+// 同一原录制夹具同时验证旧日志和原输入可重建的日布局；不是新真实日作业。
+fn fixture_log_counts(
+    path: &Path,
+    root: &Path,
+    hidden: &data_pipeline_training::hidden_preparation::HiddenPreparationV1,
+) {
+    let bytes = std::fs::metadata(path).unwrap().len();
+    let (opened, mut recovery) = SimEventLogRecoveryV2::open(path, MAX_GROUP_BYTES).unwrap();
+    let layout = if recovery.historical_day_binding_for_tests().is_some() {
+        "SIMDAY01"
+    } else {
+        "JSON"
+    };
+    let mut original_hidden = RecordedHiddenBucketSourceV1::open(hidden, root, 1, 1 << 20).unwrap();
+    let mut frames = 0;
+    let mut categories = BTreeMap::<&str, u64>::new();
+    loop {
+        let (next, inputs) = recovery.next_group().unwrap();
+        recovery = next;
+        let Some(inputs) = inputs else { break };
+        frames += 1;
+        for input in inputs {
+            if let LoggedBusinessInputV2::DayHiddenStepBucket(locator) = &input {
+                let original = original_hidden.next_bucket().unwrap().unwrap();
+                let HiddenBucketReferenceV2::Recorded(reference) = original.reference else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    locator.applied_input_position,
+                    reference.committed_prefix.next_input_position
+                );
+                assert_eq!(locator.bucket_time_utc_ms, reference.bucket_time_utc_ms);
+                assert_eq!(
+                    (locator.index_start, locator.index_end),
+                    (reference.index_start, reference.index_end)
+                );
+                assert_eq!(locator.closure, reference.closure);
+                assert_eq!(
+                    original.records.len() as u64,
+                    locator.index_end - locator.index_start
+                );
+            }
+            let category = match input {
+                LoggedBusinessInputV2::PublicGroup(_)
+                | LoggedBusinessInputV2::DayPublicGroup(_) => "public",
+                LoggedBusinessInputV2::HiddenStepBucket(_)
+                | LoggedBusinessInputV2::DayHiddenStepBucket(_) => "hidden",
+                LoggedBusinessInputV2::PublicObserveTime(_) => "observe",
+                LoggedBusinessInputV2::PublicCloseTime(_) => "close",
+                LoggedBusinessInputV2::PlatformPrefixAdvance(_) => "prefix",
+                _ => "full-business",
+            };
+            *categories.entry(category).or_default() += 1;
+        }
+    }
+    eprintln!(
+        "fixture SIM layout={layout}, role={:?}, bytes={bytes}, accepted_frames={frames}, inputs={categories:?}",
+        opened.durability_role
+    );
+}
+fn fixture_day_binding(
+    core: &PublicObservationCoreV1,
+    sequence: &str,
+    hidden: &str,
+) -> HistoricalDayLogBindingV1 {
+    HistoricalDayLogBindingV1 {
+        input_stream_id: core.header().input_stream_id.clone(),
+        consumption_sequence_ref: sequence.into(),
+        hidden_input_set_identity_sha256: Sha256Hex("a".repeat(64)),
+        hidden_consumer_stream_id: hidden.into(),
+        hidden_ordering_version:
+            data_pipeline_training::hidden_stream::STREAMING_HIDDEN_ORDERING_VERSION.into(),
+    }
+}
+fn fixture_day_bucket(
+    bucket: AcceptedHiddenStepBucketV1,
+    binding: &HistoricalDayLogBindingV1,
+) -> AcceptedHiddenStepBucketV1 {
+    let HiddenBucketReferenceV2::Recorded(reference) = bucket.reference else {
+        return bucket;
+    };
+    AcceptedHiddenStepBucketV1 {
+        reference: HiddenBucketReferenceV2::Streaming(ClosedStreamingHiddenStepBucketV1 {
+            source: StreamingHiddenSourceBindingV1 {
+                input_stream_id: binding.input_stream_id.clone(),
+                input_set_identity_sha256: binding.hidden_input_set_identity_sha256.clone(),
+                applied_prefix: AppliedIngressPrefixV1 {
+                    input_stream_id: reference.committed_prefix.input_stream_id,
+                    next_input_position: reference.committed_prefix.next_input_position,
+                },
+                ordering_version: binding.hidden_ordering_version.clone(),
+            },
+            bucket_time_utc_ms: reference.bucket_time_utc_ms,
+            index_start: reference.index_start,
+            index_end: reference.index_end,
+            closure: reference.closure,
+        }),
+        records: bucket.records,
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn historical_day_layout_rebuilds_original_inputs_and_preserves_business_sequence() {
+    // 两布局均使用正式HistoricalBacktest/FiniteHistorical入口；原CleanRun/Paper用例保留。
+    for day_log in [false, true] {
+        price_change_bba_before_initial_books_preserves_preloading_and_private_quantities_layout(
+            day_log, true,
+        )
+        .await;
+        midnight_resolution_without_initial_books_redeems_zero_balance_once_layout(day_log, true)
+            .await;
+        trusted_observation_keeps_source_prefix_and_sends_at_independent_time_layout(day_log, true)
+            .await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn price_change_bba_before_initial_books_preserves_preloading_and_private_quantities() {
+    price_change_bba_before_initial_books_preserves_preloading_and_private_quantities_layout(
+        false, false,
+    )
+    .await;
+}
+
+async fn price_change_bba_before_initial_books_preserves_preloading_and_private_quantities_layout(
+    day_log: bool,
+    finite_historical: bool,
+) {
+    // 09-12 首 price_change 的真实资产、价格、局部数量和三项时间。
+    // 后续完整 book 是独立构造的有效夹具，不冒称真实日回放。
+    const START: i64 = 1_789_171_200_000;
+    const UP: &str =
+        "107908796001205601126362103961466850840177701751257482698676558640773709147754";
+    const DOWN: &str =
+        "19032856667784098829291953695654902969996580284236420719127791921975594839098";
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let mut metadata = metadata_snapshot_row();
+    metadata.asset_ids = format!(r#"["{UP}","{DOWN}"]"#);
+    metadata.market_start_utc = START;
+    metadata.market_end_utc = START + 300_000;
+    metadata.timestamp_received = START - 299_934;
+    metadata.collector_admission_time_utc_ms = metadata.timestamp_received + 1;
+    metadata.fixed_identity_verified_at_utc = metadata.timestamp_received - 1;
+    metadata.source_evidence_received_at_utc = Some(metadata.timestamp_received);
+    metadata.row_evidence_validation_completed_at_utc = Some(metadata.timestamp_received + 1);
+    metadata.metadata_fetch_start_utc = Some(metadata.timestamp_received - 10);
+    let message = |position, source, received, admitted, event| {
+        let mut value = row("epoch-a", position, source, received, event);
+        value.collector_admission_time_utc_ms = admitted;
+        record(
+            position,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(value)),
+        )
+    };
+    let initial_book = |token: &str| PolymarketOrderbookEvent::Book {
+        asset_id: token.into(),
+        bids: vec![PolymarketPriceLevel {
+            price: "0.50".into(),
+            size: "100".into(),
+        }],
+        asks: vec![PolymarketPriceLevel {
+            price: "0.51".into(),
+            size: "80".into(),
+        }],
+        last_trade_price: None,
+    };
+    let inputs = [
+        record(
+            0,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata))),
+        ),
+        message(
+            1,
+            START,
+            START + 12,
+            START + 2331,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![
+                    PolymarketPriceChangeEntry {
+                        asset_id: UP.into(),
+                        price: "0.35".into(),
+                        size: Some("40".into()),
+                        side: PolymarketSide::Buy,
+                        best_bid: Some("0.50".into()),
+                        best_ask: Some("0.51".into()),
+                    },
+                    PolymarketPriceChangeEntry {
+                        asset_id: DOWN.into(),
+                        price: "0.65".into(),
+                        size: Some("40".into()),
+                        side: PolymarketSide::Sell,
+                        best_bid: Some("0.49".into()),
+                        best_ask: Some("0.50".into()),
+                    },
+                ],
+            },
+        ),
+        message(
+            2,
+            START + 100_000,
+            START + 100_012,
+            START + 100_013,
+            initial_book(UP),
+        ),
+        message(
+            3,
+            START + 110_000,
+            START + 110_012,
+            START + 110_013,
+            initial_book(DOWN),
+        ),
+        message(
+            4,
+            START + 120_000,
+            START + 120_012,
+            START + 120_013,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![PolymarketPriceChangeEntry {
+                    asset_id: UP.into(),
+                    price: "0.50".into(),
+                    size: Some("80".into()),
+                    side: PolymarketSide::Buy,
+                    best_bid: None,
+                    best_ask: None,
+                }],
+            },
+        ),
+        end(5),
+    ];
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    for input in inputs {
+        let result = apply(&mut core, &input);
+        if input.input_position == 1 {
+            let reports = &result.pm_reductions[0].1.reports;
+            assert_eq!(
+                reports
+                    .iter()
+                    .map(|r| r.reason_code.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "POLYMARKET_PRICE_CHANGE_FULL_BOOK_REQUIRED",
+                    "POLYMARKET_BBA_UPDATE",
+                    "POLYMARKET_PRICE_CHANGE_FULL_BOOK_REQUIRED",
+                    "POLYMARKET_BBA_UPDATE",
+                ]
+            );
+        }
+        writer.record(input, result).unwrap();
+    }
+    writer.stabilize().unwrap();
+    let path = temp.path().join("sim.jsonl");
+    let binding = fixture_day_binding(&core, "preloading-bba", "hidden-test");
+    let context = core.pm_context(CONDITION_ID).unwrap();
+    let scenario = sealed_scenario_for_markets(vec![
+        crate::scenario::PlatformMarketV1::try_new(
+            context.market,
+            context
+                .assets
+                .into_iter()
+                .map(|a| a.asset)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap(),
+    ]);
+    let (execution, _) = public_execution_with_scenario_capacity_layout(
+        &path,
+        scenario,
+        SimCallerRoleV1::HistoricalBacktest,
+        32,
+        None,
+        day_log.then(|| binding.clone()),
+        finite_historical,
+    )
+    .await;
+    let hidden = prepare_hidden_v1(
+        core,
+        PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap(),
+        &temp.path().join("hidden"),
+        &config(),
+        "hidden-test".into(),
+    )
+    .unwrap();
+    let mut recorded = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+    // 本夹具不添加宿主延迟，公共组沿正式来源可见时刻交付。
+    let source = std::iter::from_fn(move || recorded.next_visible_group());
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "preloading-bba".into());
+    driver.enable_finite_recording_wait().unwrap();
+    driver.next_group().unwrap().unwrap(); // 元数据准入先于任何隐藏价格事实。
+    let mut buckets = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
+    let mut seen = Vec::new();
+    while let Some(bucket) = buckets.next_bucket().unwrap() {
+        let bucket = if day_log {
+            fixture_day_bucket(bucket, &binding)
+        } else {
+            bucket
+        };
+        let at = bucket.reference.bucket_time_utc_ms();
+        if at == START {
+            let quotes = bucket
+                .records
+                .iter()
+                .filter_map(|r| match r {
+                    HiddenExecutionRecordV1::Step { step, .. } => match &step.change {
+                        data_pipeline_core::pm_reduction::PmStepChangeV1::BestBidAsk {
+                            quote,
+                            ..
+                        } => Some(quote),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(quotes.len(), 2);
+            // 正式十进制文本去除尾零；独立期望保留精确价格，不复用被测转换。
+            for (token, bid, ask) in [(UP, "0.5", "0.51"), (DOWN, "0.49", "0.5")] {
+                let quote = quotes.iter().find(|q| q.asset.token_id.0 == token).unwrap();
+                assert_eq!(
+                    quote.best_bid_pusd_per_share,
+                    Some(ExactDecimal(bid.into()))
+                );
+                assert_eq!(
+                    quote.best_ask_pusd_per_share,
+                    Some(ExactDecimal(ask.into()))
+                );
+            }
+            assert!(!bucket.records.iter().any(|r| matches!(r,
+            HiddenExecutionRecordV1::Step { step, .. } if matches!(&step.change,
+                data_pipeline_core::pm_reduction::PmStepChangeV1::InitialSnapshot { .. }
+                | data_pipeline_core::pm_reduction::PmStepChangeV1::LevelChange { .. }))));
+        }
+        driver.hidden_bucket(bucket).unwrap();
+        driver.next_group().unwrap().unwrap();
+        seen.push(at);
+        let session = driver
+            .execution
+            .actor
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap();
+        let platform = session.hidden_platform_markets.as_ref().unwrap();
+        if at <= START + 100_000 {
+            assert_eq!(
+                platform.buy_admission(CONDITION_ID, UP, at, START + 300_000),
+                crate::market::MarketBuyAdmissionV2::EvidenceUnknownNoEffect(
+                    crate::market::MarketBuyEvidenceUnknownV2::Preloading
+                )
+            );
+        } else {
+            assert!(matches!(
+                platform.buy_admission(CONDITION_ID, UP, at, START + 300_000),
+                crate::market::MarketBuyAdmissionV2::Ready { .. }
+            ));
+        }
+        assert_eq!(
+            platform.pm_quantity(CONDITION_ID, UP, BookSide::Bid, Decimal::new(5, 1)),
+            if at == START {
+                Decimal::ZERO
+            } else if at == START + 120_000 {
+                Decimal::from(80)
+            } else {
+                Decimal::from(100)
+            }
+        );
+        if at == START {
+            for asset in &driver.frames()[0].observation.assets {
+                assert!(asset.bids.value.is_none() && asset.asks.value.is_none());
+                assert!(asset.best_bid_ask.value.is_some());
+            }
+            let before = session.execution_state.next_account_transition_seq();
+            let receipt = driver
+                .decision()
+                .unwrap()
+                .request(BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+                    context: RequestContextV2 {
+                        global_request_id: "preloading-buy".into(),
+                        caller_correlation_id: None,
+                    },
+                    item: post_item(
+                        "preloading-buy",
+                        &ConditionId(CONDITION_ID.into()),
+                        &TokenId(UP.into()),
+                        SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: "0.2".parse().unwrap(),
+                            size_shares: "5".parse().unwrap(),
+                            post_only: true,
+                        },
+                    ),
+                }))
+                .unwrap();
+            assert!(receipt.platform_arrived_at_utc_ms < START + 100_000);
+            driver
+                .observe_at(receipt.platform_arrived_at_utc_ms + 1)
+                .unwrap();
+            let session = driver
+                .execution
+                .actor
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                session.execution_state.next_account_transition_seq(),
+                before
+            );
+            assert!(
+                session
+                    .execution_state
+                    .active_platform_order_ids()
+                    .is_empty()
+            );
+        }
+    }
+    assert_eq!(
+        seen,
+        [START, START + 100_000, START + 110_000, START + 120_000]
+    );
+    driver.stop_and_drain().unwrap();
+    fixture_log_counts(&path, &root, &hidden);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn midnight_resolution_without_initial_books_redeems_zero_balance_once() {
+    midnight_resolution_without_initial_books_redeems_zero_balance_once_layout(false, false).await;
+}
+
+async fn midnight_resolution_without_initial_books_redeems_zero_balance_once_layout(
+    day_log: bool,
+    finite_historical: bool,
+) {
+    // 已发生失败的旧市场：午夜仅登记 metadata，不带前日盘口或账户。
+    // 终态 source/received/admitted、WS epoch/sequence 和赢家均取原事故证据。
+    const CONDITION: &str = "0x958f8bdb135b6b06eb2943729196ec066aa5499599fb6f9fe00e718b44169af9";
+    const UP: &str =
+        "86414155968606164816894781771088030693649396591540249038646879610300960485835";
+    const DOWN: &str =
+        "114524727566509658620026900094951031660526443095197303364728454725101893208982";
+    const END: i64 = 1_789_171_200_000;
+    const SOURCE: i64 = 1_789_171_353_344;
+    const RECEIVED: i64 = 1_789_171_353_356;
+    const EPOCH: &str = "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237";
+    const SEQUENCE: u64 = 24_734_572;
+    let market = MarketIdentityV2 {
+        condition_id: ConditionId(CONDITION.into()),
+        clob_market_id: ClobMarketId("4457758".into()),
+        window: MarketWindowV2 {
+            start_at_utc_ms: END - 300_000,
+            end_at_utc_ms: END,
+        },
+    };
+    let mut metadata = metadata_snapshot_row();
+    metadata.condition_id = CONDITION.into();
+    metadata.clob_market_id = market.clob_market_id.0.clone();
+    metadata.asset_ids = format!(r#"["{UP}","{DOWN}"]"#);
+    metadata.market_start_utc = market.window.start_at_utc_ms;
+    metadata.market_end_utc = END;
+    metadata.timestamp_received = 1_789_170_600_107;
+    metadata.collector_admission_time_utc_ms = 1_789_170_600_111;
+    metadata.fixed_identity_verified_at_utc = metadata.timestamp_received - 1;
+    metadata.source_evidence_received_at_utc = Some(metadata.timestamp_received);
+    metadata.row_evidence_validation_completed_at_utc =
+        Some(metadata.collector_admission_time_utc_ms);
+    metadata.metadata_fetch_start_utc = Some(metadata.timestamp_received - 10);
+    // 原小证据核实了此中间行的种类、时间及 sequence，未包含状态枚举。
+    // 其余状态/无外源字段沿 core_tests::local_transition_row 构造，非原行复写。
+    let mut active = metadata.clone();
+    active.metadata_row_kind = PolymarketMetadataRowKind::MarketStateTransition;
+    active.timestamp_received = 1_789_170_900_013;
+    active.collector_admission_time_utc_ms = 1_789_170_900_014;
+    active.collector_admission_sequence = 13_509;
+    active.metadata_origin = PolymarketMetadataOrigin::LocalMarketStateTimer;
+    active.source_endpoint = None;
+    active.source_endpoint_unavailable_reason =
+        Some(MetadataSourceEndpointUnavailableReason::NotApplicableNoSourceEvidence);
+    active.source_evidence_origin = None;
+    active.source_evidence_event_type = None;
+    active.source_evidence_channel = None;
+    active.source_evidence_received_at_utc = None;
+    active.row_evidence_validation_completed_at_utc = None;
+    active.source_evidence_payload_json = None;
+    active.metadata_fetch_start_utc = None;
+    active.closed = None;
+    active.active = None;
+    active.active_unavailable_reason =
+        Some(MetadataActiveUnavailableReason::NotApplicableForRowKind);
+    active.accepting_orders = None;
+    active.outcomes_raw = None;
+    active.outcome_prices_raw = None;
+    active.response_fields_unavailable_reason = None;
+    active.market_lifecycle_state = MetadataMarketLifecycleState::Active;
+    active.market_lifecycle_transition =
+        Some(MetadataMarketLifecycleTransition::PrefetchedToActive);
+    active.lifecycle_scheduled_at_utc = Some(market.window.start_at_utc_ms);
+    active.lifecycle_applied_at_utc = Some(active.timestamp_received);
+    active.market_runtime_role = MetadataMarketRuntimeRole::Current;
+    active.market_runtime_role_transition =
+        Some(MetadataMarketRuntimeRoleTransition::NextToCurrent);
+    active.runtime_role_scheduled_at_utc = Some(market.window.start_at_utc_ms);
+    active.runtime_role_applied_at_utc = Some(active.timestamp_received);
+    let mut terminal_metadata = terminal_metadata_row(&market);
+    terminal_metadata.asset_ids = metadata.asset_ids.clone();
+    terminal_metadata.timestamp_received = RECEIVED;
+    terminal_metadata.collector_admission_time_utc_ms = RECEIVED;
+    terminal_metadata.source_evidence_received_at_utc = Some(RECEIVED);
+    terminal_metadata.row_evidence_validation_completed_at_utc = Some(RECEIVED);
+    terminal_metadata.lifecycle_applied_at_utc = Some(RECEIVED);
+    terminal_metadata.runtime_role_applied_at_utc = Some(RECEIVED);
+    terminal_metadata.ws_platform_timestamp_raw = Some(SOURCE.to_string());
+    terminal_metadata.ws_platform_timestamp_utc = Some(SOURCE);
+    terminal_metadata.winning_asset_id = Some(UP.into());
+    terminal_metadata.ws_claimant_source_sequence_epoch_id = Some(EPOCH.into());
+    terminal_metadata.ws_claimant_collector_admission_sequence = Some(SEQUENCE);
+    let mut ws = terminal_orderbook_row(&market);
+    ws.timestamp_received = RECEIVED;
+    ws.timestamp = Some(SOURCE);
+    ws.collector_admission_time_utc_ms = RECEIVED;
+    ws.source_sequence_epoch_id = EPOCH.into();
+    ws.collector_admission_sequence = SEQUENCE;
+    if let PolymarketOrderbookEvent::MarketResolved {
+        asset_ids,
+        winning_asset_id,
+        ..
+    } = &mut ws.event
+    {
+        *asset_ids = vec![UP.into(), DOWN.into()];
+        *winning_asset_id = UP.into();
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    for input in [
+        record(
+            0,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata))),
+        ),
+        record(
+            1,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(active))),
+        ),
+        record(
+            2,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(
+                terminal_metadata,
+            ))),
+        ),
+        record(
+            3,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(ws)),
+        ),
+        end(4),
+    ] {
+        let result = apply(&mut core, &input);
+        writer.record(input, result).unwrap();
+    }
+    writer.stabilize().unwrap();
+    let context = core.pm_context(CONDITION).unwrap();
+    let scenario = sealed_scenario_for_markets(vec![
+        crate::scenario::PlatformMarketV1::try_new(
+            context.market,
+            context
+                .assets
+                .into_iter()
+                .map(|asset| asset.asset)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap(),
+    ]);
+    let binding = fixture_day_binding(&core, "midnight-terminal", "midnight-terminal");
+    let (execution, delivered) = public_execution_with_scenario_capacity_layout(
+        &temp.path().join("sim.jsonl"),
+        scenario,
+        SimCallerRoleV1::HistoricalBacktest,
+        32,
+        None,
+        day_log.then(|| binding.clone()),
+        finite_historical,
+    )
+    .await;
+    let hidden = prepare_hidden_v1(
+        core,
+        PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap(),
+        &temp.path().join("hidden"),
+        &config(),
+        "midnight-terminal".into(),
+    )
+    .unwrap();
+    let mut recorded = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+    // 零额外宿主延迟；不把实际来源可见时刻映射到旧小数值夹具时间。
+    let source = std::iter::from_fn(move || recorded.next_visible_group());
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "midnight-terminal".into());
+    driver.enable_finite_recording_wait().unwrap();
+    driver.next_group().unwrap().unwrap(); // 先登记身份，未提供任何初始 L2。
+    let account_sequence = driver
+        .execution
+        .actor
+        .state
+        .as_ref()
+        .unwrap()
+        .session
+        .as_ref()
+        .unwrap()
+        .execution_state
+        .next_account_transition_seq();
+    let mut buckets = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
+    let mut terminal_count = 0;
+    while let Some(bucket) = buckets.next_bucket().unwrap() {
+        let bucket = if day_log {
+            fixture_day_bucket(bucket, &binding)
+        } else {
+            bucket
+        };
+        let at = bucket.reference.bucket_time_utc_ms();
+        while driver
+            .next_group_at()
+            .unwrap()
+            .is_some_and(|next| next < at)
+        {
+            driver.next_group().unwrap().unwrap();
+        }
+        for record in bucket.records.iter() {
+            if let HiddenExecutionRecordV1::MarketFact(fact) = record
+                && matches!(fact.payload, CanonicalMarketFactPayloadV1::Terminal(_))
+            {
+                terminal_count += 1;
+                assert_eq!(at, SOURCE);
+                assert_eq!(fact.dependency_time.source_event_at_utc_ms, Some(SOURCE));
+            }
+        }
+        driver.hidden_bucket(bucket).unwrap();
+    }
+    while driver.next_group().unwrap().is_some() {}
+    assert_eq!(terminal_count, 1, "配对后的终态只归约一次");
+    let session = driver
+        .execution
+        .actor
+        .state
+        .as_ref()
+        .unwrap()
+        .session
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        session.execution_state.next_account_transition_seq(),
+        account_sequence
+    );
+    assert!(
+        session
+            .execution_state
+            .redeemed_market_resolution(CONDITION)
+            .is_some()
+    );
+    for state in [
+        &session.public_markets,
+        session.hidden_platform_markets.as_ref().unwrap(),
+    ] {
+        assert_eq!(state.external_level_count_for_tests(CONDITION), 0);
+        assert_eq!(
+            state.validate_input_complete(),
+            Err(crate::market::MarketEventErrorV1::IncompleteInitialLoad(
+                vec![CONDITION.into()]
+            ))
+        );
+    }
+    let feedback = delivered.settlements.borrow();
+    let redemptions = feedback
+        .iter()
+        .filter_map(|feedback| match &feedback.event {
+            SettlementLifecycleEventV2::AutoRedeemApplied {
+                condition_id,
+                resolution_source_event_at_utc_ms,
+                redeemed_outcome_balances,
+                redeemed_pusd,
+                account_delta,
+                ..
+            } => Some((
+                condition_id,
+                resolution_source_event_at_utc_ms,
+                redeemed_outcome_balances,
+                redeemed_pusd,
+                account_delta,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(condition, at, balances, amount, delta)] = redemptions.as_slice() else {
+        panic!("零余额自动赎回反馈必须恰好一次: {redemptions:?}");
+    };
+    assert_eq!(condition.0, CONDITION);
+    assert_eq!(**at, SOURCE);
+    assert_eq!(amount.0, "0");
+    assert!(delta.is_none());
+    assert_eq!(balances.len(), 2);
+    assert!(
+        balances
+            .iter()
+            .all(|balance| balance.balance_shares.0 == "0")
+    );
+    drop(feedback);
+    if finite_historical {
+        driver.stop_and_drain().unwrap();
+    } else {
+        driver.complete().unwrap();
+    }
+    fixture_log_counts(&temp.path().join("sim.jsonl"), &root, &hidden);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -849,7 +1700,7 @@ async fn hidden_index_pages_preserve_real_steps_market_facts_and_execution_isola
     while let Some(bucket) = small.next_bucket().unwrap() {
         let other = wide.next_bucket().unwrap().unwrap();
         assert_eq!(bucket, other, "页边界不改变桶或索引序材料");
-        times.push(bucket.reference.bucket_time_utc_ms);
+        times.push(bucket.reference.bucket_time_utc_ms());
         for record in bucket.records.iter() {
             match record {
                 HiddenExecutionRecordV1::Step { step, .. } => {
@@ -877,7 +1728,7 @@ async fn hidden_index_pages_preserve_real_steps_market_facts_and_execution_isola
                 _ => {}
             }
         }
-        let at = bucket.reference.bucket_time_utc_ms;
+        let at = bucket.reference.bucket_time_utc_ms();
         driver.hidden_bucket(bucket).unwrap();
         if at == 21_000 {
             let session = driver
@@ -1037,11 +1888,11 @@ async fn decision_cutoff_uses_delivered_feedback_and_frame_borrows_original_obse
     }
     let last = driver.last_receipt.as_ref().unwrap().clone();
     let closure = TrustedPublicTimeClosureV1 {
-            execution_time: driver.time(22_000),
-            consumption_sequence_ref: driver.consumption_sequence_ref.clone(),
-            next_group_position: 5,
-            closure: PublicTimeClosureReasonV1::NextGlobalEventAt(TERMINAL_ADMITTED_TIME_MS),
-        };
+        execution_time: driver.time(22_000),
+        consumption_sequence_ref: driver.consumption_sequence_ref.clone(),
+        next_group_position: 5,
+        closure: PublicTimeClosureReasonV1::NextGlobalEventAt(TERMINAL_ADMITTED_TIME_MS),
+    };
     driver.execution.close_public_time(closure).unwrap();
     driver.close_pending = false;
     let required = driver
@@ -1050,11 +1901,11 @@ async fn decision_cutoff_uses_delivered_feedback_and_frame_borrows_original_obse
         .next_required_logical_drive()
         .unwrap();
     let closure = TrustedPublicTimeClosureV1 {
-            execution_time: driver.time(required.required_at_utc_ms),
-            consumption_sequence_ref: driver.consumption_sequence_ref.clone(),
-            next_group_position: 5,
-            closure: PublicTimeClosureReasonV1::NextGlobalEventAt(TERMINAL_ADMITTED_TIME_MS),
-        };
+        execution_time: driver.time(required.required_at_utc_ms),
+        consumption_sequence_ref: driver.consumption_sequence_ref.clone(),
+        next_group_position: 5,
+        closure: PublicTimeClosureReasonV1::NextGlobalEventAt(TERMINAL_ADMITTED_TIME_MS),
+    };
     driver.execution.close_public_time(closure).unwrap();
     let response = delivered.responses.borrow()[0].clone();
     delivered.deliver_through(response.response_received_at_utc_ms - 1);
@@ -1191,7 +2042,7 @@ async fn hidden_trade_and_bba_before_initial_book_have_no_execution_effect() {
     let mut source = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
     let mut changes = Vec::new();
     while let Some(bucket) = source.next_bucket().unwrap() {
-        let at = bucket.reference.bucket_time_utc_ms;
+        let at = bucket.reference.bucket_time_utc_ms();
         if at > 21_002 {
             break;
         }
@@ -1336,13 +2187,13 @@ async fn hidden_cross_epoch_index_keeps_the_real_predecessor_failure() {
     .unwrap();
     let mut source = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
     let first = source.next_bucket().unwrap().unwrap();
-    assert_eq!(first.reference.bucket_time_utc_ms, 20_050);
+    assert_eq!(first.reference.bucket_time_utc_ms(), 20_050);
     execution.hidden_bucket(first).unwrap();
     let recovery = source.next_bucket().unwrap().unwrap();
-    assert_eq!(recovery.reference.bucket_time_utc_ms, 20_100);
+    assert_eq!(recovery.reference.bucket_time_utc_ms(), 20_100);
     execution.hidden_bucket(recovery).unwrap();
     let late = source.next_bucket().unwrap().unwrap();
-    assert_eq!(late.reference.bucket_time_utc_ms, 20_200);
+    assert_eq!(late.reference.bucket_time_utc_ms(), 20_200);
     assert!(late.records.iter().any(|record| matches!(record, HiddenExecutionRecordV1::Step { step, .. }
         if matches!(&step.change, data_pipeline_core::pm_reduction::PmStepChangeV1::LevelChange { transition, .. }
         if transition.quantity_before_shares.0 == "10" && transition.quantity_after_shares.0 == "20"))));
@@ -1622,7 +2473,7 @@ async fn pure_reference_bucket_closes_without_market_effect_and_missing_time_is_
     .unwrap();
     let mut source = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
     let bucket = source.next_bucket().unwrap().unwrap();
-    assert_eq!(bucket.reference.bucket_time_utc_ms, 21_000);
+    assert_eq!(bucket.reference.bucket_time_utc_ms(), 21_000);
     assert_eq!(bucket.records.len(), 1);
     assert!(matches!(
         bucket.records[0],
@@ -1634,7 +2485,7 @@ async fn pure_reference_bucket_closes_without_market_effect_and_missing_time_is_
             .unwrap()
             .unwrap()
             .reference
-            .bucket_time_utc_ms,
+            .bucket_time_utc_ms(),
         22_000
     );
     assert!(
@@ -1708,7 +2559,6 @@ async fn enrolled_market_has_the_same_snapshot_rule_frame() {
     assert_eq!(frames[0].decision_cutoff, cutoff);
 }
 
-
 // 与两个真实有限例程共用供料策略；不向生产 API 暴露后台测试屏障。
 pub(super) mod finite_feeding {
     use crate as sim_system;
@@ -1737,8 +2587,10 @@ async fn finite_public_feed_continues_after_closed_time_and_due_action_without_r
     let core = recorded_complete(&root);
     let mut reference = None;
     let mut prior_steps = 0;
-    for blocked in [false, true] {
-        let path = temp.path().join(format!("public-{blocked}.jsonl"));
+    for (blocked, automatic) in [(false, false), (true, false), (true, true)] {
+        let path = temp
+            .path()
+            .join(format!("public-{blocked}-{automatic}.jsonl"));
         let (execution, delivered) = public_execution_capacity(
             &path,
             &core,
@@ -1798,6 +2650,24 @@ async fn finite_public_feed_continues_after_closed_time_and_due_action_without_r
                 .unwrap()
                 .pause_for_tests(false)
         });
+        let automatic_release = if automatic {
+            driver.enable_finite_recording_wait().unwrap();
+            let (notice, entered) = std::sync::mpsc::sync_channel(1);
+            driver
+                .execution
+                .actor
+                .background_log
+                .as_mut()
+                .unwrap()
+                .notify_finite_wait_for_tests(notice);
+            let release = release.take().unwrap();
+            Some(std::thread::spawn(move || {
+                entered.recv().unwrap();
+                release.send(()).unwrap();
+            }))
+        } else {
+            None
+        };
         let before = driver.execution.actor.applied_input_sequence;
         let drive_before = driver.drive_position;
         let mut waits = 0;
@@ -1841,7 +2711,10 @@ async fn finite_public_feed_continues_after_closed_time_and_due_action_without_r
         )
         .unwrap()
         .unwrap();
-        assert_eq!(waits, usize::from(blocked));
+        if let Some(worker) = automatic_release {
+            worker.join().unwrap();
+        }
+        assert_eq!(waits, usize::from(blocked && !automatic));
         if !blocked {
             prior_steps = driver.execution.actor.applied_input_sequence - before - 1;
         }
@@ -1863,9 +2736,7 @@ async fn finite_public_feed_continues_after_closed_time_and_due_action_without_r
         } else {
             reference = Some(actual);
         }
-        driver
-            .complete()
-            .unwrap();
+        driver.complete().unwrap();
     }
 }
 
@@ -1976,7 +2847,7 @@ async fn finite_hidden_feed_resumes_after_due_actions_and_applies_each_bucket_on
                                 .actor
                                 .next_required_logical_drive()
                                 .is_none_or(|required| required.required_at_utc_ms
-                                    >= bucket.reference.bucket_time_utc_ms)
+                                    >= bucket.reference.bucket_time_utc_ms())
                         );
                         release.send(()).unwrap();
                     }
@@ -1996,7 +2867,7 @@ async fn finite_hidden_feed_resumes_after_due_actions_and_applies_each_bucket_on
                 .session
                 .as_ref()
                 .unwrap();
-            if bucket.reference.bucket_time_utc_ms == 21_001 {
+            if bucket.reference.bucket_time_utc_ms() == 21_001 {
                 assert_eq!(
                     session
                         .hidden_platform_markets
@@ -2030,75 +2901,113 @@ async fn finite_hidden_feed_resumes_after_due_actions_and_applies_each_bucket_on
 
 #[tokio::test(flavor = "current_thread")]
 async fn finite_feed_wait_propagates_original_background_io_and_stops_without_seal() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("dpt");
-    let core = recorded_books(&root);
-    let path = temp.path().join("sim.jsonl");
-    let (mut execution, _) =
-        public_execution_capacity(&path, &core, SimCallerRoleV1::Paper, 0, None).await;
-    execution.wait_for_recording_capacity().unwrap();
-    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
-    let mut driver = FinitePublicConsumptionV1::new(execution, source, "finite-times".into());
-    let first = finite_feeding::feed(&mut driver, FinitePublicConsumptionV1::next_group,
-        FinitePublicConsumptionV1::wait_for_recording_capacity).unwrap().unwrap();
-    driver.wait_for_recording_capacity().unwrap();
-    let (entered, release) = driver.execution.actor.background_log.as_ref().unwrap().pause_write_for_tests();
-    // 先让真实上一组闭合占住后台写屏障，再测空档闭合后的原背压错误传播。
-    driver.state.close_at(10_000, PublicTimeClosureReasonV1::NextGlobalEventAt(22_000)).unwrap();
-    driver.wait_for_recording_capacity().unwrap();
-    entered.recv().unwrap();
-    let before = driver.execution.actor.applied_input_sequence;
-    let mut waits = 0;
-    let mut outputs = Vec::new();
-    let result = finite_feeding::feed(
-        &mut driver,
-        FinitePublicConsumptionV1::next_group,
-        |driver| {
-            waits += 1;
-            assert_eq!(driver.execution.actor.applied_input_sequence, before + 1);
-            assert_eq!(
-                driver
-                    .source
-                    .peek()
-                    .unwrap()
-                    .as_ref()
-                    .unwrap()
-                    .prepared
-                    .reference
-                    .group_position,
-                1
-            );
-            release.send(()).unwrap();
-            driver.wait_for_recording_capacity()
-        },
-    );
-    if let Ok(Some(value)) = &result {
-        outputs.push(value.clone());
-    }
-    let Err(SimRunActorErrorV2::Log(error @ crate::event_log::SimEventLogErrorV2::Io { .. })) =
-        result
-    else {
-        panic!("必须传播真实后台写错误")
-    };
-    assert_eq!(waits, 1);
-    assert!(outputs.is_empty());
-    assert_eq!(driver.last_receipt.as_ref(), Some(&first.0));
-    assert_eq!(driver.execution.actor.applied_input_sequence, before + 1);
-    let background = driver.execution.actor.background_log.take().unwrap();
-    assert_eq!(background.abort_and_join_for_tests().unwrap_err(), error);
-    assert!(!fs::read_to_string(&path).unwrap().contains("RUN_SEAL"));
-    let (_, mut reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
-    loop {
-        let (next, group) = reader.next_group().unwrap();
-        reader = next;
-        if group.is_none() {
-            break;
+    for automatic in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dpt");
+        let core = recorded_books(&root);
+        let path = temp.path().join("sim.jsonl");
+        let (mut execution, _) =
+            public_execution_capacity(&path, &core, SimCallerRoleV1::Paper, 0, None).await;
+        execution.wait_for_recording_capacity().unwrap();
+        let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+        let mut driver = FinitePublicConsumptionV1::new(execution, source, "finite-times".into());
+        let first = finite_feeding::feed(
+            &mut driver,
+            FinitePublicConsumptionV1::next_group,
+            FinitePublicConsumptionV1::wait_for_recording_capacity,
+        )
+        .unwrap()
+        .unwrap();
+        driver.wait_for_recording_capacity().unwrap();
+        let (entered, release) = driver
+            .execution
+            .actor
+            .background_log
+            .as_ref()
+            .unwrap()
+            .pause_write_for_tests();
+        // 先让真实上一组闭合占住后台写屏障，再测空档闭合后的原背压错误传播。
+        driver
+            .state
+            .close_at(10_000, PublicTimeClosureReasonV1::NextGlobalEventAt(22_000))
+            .unwrap();
+        driver.wait_for_recording_capacity().unwrap();
+        entered.recv().unwrap();
+        let mut release = Some(release);
+        let automatic_release = if automatic {
+            driver.enable_finite_recording_wait().unwrap();
+            let (notice, waiting) = std::sync::mpsc::sync_channel(1);
+            driver
+                .execution
+                .actor
+                .background_log
+                .as_mut()
+                .unwrap()
+                .notify_finite_wait_for_tests(notice);
+            let release = release.take().unwrap();
+            Some(std::thread::spawn(move || {
+                waiting.recv().unwrap();
+                release.send(()).unwrap();
+            }))
+        } else {
+            None
+        };
+        let before = driver.execution.actor.applied_input_sequence;
+        let mut waits = 0;
+        let mut outputs = Vec::new();
+        let result = finite_feeding::feed(
+            &mut driver,
+            FinitePublicConsumptionV1::next_group,
+            |driver| {
+                waits += 1;
+                assert_eq!(driver.execution.actor.applied_input_sequence, before + 1);
+                assert_eq!(
+                    driver
+                        .source
+                        .peek()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .prepared
+                        .reference
+                        .group_position,
+                    1
+                );
+                release.take().unwrap().send(()).unwrap();
+                driver.wait_for_recording_capacity()
+            },
+        );
+        if let Ok(Some(value)) = &result {
+            outputs.push(value.clone());
         }
+        let Err(SimRunActorErrorV2::Log(error @ crate::event_log::SimEventLogErrorV2::Io { .. })) =
+            result
+        else {
+            panic!("必须传播真实后台写错误")
+        };
+        if let Some(worker) = automatic_release {
+            worker.join().unwrap();
+        }
+        assert_eq!(waits, usize::from(!automatic));
+        assert!(outputs.is_empty());
+        assert_eq!(driver.last_receipt.as_ref(), Some(&first.0));
+        assert_eq!(driver.execution.actor.applied_input_sequence, before + 1);
+        let background = driver.execution.actor.background_log.take().unwrap();
+        assert_eq!(background.abort_and_join_for_tests().unwrap_err(), error);
+        assert!(!fs::read_to_string(&path).unwrap().contains("RUN_SEAL"));
+        let (_, mut reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+        loop {
+            let (next, group) = reader.next_group().unwrap();
+            reader = next;
+            if group.is_none() {
+                break;
+            }
+        }
+        assert!(matches!(
+            reader.finish_sealed_clean_run(),
+            Err(crate::event_log::SimEventLogErrorV2::UnsealedCleanRun)
+        ));
     }
-    assert!(matches!(
-        reader.finish_sealed_clean_run(),
-        Err(crate::event_log::SimEventLogErrorV2::UnsealedCleanRun)
-    ));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2396,7 +3305,11 @@ async fn continuous_actual_clock_splits_old_source_times_and_drains_earlier_due_
         execution_state.next_rebate_clock_at_utc_ms(),
         Some(MARKET_END_AT)
     );
-    assert_eq!(execution_state.next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()), None);
+    assert_eq!(
+        execution_state
+            .next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()),
+        None
+    );
     assert_eq!(execution_state.next_scheduled_finality_at_utc_ms(), None);
     assert_eq!(
         driver.next_wake_after(),
@@ -2674,7 +3587,10 @@ async fn continuous_equal_time_finality_gtd_and_rebate_keep_original_pre_market_
         .as_ref()
         .unwrap()
         .execution_state;
-    assert_eq!(state.next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()), Some(deadline));
+    assert_eq!(
+        state.next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()),
+        Some(deadline)
+    );
     let finality_at = state.next_scheduled_finality_at_utc_ms().unwrap();
     for (at, class) in [
         (finality_at, "finality"),
@@ -2707,7 +3623,12 @@ async fn continuous_equal_time_finality_gtd_and_rebate_keep_original_pre_market_
                 session.execution_state.next_scheduled_finality_at_utc_ms(),
                 Some(at)
             ),
-            "gtd" => assert_eq!(session.execution_state.next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()), None),
+            "gtd" => assert_eq!(
+                session
+                    .execution_state
+                    .next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()),
+                None
+            ),
             _ => assert_ne!(
                 session.execution_state.next_rebate_clock_at_utc_ms(),
                 Some(at)
@@ -2719,12 +3640,48 @@ async fn continuous_equal_time_finality_gtd_and_rebate_keep_original_pre_market_
 
 #[tokio::test(flavor = "current_thread")]
 async fn trusted_observation_keeps_source_prefix_and_sends_at_independent_time() {
+    trusted_observation_keeps_source_prefix_and_sends_at_independent_time_layout(false, false)
+        .await;
+}
+
+async fn trusted_observation_keeps_source_prefix_and_sends_at_independent_time_layout(
+    day_log: bool,
+    finite_historical: bool,
+) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let core = recorded_books(&root);
     let path = temp.path().join("sim.jsonl");
     let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
-    let (execution, _) = public_execution(&path, &core, SimCallerRoleV1::Paper).await;
+    let binding = fixture_day_binding(&core, "time-test", "hidden-test");
+    let context = core.pm_context(CONDITION_ID).unwrap();
+    let scenario = sealed_scenario_for_markets(vec![
+        crate::scenario::PlatformMarketV1::try_new(
+            context.market,
+            context
+                .assets
+                .into_iter()
+                .map(|a| a.asset)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap(),
+    ]);
+    let (execution, _) = public_execution_with_scenario_capacity_layout(
+        &path,
+        scenario,
+        if finite_historical {
+            SimCallerRoleV1::HistoricalBacktest
+        } else {
+            SimCallerRoleV1::Paper
+        },
+        32,
+        None,
+        day_log.then(|| binding.clone()),
+        finite_historical,
+    )
+    .await;
     let mut driver = FinitePublicConsumptionV1::new(execution, source, "time-test".into());
     for _ in 0..3 {
         driver.next_group().unwrap().unwrap();
@@ -2868,12 +3825,38 @@ async fn trusted_observation_keeps_source_prefix_and_sends_at_independent_time()
         pm_materials: Vec::new(),
     };
     let mut sequence = 1;
+    let mut saw_observation = false;
+    if day_log {
+        assert_eq!(recovery.historical_day_binding_for_tests(), Some(&binding));
+    }
     loop {
         let (next, inputs) = recovery.next_group().unwrap();
         recovery = next;
         let Some(inputs) = inputs else { break };
         for logged in inputs {
+            saw_observation |= matches!(logged, LoggedBusinessInputV2::PublicObserveTime(_));
             let input = match logged {
+                LoggedBusinessInputV2::DayPublicGroup(group) => {
+                    let prepared = source.next().unwrap().unwrap().prepared;
+                    assert_eq!(prepared.reference.input_stream_id, binding.input_stream_id);
+                    assert_eq!(
+                        prepared.reference.applied_prefix.next_input_position,
+                        group.next_input_position
+                    );
+                    assert_eq!(prepared.reference.group_position, group.group_position);
+                    assert_eq!(
+                        prepared.reference.closed_at_input_position,
+                        group.closed_at_input_position
+                    );
+                    BusinessInputV2::PublicGroup(AcceptedPublicGroupV1 {
+                        reference: prepared.reference.clone(),
+                        execution_time: TrustedActorExecutionTimeV1(group.execution_time),
+                        prepared,
+                        pm_materials: Vec::new(),
+                        pm_step_bindings: Vec::new(),
+                        pm_reports: Vec::new(),
+                    })
+                }
                 LoggedBusinessInputV2::PublicGroup(group) => {
                     let prepared = source.next().unwrap().unwrap().prepared;
                     assert_eq!(prepared.reference, group.reference);
@@ -2924,8 +3907,11 @@ async fn trusted_observation_keeps_source_prefix_and_sends_at_independent_time()
         })
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
-    let log = std::fs::read_to_string(path).unwrap();
-    assert!(log.contains("PUBLIC_OBSERVE_TIME"));
+    assert!(saw_observation);
+    let log = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+    if !day_log {
+        assert!(log.contains("PUBLIC_OBSERVE_TIME"));
+    }
     assert!(!log.contains("EndOfInput"));
     assert!(!log.contains("RUN_SEAL"));
 }
@@ -2956,9 +3942,19 @@ async fn paper_send_samples_clock_at_request_instead_of_capability_acquisition()
     clock.store(22_050, Ordering::SeqCst);
     let receipt = send
         .request(BusinessRequestV2::PostOrder(PostOrderRequestV2 {
-            context: RequestContextV2 { global_request_id: "paper-time".into(), caller_correlation_id: None },
-            item: post_item("buy", &ConditionId(CONDITION_ID.into()), &TokenId(UP_TOKEN_ID.into()),
-                SimBuyOrderKindV1::FokMarket { spend_pusd: Decimal::from(3), worst_price_pusd_per_share: Decimal::new(6, 1) }),
+            context: RequestContextV2 {
+                global_request_id: "paper-time".into(),
+                caller_correlation_id: None,
+            },
+            item: post_item(
+                "buy",
+                &ConditionId(CONDITION_ID.into()),
+                &TokenId(UP_TOKEN_ID.into()),
+                SimBuyOrderKindV1::FokMarket {
+                    spend_pusd: Decimal::from(3),
+                    worst_price_pusd_per_share: Decimal::new(6, 1),
+                },
+            ),
         }))
         .unwrap();
     assert_eq!(send.cutoff(), &observed);
@@ -2982,7 +3978,10 @@ async fn paper_send_samples_clock_at_request_instead_of_capability_acquisition()
     let due = driver.required_at().unwrap();
     clock.store(due, Ordering::SeqCst);
     driver.observe().unwrap();
-    assert!(completed_post_response(&driver.execution.actor, "paper-time").is_none(), "观察不关闭当前毫秒的 BUY");
+    assert!(
+        completed_post_response(&driver.execution.actor, "paper-time").is_none(),
+        "观察不关闭当前毫秒的 BUY"
+    );
     clock.store(due + 1, Ordering::SeqCst);
     driver.observe().unwrap();
     assert!(completed_post_response(&driver.execution.actor, "paper-time").is_some());

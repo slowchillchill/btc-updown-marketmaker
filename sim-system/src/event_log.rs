@@ -91,8 +91,252 @@ impl std::fmt::Display for SimEventLogErrorV2 {
 
 impl std::error::Error for SimEventLogErrorV2 {}
 
+/// 固定版本前缀；随后是长度（u64 little endian）和一帧CBOR。
+pub(crate) const HISTORICAL_DAY_LOG_MAGIC_V1: &[u8; 8] = b"SIMDAY01";
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum SimLogLayoutV1 {
+    #[default]
+    JsonV2,
+    HistoricalDayV1(crate::public_consumption::HistoricalDayLogBindingV1),
+}
+
+// 日布局保留原接纳组，不将字段位置视为业务输入序号。
+struct DayInputRefV1<'a>(&'a BusinessInputV2);
+impl Serialize for DayInputRefV1<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{Error, SerializeTuple};
+        macro_rules! tuple {
+            ($tag:expr, $($field:expr),+ $(,)?) => {{
+                let count = 1 + [$(stringify!($field)),+].len();
+                let mut tuple = serializer.serialize_tuple(count)?;
+                tuple.serialize_element(&$tag)?;
+                $(tuple.serialize_element($field)?;)+
+                tuple.end()
+            }};
+        }
+        match self.0 {
+            BusinessInputV2::PublicObserveTime(time) => {
+                tuple!(0u8, &time.drive_position(), &time.logical_time_utc_ms())
+            }
+            BusinessInputV2::PublicCloseTime(close) => tuple!(
+                1u8,
+                &close.execution_time.drive_position(),
+                &close.execution_time.logical_time_utc_ms(),
+                &close.next_group_position,
+                &close.closure
+            ),
+            BusinessInputV2::PlatformPrefixAdvance(prefix) => tuple!(
+                2u8,
+                &prefix.path,
+                &prefix.closed_through_utc_ms,
+                &prefix.next_index_position
+            ),
+            BusinessInputV2::PublicGroup(group) => tuple!(
+                3u8,
+                &group.execution_time.drive_position(),
+                &group.execution_time.logical_time_utc_ms(),
+                &group.reference.applied_prefix.next_input_position,
+                &group.reference.group_position,
+                &group.reference.closed_at_input_position
+            ),
+            BusinessInputV2::HiddenStepBucket(bucket) => {
+                let crate::public_consumption::HiddenBucketReferenceV2::Streaming(reference) =
+                    &bucket.reference
+                else {
+                    return Err(S::Error::custom("历史日布局需要原流式隐藏来源"));
+                };
+                tuple!(
+                    4u8,
+                    &reference.source.applied_prefix.next_input_position,
+                    &reference.bucket_time_utc_ms,
+                    &reference.index_start,
+                    &reference.index_end,
+                    &reference.closure
+                )
+            }
+            // 原正式业务载荷先沿既有JSON serde语义形成值，避免CBOR非人可读模式改变正式编码。
+            other => tuple!(5u8, &serde_json::to_value(other).map_err(S::Error::custom)?),
+        }
+    }
+}
+#[derive(Debug)]
+enum DayInputRecordV1 {
+    Observe(u64, i64),
+    Close(
+        u64,
+        i64,
+        u64,
+        crate::public_consumption::PublicTimeClosureReasonV1,
+    ),
+    Prefix(crate::market::MarketEventPathV1, i64, u64),
+    Public(u64, i64, u64, u64, u64),
+    Hidden(u64, i64, u64, u64, contracts::ReplayIndexClosureV1),
+    Full(serde_json::Value),
+}
+impl<'de> Deserialize<'de> for DayInputRecordV1 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = DayInputRecordV1;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("历史日输入元组")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                macro_rules! field {
+                    () => {
+                        seq.next_element()?
+                            .ok_or_else(|| A::Error::custom("历史日输入元组缺字段"))?
+                    };
+                }
+                let tag: u8 = field!();
+                Ok(match tag {
+                    0 => DayInputRecordV1::Observe(field!(), field!()),
+                    1 => DayInputRecordV1::Close(field!(), field!(), field!(), field!()),
+                    2 => DayInputRecordV1::Prefix(field!(), field!(), field!()),
+                    3 => DayInputRecordV1::Public(field!(), field!(), field!(), field!(), field!()),
+                    4 => DayInputRecordV1::Hidden(field!(), field!(), field!(), field!(), field!()),
+                    5 => DayInputRecordV1::Full(field!()),
+                    _ => return Err(A::Error::custom("未知历史日输入类型")),
+                })
+            }
+        }
+        deserializer.deserialize_seq(Visitor)
+    }
+}
+impl DayInputRecordV1 {
+    fn into_logged(
+        self,
+        run_id: &str,
+        binding: &crate::public_consumption::HistoricalDayLogBindingV1,
+        offset: u64,
+    ) -> Result<LoggedBusinessInputV2, SimEventLogErrorV2> {
+        use crate::public_consumption::*;
+        let time = |drive_position, logical_time_utc_ms| ActorTimeRecordV1 {
+            run_id: run_id.into(),
+            drive_position,
+            logical_time_utc_ms,
+        };
+        Ok(match self {
+            Self::Observe(p, at) => LoggedBusinessInputV2::PublicObserveTime(time(p, at)),
+            Self::Close(p, at, next, closure) => {
+                LoggedBusinessInputV2::PublicCloseTime(LoggedPublicClosureV1 {
+                    execution_time: time(p, at),
+                    consumption_sequence_ref: binding.consumption_sequence_ref.clone(),
+                    next_group_position: next,
+                    closure,
+                })
+            }
+            Self::Prefix(path, at, next) => LoggedBusinessInputV2::PlatformPrefixAdvance(
+                crate::runtime_v2::PlatformPrefixAdvanceV2 {
+                    path,
+                    closed_through_utc_ms: at,
+                    next_index_position: next,
+                },
+            ),
+            Self::Public(p, at, next, group, closed) => {
+                LoggedBusinessInputV2::DayPublicGroup(LoggedDayPublicGroupV1 {
+                    execution_time: time(p, at),
+                    next_input_position: next,
+                    group_position: group,
+                    closed_at_input_position: closed,
+                })
+            }
+            Self::Hidden(applied, at, start, end, closure) => {
+                LoggedBusinessInputV2::DayHiddenStepBucket(LoggedDayHiddenBucketV1 {
+                    applied_input_position: applied,
+                    bucket_time_utc_ms: at,
+                    index_start: start,
+                    index_end: end,
+                    closure,
+                })
+            }
+            Self::Full(value) => serde_json::from_value(value).map_err(|e| {
+                SimEventLogErrorV2::CompleteLineDecode {
+                    offset,
+                    message: e.to_string(),
+                }
+            })?,
+        })
+    }
+}
+fn encode_day_frame<T: Serialize>(value: &T, limit: usize) -> Result<Vec<u8>, SimEventLogErrorV2> {
+    let mut buffer = BoundedLineBufferV2::new(limit);
+    buffer
+        .write_all(&[0; 8])
+        .map_err(|_| SimEventLogErrorV2::GroupTooLarge { limit_bytes: limit })?;
+    ciborium::ser::into_writer(value, &mut buffer).map_err(|error| match error {
+        ciborium::ser::Error::Io(_) => SimEventLogErrorV2::GroupTooLarge { limit_bytes: limit },
+        error => SimEventLogErrorV2::Encode(error.to_string()),
+    })?;
+    let mut bytes = buffer.into_inner();
+    let length = (bytes.len() - 8) as u64;
+    bytes[..8].copy_from_slice(&length.to_le_bytes());
+    #[cfg(test)]
+    record_line_encode_for_tests();
+    Ok(bytes)
+}
+enum DayFrameReadV1 {
+    End,
+    Partial,
+    Complete(Vec<u8>),
+}
+fn read_day_frame(
+    reader: &mut impl Read,
+    limit: usize,
+) -> Result<DayFrameReadV1, SimEventLogErrorV2> {
+    let mut prefix = [0; 8];
+    let mut count = 0;
+    while count < 8 {
+        let n = reader
+            .read(&mut prefix[count..])
+            .map_err(|e| io_error("读取日SIM帧长度", e))?;
+        if n == 0 {
+            return Ok(if count == 0 {
+                DayFrameReadV1::End
+            } else {
+                DayFrameReadV1::Partial
+            });
+        }
+        count += n;
+    }
+    let length = u64::from_le_bytes(prefix);
+    if length.checked_add(8).is_none_or(|n| n > limit as u64) {
+        return Err(SimEventLogErrorV2::GroupTooLarge { limit_bytes: limit });
+    }
+    let mut bytes = vec![0; length as usize];
+    match reader.read_exact(&mut bytes) {
+        Ok(()) => Ok(DayFrameReadV1::Complete(bytes)),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(DayFrameReadV1::Partial),
+        Err(e) => Err(io_error("读取日SIM帧正文", e)),
+    }
+}
+fn decode_day_frame<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    offset: u64,
+) -> Result<T, SimEventLogErrorV2> {
+    let mut reader = io::Cursor::new(bytes);
+    let value = ciborium::de::from_reader(&mut reader).map_err(|e| {
+        SimEventLogErrorV2::CompleteLineDecode {
+            offset,
+            message: e.to_string(),
+        }
+    })?;
+    if reader.position() != bytes.len() as u64 {
+        return Err(SimEventLogErrorV2::CompleteLineDecode {
+            offset,
+            message: "CBOR帧存在额外正文".into(),
+        });
+    }
+    Ok(value)
+}
+
 pub(crate) struct SimEventLogV2 {
     file: File,
+    layout: SimLogLayoutV1,
     durability_role: RunDurabilityRoleV2,
     projection_version: BusinessProjectionVersionV1,
     byte_count: u64,
@@ -106,17 +350,113 @@ pub(crate) struct SimEventLogV2 {
     fail_next_sync: bool,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SimLogCheckpointV1 {
+    byte_count: u64,
+    next_input_sequence: u64,
+    #[serde(default)]
+    layout: SimLogLayoutV1,
+}
 impl SimEventLogV2 {
+    fn checkpoint(&self) -> SimLogCheckpointV1 {
+        SimLogCheckpointV1 {
+            byte_count: self.byte_count,
+            next_input_sequence: self.next_input_sequence,
+            layout: self.layout.clone(),
+        }
+    }
+    pub(crate) fn restore_checkpoint(
+        path: &Path,
+        opened: &RunOpenedV2,
+        saved: SimLogCheckpointV1,
+        max_group_bytes: usize,
+    ) -> Result<Self, SimEventLogErrorV2> {
+        use std::io::{Seek, SeekFrom};
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| io_error("打开原 SIM 检查点日志", e))?;
+        if file
+            .metadata()
+            .map_err(|e| io_error("读取原 SIM 日志长度", e))?
+            .len()
+            < saved.byte_count
+        {
+            return Err(SimEventLogErrorV2::InvalidStructure(
+                "SIM 日志短于完整检查点",
+            ));
+        }
+        file.set_len(saved.byte_count)
+            .map_err(|e| io_error("丢弃 SIM 未提交执行尾", e))?;
+        file.seek(SeekFrom::Start(saved.byte_count))
+            .map_err(|e| io_error("定位 SIM 续写位置", e))?;
+        file.sync_data()
+            .map_err(|e| io_error("稳定 SIM 检查点尾部恢复", e))?;
+        Ok(Self {
+            layout: saved.layout,
+            file,
+            durability_role: opened.durability_role,
+            projection_version: opened.projection_version,
+            byte_count: saved.byte_count,
+            next_input_sequence: saved.next_input_sequence,
+            max_group_bytes,
+            #[cfg(feature = "measurement")]
+            measurement_probe: Arc::new(MeasurementProbe::default()),
+            #[cfg(test)]
+            fail_next_write: false,
+            #[cfg(test)]
+            fail_next_sync: false,
+        })
+    }
+
     pub(crate) fn create(
         path: &Path,
         opened: &RunOpenedV2,
         max_group_bytes: usize,
     ) -> Result<Self, SimEventLogErrorV2> {
+        Self::create_with_layout(path, opened, max_group_bytes, SimLogLayoutV1::JsonV2)
+    }
+    pub(crate) fn create_historical_day(
+        path: &Path,
+        opened: &RunOpenedV2,
+        max_group_bytes: usize,
+        binding: crate::public_consumption::HistoricalDayLogBindingV1,
+    ) -> Result<Self, SimEventLogErrorV2> {
+        Self::create_with_layout(
+            path,
+            opened,
+            max_group_bytes,
+            SimLogLayoutV1::HistoricalDayV1(binding),
+        )
+    }
+    fn create_with_layout(
+        path: &Path,
+        opened: &RunOpenedV2,
+        max_group_bytes: usize,
+        layout: SimLogLayoutV1,
+    ) -> Result<Self, SimEventLogErrorV2> {
         #[cfg(feature = "measurement")]
         let measurement_probe = Arc::new(MeasurementProbe::default());
         #[cfg(feature = "measurement")]
         let encode_started = Instant::now();
-        let encoded = encode_line(&SimEventLogLineRefV2::RunOpened(opened), max_group_bytes)?;
+        let encoded = match &layout {
+            SimLogLayoutV1::JsonV2 => {
+                encode_line(&SimEventLogLineRefV2::RunOpened(opened), max_group_bytes)?
+            }
+            SimLogLayoutV1::HistoricalDayV1(binding) => {
+                let mut bytes = HISTORICAL_DAY_LOG_MAGIC_V1.to_vec();
+                bytes.extend(encode_day_frame(
+                    &(
+                        serde_json::to_value(opened)
+                            .map_err(|e| SimEventLogErrorV2::Encode(e.to_string()))?,
+                        binding,
+                    ),
+                    max_group_bytes,
+                )?);
+                bytes
+            }
+        };
         #[cfg(feature = "measurement")]
         measurement_probe.record(
             MeasurementContext::CommitGroup,
@@ -131,6 +471,7 @@ impl SimEventLogV2 {
             .map_err(|error| io_error("创建单一事件日志", error))?;
         let mut log = Self {
             file,
+            layout,
             durability_role: opened.durability_role,
             projection_version: opened.projection_version,
             byte_count: 0,
@@ -196,7 +537,13 @@ impl SimEventLogV2 {
         } else {
             SimEventLogLineRefV2::AcceptedInputs(inputs)
         };
-        let encoded = encode_line(&line, self.max_group_bytes)?;
+        let encoded = match &self.layout {
+            SimLogLayoutV1::JsonV2 => encode_line(&line, self.max_group_bytes)?,
+            SimLogLayoutV1::HistoricalDayV1(_) => encode_day_frame(
+                &(inputs.iter().map(DayInputRefV1).collect::<Vec<_>>(), hits),
+                self.max_group_bytes,
+            )?,
+        };
         #[cfg(feature = "measurement")]
         self.measurement_probe.record(
             MeasurementContext::CommitGroup,
@@ -321,6 +668,9 @@ impl SimEventLogV2 {
 
 pub(crate) struct SimEventLogRecoveryV2 {
     reader: BufReader<File>,
+    layout: SimLogLayoutV1,
+    run_id: String,
+    pub(crate) cancel_scenario_hits: Vec<CancelScenarioHitV1>,
     durability_role: RunDurabilityRoleV2,
     projection_version: BusinessProjectionVersionV1,
     max_group_bytes: usize,
@@ -342,17 +692,49 @@ impl SimEventLogRecoveryV2 {
             .open(path)
             .map_err(|error| io_error("打开单一事件日志", error))?;
         let mut reader = BufReader::new(file);
-        let mut buffer = Vec::new();
-        let first = read_complete_line(&mut reader, &mut buffer, 0, max_group_bytes)?
-            .ok_or(SimEventLogErrorV2::InvalidStructure("缺少完整 RunOpened"))?;
-        let SimEventLogLineV2::RunOpened(opened) = first else {
-            return Err(SimEventLogErrorV2::InvalidStructure(
-                "第一行必须是 RunOpened",
-            ));
+        let is_day = reader
+            .fill_buf()
+            .map_err(|e| io_error("读取SIM格式", e))?
+            .starts_with(HISTORICAL_DAY_LOG_MAGIC_V1);
+        let (opened, layout, last_complete_offset) = if is_day {
+            reader
+                .seek(SeekFrom::Start(8))
+                .map_err(|e| io_error("读取日SIM头", e))?;
+            let DayFrameReadV1::Complete(bytes) = read_day_frame(&mut reader, max_group_bytes)?
+            else {
+                return Err(SimEventLogErrorV2::InvalidStructure("缺少完整日SIM头"));
+            };
+            let (value, binding): (
+                serde_json::Value,
+                crate::public_consumption::HistoricalDayLogBindingV1,
+            ) = decode_day_frame(&bytes, 8)?;
+            let opened: RunOpenedV2 = serde_json::from_value(value).map_err(|e| {
+                SimEventLogErrorV2::CompleteLineDecode {
+                    offset: 8,
+                    message: e.to_string(),
+                }
+            })?;
+            (
+                opened,
+                SimLogLayoutV1::HistoricalDayV1(binding),
+                16 + bytes.len() as u64,
+            )
+        } else {
+            let mut buffer = Vec::new();
+            let first = read_complete_line(&mut reader, &mut buffer, 0, max_group_bytes)?
+                .ok_or(SimEventLogErrorV2::InvalidStructure("缺少完整 RunOpened"))?;
+            let SimEventLogLineV2::RunOpened(opened) = first else {
+                return Err(SimEventLogErrorV2::InvalidStructure(
+                    "第一行必须是 RunOpened",
+                ));
+            };
+            (opened, SimLogLayoutV1::JsonV2, buffer.len() as u64)
         };
-        let last_complete_offset = buffer.len() as u64;
         let recovery = Self {
             reader,
+            layout,
+            run_id: opened.run_id.clone(),
+            cancel_scenario_hits: Vec::new(),
             durability_role: opened.durability_role,
             projection_version: opened.projection_version,
             max_group_bytes,
@@ -365,11 +747,44 @@ impl SimEventLogRecoveryV2 {
         Ok((opened, recovery))
     }
 
+    #[cfg(test)]
+    pub(crate) fn historical_day_binding_for_tests(
+        &self,
+    ) -> Option<&crate::public_consumption::HistoricalDayLogBindingV1> {
+        match &self.layout {
+            SimLogLayoutV1::HistoricalDayV1(binding) => Some(binding),
+            SimLogLayoutV1::JsonV2 => None,
+        }
+    }
     pub(crate) fn next_group(
         mut self,
     ) -> Result<(Self, Option<Vec<LoggedBusinessInputV2>>), SimEventLogErrorV2> {
         if self.reached_eof {
             return Ok((self, None));
+        }
+        if let SimLogLayoutV1::HistoricalDayV1(binding) = &self.layout {
+            let bytes = match read_day_frame(&mut self.reader, self.max_group_bytes)? {
+                DayFrameReadV1::End => {
+                    self.reached_eof = true;
+                    return Ok((self, None));
+                }
+                DayFrameReadV1::Partial => {
+                    self.incomplete_tail = true;
+                    self.reached_eof = true;
+                    return Ok((self, None));
+                }
+                DayFrameReadV1::Complete(bytes) => bytes,
+            };
+            let (inputs, hits): (Vec<DayInputRecordV1>, Vec<CancelScenarioHitV1>) =
+                decode_day_frame(&bytes, self.last_complete_offset)?;
+            let inputs = inputs
+                .into_iter()
+                .map(|i| i.into_logged(&self.run_id, binding, self.last_complete_offset))
+                .collect::<Result<Vec<_>, _>>()?;
+            self.cancel_scenario_hits = hits;
+            self.last_complete_offset += 8 + bytes.len() as u64;
+            self.next_input_sequence += inputs.len() as u64;
+            return Ok((self, Some(inputs)));
         }
         loop {
             let offset = self.last_complete_offset;
@@ -451,6 +866,7 @@ impl SimEventLogRecoveryV2 {
             .map_err(|error| io_error("定位事件日志续写位置", error))?;
         Ok(SimEventLogV2 {
             file,
+            layout: self.layout,
             durability_role: self.durability_role,
             projection_version: self.projection_version,
             byte_count: self.last_complete_offset,
@@ -700,6 +1116,135 @@ mod tests {
             };
             groups.push(group);
         }
+    }
+
+    fn day_binding() -> crate::public_consumption::HistoricalDayLogBindingV1 {
+        crate::public_consumption::HistoricalDayLogBindingV1 {
+            input_stream_id: "original-public".into(),
+            consumption_sequence_ref: "original-consumption".into(),
+            hidden_input_set_identity_sha256: sha('8'),
+            hidden_consumer_stream_id: "original-hidden".into(),
+            hidden_ordering_version: "fixture-order-v1".into(),
+        }
+    }
+
+    #[test]
+    fn historical_day_frames_preserve_groups_hits_and_resume_at_physical_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("day.sim");
+        let header = opened(RunDurabilityRoleV2::FiniteHistorical);
+        let binding = day_binding();
+        let log =
+            SimEventLogV2::create_historical_day(&path, &header, MAX_GROUP_BYTES, binding.clone())
+                .unwrap();
+        let prefix = PlatformPrefixAdvanceV2 {
+            path: MarketEventPathV1::HiddenPlatform,
+            closed_through_utc_ms: 100,
+            next_index_position: 0,
+        };
+        let hits = vec![CancelScenarioHitV1 {
+            configuration_input_sequence: 1,
+            global_request_id: "request-a".into(),
+            platform_order_id: "order-a".into(),
+            effective_processing_at_utc_ms: 100,
+        }];
+        let (log, range) = log
+            .append_group_with_hits(
+                &[input("a"), BusinessInputV2::PlatformPrefixAdvance(prefix)],
+                &hits,
+            )
+            .unwrap();
+        assert_eq!(range, 1..3);
+        let saved = log.checkpoint();
+        let saved_bytes = saved.byte_count;
+        let (log, range) = log.append_group(&[input("uncommitted")]).unwrap();
+        assert_eq!(range, 3..4);
+        drop(log);
+        // 已写完但未发布到完整日点的尾帧不得再次进入经济前缀。
+        let saved = serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        let log =
+            SimEventLogV2::restore_checkpoint(&path, &header, saved, MAX_GROUP_BYTES).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), saved_bytes);
+        assert_eq!(log.next_input_sequence(), 3);
+        let (log, range) = log.append_group(&[input("resumed")]).unwrap();
+        assert_eq!(range, 3..4);
+        assert_eq!(log.byte_count, std::fs::metadata(&path).unwrap().len());
+        drop(log);
+        let (decoded, recovery) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+        assert_eq!(decoded, header);
+        assert_eq!(recovery.historical_day_binding_for_tests(), Some(&binding));
+        let (recovery, first) = recovery.next_group().unwrap();
+        assert_eq!(
+            first.unwrap(),
+            vec![
+                LoggedBusinessInputV2::ActivateSession {
+                    activation_id: "activation-a".into()
+                },
+                LoggedBusinessInputV2::PlatformPrefixAdvance(prefix)
+            ]
+        );
+        assert_eq!(recovery.cancel_scenario_hits, hits);
+        let (recovery, second) = recovery.next_group().unwrap();
+        assert_eq!(
+            second.unwrap(),
+            vec![LoggedBusinessInputV2::ActivateSession {
+                activation_id: "activation-resumed".into()
+            }]
+        );
+        assert!(recovery.cancel_scenario_hits.is_empty());
+        let (recovery, end) = recovery.next_group().unwrap();
+        assert!(end.is_none());
+        assert_eq!(recovery.next_input_sequence, 4);
+        assert!(!recovery.incomplete_tail);
+        // 既有检查点无新增布局字段时，继续原JSON写法。
+        let old: SimLogCheckpointV1 =
+            serde_json::from_value(serde_json::json!({"byte_count":12,"next_input_sequence":2}))
+                .unwrap();
+        assert_eq!(old.layout, SimLogLayoutV1::JsonV2);
+    }
+
+    #[test]
+    fn historical_day_partial_tail_is_incomplete_and_complete_corruption_is_fatal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("day.sim");
+        let header = opened(RunDurabilityRoleV2::FiniteHistorical);
+        let log =
+            SimEventLogV2::create_historical_day(&path, &header, MAX_GROUP_BYTES, day_binding())
+                .unwrap();
+        let saved = log.checkpoint();
+        let (log, _) = log.append_group(&[input("a")]).unwrap();
+        let complete_bytes = log.byte_count;
+        drop(log);
+        // 帧正文被截断：保留此前完整组，明确未完成而非成功结束。
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(complete_bytes - 1)
+            .unwrap();
+        let (_, recovery) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+        let (recovery, group) = recovery.next_group().unwrap();
+        assert!(group.is_none());
+        assert!(recovery.incomplete_tail);
+        assert_eq!(recovery.last_complete_offset, saved.byte_count);
+        // 恢复原完整点后续写；完整损坏帧不能被当成可丢弃的截断尾。
+        let log =
+            SimEventLogV2::restore_checkpoint(&path, &header, saved, MAX_GROUP_BYTES).unwrap();
+        drop(log);
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&1u64.to_le_bytes()).unwrap();
+        file.write_all(&[0xff]).unwrap();
+        drop(file);
+        let (_, recovery) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+        assert!(matches!(
+            recovery.next_group(),
+            Err(SimEventLogErrorV2::CompleteLineDecode { .. })
+        ));
+        // 上限按实际帧字节计量，不为比较旧JSON而重新物化公共报告。
+        assert!(matches!(
+            encode_day_frame(&vec![0u8; MAX_GROUP_BYTES], 16),
+            Err(SimEventLogErrorV2::GroupTooLarge { limit_bytes: 16 })
+        ));
     }
 
     #[test]
@@ -1133,7 +1678,19 @@ struct BackgroundFinishV1 {
     #[cfg(feature = "shared-execution")]
     ledger: Option<LedgerBatchV2>,
 }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BackgroundCheckpointV1 {
+    pub log: SimLogCheckpointV1,
+    pub noe: Option<crate::run_v2::noe_projection::BackgroundNoeCheckpointV1>,
+    #[cfg(feature = "shared-execution")]
+    pub ledger: Option<ledger::LedgerBackgroundCheckpointV1>,
+}
 enum BackgroundLogCommandV1 {
+    Checkpoint(
+        BackgroundFinishV1,
+        std::sync::mpsc::SyncSender<Result<BackgroundCheckpointV1, SimEventLogErrorV2>>,
+    ),
+
     Group(BackgroundGroupV1),
     Finish(BackgroundFinishV1),
     Stabilize(
@@ -1156,6 +1713,10 @@ enum BackgroundLogCommandV1 {
 pub(crate) struct BackgroundEventLogV1 {
     sender: std::sync::mpsc::SyncSender<BackgroundLogCommandV1>,
     pending: Option<BackgroundGroupV1>,
+    // 有限宿主在每次尚未接纳的提交前等原交接，不重试复合业务操作。
+    finite_recording_wait: bool,
+    #[cfg(test)]
+    finite_wait_notice: Option<std::sync::mpsc::SyncSender<()>>,
     #[cfg(feature = "shared-execution")]
     ledger: Option<(std::path::PathBuf, LedgerIntakeV2)>,
     failure: std::sync::Arc<std::sync::Mutex<Option<SimEventLogErrorV2>>>,
@@ -1168,6 +1729,47 @@ impl BackgroundEventLogV1 {
     fn start_with_hook(
         log: SimEventLogV2,
         capacity: usize,
+        before_encode: impl FnMut() + Send + 'static,
+    ) -> Self {
+        Self::start_with_state(
+            log,
+            capacity,
+            None,
+            #[cfg(feature = "shared-execution")]
+            BackgroundLedgerV2::default(),
+            before_encode,
+        )
+    }
+    pub(crate) fn restore(
+        log: SimEventLogV2,
+        capacity: usize,
+        noe: Option<crate::run_v2::noe_projection::BackgroundNoeWriterV1>,
+        #[cfg(feature = "shared-execution")] saved_ledger: Option<
+            ledger::LedgerBackgroundCheckpointV1,
+        >,
+    ) -> Result<Self, SimEventLogErrorV2> {
+        #[cfg(feature = "shared-execution")]
+        let ledger = BackgroundLedgerV2 {
+            writer: saved_ledger
+                .map(ledger::LedgerBackgroundWriterV2::restore_checkpoint)
+                .transpose()
+                .map_err(ledger_background_error)?,
+            pending: Default::default(),
+        };
+        Ok(Self::start_with_state(
+            log,
+            capacity,
+            noe,
+            #[cfg(feature = "shared-execution")]
+            ledger,
+            || {},
+        ))
+    }
+    fn start_with_state(
+        log: SimEventLogV2,
+        capacity: usize,
+        initial_noe: Option<crate::run_v2::noe_projection::BackgroundNoeWriterV1>,
+        #[cfg(feature = "shared-execution")] initial_ledger: BackgroundLedgerV2,
         mut before_encode: impl FnMut() + Send + 'static,
     ) -> Self {
         let (sender, receiver) = std::sync::mpsc::sync_channel::<BackgroundLogCommandV1>(capacity);
@@ -1176,9 +1778,9 @@ impl BackgroundEventLogV1 {
         let worker = std::thread::spawn(move || {
             let result = (|| {
                 let mut log = log;
-                let mut noe = None;
+                let mut noe = initial_noe;
                 #[cfg(feature = "shared-execution")]
-                let mut ledger = BackgroundLedgerV2::default();
+                let mut ledger = initial_ledger;
                 #[cfg(test)]
                 let mut write_pause: Option<(
                     std::sync::mpsc::SyncSender<()>,
@@ -1194,9 +1796,11 @@ impl BackgroundEventLogV1 {
                                 entered.send(()).unwrap();
                                 release.recv().unwrap();
                             }
-                            for input in &mut inputs {
-                                if let BusinessInputV2::PublicGroup(group) = input {
-                                    group.materialize()?;
+                            if matches!(log.layout, SimLogLayoutV1::JsonV2) {
+                                for input in &mut inputs {
+                                    if let BusinessInputV2::PublicGroup(group) = input {
+                                        group.materialize()?;
+                                    }
                                 }
                             }
                             log = log
@@ -1231,6 +1835,30 @@ impl BackgroundEventLogV1 {
                             if let Some(error) = group.normalization_error {
                                 return Err(SimEventLogErrorV2::NoeNormalization(error));
                             }
+                        }
+                        Ok(BackgroundLogCommandV1::Checkpoint(_finish, acknowledged)) => {
+                            let result = (|| {
+                                #[cfg(feature = "measurement")]
+                                log.sync_data(MeasurementContext::CommitGroup)?;
+                                #[cfg(not(feature = "measurement"))]
+                                log.sync_data()?;
+                                if let Some(noe) = &mut noe {
+                                    noe.stabilize().map_err(SimEventLogErrorV2::Noe)?;
+                                }
+                                #[cfg(feature = "shared-execution")]
+                                {
+                                    ledger.accept(_finish.ledger)?;
+                                    ledger.finish()?;
+                                }
+                                Ok(BackgroundCheckpointV1 {
+                                    log: log.checkpoint(),
+                                    noe: noe.as_ref().map(|n| n.checkpoint()),
+                                    #[cfg(feature = "shared-execution")]
+                                    ledger: ledger.writer.as_ref().map(|w| w.checkpoint()),
+                                })
+                            })();
+                            let _ = acknowledged.send(result.clone());
+                            result?;
                         }
                         Ok(BackgroundLogCommandV1::Stabilize(_finish, acknowledged)) => {
                             let result = (|| {
@@ -1308,6 +1936,9 @@ impl BackgroundEventLogV1 {
         Self {
             sender,
             pending: None,
+            finite_recording_wait: false,
+            #[cfg(test)]
+            finite_wait_notice: None,
             #[cfg(feature = "shared-execution")]
             ledger: None,
             failure,
@@ -1322,6 +1953,30 @@ impl BackgroundEventLogV1 {
             sink.lock().unwrap().push(material)
         }));
         self.ledger = Some((root.to_owned(), intake));
+    }
+    #[cfg(feature = "shared-execution")]
+    pub(crate) fn reconnect_ledger(&mut self, writer: &mut ledger::LedgerWriterV1, root: &Path) {
+        let intake = LedgerIntakeV2::default();
+        let sink = intake.clone();
+        writer.reconnect_record_sink_v2(Box::new(move |material| {
+            sink.lock().unwrap().push(material)
+        }));
+        self.ledger = Some((root.to_owned(), intake));
+    }
+    pub(crate) fn checkpoint(&mut self) -> Result<BackgroundCheckpointV1, SimEventLogErrorV2> {
+        self.wait_for_capacity()?;
+        let (acknowledged, completed) = std::sync::mpsc::sync_channel(1);
+        let finish = BackgroundFinishV1 {
+            seal_clean_run: false,
+            #[cfg(feature = "shared-execution")]
+            ledger: self.take_ledger(),
+        };
+        self.sender
+            .send(BackgroundLogCommandV1::Checkpoint(finish, acknowledged))
+            .map_err(|_| SimEventLogErrorV2::InvalidStructure("检查点后台已停止"))?;
+        completed
+            .recv()
+            .map_err(|_| SimEventLogErrorV2::InvalidStructure("检查点后台未返回稳定位置"))?
     }
     #[cfg(feature = "shared-execution")]
     fn take_ledger(&mut self) -> Option<LedgerBatchV2> {
@@ -1367,11 +2022,24 @@ impl BackgroundEventLogV1 {
         drop(self.sender);
         self.worker.join().unwrap()
     }
+    #[cfg(test)]
+    pub(crate) fn notify_finite_wait_for_tests(&mut self, notice: std::sync::mpsc::SyncSender<()>) {
+        self.finite_wait_notice = Some(notice);
+    }
+    pub(crate) fn enable_finite_recording_wait(&mut self) {
+        self.finite_recording_wait = true;
+    }
     pub(crate) fn ready(&mut self) -> Result<bool, SimEventLogErrorV2> {
         if let Some(error) = self.failure.lock().unwrap().clone() {
             return Err(error);
         }
-        if let Some(inputs) = self.pending.take() {
+        if self.finite_recording_wait && self.pending.is_some() {
+            #[cfg(test)]
+            if let Some(notice) = self.finite_wait_notice.take() {
+                let _ = notice.send(());
+            }
+            self.wait_for_capacity()?;
+        } else if let Some(inputs) = self.pending.take() {
             self.enqueue_group(inputs)?;
         }
         Ok(self.pending.is_none())

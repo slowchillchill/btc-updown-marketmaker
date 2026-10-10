@@ -70,16 +70,16 @@ class SourceQualifiedResolutions:
         return cls(columns,absent,absent.clone(),torch.zeros_like(absent),
                    torch.zeros_like(absent,dtype=torch.bool),torch.zeros(roots,dtype=torch.int32,device=device))
 
-    def observe(self, reference, market, market_end, initialized, enabled, role_terminal):
-        """先保存原源判定；只有Fresh和真实初始化/时点合格才给执行层候选。"""
+    def observe(self, reference, market, market_end, admitted, enabled, role_terminal):
+        """先保存原源判定；只有Fresh和真实资产准入/时点合格才给执行层候选。"""
         columns = self.columns
         roots, markets = self.present.shape
         if any(value.shape != (roots,) or value.dtype != torch.int64 or value.device != self.fault.device
                for value in (reference,market,market_end)):
             raise TypeError('判定源坐标、市场与end须为同设备完整int64根列')
         if any(value.shape != (roots,) or value.dtype != torch.bool or value.device != self.fault.device
-               for value in (initialized,enabled,role_terminal)):
-            raise TypeError('原资产全初始化、执行与角色终态须为同设备bool根列')
+               for value in (admitted,enabled,role_terminal)):
+            raise TypeError('原完整资产准入、执行与角色终态须为同设备bool根列')
         if markets == 0:
             fault = self.fault | enabled.to(torch.int32)
             return replace(self,fault=fault),SourceTerminalTransition(self,market,reference,
@@ -88,7 +88,7 @@ class SourceQualifiedResolutions:
         axis = torch.arange(roots,device=self.fault.device)
         safe = market.clamp(0,markets-1)
         has_source = row[:,0] != 0
-        error = ((market<0)|(market>=markets)|~initialized|(reference<0)|
+        error = ((market<0)|(market>=markets)|~admitted|(reference<0)|
                  (reference>=columns.fields.size(0)-1)|(row[:,2]<0)|(row[:,3]<0)|(row[:,5]!=2)).to(torch.int32)
         error |= (has_source & (row[:,1] < market_end)).to(torch.int32)
         error |= (has_source & self.present[axis,safe] &
