@@ -57,7 +57,7 @@ def diagnostic_columns(value,names):
     return {name:plain(getattr(value,name)) for name in names}
 
 
-def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,receipt,intents,asks,taker,maker,codec,artifact,stage,*,second_buy=False):
+def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,receipt,intents,asks,taker,maker,codec,artifact,stage,*,second_buy=False,assembled):
     evidence=[];original_stage=stage;page_changes=0;hidden_pages=[]
     def stage(name,**row):
         nonlocal page_changes
@@ -76,7 +76,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     full_warmup=source.get('continuous_full_warmup',False)
     first_observation=offset-28000 if full_warmup else 1300+offset
     started=time.perf_counter();zero=T([0]);yes=T([True],torch.bool);empty=T([[]]);start=zero-29000
-    market_indices=T([0,1]) if two else zero;row_roots=T([0,0]) if two else zero
+    market_indices=assembled.market_indices;row_roots=T([0,0]) if two else zero
     identities=T([[0,0,0],[0,0,1]]) if two else T([[0,0,0]]);condition_slots=T(list(range(2 if two else 1)))
     condition=source['initial'][0]['market']['condition_id'];tokens=[a['token_id'] for a in source['bounded_hidden']['assets']]
     legs=run(lambda:SubmittedLegs(T([[True,False]],torch.bool),T([[False,False]],torch.bool),T([[0,-1]]),T([[0,1]]),
@@ -94,7 +94,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         return T([[0]*width])
     backend=ContinuousExecution(population,rule,codec,sampler,asks,T(list(range(len(tokens)))),
         T([event['market']['window']['end_at_utc_ms'] for event in source['initial']]),taker,maker,
-        block.asset_markets,T(list(range(len(tokens)))),paths,scenario)
+        assembled.condition_by_asset,block.asset_axis,paths,scenario)
     if two:
         from maker_days import MakerDays
         from rebate_coordinator import RebateCoordinator
@@ -438,6 +438,23 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             'shared_across_current_next_market':history.registry is registry,'cache_hint_kib':2048}
         shutil.copyfile(registry.path,artifact/'source-identities.sqlite3')
         registry.close()
+        frontier=clock.runtime.hidden_frontier
+        root=frontier.columns.source.catalog
+        _,hidden_eof=frontier.scheduled()
+        assert isinstance(root,PreparedHiddenPages) and root.lifecycle_values is frontier.columns.source.lifecycle_values
+        assert root.terminal_columns is frontier.columns.source.terminal_columns
+        assert int(frontier.closed_bucket.cpu()[0])==frontier.columns.bucket_base+int(frontier.next_bucket.cpu()[0])-1
+        result['dual_source_blocks']={'public_parts':len(clock.source.prepared.parts),
+            'hidden_parts':len(root.parts),'hidden_buckets':len(root.arrays['bucket_times']),
+            'public_page_changes':page_changes,'hidden_pages':hidden_pages,
+            'public_position':clock.source.position.cpu().tolist(),
+            'closed_global_bucket':frontier.closed_bucket.cpu().tolist(),
+            'hidden_index_position':values(frontier.index_position),'hidden_eof':hidden_eof.cpu().tolist(),
+            'root_terminal_and_lifecycle_shared':True,
+            'allocated_peak_bytes':torch.cuda.max_memory_allocated(),
+            'reserved_peak_bytes':torch.cuda.max_memory_reserved(),
+            'process_max_rss_kib':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+            'resource_scope':'since source installation peak reset; includes live source baseline, opening/continuous model and independent GPU oracle; Python process RSS since start excludes writer/Rust parent; no driver or OS-cache peak'}
         (artifact/'two-market-report.json').write_text(json.dumps(result,indent=2))
         return result
     assert [int(o.frozen.cutoff.cpu()[0]) for o in observations]==[1300,1400,1500,1600,1700,1800,1900]
@@ -710,7 +727,7 @@ def main():
             if at%1000:return
             row=dict(row,observation_position=max(0,(at-271000)//100+1),observations_total=309)
         print(json.dumps(row),file=sys.stderr,flush=True)
-    report=check(source,codec.post_terms_batch_v2,progress,before_drive=lambda *args,**kwargs:bounded(*args,codec,artifact,continuous=lambda *a:continuous(*a,second_buy='--out-of-order-buy' in sys.argv),**kwargs),defer_initial_send=True)
+    report=check(source,codec.post_terms_batch_v2,progress,before_drive=lambda *args,**kwargs:bounded(*args,codec,artifact,continuous=lambda *a,**k:continuous(*a,second_buy='--out-of-order-buy' in sys.argv,**k),**kwargs),defer_initial_send=True)
     print(json.dumps(report),flush=True)
 
 if __name__=='__main__':main()

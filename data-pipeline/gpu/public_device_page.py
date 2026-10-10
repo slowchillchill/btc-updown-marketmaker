@@ -100,6 +100,14 @@ def _json_bytes(value):
     return json.dumps(value,ensure_ascii=False,separators=(',',':')).encode('utf8')
 
 
+def _ordered_offsets(offsets,*,rows_per_segment=65536):
+    """相邻原u64偏移逐段比较，段首保留上段末；不复制整份旁列。"""
+    for begin in range(1,len(offsets),rows_per_segment):
+        end=min(begin+rows_per_segment,len(offsets))
+        if np.any(offsets[begin:end]<offsets[begin-1:end-1]):return False
+    return True
+
+
 def store_array_member(directory, members, name, array, kind):
     """public/hidden共用的固定类型成员；调用方负责来源绑定和业务列布局。"""
     array=np.asarray(array,dtype=DTYPES[kind],order='C')
@@ -524,7 +532,7 @@ class PreparedPublicBlocks:
         offsets=np.memmap(raw/'group_metadata.offsets.u64le',dtype='<u8',mode='r')
         text=(np.memmap(raw/'group_metadata.utf8',dtype='u1',mode='r')
             if (raw/'group_metadata.utf8').stat().st_size else np.empty(0,dtype='u1'))
-        if len(offsets)!=count+1 or offsets[0]!=0 or offsets[-1]!=len(text) or np.any(np.diff(offsets.astype('<i8'))<0):
+        if len(offsets)!=count+1 or offsets[0]!=0 or offsets[-1]!=len(text) or not _ordered_offsets(offsets):
             raise ValueError('公共分块组旁列布局错误')
         self.causal=(np.memmap(raw/'causal_visible_at.i64le',dtype='<i8',mode='r',shape=(count,))
             if count else np.empty(0,dtype='<i8'))

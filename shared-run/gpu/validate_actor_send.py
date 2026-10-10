@@ -2,7 +2,7 @@
 from dataclasses import replace
 from pathlib import Path
 from fractions import Fraction
-import importlib.util,json,os,sys,time,hashlib
+import importlib.util,json,os,sys,time,hashlib,resource
 import torch
 ROOT=Path(__file__).resolve().parents[2]
 sys.path[:0]=[str(ROOT/p) for p in ('model-train','sim-system/gpu','shared-run/gpu','data-pipeline/gpu',
@@ -18,7 +18,8 @@ from core import EvidenceBank
 from market_economics import UnresolvedMarkets
 from queues import Numbers
 from public_device_page import PreparedPublicPage,build_public_device_page,build_public_device_blocks
-from hidden_device_page import PreparedHiddenMaterial,build_hidden_device_columns
+from hidden_device_page import PreparedHiddenPages,build_hidden_device_pages
+from actor_sources import install_actor_sources
 from validate_joint_freeze import install_opening
 from registry import FrozenIntentOrders,PublicCancellationState
 from commitments import SubmittedLegs,bind_submission_receipt
@@ -57,25 +58,44 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
     # 原源没有GTD/FAK、结算请求/市场终态；所有已登记正文均是正式GTC/FOK。
     assert all(next(iter(p['item']['order']['kind'])) in ('GtcLimit','FokMarket') for p in source['posts'])
     assert not source['opening_ledger']['resolutions'] and not source['opening_ledger']['settlement_costs']
-    compact=artifact/'public-compact';page=artifact/'public-page'
+    compact=artifact/'public-compact';page=artifact/'public-page';preparation=[]
+    def phase_start():
+        torch.cuda.synchronize();torch.cuda.reset_peak_memory_stats()
+        return time.perf_counter(),torch.cuda.memory_allocated(),torch.cuda.memory_reserved()
+    def phase_done(name,before,**details):
+        torch.cuda.synchronize()
+        row=dict(stage=name,seconds=time.perf_counter()-before[0],
+            allocated_baseline_bytes=before[1],reserved_baseline_bytes=before[2],
+            allocated_peak_bytes=torch.cuda.max_memory_allocated(),reserved_peak_bytes=torch.cuda.max_memory_reserved(),
+            process_max_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,**details)
+        preparation.append(row);progress(row)
+    phase=phase_start()
     if os.environ.get('B_GPU_PUBLIC_BLOCKS'):
         prepared=build_public_device_blocks(os.environ['B_GPU_COLUMNS_BINARY'],compact,page,groups_per_block=2)
     else:
         build_public_device_page(os.environ['B_GPU_COLUMNS_BINARY'],compact,page)
         prepared=PreparedPublicPage(page,compact)
-    pm,market,reference,binance=prepared.install()
-    public_source=PublicGroupSource(prepared,1,page_groups=3 if source.get('continuous_two_markets') else 2,observation_inputs=continuous is not None)
+    phase_done('public_root_preparation',phase,groups=len(prepared.columns['groups']),
+        parts=len(prepared.parts) if hasattr(prepared,'parts') else 1)
     hidden_source=source['bounded_hidden']
     assets=hidden_source['assets'];tokens=[asset['token_id'] for asset in assets]
-    block=HiddenPmBlock(assets,[(tokens[a],side.upper().removesuffix('S'),_decimal(price)) for a,side,price in slots],
-        source_binding=hidden_source['source_binding'])
-    hidden_columns=artifact/'hidden-columns'
-    build_hidden_device_columns(block,hidden_columns,hidden_source['source_binding'])
-    prepared_hidden=PreparedHiddenMaterial(hidden_columns,hidden_source['source_binding'])
-    block=HiddenPmBlock.from_prepared(prepared_hidden.page(0,min(1,len(block.buckets))))
-    runtime=replace(runtime,hidden=run(lambda:block.empty_state(segment_capacity=runtime.hidden.queues.capacity)),
-        hidden_frontier=HiddenBucketFrontier.open(HiddenBucketColumns.from_block(block),1))
-    runtime=runtime.install_hidden_market_controls()
+    hidden_columns=artifact/'hidden-pages'
+    phase=phase_start()
+    build_hidden_device_pages(assets,[(tokens[a],side.upper().removesuffix('S'),_decimal(price)) for a,side,price in slots],
+        hidden_columns,hidden_source['source_binding'],buckets_per_part=2)
+    prepared_hidden=PreparedHiddenPages(hidden_columns,hidden_source['source_binding'])
+    phase_done('hidden_root_preparation',phase,buckets=len(prepared_hidden.arrays['bucket_times']),
+        parts=len(prepared_hidden.parts))
+    phase=phase_start()
+    assembled=install_actor_sources(prepared,prepared_hidden,runtime,
+        [event['market']['condition_id'] for event in source['initial'][::2]],
+        page_groups=3 if source.get('continuous_two_markets') else 2,hidden_page_buckets=1,
+        observation_inputs=continuous is not None)
+    runtime,public_source,block=assembled.runtime,assembled.source,assembled.block
+    pm,market,reference,binance=assembled.states
+    phase_done('actor_source_installation',phase)
+    (artifact/'source-preparation.json').write_text(json.dumps(dict(phases=preparation,
+        scope='Python phase wall time includes its writer subprocess; process RSS excludes children; CUDA peaks include live baseline/reserved allocator cache, not driver or other processes; finite source, not15day capacity'),indent=2))
     public=replace(public,ledger=run(lambda:install_opening(replace(public.ledger,
         unresolved_markets=UnresolvedMarkets.open(public.ledger.success_pools,T(list(range(0,len(assets),2))))),source)),
         cancellations=run(lambda:PublicCancellationState.open(integers([]),T([[]],torch.bool))))
@@ -138,7 +158,7 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
     assert values(clock.runtime.account.cash)==[int(Fraction(source['cash'])*1000000)]
     if continuous is not None:
         return continuous(source,clock,pm,market,reference,binance,block,sampler,rule,receipt,intents,
-            ask_directory,taker,maker,codec,artifact,stage)
+            ask_directory,taker,maker,codec,artifact,stage,assembled=assembled)
     # 只消费实际完成Ck的完整原group，并将该位置上限交给原100ms编码器。
     source_snapshot=public_source.snapshot();prefix=public_source.prefix_at(pm,ck)
     decision_cutoff=None
@@ -294,8 +314,18 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
     assert values(clock.runtime.input_frontier.next_sequence)==[values(result.receipt.input_sequence)[0]+1]
     assert not torch.equal(counter,random.counter)
     assert values(actor.cash_micro)==cash and torch.equal(old_prefix,prefix) and torch.equal(sender.observation[0],source_snapshot[0])
-    assert clock.runtime.hidden_frontier.scheduled()[0].at.cpu().tolist()==[1414]
-    assert clock.runtime.hidden_frontier.scheduled()[0].present.cpu().item()
+    next_hidden,hidden_eof=clock.runtime.hidden_frontier.scheduled()
+    next_bound=clock.runtime.hidden_frontier.columns.next_bucket_at
+    # 开放Sk不要求把恰在Sk的后继桶预装；页末原闭桶下界仍证明该桶未消费。
+    assert not hidden_eof.any().cpu().item()
+    next_at=next_hidden.at if next_bound is None else torch.where(next_hidden.present,next_hidden.at,next_bound)
+    assert next_at.cpu().tolist()==[1414]
+    frontier=clock.runtime.hidden_frontier
+    assert next_hidden.present.cpu().item() or (
+        next_bound is not None and frontier.next_bucket.cpu().tolist()==[frontier.columns.at.numel()]
+        and not frontier.applying.any().cpu().item())
+    assert frontier.closed_bucket.cpu().tolist()==[0]
+    assert values(frontier.index_position)==values(prepared_hidden.index_start(1,frontier.next_bucket))
     unreceived=clock.public.pending_noe.received_at[clock.public.pending_noe.active].cpu().tolist()
     assert unreceived and min(unreceived)==1414 and max(unreceived)==1415
     received=clock.public.pending_noe.received_at[~clock.public.pending_noe.active].cpu().tolist()
