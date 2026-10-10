@@ -31,6 +31,9 @@ pub(crate) struct Resolution {
     pub request: Option<SettlementRequestFactV1<Identity>>,
     pub redeemed_pair: Decimal,
     pub redeemed_orphan: [Decimal; 2],
+    // 原自动结算生命周期事实，包括没有账户 delta 的零余额终态。
+    #[serde(default)]
+    pub auto_redeemed: bool,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Market {
@@ -225,6 +228,25 @@ impl Market {
     }
 }
 impl EconomicsState {
+    // 原结算读取与 Auto 归属共用本地已应用的经济前驱；平台发生与反馈可见分别推进。
+    fn economic_predecessors_closed(&self, condition: &str) -> bool {
+        self.markets
+            .get(condition)
+            .is_some_and(|market| market.maker_accrual_finalized)
+            && !self.trades.values().any(|trade| {
+                trade.fact.condition_id.0 == condition
+                    && match trade.fact.economic_disposition {
+                        SourceNeutralTradeEconomicDispositionV1::FinalSuccess => {
+                            !trade.success_applied
+                        }
+                        SourceNeutralTradeEconomicDispositionV1::FinalFailureUnapplied
+                        | SourceNeutralTradeEconomicDispositionV1::FinalFailureCompensated => {
+                            trade.economic_applied
+                        }
+                        _ => true,
+                    }
+            })
+    }
     pub(crate) fn dependencies_present<R: Clone + std::fmt::Debug>(
         &self,
         record: &execution_normalization::NoeConsumedRecordRef<R>,
@@ -234,12 +256,44 @@ impl EconomicsState {
                 .get(&condition.0)
                 .is_some_and(|m| m.resolution.is_some())
         };
+        let auto_resolution = |condition: &ConditionId, identity: &Identity| {
+            self.markets
+                .get(&condition.0)
+                .and_then(|market| market.resolution.as_ref())
+                .is_some_and(|resolution| resolution.fact.resolution_identity == *identity)
+                && self.economic_predecessors_closed(&condition.0)
+        };
         let contribution_ready = |c: &RebateContributionFactV1<Identity>| {
             self.trades
                 .get(&c.trade_identity)
                 .is_some_and(|t| t.success_applied)
         };
         match record.record() {
+            // Auto 与 Resolved 的反馈按真实接收时刻领取，Auto 可先到。
+            // 保留原领取引用，等待判定与经济成功池齐备，不以先到的 Auto 读取未完成配对。
+            NormalizationRecord::Evidence {
+                evidence:
+                    SourceNeutralEvidenceKind::SettlementLifecycle {
+                        result:
+                            SourceNeutralSettlementLifecycleResultV1::AutoRedeemApplied {
+                                condition_id,
+                                resolution_identity,
+                                ..
+                            },
+                    },
+                ..
+            } => auto_resolution(condition_id, resolution_identity),
+            NormalizationRecord::EconomicFact { fact, .. } => match &fact.disposition {
+                SourceNeutralEconomicDispositionV1::AccountTransition {
+                    condition_id: Some(condition),
+                    transition:
+                        SourceNeutralAccountTransitionKindV1::AutoRedeemApplied {
+                            resolution_identity,
+                        },
+                    ..
+                } => auto_resolution(condition, resolution_identity),
+                _ => true,
+            },
             NormalizationRecord::Evidence {
                 evidence: SourceNeutralEvidenceKind::SettlementLifecycleV2 { result },
                 ..
@@ -279,26 +333,35 @@ impl EconomicsState {
                 _ => true,
             },
             NormalizationRecord::EconomicFactV2 { fact, .. } => match &fact.disposition {
-                SourceNeutralEconomicDispositionV2::AccountTransition { transition, .. } => {
-                    match transition {
-                        SourceNeutralAccountTransitionKindV2::ExternalCashApplied {
-                            cash_identity,
-                        } => self.external_cash.contains_key(cash_identity),
-                        SourceNeutralAccountTransitionKindV2::ResolutionRedeemApplied {
-                            settlement_request_id,
-                            ..
-                        }
-                        | SourceNeutralAccountTransitionKindV2::SettlementCostRecognized {
-                            settlement_request_id,
-                            ..
-                        }
-                        | SourceNeutralAccountTransitionKindV2::SettlementCostPaid {
-                            settlement_request_id,
-                            ..
-                        } => resolution(&settlement_request_id.condition_id),
-                        _ => true,
+                SourceNeutralEconomicDispositionV2::AccountTransition {
+                    transition,
+                    condition_id,
+                    ..
+                } => match transition {
+                    SourceNeutralAccountTransitionKindV2::Existing(
+                        SourceNeutralAccountTransitionKindV1::AutoRedeemApplied {
+                            resolution_identity,
+                        },
+                    ) => condition_id
+                        .as_ref()
+                        .is_none_or(|condition| auto_resolution(condition, resolution_identity)),
+                    SourceNeutralAccountTransitionKindV2::ExternalCashApplied { cash_identity } => {
+                        self.external_cash.contains_key(cash_identity)
                     }
-                }
+                    SourceNeutralAccountTransitionKindV2::ResolutionRedeemApplied {
+                        settlement_request_id,
+                        ..
+                    }
+                    | SourceNeutralAccountTransitionKindV2::SettlementCostRecognized {
+                        settlement_request_id,
+                        ..
+                    }
+                    | SourceNeutralAccountTransitionKindV2::SettlementCostPaid {
+                        settlement_request_id,
+                        ..
+                    } => resolution(&settlement_request_id.condition_id),
+                    _ => true,
+                },
                 _ => true,
             },
             _ => true,
@@ -361,6 +424,23 @@ impl EconomicsState {
                     result.maker_fee_equivalent_pusd.clone(),
                     &mut patch,
                 )?,
+                SourceNeutralEvidenceKind::SettlementLifecycle {
+                    result:
+                        SourceNeutralSettlementLifecycleResultV1::AutoRedeemApplied {
+                            condition_id,
+                            resolution_identity,
+                            ..
+                        },
+                } => {
+                    // 原 V1 记录可没有 V2 判定索引；只更新已关联的正式判定。
+                    if let Some(mut market) = self.markets.get(&condition_id.0).cloned()
+                        && let Some(resolution) = &mut market.resolution
+                        && resolution.fact.resolution_identity == *resolution_identity
+                    {
+                        resolution.auto_redeemed = true;
+                        patch.markets.push((condition_id.0.clone(), market));
+                    }
+                }
                 SourceNeutralEvidenceKind::SettlementLifecycleV2 { result } => self.settlement(
                     logical_identity,
                     source.record().source_order(),
@@ -485,7 +565,29 @@ impl EconomicsState {
                 )?;
                 match transition {
                     SourceNeutralAccountTransitionKindV2::Existing(t) => {
-                        cash.maker_cash = add(cash.maker_cash, delta)?;
+                        let auto_market = match t {
+                            SourceNeutralAccountTransitionKindV1::AutoRedeemApplied {
+                                resolution_identity,
+                            } => condition_id.as_ref().and_then(|condition| {
+                                let market = self.markets.get(&condition.0)?;
+                                (market.resolution.as_ref()?.fact.resolution_identity
+                                    == *resolution_identity)
+                                    .then(|| (condition, market.clone()))
+                            }),
+                            _ => None,
+                        };
+                        if let Some((condition, mut market)) = auto_market {
+                            let resolution = market.resolution.as_mut().expect("原判定身份已关联");
+                            let paired = market.paired - resolution.redeemed_pair;
+                            cash.maker_cash = add(cash.maker_cash, paired)?;
+                            cash.directional_cash = add(cash.directional_cash, delta - paired)?;
+                            resolution.redeemed_pair = market.paired;
+                            resolution.redeemed_orphan =
+                                [market.pools[0].quantity, market.pools[1].quantity];
+                            patch.markets.push((condition.0.clone(), market));
+                        } else {
+                            cash.maker_cash = add(cash.maker_cash, delta)?;
+                        }
                         match t {
                             SourceNeutralAccountTransitionKindV1::FillFinalityEconomicApplied { trade_identity, .. }
                             | SourceNeutralAccountTransitionKindV1::FillFinalityCompensationApplied { trade_identity, .. } => {
@@ -645,6 +747,7 @@ impl EconomicsState {
                         request: None,
                         redeemed_pair: Decimal::ZERO,
                         redeemed_orphan: [Decimal::ZERO; 2],
+                        auto_redeemed: false,
                     });
                 }
                 patch.markets.push((fact.condition_id.0.clone(), market));
@@ -1114,26 +1217,13 @@ impl LedgerEconomicReadV1<'_> {
     pub fn resolutions(&self) -> impl Iterator<Item = ResolutionAccountReadV1<'_>> {
         self.state.markets.iter().filter_map(|(condition, market)| {
             let resolution = market.resolution.as_ref()?;
-            let pending = self.state.trades.values().any(|trade| {
-                trade.fact.condition_id.0 == *condition
-                    && match trade.fact.economic_disposition {
-                        SourceNeutralTradeEconomicDispositionV1::FinalSuccess => {
-                            !trade.success_applied
-                        }
-                        SourceNeutralTradeEconomicDispositionV1::FinalFailureUnapplied
-                        | SourceNeutralTradeEconomicDispositionV1::FinalFailureCompensated => {
-                            trade.economic_applied
-                        }
-                        _ => true,
-                    }
-            });
             let (pair, orphan) = market.receivables();
             Some(ResolutionAccountReadV1 {
                 resolved: &resolution.fact,
                 request: resolution.request.as_ref(),
                 settlement_cost_attribution: resolution.category,
                 economic_predecessors_closed: ExecutionReadValueV1::Known(
-                    !pending && market.maker_accrual_finalized,
+                    self.state.economic_predecessors_closed(condition),
                 ),
                 paired_receivable_pusd: exact(pair),
                 winner_orphan_receivable_pusd: exact(orphan),
@@ -1209,6 +1299,9 @@ impl LedgerEconomicReadV1<'_> {
                 unpaid_taker_fee_pusd: exact(m.unpaid_taker),
                 settlement_state: match &m.resolution {
                     None => EconomicSettlementStateV1::Unresolved,
+                    Some(resolution) if resolution.auto_redeemed => {
+                        EconomicSettlementStateV1::Redeemed
+                    }
                     Some(resolution) => match resolution.request.as_ref().map(|r| r.outcome) {
                         Some(SettlementRequestOutcomeV1::FinalSuccess)
                             if resolution.redeemed_pair > Decimal::ZERO
