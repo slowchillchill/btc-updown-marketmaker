@@ -51,13 +51,14 @@ def receive_current(state,delivery,stage,enabled=None):
     return state,~(state.waiting.received&~state.waiting.consumed).any(1)&(state.ledger.fault==0)
 
 
-def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,ask_directory,taker,maker,progress,codec,artifact,*,clock_only=False,initial_submit=None,no_trade=False,continuous=None):
+def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,ask_directory,taker,maker,progress,codec,artifact,*,clock_only=False,initial_submit=None,no_trade=False,continuous=None,cold_request=None):
     yes=T([True],torch.bool);zero=T([0]);started=time.perf_counter()
     timing=source['bounded_timing'];ck=T([timing['observation_at']]);sk=ck+timing['calculation_duration']+timing['dispatch_delay']
     assert sk.cpu().tolist()==[1414] and source['market_end']>1415
     # 原源没有GTD/FAK、结算请求/市场终态；所有已登记正文均是正式GTC/FOK。
-    assert all(next(iter(p['item']['order']['kind'])) in ('GtcLimit','FokMarket') for p in source['posts'])
-    assert not source['opening_ledger']['resolutions'] and not source['opening_ledger']['settlement_costs']
+    if cold_request is None:
+        assert all(next(iter(p['item']['order']['kind'])) in ('GtcLimit','FokMarket') for p in source['posts'])
+        assert not source['opening_ledger']['resolutions'] and not source['opening_ledger']['settlement_costs']
     compact=artifact/'public-compact';page=artifact/'public-page';preparation=[]
     def phase_start():
         torch.cuda.synchronize();torch.cuda.reset_peak_memory_stats()
@@ -81,24 +82,44 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
     assets=hidden_source['assets'];tokens=[asset['token_id'] for asset in assets]
     hidden_columns=artifact/'hidden-pages'
     phase=phase_start()
-    build_hidden_device_pages(assets,[(tokens[a],side.upper().removesuffix('S'),_decimal(price)) for a,side,price in slots],
+    build_hidden_device_pages(assets[::-1] if cold_request is not None else assets,[(tokens[a],side.upper().removesuffix('S'),_decimal(price)) for a,side,price in slots],
         hidden_columns,hidden_source['source_binding'],buckets_per_part=2)
     prepared_hidden=PreparedHiddenPages(hidden_columns,hidden_source['source_binding'])
     phase_done('hidden_root_preparation',phase,buckets=len(prepared_hidden.arrays['bucket_times']),
         parts=len(prepared_hidden.parts))
     phase=phase_start()
-    assembled=install_actor_sources(prepared,prepared_hidden,runtime,
-        [event['market']['condition_id'] for event in source['initial'][::2]],
-        page_groups=3 if source.get('continuous_two_markets') else 2,hidden_page_buckets=1,
-        observation_inputs=continuous is not None)
-    runtime,public_source,block=assembled.runtime,assembled.source,assembled.block
-    pm,market,reference,binance=assembled.states
-    phase_done('actor_source_installation',phase)
+    if cold_request is None:
+        assembled=install_actor_sources(prepared,prepared_hidden,runtime,
+            [event['market']['condition_id'] for event in source['initial'][::2]],
+            page_groups=3 if source.get('continuous_two_markets') else 2,hidden_page_buckets=1,
+            observation_inputs=continuous is not None)
+        runtime,public_source,block=assembled.runtime,assembled.source,assembled.block
+        pm,market,reference,binance=assembled.states
+        phase_done('actor_source_installation',phase)
+        (artifact/'source-preparation.json').write_text(json.dumps(dict(phases=preparation,
+            scope='Python phase wall time includes its writer subprocess; process RSS excludes children; CUDA peaks include live baseline/reserved allocator cache, not driver or other processes; finite source, not15day capacity'),indent=2))
+        public=replace(public,ledger=run(lambda:install_opening(replace(public.ledger,
+            unresolved_markets=UnresolvedMarkets.open(public.ledger.success_pools,T(list(range(0,len(assets),2))))),source)),
+            cancellations=run(lambda:PublicCancellationState.open(integers([]),T([[]],torch.bool))))
+    else:
+        from actor_opening import open_actor_root
+        cold=open_actor_root(prepared,prepared_hidden,codec,cold_request,page_groups=3,hidden_page_buckets=1)
+        assembled=cold.sources;runtime,public,noe=assembled.runtime,cold.public,cold.projection
+        public_source,block=assembled.source,assembled.block
+        pm,market,reference,binance=assembled.states
+        source={**source,'cold_authority':cold.authority,'cold_conditions':cold.conditions,'cold_tokens':cold.tokens,
+            'cold_asset_ends':cold.asset_ends,'bounded_hidden':{**hidden_source,'assets':block.assets}}
+        rows=[[i for i,(asset,side) in enumerate(zip(block.level_assets.cpu().tolist(),block.level_sides.cpu().tolist()))
+            if asset==a and side==1] for a in range(len(cold.tokens))]
+        width=max(map(len,rows));ask_directory=T([row+[-1]*(width-len(row)) for row in rows])
+        (artifact/'cold-authority.json').write_text(json.dumps(cold.authority,indent=2))
+        phase_done('actor_cold_opening_and_installation',phase)
+        assert values(runtime.account.cash)==[2000000000]
+        assert not runtime.orders.occupied.any().cpu().item()
+        assert not public.ledger.orders.occupied.any().cpu().item()
+        assert amounts(public.ledger.success_pools.quantity)==[Fraction(0)]*len(assets)
     (artifact/'source-preparation.json').write_text(json.dumps(dict(phases=preparation,
-        scope='Python phase wall time includes its writer subprocess; process RSS excludes children; CUDA peaks include live baseline/reserved allocator cache, not driver or other processes; finite source, not15day capacity'),indent=2))
-    public=replace(public,ledger=run(lambda:install_opening(replace(public.ledger,
-        unresolved_markets=UnresolvedMarkets.open(public.ledger.success_pools,T(list(range(0,len(assets),2))))),source)),
-        cancellations=run(lambda:PublicCancellationState.open(integers([]),T([[]],torch.bool))))
+        scope='Python phase wall time includes writer subprocess and cold Native call; process RSS excludes children; CUDA peaks include live baseline/reserved cache; finite source, not15day capacity'),indent=2))
     bank=lambda p:p.normalizer.bank if p.normalizer is not None else EvidenceBank.empty('cuda')
     end=T([source['market_end']]*len(assets))
     batches=[]
@@ -154,7 +175,7 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
     advance=clock.advance_before(ck,yes,progress=stage)
     assert not advance.fault.any().cpu().item() and advance.complete.cpu().item()
     assert not clock.public.pending_noe.active.any().cpu().item()
-    checkpoint(clock.public.ledger,source['sent_ledger'])
+    if cold_request is None:checkpoint(clock.public.ledger,source['sent_ledger'])
     assert values(clock.runtime.account.cash)==[int(Fraction(source['cash'])*1000000)]
     if continuous is not None:
         return continuous(source,clock,pm,market,reference,binance,block,sampler,rule,receipt,intents,

@@ -1508,8 +1508,9 @@ FixedIdentity只在原完整目录/成员绑定后消费，InitialTick只设置t
 生命周期转移与市场质量检查原前驱，资产质量继续复用原清外部簿/E段的候选。
 控制字段、资产候选和reference游标按同根fault/精确资源门共同提交。当前这些字段不替代
 真实初始化Active、接单准入或Terminal/结算状态，未装该控制后端的运行仍等待MarketFact。
-Terminal保留原来源并等待真实Resolution、义务与NOE输出协调；已批准政策仍是请求式
-RESOLUTION_REDEEM_ONLY，正式延迟/费用/失败查询参数未定不改变这个政策。
+Terminal保留原来源并等待真实Resolution、义务与NOE输出协调。当前 #181 B100ms 批准目标为
+[D-0329](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6097003779)
+的平台自动结算；GPU Auto 纵向链尚待实施。此前 RESOLUTION_REDEEM_ONLY 请求能力与验证保留历史范围。
 当前mapped值ID借同一固定源页字典解释，跨页更换须承接完整原值/字典引用，不能直接复用局部ID。
 
 冷材料的市场事实身份沿 `public_reduction::materialize_market_fact_v1` 复用原纯物化配方。
@@ -1555,11 +1556,11 @@ Pi/历史亏损仍在每条实际提交时更新。此处原Resolved切片只证
 
 非零市场关闭接线沿同一真实 DPT 空双腿 Book 和原外层 GTC 请求建立账户段。运行价位由原意图的精确限价冷分配，不要求来源盘口已有该价位，也不从原订单后态初始化。SIM 按原订单字符串序关闭全部该市场 Base 订单，订单生命周期与正额本金释放使用完整 Resolution/Order 身份（设备 schema19/18），最后发一次 Resolved。Registry 在首次公开领取时独立关闭订单；Ledger 仅在实际经济提交时释放本金，并更新该条目的订单 condition/open/last sequence。零释放的订单关闭不耗平台经济序。当前工程对照仅一笔挂单、无实际 pending fill；请求式兑付、跨页和完整宿主仍继续。
 
-待成交判定义务沿同一原成交池接入最终性提交：首次合格Terminal保存非终局fill的完整u64序号，MINED及经济应用保留前驱，已提交CONFIRMED/FAILED才清退对应身份。Maker市场结果仍是独立请求前驱。有限工程对照使用原decode_and_seal的MATCHED+0/MINED+5000/CONFIRMED+6000、economic ordinal1，真实typedraw在26000增加Bid 0.4×3、27000归零生成Maker，市场end30000、Terminal31000先产生Resolved，应收随后成功更新；此密封profile仅用于该顺序验证，不是正式训练默认。请求式RESOLUTION_REDEEM_ONLY及Actor无Redeem保持；本切片未实现请求发送或清偿。
+待成交判定义务沿同一原成交池接入最终性提交：首次合格Terminal保存非终局fill的完整u64序号，MINED及经济应用保留前驱，已提交CONFIRMED/FAILED才清退对应身份。Maker市场结果仍是独立请求前驱。有限工程对照使用原decode_and_seal的MATCHED+0/MINED+5000/CONFIRMED+6000、economic ordinal1，真实typedraw在26000增加Bid 0.4×3、27000归零生成Maker，市场end30000、Terminal31000先产生Resolved，应收随后成功更新；此密封profile仅用于该顺序验证，不是正式训练默认。该历史切片当时保持请求式RESOLUTION_REDEEM_ONLY及Actor无Redeem，未实现请求发送或清偿；当前B目标由D-0329替代。
 
 公开请求前驱读面由 `MarketResolutions.economic_predecessors(TradeSuccess, RebateDays)` 按同condition归约：FinalSuccess须success_applied，FinalFailure须已撤销economic_applied，其余仍pending，再与原maker_accrual_finalized取AND。完整经济冷前缀的Known保持独立，Resolved不补历史；该读面不读取SIM隐藏pending，也不替代请求协调器的承诺／应收首次资格或后台独立屏障。上述工程Maker源在Terminal/MINED为false、CONFIRMED并消费实际Maker结果后为true，五条后续最终性NOE连同前面七条构成12条完整人口。
 
-下一首请求增量在 shared-run 所属 `SettlementCoordinator` 消费同一次 `FrozenPublicAccount`。首次发送须公开Ledger waiting为空、同condition完整receipt逐腿承诺为空、经济前驱Known(true)且应收正；未知腿关联不能证明本condition无承诺。已有Request的查询和显式RetryAuthorized不重查首次资格，按最后已处理公开observation抑制重复；普通Unknown/Timeout不增加赎回次数，Timeout分支只查询。请求身份保原account、condition、canonical resolution及固定RESOLUTION_REDEEM_ONLY，SDK indexSets固定[1,2]。设备目录坐标借完整原字符串字典，不是新业务身份。
+已交付的请求式增量（原D-0129范围）在 shared-run 所属 `SettlementCoordinator` 消费同一次 `FrozenPublicAccount`。首次发送须公开Ledger waiting为空、同condition完整receipt逐腿承诺为空、经济前驱Known(true)且应收正；未知腿关联不能证明本condition无承诺。已有Request的查询和显式RetryAuthorized不重查首次资格，按最后已处理公开observation抑制重复；普通Unknown/Timeout不增加赎回次数，Timeout分支只查询。请求身份保原account、condition、canonical resolution及固定RESOLUTION_REDEEM_ONLY，SDK indexSets固定[1,2]。设备目录坐标借完整原字符串字典，不是新业务身份。
 
 SIM `SettlementRegistrations` 支持显式Registered及可选TerminalSuccess的有限scenario：首次到达按原canonical resolution ID的出站SHA时延采样，保存first_arrival/完整u64 sends，后台独立核原resolution pending集合为空及Maker市场结果存在。重复登记保首次到达与scenario进度。真实Registered观察由原SettlementLifecycle映射为schema20，经同Emitter/private时延、Normalizer、NOE双门及持续公开Ledger接纳；Ledger只增加条目并保存非终局Request，平台经济/本地序和现金不变。此类型不是完整scenario解释器；成功经济及有限查询接线见下文，费用和受控重试后台尚未交付。完整Request证据仍由bank/原position保存，终局Request状态沿原Ledger保持sticky。
 
@@ -2217,6 +2218,9 @@ PPO或活动恢复仍未交付。
 
 ### 连续宿主的 Terminal、请求式结算与经济尾段
 
+本节记录已交付请求能力及其历史验证。D-0329已批准#181 B100ms默认平台自动结算；
+本次冷开户不切换GPU运行模式，Auto的SIM／NOE／Ledger纵向链仍待下一增量实现。
+
 `ContinuousExecution.hidden` 将原 Terminal tag9 交给 `BaseSimRuntime.apply_hidden_terminal`，
 保订单关闭、Resolved、账户和同一引用游标共同提交。其余 hidden 引用及操作继续用原
 消费者。阶段0按已安装的原 scenario 分发 Registered、Timeout、QueryReply 和 Success；
@@ -2415,8 +2419,45 @@ Tensor实参误用、各自查证/修正原件均保留，不把失败写成通�
 2,243,852 KiB。不含驱动、其他进程显存或OS页缓存峰，不外推正式吞吐和15日容量。
 实际命令、源码和阶段记录见 #181 本双来源装配批次证据。
 
-后续仍须闭合原冷开户与真实目录/请求装配、活跃市场行及已完成任务/冻结引用释放。
+原冷开户与完整目录的后续交付见下节；不限固定时刻的请求身份装配、活跃市场行及已完成任务/冻结引用释放仍待闭合。
 当前任务列表仍追加，释放CUDA捕获图不等于完整任务/轨迹退役。再验证一个真实跨UTC
 三市场连续根及完整15/3日准备/容量；底层一次 `HistoricalMerge` 已支持跨文件/UTC，
 不拼多个各自正常EOF的日根。D-0320只在完整窗口末日23:55停止新增交易，D-0319返佣
 等权与真实尾段保持。本批不改变奖励、PPO、活动恢复、训练预算或启动正式训练。
+
+### 单次真实冷开户与完整根目录
+
+`shared-run::open_session_v2` 复用原 SIM `create_session` →真实开户 NOE→
+`SharedExecutionV2::from_opening` →`activate_session`。Native 薄绑定调用这一公共链，
+返回本次开户记录、原位置、Ledger 经济读面、激活结果及所属 SIM 的实际输入／账户／
+反馈／批序。后台按原 `stop_and_drain` 关闭，CPU 活动对象随后释放。GPU 冷安装只读
+这一结果；不接旧验证器的中途开户快照、未来 posts 或假定两次输入提交。
+资金由调用方显式配置。B 沿原批准值2000 pUSD、零持仓零挂单，公共库不设该默认值。
+完整公共根与 hidden 原场景按 condition、token、outcome、window 绑定；目录人口完整
+不代表未来行情、tick、质量或交易资格已可见。一根只有一个账户，不按市场或块补资。
+
+公开 Actor 资产坐标只用来构造原正文 token；SIM Pending 随实际 token 查其物理槽。
+NOE 和 Ledger 成功池使用同一 SIM token 编码；outcome 只确定对腿和市场首资产，
+不能作为 token 字典。连续观察和实际发送接原 `PublicLedgerReceiver`，物理需求仍
+沿其 `resources_fit/required` 返回。合法等待不要求队列清空：已经领取的经济序8等待
+真实序7到达期间，账户冻结保留 pending，时钟继续推进，不提前消费未来 NOE。
+
+有限反序目录代表使用 public token `[1,2,3,4]`、SIM token `[4,3,2,1]`，2000空账户从
+原 Actor 生成挂单／撤单并跨市场成交。原完整 typed 前缀至301528保持 token3 ask0.5、
+token4 ask0.6；两腿 limit0.5，只有 token3成交24.19份。独立 Fraction 后验按原封存
+0.07、指数1及 H5 规则核本金12.095、费用0.42333、现金1987.48167 pUSD，
+成功量落在真实 token3槽。该后验是有限成交数值对照，不是完整窗口 CPU 双跑。
+301600时平台 prefix6，已领取序8仍未消费；序7真实 received_at301692，301700
+首次领取后顺序消费7／8，prefix8且 waiting为空。序8首次 available_at301600不刷新。
+这些时刻是短夹具的实际时序，不是正式延迟参数。入口49.53秒通过，连续段43.92秒；
+单市场非零history／真实发送及 Taker 尾段回归30.98秒通过，原付款1.4 pUSD及余量保持。
+
+原 two-5 阻断、诊断44.57秒的预期失败、receiver-1未检出成功池错轴的通过、
+独立后验初稿错误的token4断言、正确后验对旧成功池输出的负对照及最终成功均保留。
+同时保留早期 Native 编译／同步开户／Scenario 错误、9处误替换恢复与先启动后联网
+的执行偏差；不把各次脚本通过扩大成当时未覆盖的验收。必要源码、命令、原件、
+冷准备耗时与资源口径见 #181 本批证据。
+
+本批只闭合真实冷开户和完整目录。有限请求身份仍由验证器配置，通用请求拥有者、
+活跃行与任务／冻结引用释放、跨UTC连续根和15／3日工作集未完成。D-0329批准的 GPU
+Auto 纵向链属下一批；本次不切结算模式，不声称活动恢复、PPO或正式训练已交付。

@@ -3,6 +3,8 @@ mod registry;
 pub use registry::*;
 mod group;
 pub use group::*;
+mod opening;
+pub use opening::*;
 
 mod quantity;
 

@@ -19489,6 +19489,18 @@ pub struct PublicSimExecutionV1 {
     actor: SimRunActorV2,
 }
 impl PublicSimExecutionV1 {
+    /// 原冷开户完成后的设备交接序；不推进或复制业务状态。
+    pub fn session_sequences(&self) -> Result<(u64, u64, u64, u64), SimRunActorErrorV2> {
+        let session = self.actor.state.as_ref().and_then(|state| state.session.as_ref())
+            .ok_or(SimRunActorErrorV2::SessionNotCreated)?;
+        let next_input = self.actor.log.as_ref().map_or(self.actor.applied_input_sequence,
+            SimEventLogV2::next_input_sequence);
+        Ok((next_input,
+            session.execution_state.next_account_transition_seq(),
+            session.next_private_feedback_sequence, session.next_projection_batch_sequence))
+    }
+
+
     #[allow(clippy::too_many_arguments)]
     pub fn create_new(
         path: &Path,

@@ -313,6 +313,7 @@ fn model_intent_requests_v2(input: &str) -> PyResult<String> {
 
 #[pymodule]
 fn model_native_inputs(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(open_actor_account_v2, module)?)?;
     module.add_function(wrap_pyfunction!(sim_order_ids_v1, module)?)?;
     module.add_function(wrap_pyfunction!(post_terms_batch_v2, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_targets_batch_v2, module)?)?;
@@ -320,6 +321,86 @@ fn model_native_inputs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PythonGroup>()?;
     module.add_class::<PythonActor>()?;
     Ok(())
+}
+
+/// 冷端只调用公共开户链；返回原事实和前沿后释放CPU活动对象。
+#[pyfunction]
+fn open_actor_account_v2(input: &str) -> PyResult<String> {
+    use sim_system::execution::*;
+    use sim_system::platform_rules::{HistoricalProcessSnapshotRequestV1, ImplementationIdentityV1,
+        load_historical_process_snapshot_v3};
+    #[derive(serde::Deserialize)]
+    struct Request {
+        log_path: std::path::PathBuf,
+        noe_root: std::path::PathBuf,
+        rule_path: std::path::PathBuf,
+        rule_sha256: contracts::Sha256Hex,
+        rules_as_of_utc_ms: i64,
+        implementation_identity: ImplementationIdentityV1,
+        source_sha256: contracts::Sha256Hex,
+        scenario: sim_system::scenario::SimulationScenarioArtifactV1,
+        finality_policy: serde_json::Value,
+        session: SessionSpecV3,
+        activation_id: String,
+    }
+    let request: Request = serde_json::from_str(input).map_err(error)?;
+    let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+        snapshot_path: request.rule_path, expected_file_sha256: request.rule_sha256,
+        replay_causal_start_utc_ms: request.rules_as_of_utc_ms,
+    }).map_err(error)?;
+    let finality = Arc::new(sim_system::finality::TradeFinalityPolicyV2::decode_and_seal(
+        &serde_json::to_vec(&request.finality_policy).map_err(error)?).map_err(error)?);
+    // 原构造器形成正式资产次序；GPU物理槽次序不决定场景身份。
+    let scenario_artifact = sim_system::scenario::SimulationScenarioArtifactV1 {
+        schema_version: request.scenario.schema_version,
+        markets: request.scenario.markets.into_iter().map(|market|
+            sim_system::scenario::PlatformMarketV1::try_new(market.market().clone(), market.assets().clone()))
+            .collect::<Result<Vec<_>, _>>().map_err(error)?,
+    };
+    let scenario = Arc::new(sim_system::scenario::SealedPlatformScenarioV1::decode_and_seal(
+        &serde_json::to_vec(&scenario_artifact).map_err(error)?).map_err(error)?);
+    let latency = sim_system::latency_profile::load_embedded_proxy_latency_profile().map_err(error)?;
+    let opened = RunOpenedV2 {
+        projection_version: BusinessProjectionVersionV1::V4,
+        run_id: request.session.run_id.clone(), durability_role: RunDurabilityRoleV2::FiniteHistorical,
+        platform_rule_snapshot_file_sha256: rules.file_sha256().clone(),
+        trade_finality_policy_file_sha256: finality.policy_id().clone(),
+        platform_scenario_file_sha256: scenario.file_sha256().clone(),
+        proxy_latency_profile_file_sha256: latency.file_sha256().clone(),
+        implementation_identity: request.implementation_identity,
+        market_event_source_identity_sha256: Some(request.source_sha256),
+    };
+    let reference = |position| contracts::execution_normalization::DurableSourceReferenceV1 {
+        source: contracts::execution_normalization::ImmutableSourceReferenceV1::Location(
+            format!("{}#input={position}", request.log_path.display())),
+    };
+    let port = MemoryNoeProjectionPortV4::new(&request.noe_root, opened.clone(), reference(0),
+        reference(1), request.session.creation_request_id.clone(), "native-gpu-opening-v2".into());
+    let observation = port.observation();
+    let public = sim_system::public_consumption::PublicRunOpenedV1 {
+        projection_version: opened.projection_version, run_id: opened.run_id,
+        platform_rule_snapshot_file_sha256: opened.platform_rule_snapshot_file_sha256,
+        trade_finality_policy_file_sha256: opened.trade_finality_policy_file_sha256,
+        platform_scenario_file_sha256: opened.platform_scenario_file_sha256,
+        proxy_latency_profile_file_sha256: opened.proxy_latency_profile_file_sha256,
+        implementation_identity: opened.implementation_identity,
+        market_event_source_identity_sha256: opened.market_event_source_identity_sha256,
+    };
+    let mut execution = PublicSimExecutionV1::create_new_historical(&request.log_path, public, rules, finality,
+        scenario, latency, Box::new(port), 1 << 20, 8).map_err(error)?;
+    let (shared, activation) = shared_run::open_session_v2(&mut execution, observation.clone(),
+        request.session, request.activation_id,
+        ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit).map_err(error)?;
+    let opening = observation.opening_record().ok_or_else(||error("原SIM缺开户记录"))?;
+    let read = shared.ledger().economic_read().ok_or_else(|| error("开户账本缺少经济读面"))?;
+    let result = serde_json::to_string(&serde_json::json!({
+        "opening_record": opening.record(), "opening_position": opening.position(),
+        "opening_context": opening.context(), "ledger_projection": read.base(),
+        "session_sequences": execution.session_sequences().map_err(error)?,
+        "activation": format!("{activation:?}")
+    })).map_err(error)?;
+    execution.stop_and_drain().map_err(error)?;
+    Ok(result)
 }
 
 #[pyfunction]

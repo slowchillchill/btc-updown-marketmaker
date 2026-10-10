@@ -21,6 +21,7 @@ from asset_buy import take_ratio
 from queues import _take
 import copy
 from dataclasses import fields,is_dataclass
+from ledger_drain import PublicLedgerReceiver
 
 
 def stored_actual(value):
@@ -59,6 +60,8 @@ def diagnostic_columns(value,names):
 
 def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,receipt,intents,asks,taker,maker,codec,artifact,stage,*,second_buy=False,assembled):
     evidence=[];original_stage=stage;page_changes=0;hidden_pages=[]
+    receiver=PublicLedgerReceiver()
+    received_checks=[]
     def stage(name,**row):
         nonlocal page_changes
         if name=='publication_boundary' and os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL') and int(clock.gates.public_visible_at.cpu()[0])==87_000_009:
@@ -78,11 +81,17 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     started=time.perf_counter();zero=T([0]);yes=T([True],torch.bool);empty=T([[]]);start=zero-29000
     market_indices=assembled.market_indices;row_roots=T([0,0]) if two else zero
     identities=T([[0,0,0],[0,0,1]]) if two else T([[0,0,0]]);condition_slots=T(list(range(2 if two else 1)))
-    condition=source['initial'][0]['market']['condition_id'];tokens=[a['token_id'] for a in source['bounded_hidden']['assets']]
-    legs=run(lambda:SubmittedLegs(T([[True,False]],torch.bool),T([[False,False]],torch.bool),T([[0,-1]]),T([[0,1]]),
-        rational(['1000.001','0']),T([[True,False]],torch.bool),T([[0,-1]]),T([[0,1]]),T([[True,False]],torch.bool),
-        SubmittedBuyTerms(T([[2,0]]),T([[False,False]],torch.bool),rational(['0.5','0']),rational(['500.0005','0']),T([[0,-1]]))))
-    legs=run(lambda:bind_submission_receipt(legs,zero,receipt))
+    conditions=source.get('cold_conditions',tuple(event['market']['condition_id'] for event in source['initial'][::2]))
+    condition=conditions[0];tokens=source.get('cold_tokens',tuple(a['token_id'] for a in source['bounded_hidden']['assets']))
+    asset_ends=source.get('cold_asset_ends',tuple(event['market']['window']['end_at_utc_ms'] for event in source['initial']))
+    if 'cold_authority' in source:
+        legs=run(lambda:SubmittedLegs(empty.bool(),empty.bool(),empty,empty,rational([]),empty.bool(),empty,empty,empty.bool(),
+            SubmittedBuyTerms(empty,empty.bool(),rational([]),rational([]),empty),integers([]),empty.bool()))
+    else:
+        legs=run(lambda:SubmittedLegs(T([[True,False]],torch.bool),T([[False,False]],torch.bool),T([[0,-1]]),T([[0,1]]),
+            rational(['1000.001','0']),T([[True,False]],torch.bool),T([[0,-1]]),T([[0,1]]),T([[True,False]],torch.bool),
+            SubmittedBuyTerms(T([[2,0]]),T([[False,False]],torch.bool),rational(['0.5','0']),rational(['500.0005','0']),T([[0,-1]]))))
+        legs=run(lambda:bind_submission_receipt(legs,zero,receipt))
     population=SubmittedActorRequests(intents,legs)
     # 此刻源账户尚无一次公开NOE，冷开户原记录明确没有取消历史。
     assert not clock.public.registry.events.received.any().cpu().item()
@@ -93,9 +102,9 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         width=world.hidden.queues.capacity*(selected.size(1) if kind=='taker' else 1)
         return T([[0]*width])
     backend=ContinuousExecution(population,rule,codec,sampler,asks,T(list(range(len(tokens)))),
-        T([event['market']['window']['end_at_utc_ms'] for event in source['initial']]),taker,maker,
+        T(asset_ends),taker,maker,
         assembled.condition_by_asset,block.asset_axis,paths,scenario)
-    if two:
+    if two and 'cold_authority' not in source:
         from maker_days import MakerDays
         from rebate_coordinator import RebateCoordinator
         clock.runtime=replace(clock.runtime,calendars=run(lambda:RebateCoordinator(
@@ -161,7 +170,8 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         requests=freeze_scoped_cancel_requests(snapshot.state,scopes,object_scopes,location,snapshot.location_known,
             snapshot.targets,account.cutoff)
         leg_count=population.submitted_legs.present.size(1)
-        sides=population.submitted_legs.outcome_indices.gather(1,directory.term_leg_slots.clamp(0,leg_count-1))
+        sides=(population.submitted_legs.outcome_indices.gather(1,directory.term_leg_slots.clamp(0,leg_count-1))
+            if leg_count else torch.full_like(directory.term_leg_slots,-1))
         sides=torch.where(directory.origin_known,sides,-1)
         funds=public.ledger.order_funds
         cancels=cancel_inputs(objects,account.cancel_directory,directory,account.orders,account.order_sources,
@@ -213,6 +223,11 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             if at==2000+offset:
                 with torch.no_grad():policy.action.actor.family[-1].bias[2]=40.;policy.action.actor.family[-1].bias[0]=0.
             policies[at]=policy
+    if 'cold_authority' in source:
+        # 下一市场的原Actor GTC跨越真实0.5 ask，覆盖公开最终性与资金延续。
+        with torch.no_grad():
+            policies[2000+offset].action.actor.price.bias[38]=0.
+            policies[2000+offset].action.actor.price.bias[49]=40.
     if full_warmup:
         for at in range(first_observation,1300+offset,100):policies[at]=policies[1800+offset]
         policies[2800+offset]=policies[1800+offset]
@@ -296,6 +311,28 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     def policy_start(observation,enabled):
         at=int(observation.frozen.cutoff.cpu()[0]);bound.append(at)
         return policies[at],zero+at
+    def receive(public,delivery,enabled):
+        public,ready=receiver(public,delivery,enabled)
+        columns,waiting=public.ledger.columns,public.waiting
+        pending=waiting.received&~waiting.consumed
+        row=dict(at=clock.gates.public_visible_at.cpu().tolist(),
+            platform_prefix=values(public.ledger.platform.platform_source_prefix),
+            ready=ready.cpu().tolist(),waiting=[dict(column=column,row=int(columns.row_refs[root,column].cpu()),
+                sequence=values(columns.sequences)[root*columns.row_refs.size(1)+column],
+                first_available_at=int(waiting.available_at[root,column].cpu()))
+                for root,column in pending.nonzero().cpu().tolist()],
+            resources_fit=True if receiver.captured is None else bool(receiver.captured.resources_fit.cpu()))
+        if 'cold_authority' in source:
+            sequences=values(columns.sequences)
+            row['late_predecessor']=[dict(row=int(columns.row_refs[root,column].cpu()),sequence=sequences[root*columns.row_refs.size(1)+column],
+                received=bool(waiting.received[root,column].cpu()),consumed=bool(waiting.consumed[root,column].cpu()),
+                first_available_at=int(waiting.available_at[root,column].cpu()))
+                for root,column in columns.enabled.nonzero().cpu().tolist()
+                if sequences[root*columns.row_refs.size(1)+column] in (7,8)]
+        if receiver.captured is not None and not row['resources_fit']:
+            row['required']={name:value.cpu().tolist() for name,value in receiver.captured.required.items()}
+        received_checks.append(row);stage('public_ledger_receive',**row)
+        return public,ready
     def sender_factory(task):
         observation=task.observation;at=int(observation.frozen.cutoff.cpu()[0]);key=request_ids.index('continuous-'+str(at))
         inputs=ActorPolicyInputs.publish(observation.actor,observation.market,observation.frozen,task.evaluation,observation.cancels)
@@ -307,12 +344,11 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         identity_bytes,offsets=byte_column([key.encode() for key in request_ids])
         slots={}
         submit=ActorRequestSubmission(control,control.leg_requests,sampler,rule,identity_bytes,offsets,
-            (tuple(event['market']['condition_id'] for event in source['initial'][::2]),),(tuple(tokens),),(slots,),
-            (tuple(event['market']['window']['end_at_utc_ms'] for event in source['initial'][::2]),),codec,population=population,
+            (tuple(conditions),),(tuple(tokens),),(slots,),
+            (tuple(int(clock.source.prepared.columns['markets'][i]['window']['end_at_utc_ms']) for i in market_indices.cpu().tolist()),),codec,population=population,
             order_sequences=({value:key for key,value in orders.items()},))
         ids=IntentRequestIdentities(({'global_request_id':request_ids[key],'caller_correlation_id':None},),
-            (tuple(event['market']['condition_id'] for event in source['initial'][::2]),),(tuple(tokens),),(orders,))
-        def receive(public,delivery,enabled):return receive_current(public,delivery,stage,enabled)
+            (tuple(conditions),),(tuple(a['token_id'] for a in clock.source.prepared.columns['assets']),),(orders,))
         sender=FrozenActorSend(publication,driver,control,ids,codec,submit,receive,observation.source_snapshot,
             decision_cutoff=observation.cutoff)
         senders.append(sender);return sender
@@ -337,7 +373,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                 projection_batches=[diagnostic_columns(batch,('rows','emitted','received_at','private_sequences',
                     'batch_sequences','record_ordinals','platform_at','request_slots','item_ordinals'))
                     for batch in public.ledger.columns.projection_batches])
-        return receive_current(public,delivery,stage,enabled)
+        return receive(public,delivery,enabled)
     shared=ContinuousActorRun(clock,T([first_observation]),models,freeze,receive_observation,
         trading_until=T([2000]) if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") and not two else None,inputs=material)
     continuations=0
@@ -455,6 +491,32 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             'reserved_peak_bytes':torch.cuda.max_memory_reserved(),
             'process_max_rss_kib':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
             'resource_scope':'since source installation peak reset; includes live source baseline, opening/continuous model and independent GPU oracle; Python process RSS since start excludes writer/Rust parent; no driver or OS-cache peak'}
+        if 'cold_authority' in source:
+            balance=source['cold_authority']['ledger_projection']['platform_confirmed_projection']
+            assert balance['cash_pusd']=='2000' and balance['available_pusd']=='2000'
+            assert balance['open_order_count']==0 and balance['pending_fill_count']==0 and not balance['outcome_balances']
+            actual_tokens=list(tokens);public_tokens=[a['token_id'] for a in clock.source.prepared.columns['assets']]
+            assert actual_tokens!=public_tokens
+            assert clock.runtime.fills.occupied.any().cpu().item()
+            assert any(value>0 for value in amounts(clock.public.ledger.success_pools.quantity))
+            # 这些时刻属于本次150ms模型延迟的短代表，不要求完整热身的20ms配置相同。
+            late_predecessor=[]
+            if not full_warmup:
+                early=next(row for row in received_checks if row['at']==[301600])
+                later=next(row for row in received_checks if row['at']==[301700])
+                assert early['ready']==[True] and early['resources_fit'] and early['platform_prefix']==[6]
+                assert early['late_predecessor']==[dict(row=207,sequence=7,received=False,consumed=False,first_available_at=0),
+                    dict(row=223,sequence=8,received=True,consumed=False,first_available_at=301600)]
+                assert later['ready']==[True] and later['platform_prefix']==[8] and not later['waiting']
+                assert later['late_predecessor']==[dict(row=207,sequence=7,received=True,consumed=True,first_available_at=301700),
+                    dict(row=223,sequence=8,received=True,consumed=True,first_available_at=301600)]
+                late_predecessor=[early,later]
+            result['real_cold_opening']=dict(session_sequences=source['cold_authority']['session_sequences'],
+                ledger_entry=source['cold_authority']['ledger_projection']['ledger_entry_seq'],activation=source['cold_authority']['activation'],
+                initial_cash='2000',initial_orders=0,initial_legs=0,public_tokens=public_tokens,sim_tokens=actual_tokens,
+                current_cash=str(amounts(clock.public.ledger.platform.balances)[0]),
+                success_quantities=[str(v) for v in amounts(clock.public.ledger.success_pools.quantity)],
+                source_platform_prefix=values(clock.public.ledger.platform.platform_source_prefix),late_predecessor=late_predecessor)
         (artifact/'two-market-report.json').write_text(json.dumps(result,indent=2))
         return result
     assert [int(o.frozen.cutoff.cpu()[0]) for o in observations]==[1300,1400,1500,1600,1700,1800,1900]
@@ -727,7 +789,39 @@ def main():
             if at%1000:return
             row=dict(row,observation_position=max(0,(at-271000)//100+1),observations_total=309)
         print(json.dumps(row),file=sys.stderr,flush=True)
-    report=check(source,codec.post_terms_batch_v2,progress,before_drive=lambda *args,**kwargs:bounded(*args,codec,artifact,continuous=lambda *a,**k:continuous(*a,second_buy='--out-of-order-buy' in sys.argv,**k),**kwargs),defer_initial_send=True)
+    if source.get('continuous_two_markets'):
+        from latency import EmpiricalDelaySampler
+        from rules import PublicRuleGpu
+        # 有限材料的真实行情价位目录；不以未来请求推账户或预留。
+        slots=set()
+        for asset,event in enumerate(source['initial']):
+            for side in ('bids','asks'):
+                for level in event['payload']['event'][side]:
+                    slots.add((asset,side,Fraction(level['price_pusd_per_share'])))
+        for event in source['changed']:
+            if event['payload']['event_type']=='level_execution_transition':
+                value=event['payload']['event'];slots.add((0,'asks' if value['side']=='ASK' else 'bids',Fraction(value['price_pusd_per_share'])))
+        slots=sorted(slots)
+        ask_rows=[[i for i,(a,side,_) in enumerate(slots) if a==asset and side=='asks'] for asset in range(len(source['initial']))]
+        width=max(map(len,ask_rows));asks=T([row+[-1]*(width-len(row)) for row in ask_rows])
+        sampler=EmpiricalDelaySampler.build((ROOT/'sim-system/config/latency-profiles'/source['profile_sha256']/'profile.json').read_bytes(),
+            source['profile_sha256'],[source['session_seed'].encode('ascii')])
+        rule_path=ROOT/'sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json'
+        cold_request=dict(log_path=str(artifact/'cold-session.log'),noe_root=str(artifact/'cold-noe'),rule_path=str(rule_path),
+            rule_sha256=hashlib.sha256(rule_path.read_bytes()).hexdigest(),rules_as_of_utc_ms=2**63-1,
+            implementation_identity=json.loads(rule_path.read_text())['provenance']['implementation_identity'],
+            source_sha256=hashlib.sha256((artifact/'public-compact/manifest.json').read_bytes()).hexdigest(),
+            finality_policy=dict(schema_version='trade_finality_policy_v2',normal_path=source['finality_path'],failure_overrides=[]),
+            activation_id='gpu-cold-activate',session=dict(run_id=source['run_id'],session_id=source['session_id'],
+                account_id='gpu-cold-account',caller_role='MODEL_TRAIN',caller_instance_id='gpu-cold-caller',
+                creation_request_id='gpu-cold-create',response_bridge_binding_id='gpu-cold-bridge',
+                initial_account_state=dict(available_pusd='2000'),session_seed=source['session_seed']))
+        taker,maker=run(lambda:(rational([source['taker_rebate_rate']]),rational([source['maker_rebate_rate']])))
+        report=bounded(source,None,None,None,sampler,PublicRuleGpu(source['rule']),slots,T([0]*len(slots)),None,None,asks,
+            taker,maker,progress,codec,artifact,continuous=continuous,cold_request=cold_request)
+    else:
+        report=check(source,codec.post_terms_batch_v2,progress,before_drive=lambda *args,**kwargs:bounded(*args,codec,artifact,continuous=lambda *a,**k:continuous(*a,second_buy='--out-of-order-buy' in sys.argv,**k),**kwargs),defer_initial_send=True)
+
     print(json.dumps(report),flush=True)
 
 if __name__=='__main__':main()
