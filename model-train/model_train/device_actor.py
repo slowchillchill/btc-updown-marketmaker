@@ -208,6 +208,12 @@ class CapturedDeviceActor:
         """所属Execute消费者：完整选择→原正文→当前公共Ledger；不发送。"""
         return publication.consume(self,state,control,enabled)
 
+    def release_capture(self):
+        """决定全部完成后释放图和捕获临时值；原输入与已拥有的发布值继续保留。"""
+        self.loop=None
+        self.graphs.clear()
+        self.support=None
+
 
 class ActorSelection:
     """本次决定的发布拥有者；保留正文、原资金决定及唯一业务随机提交。

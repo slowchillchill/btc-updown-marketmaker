@@ -14,7 +14,9 @@ class PublicGroupNext:
 
 class PublicGroupSource:
     """共享PreparedPublicPage，物理分页不改变完整原group或输入身份。"""
-    def __init__(self,prepared,roots,*,columns_binary=None):
+    def __init__(self,prepared,roots,*,columns_binary=None,page_groups=256):
+        if type(page_groups) is not int or page_groups<1:raise ValueError('物理组页容量须为正整数')
+        self.page_capacity=page_groups
         self.prepared=prepared
         self.position=torch.zeros(roots,dtype=torch.int64,device=prepared.device)
         self.page_begin=self.page_end=0
@@ -28,8 +30,9 @@ class PublicGroupSource:
         if len(progress)!=len(prepared.columns['groups']):
             raise ValueError('原来源进度与完整组人口不符')
 
-    def load_next(self,groups):
+    def load_next(self,groups=None):
         """冷资源边界加载真实完整组片；未加载不冒充EOF或group可消费。"""
+        groups=self.page_capacity if groups is None else groups
         if type(groups) is not int or groups<1:raise ValueError('物理组页容量须为正整数')
         begin=int(self.position.min().cpu())
         end=min(begin+groups,len(self.prepared.columns['groups']))

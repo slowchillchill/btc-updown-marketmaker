@@ -365,11 +365,11 @@ async fn gpu_pending_post_uses_request_market_for_asset_admission() {
 // 本来源只有原GTC/FOK及未结束市场，不装造GTD/FAK/结算义务。
 #[cfg(feature="shared-execution")]
 async fn pending_actor_send_original_source() -> serde_json::Value {
-    pending_actor_send_original_source_with_history(false,false).await
+    pending_actor_send_original_source_with_history(false,false,false).await
 }
 
 #[cfg(feature="shared-execution")]
-async fn pending_actor_send_original_source_with_history(nonzero_history:bool,two_markets:bool) -> serde_json::Value {
+async fn pending_actor_send_original_source_with_history(nonzero_history:bool,two_markets:bool,full_warmup:bool) -> serde_json::Value {
     let mut sources=pending_post_original_sources_at(&["fok_success"],false,Some(1410)).await;
     let source=&mut sources[0];
     let mut initial:Vec<ExecutionMarketEventV3>=serde_json::from_value(source["initial"].clone()).unwrap();
@@ -449,6 +449,7 @@ async fn pending_actor_send_original_source_with_history(nonzero_history:bool,tw
     source["bounded_hidden"]=hidden;
     source["bounded_timing"]=serde_json::json!({"observation_at":1300,"calculation_duration":114,"dispatch_delay":0,
         "provenance":"gpu_frozen_actor_sends_from_real_bounded_source finite engineering fixture"});
+    source["continuous_full_warmup"]=serde_json::json!(full_warmup);
     std::fs::write(artifact.join("original-actor-send.json"),serde_json::to_vec_pretty(source).unwrap()).unwrap();
     source.clone()
 }
@@ -490,12 +491,20 @@ async fn gpu_continuous_two_markets_share_account_and_keep_market_memory() {
 
 #[cfg(feature="shared-execution")]
 #[tokio::test(flavor="current_thread")]
+#[ignore="真实100ms网格完整30s热身与同源自动分页；有限工程时延配置"]
+async fn gpu_continuous_full_thirty_second_warmup_uses_same_source_pages() {
+    bounded_gpu_actor_check(Some("--full-warmup")).await;
+}
+
+#[cfg(feature="shared-execution")]
+#[tokio::test(flavor="current_thread")]
 #[ignore="locked GPU; real NoTrade at the bounded send boundary"]
 async fn gpu_frozen_actor_no_trade_at_real_send_boundary() {bounded_gpu_actor_check(Some("--no-trade")).await;}
 
 #[cfg(feature="shared-execution")]
 async fn bounded_gpu_actor_check(mode:Option<&str>) {
-    let source=pending_actor_send_original_source_with_history(mode==Some("--nonzero-history")||mode==Some("--two-markets"),mode==Some("--two-markets")).await;
+    let two=mode==Some("--two-markets")||mode==Some("--full-warmup");
+    let source=pending_actor_send_original_source_with_history(mode==Some("--nonzero-history")||two,two,mode==Some("--full-warmup")).await;
     let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
     let mut command=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap());
     command.arg(std::env::var("B_GPU_ACTOR_SEND_VALIDATOR").unwrap());
@@ -504,7 +513,7 @@ async fn bounded_gpu_actor_check(mode:Option<&str>) {
     serde_json::to_writer(child.stdin.take().unwrap(),&source).unwrap();
     let output=child.wait_with_output().unwrap();
     std::fs::write(artifact.join("actor-send-report.json"),&output.stdout).unwrap();
-    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success(),"Python校验器退出状态：{}\n{}",output.status,String::from_utf8_lossy(&output.stderr));
     eprintln!("actor_send={}",String::from_utf8_lossy(&output.stdout));
 }
 

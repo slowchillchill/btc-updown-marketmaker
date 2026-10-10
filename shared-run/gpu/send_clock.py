@@ -22,7 +22,10 @@ class BoundedSendClock:
     当前资源事务时返回原进入状态，effect保原需求；不会把资源不足当业务完成。
     gtd必须由本装配的实际请求/订单来源供给，不用None默认为不存在。
     """
-    def __init__(self,runtime,projection,public,source,handlers,gtd,bank):
+    def __init__(self,runtime,projection,public,source,handlers,gtd,bank,*,hidden_page_buckets=64):
+        if type(hidden_page_buckets) is not int or hidden_page_buckets<1:
+            raise ValueError('物理hidden页容量须为正整数')
+        self.hidden_page_buckets=hidden_page_buckets
         self.runtime,self.projection,self.public=runtime,projection,public
         self.source,self.handlers,self.gtd,self.bank=source,handlers,gtd,bank
         self.gates=ReceiveGates.unset(runtime.orders.roots,device=runtime.orders.occupied.device)
@@ -44,6 +47,20 @@ class BoundedSendClock:
             if hidden_bound is not None:hidden_known|=hidden_bound.expand_as(at)>=at
             missing_hidden=enabled&~hidden_known
             missing_public=public_due&~group.present
+            # 冷资源装配仅安装原页；不消费组/桶、不推进时钟，也不替换旧冻结。
+            if bool(missing_hidden.any().cpu()):
+                loaded=frontier.load_next(self.hidden_page_buckets)
+                if loaded is not frontier:
+                    self.runtime=replace(self.runtime,hidden_frontier=loaded)
+                    if progress:progress('hidden_page',begin=loaded.columns.bucket_base,
+                        buckets=loaded.columns.at.numel())
+                    continue
+            if bool(missing_public.any().cpu()):
+                previous=(self.source.page_begin,self.source.page_end)
+                self.source.load_next()
+                if previous!=(self.source.page_begin,self.source.page_end):
+                    if progress:progress('public_page',begin=self.source.page_begin,end=self.source.page_end)
+                    continue
             # 暂缺公开页仅允许处理不晚于其真实下一组的SIM阶段，不能跨源空档。
             choice=replace(choice,present=choice.present&(~public_due|(choice.at<=group.at)))
             hidden_before_group=hidden.present|eof

@@ -87,6 +87,19 @@ class HiddenBucketFrontier:
         zero=torch.zeros_like(self.next_bucket)
         return replace(self,columns=columns,next_bucket=zero,next_step=zero.clone(),next_reference=zero.clone())
 
+    def load_next(self, buckets):
+        """物理耗尽后沿同一已验证材料加载相邻完整桶；未耗尽根保原页。"""
+        old=self.columns
+        source=getattr(old.source,'catalog',None)
+        if source is None or old.end_of_input:return self
+        ready=(self.next_bucket==old.at.numel()) & ~self.applying & (self.fault==0)
+        if not ready.all().cpu().item():return self
+        from hidden_inputs import HiddenPmBlock
+        begin=old.bucket_base+old.at.numel()
+        page=source.page(begin,min(begin+buckets,len(source.arrays['bucket_times'])))
+        block=HiddenPmBlock.from_prepared(page)
+        return self.handoff(HiddenBucketColumns.from_block(block))
+
     def begin(self, choice):
         source,_ = self.scheduled()
         active = choice.enabled(4) & source.present & (choice.at == source.at) & ~self.applying

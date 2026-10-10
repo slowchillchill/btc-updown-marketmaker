@@ -233,9 +233,8 @@ def main(source=None):
     if prepared_hidden is not None:
         from base_runtime_storage import BaseRuntimeStorage
         held_page=BaseRuntimeStorage(runtime,runtime).snapshot()
-        second_block=HiddenPmBlock.from_prepared(prepared_hidden.page(1,2))
-        continued=replace(runtime,hidden_frontier=runtime.hidden_frontier.handoff(
-            HiddenBucketColumns.from_block(second_block)))
+        continued=replace(runtime,hidden_frontier=runtime.hidden_frontier.load_next(1))
+        second_block=continued.hidden_frontier.columns.source
         for name in ('hidden','requests','orders','account','fills','calendars'):
             compare(getattr(continued,name),getattr(held_page,name),'nonempty_handoff_'+name)
         assert continued.hidden_frontier.columns.source.terminal_columns is block.terminal_columns

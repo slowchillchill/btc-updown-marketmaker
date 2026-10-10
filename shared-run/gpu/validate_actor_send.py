@@ -18,6 +18,7 @@ from core import EvidenceBank
 from market_economics import UnresolvedMarkets
 from queues import Numbers
 from public_device_page import PreparedPublicPage,build_public_device_page
+from hidden_device_page import PreparedHiddenMaterial,build_hidden_device_columns
 from validate_joint_freeze import install_opening
 from registry import FrozenIntentOrders,PublicCancellationState
 from commitments import SubmittedLegs,bind_submission_receipt
@@ -59,11 +60,15 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
     compact=artifact/'public-compact';page=artifact/'public-page'
     build_public_device_page(os.environ['B_GPU_COLUMNS_BINARY'],compact,page)
     prepared=PreparedPublicPage(page,compact);pm,market,reference,binance=prepared.install()
-    public_source=PublicGroupSource(prepared,1);public_source.load_next(1)
+    public_source=PublicGroupSource(prepared,1,page_groups=3 if source.get('continuous_two_markets') else 2)
     hidden_source=source['bounded_hidden']
     assets=hidden_source['assets'];tokens=[asset['token_id'] for asset in assets]
     block=HiddenPmBlock(assets,[(tokens[a],side.upper().removesuffix('S'),_decimal(price)) for a,side,price in slots],
         source_binding=hidden_source['source_binding'])
+    hidden_columns=artifact/'hidden-columns'
+    build_hidden_device_columns(block,hidden_columns,hidden_source['source_binding'])
+    prepared_hidden=PreparedHiddenMaterial(hidden_columns,hidden_source['source_binding'])
+    block=HiddenPmBlock.from_prepared(prepared_hidden.page(0,min(1,len(block.buckets))))
     runtime=replace(runtime,hidden=run(lambda:block.empty_state(segment_capacity=runtime.hidden.queues.capacity)),
         hidden_frontier=HiddenBucketFrontier.open(HiddenBucketColumns.from_block(block),1))
     runtime=runtime.install_hidden_market_controls()
@@ -76,6 +81,7 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
     def refresh(world,choice):return replace(choice,requests=world.requests,fills=world.fills,calendars=world.calendars,
         hidden_frontier=world.hidden_frontier,settlement_registrations=world.settlement_registrations,order_query_history=world.order_query_history)
     def hidden(world,projection,choice):
+        block=world.hidden_frontier.columns.source
         world=world.begin_hidden_bucket(choice)
         for i in range(block.reference_rows.size(0)):
             world=run(lambda:world.apply_hidden_reference(refresh(world,choice),T([i])))
@@ -105,16 +111,14 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
         # 原来源实际CreateSession/ActivateSession的冷初始化已成功，不移植CPU物理编号。
         frontier,_=run(lambda:frontier.commit(yes));frontier,_=run(lambda:frontier.commit(yes))
         runtime=replace(runtime,input_frontier=frontier)
-    clock=BoundedSendClock(runtime,noe,public,public_source,{4:hidden,5:post,2:finality},ScheduledTime.absent(zero),bank)
+    clock=BoundedSendClock(runtime,noe,public,public_source,{4:hidden,5:post,2:finality},ScheduledTime.absent(zero),bank,
+        hidden_page_buckets=2)
     trace=[]
     def stage(name,**row):
         value=dict(stage=name,elapsed_seconds=time.perf_counter()-started,**row);trace.append(value);progress(value)
     if initial_submit is not None:
-        while True:
-            advance=clock.advance_before(T([source["sent_at"]]),yes,progress=stage)
-            assert not advance.fault.any().cpu().item()
-            if advance.complete.cpu().item():break
-            assert advance.public_page_missing.cpu().item();public_source.load_next(1)
+        advance=clock.advance_before(T([source["sent_at"]]),yes,progress=stage)
+        assert not advance.fault.any().cpu().item() and advance.complete.cpu().item()
         old_input=clock.runtime.input_frontier.next_sequence
         clock.runtime,ledger,receipt,enough=run(lambda:initial_submit(clock.runtime,clock.public.ledger,old_input))
         assert enough.cpu().tolist()==[True] and receipt.registered.cpu().tolist()==[True]
@@ -123,11 +127,8 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
         clock.runtime=replace(clock.runtime,input_frontier=frontier);clock.public=replace(clock.public,ledger=ledger)
         stage("original_request_commit",gpu_input_sequence=values(receipt.input_sequence),cpu_reference_input=source["input_sequence"])
         assert receipt.arrived_at.cpu().tolist()==[source["receipt"]["arrived_at"]]
-    while True:
-        advance=clock.advance_before(ck,yes,progress=stage)
-        assert not advance.fault.any().cpu().item()
-        if advance.complete.cpu().item():break
-        assert advance.public_page_missing.cpu().item();public_source.load_next(1)
+    advance=clock.advance_before(ck,yes,progress=stage)
+    assert not advance.fault.any().cpu().item() and advance.complete.cpu().item()
     assert not clock.public.pending_noe.active.any().cpu().item()
     checkpoint(clock.public.ledger,source['sent_ledger'])
     assert values(clock.runtime.account.cash)==[int(Fraction(source['cash'])*1000000)]
@@ -185,11 +186,8 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
     assert actor.fault.cpu().tolist()==[0] and torch.equal(market_freeze.prefixes,prefix)
     cash_before_freeze=values(actor.cash_micro)
     if clock_only:
-        while True:
-            advance=clock.advance_before(sk,yes,progress=stage)
-            assert not advance.fault.any().cpu().item()
-            if advance.complete.cpu().item():break
-            assert advance.public_page_missing.cpu().item();public_source.load_next(1)
+        advance=clock.advance_before(sk,yes,progress=stage)
+        assert not advance.fault.any().cpu().item() and advance.complete.cpu().item()
         delivery=run(clock.receive_first)
         clock.public,ready=receive_current(clock.public,delivery,stage)
         assert ready.cpu().tolist()==[True]
@@ -245,14 +243,8 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
     cutoff_reference=decision_cutoff.receipt.original_reference(0)
     assert cutoff_reference["group_position"]==int(source_snapshot[0].cpu()[0])-1
     assert values(decision_cutoff.private_feedback_sequence)==[0]
-    # 第一次实际资源不足保留原prefix；不把缺公开页当完成。
+    # 原宿主自动安装缺页，同一发送事件沿原开放时间端点完成。
     result=sender.execute(clock,yes,progress=stage)
-    if not result.advance.complete.cpu().item():
-        assert result.advance.public_page_missing.cpu().item()
-        assert not result.complete.any().cpu().item() and result.receipt is None
-        assert publication.action is None and torch.equal(random.counter,counter)
-        public_source.load_next(2)
-        result=sender.execute(clock,yes,progress=stage)
     assert result.advance.complete.cpu().item()
     stage("publication_state",action_fault=None if publication.action is None else publication.action.fault.cpu().tolist(),
         published=publication.published.cpu().tolist(),candidate_complete=None if publication.candidate is None else publication.candidate.complete.cpu().tolist(),

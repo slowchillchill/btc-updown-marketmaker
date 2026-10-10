@@ -121,6 +121,7 @@ class ActorModelQueue:
             self.hidden=torch.where(accepted[self.row_roots][None,:,None],task.evaluation.hidden,self.hidden)
             self.last_completed_at=torch.where(accepted,event.at,self.last_completed_at)
             task.stage=torch.where(accepted,torch.where(actionable,2,3),task.stage)
+            self._release_completed_capture(task)
             complete |= accepted
         return complete
 
@@ -137,7 +138,14 @@ class ActorModelQueue:
                 fault |= torch.where(active,result.advance.fault,0)
                 if bool((active&~result.advance.complete).any().cpu()):blocked_advance=result.advance
             task.stage=torch.where(active&result.complete,3,task.stage)
+            self._release_completed_capture(task)
         return complete,fault,blocked_advance
+
+    @staticmethod
+    def _release_completed_capture(task):
+        # 原stage3表示该根已完成；其它根的续接/待发送仍持有本次捕获。
+        if task.sender is not None and bool(((task.stage==3)|~task.active).all().cpu()):
+            task.sender.driver.release_capture()
 
     def make_sender(self, task):
         observation=task.observation.actor_view();indices=task.observation.decision_rows

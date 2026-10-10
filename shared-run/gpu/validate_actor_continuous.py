@@ -54,14 +54,19 @@ def diagnostic_columns(value,names):
 
 
 def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,receipt,intents,asks,taker,maker,codec,artifact,stage,*,second_buy=False):
-    evidence=[];original_stage=stage
+    evidence=[];original_stage=stage;page_changes=0;hidden_pages=[]
     def stage(name,**row):
+        nonlocal page_changes
+        if name=='public_page':page_changes+=1
+        if name=='hidden_page':hidden_pages.append(row)
         if name=="continuous_event":
             row.update(business_random=random.counter.cpu().tolist(),history_prefix=material.memory.last_prefix.cpu().tolist(),
                 published=[s.publication.published.cpu().tolist() for s in senders],receipts=[s.receipt is not None for s in senders])
             evidence.append(dict(stage=name,**row))
         original_stage(name,**row)
     two=source.get('continuous_two_markets',False);offset=source.get('continuous_observation_offset',0)
+    full_warmup=source.get('continuous_full_warmup',False)
+    first_observation=offset-28000 if full_warmup else 1300+offset
     started=time.perf_counter();zero=T([0]);yes=T([True],torch.bool);empty=T([[]]);start=zero-29000
     market_indices=T([0,1]) if two else zero;row_roots=T([0,0]) if two else zero
     identities=T([[0,0,0],[0,0,1]]) if two else T([[0,0,0]]);condition_slots=T(list(range(2 if two else 1)))
@@ -100,11 +105,12 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     clock.handlers[5]=diagnostic_mutation
     history=SourceHistoryInputs(pm,market,reference,clock.source.prepared.columns)
     encoder=MarketInputs100ms(pm,market,reference,binance,history,rule,clock.source.prepared.columns,pm.causal_visible_at)
-    memory=history.empty(len(market_indices),start[row_roots]);endpoints=MarketFreezeMemory(clock.source.prefix_at(pm,T([1200+offset]))[row_roots],T([1200+offset])[row_roots],None,None)
+    memory=history.empty(len(market_indices),start[row_roots]);endpoints=MarketFreezeMemory(clock.source.prefix_at(pm,T([first_observation-100]))[row_roots],T([first_observation-100])[row_roots],None,None)
     valuation=PortfolioValuation(pm,tokens,clock.public.ledger.success_pools.asset_roots)
     known={name:yes for name in ('executed_prefix_known','success_prefix_known','rebate_prefix_known','settlement_prefix_known',
         'ledger_prefix_known','economic_liability_prefix_known','economic_prefix_known')}
-    request_ids=[source['request_id']]+['continuous-'+str(at+offset) for at in range(1300,2800 if two else 1900,100)]
+    request_end=(2900 if full_warmup else 2800)+offset if two else 1900
+    request_ids=[source['request_id']]+['continuous-'+str(at) for at in range(first_observation,request_end,100)]
     ranks={key:i for i,key in enumerate(sorted(request_ids))}
     def account_builder(public,frozen,bank,market_indices,row_identities):
         frame=market.frame(frozen.prefixes)
@@ -194,6 +200,9 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             if at==2000+offset:
                 with torch.no_grad():policy.action.actor.family[-1].bias[2]=40.;policy.action.actor.family[-1].bias[0]=0.
             policies[at]=policy
+    if full_warmup:
+        for at in range(first_observation,1300+offset,100):policies[at]=policies[1800+offset]
+        policies[2800+offset]=policies[1800+offset]
     random=ActionRandom(zero+181606,T([[0,0,0,0]]));observations=[];senders=[];bound=[]
     history_checks=[];history_retry=False;resource_candidate=None;end_retry=False;release_calls=[]
     def freeze(world,at,enabled):
@@ -296,8 +305,13 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         senders.append(sender);return sender
     def release_markets(ended):
         release_calls.append(ended.cpu().tolist());material.release_markets(ended)
-    models=ActorModelQueue(torch.zeros((2,len(market_indices),64),device='cuda'),identities,T([1300+offset]),policy_start,
-        lambda observation:(zero+(150 if two else 114),zero+120 if int(observation.frozen.cutoff.cpu()[0])==1300+offset else zero),sender_factory,
+    def timing(observation):
+        at=int(observation.account.cutoff.cpu()[0])
+        duration=150 if two else 114
+        if full_warmup and at!=1900+offset:duration=20
+        return zero+duration,zero+120 if at==1300+offset else zero
+    models=ActorModelQueue(torch.zeros((2,len(market_indices),64),device='cuda'),identities,T([first_observation]),policy_start,
+        timing,sender_factory,
         row_roots=row_roots,market_ends=market.times[market_indices,1] if two else None,
         release_markets=release_markets if two else None)
     def receive_observation(public,delivery,enabled):
@@ -309,8 +323,8 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                     'batch_sequences','record_ordinals','platform_at','request_slots','item_ordinals'))
                     for batch in public.ledger.columns.projection_batches])
         return receive_current(public,delivery,stage,enabled)
-    shared=ContinuousActorRun(clock,T([1300+offset]),models,freeze,receive_observation)
-    continuations=0;page_changes=0
+    shared=ContinuousActorRun(clock,T([first_observation]),models,freeze,receive_observation)
+    continuations=0
     while True:
         result=shared.advance_before(T([2801+offset if two else 1901]),yes,progress=stage)
         if result.fault.any().cpu().item():
@@ -365,9 +379,6 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             encoder.grow_resources(required);history_retry=True;resource_candidate=None
             stage('whole_root_input_growth',at=shared.next_observation.cpu().tolist(),required=required,end_retry=end_retry)
             continue
-        next_group=clock.source.next()
-        if not next_group.present.cpu().item() and not next_group.eof.cpu().item():
-            clock.source.load_next(1);page_changes+=1;stage('continuous_next_page',page_changes=page_changes,position=clock.source.position.cpu().tolist());continue
         required_requests=max([clock.runtime.requests.capacity]+[int(s.receipt.required_requests.max().cpu()) for s in senders if s.receipt is not None])
         required_legs=max([clock.public.ledger.reservations.capacity]+[int(s.publication.reservation.decision.required_capacity.max().cpu())
             for s in senders if s.publication.reservation is not None])
@@ -388,6 +399,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         if frozen is not None:stage('blocked_unknown',fault=frozen.frozen.fault.cpu().tolist(),required=frozen.market.required.cpu().tolist())
         raise AssertionError('真实连续路径未完成且尚无已报告物理需求')
     if two:
+        assert page_changes and hidden_pages
         return verify_two_market_continuous(source,clock,material,models,observations,senders,history_retry,
             history,encoder,random,evidence,started,artifact,stage,end_retry,release_calls)
     assert [int(o.frozen.cutoff.cpu()[0]) for o in observations]==[1300,1400,1500,1600,1700,1800,1900]
@@ -487,10 +499,14 @@ def verify_two_market_continuous(source,clock,material,models,observations,sende
         history,encoder,random,evidence,started,artifact,stage,end_retry,release_calls):
     offset=source['continuous_observation_offset']
     assert history_retry and end_retry and release_calls==[[True,False]]
-    assert [int(o.account.cutoff.cpu()[0]) for o in observations]==list(range(1300+offset,2900+offset,100))
+    full_warmup=source.get('continuous_full_warmup',False)
+    first_observation=offset-28000 if full_warmup else 1300+offset
+    assert [int(o.account.cutoff.cpu()[0]) for o in observations]==list(range(first_observation,2900+offset,100))
     assert clock.public.ledger.fault.numel()==clock.runtime.account.available.sign.numel()==1
     actual=[task for task in models.tasks if task.evaluation is not None]
-    assert [int(task.started_at.cpu()[0]) for task in actual]==list(range(1300+offset,2801+offset,150))
+    expected_starts=(list(range(first_observation,2000+offset,100))+[2050+offset]+list(range(2100+offset,2801+offset,100))
+        if full_warmup else list(range(1300+offset,2801+offset,150)))
+    assert [int(task.started_at.cpu()[0]) for task in actual]==expected_starts
     # 独立逐市场模型前向：不调用队列/身份映射或其评估方法生成期望。
     previous=torch.zeros((2,2,64),device='cuda');warm_steps=0;opened=False
     for task in actual:
@@ -504,7 +520,7 @@ def verify_two_market_continuous(source,clock,material,models,observations,sende
                 torch.testing.assert_close(task.evaluation.state[row:row+1],state)
                 if row==1 and role==0:warm_steps+=1
                 if row==1 and role==1 and not opened:
-                    assert warm_steps==7 and previous[:,row:row+1].abs().sum().cpu().item()>0
+                    assert warm_steps==(300 if full_warmup else 7) and previous[:,row:row+1].abs().sum().cpu().item()>0
                     opened=True
                 previous[:,row:row+1]=hidden
         assert task.active.numel()==task.stage.numel()==1
@@ -513,14 +529,16 @@ def verify_two_market_continuous(source,clock,material,models,observations,sende
     actor_cutoffs=[int(sender.driver.inputs.actor.cutoff.cpu()[0]) for sender in senders]
     assert actor_cutoffs==[int(task.observation.account.cutoff.cpu()[0]) for task in actual if task.stage.cpu().item()>=2]
     assert all(sender.driver.inputs.actor.cutoff.numel()==1 for sender in senders)
-    assert any(int(task.observation.account.cutoff.cpu()[0])==1900+offset and task.completed_at.cpu().tolist()==[2350+offset] for task in actual)
+    old_completed=(2050 if full_warmup else 2350)+offset
+    assert any(int(task.observation.account.cutoff.cpu()[0])==1900+offset and task.completed_at.cpu().tolist()==[old_completed] for task in actual)
     assert models.hidden[:,0].abs().sum().cpu().item()==0 and models.hidden[:,1].abs().sum().cpu().item()>0
     assert material.memory.counts.cpu().tolist()==[[0]*6,[7,0,0,0,0,0]]
     assert not material.endpoints.pm_sides.known[0].any().cpu().item()
     assert material.endpoints.pm_sides.known[1].any().cpu().item()
-    assert observations[0].frozen.fast[0,542].cpu().item()==observations[0].frozen.fast[1,542].cpu().item()==1/16
-    assert observations[0].frozen.fast[0,597].cpu().item()!=observations[0].frozen.fast[1,597].cpu().item()
-    assert observations[0].market.endpoint_memory.pm_sides.asset_indices.cpu().tolist()==[[0,1],[2,3]]
+    first_nonzero=next(observation for observation in observations if int(observation.account.cutoff.cpu()[0])==1300+offset)
+    assert first_nonzero.frozen.fast[0,542].cpu().item()==first_nonzero.frozen.fast[1,542].cpu().item()==1/16
+    assert first_nonzero.frozen.fast[0,597].cpu().item()!=first_nonzero.frozen.fast[1,597].cpu().item()
+    assert first_nonzero.market.endpoint_memory.pm_sides.asset_indices.cpu().tolist()==[[0,1],[2,3]]
     # 同一真实完整组一次消费的独立调度对照；只比较未退役下一市场。
     groups=torch.arange(int(material.memory.last_prefix.max().cpu())+1,device='cuda')
     once,error=run(lambda:history.consume(groups,encoder.delivered_cutoffs[groups],T([0,1]),
@@ -560,10 +578,10 @@ def verify_two_market_continuous(source,clock,material,models,observations,sende
     bodies=[sender.requests[1][0] for sender in senders if sender.requests is not None]
     assert any(body['method']=='POST_ORDERS' and body['request']['items'][0]['item']['order']['condition_id']==source['initial'][2]['market']['condition_id'] for body in bodies)
     result=dict(passed=True,scope='one account/current trade plus T-30 next ContextOnly; next open inherits all GRU layers',
-        account_roots=1,market_memories=2,observation_times=list(range(1300+offset,2900+offset,100)),
+        account_roots=1,market_memories=2,observation_times=list(range(first_observation,2900+offset,100)),
         model_starts=[int(task.started_at.cpu()[0]) for task in actual],warm_recurrences_before_open=warm_steps,
         boundary_roles=boundary_roles,late_root_roles=frozen.role.cpu().tolist(),
-        old_observation_completes_after_market_end_at=2350+offset,shared_slow_except_role=True,
+        old_observation_completes_after_market_end_at=old_completed,shared_slow_except_role=True,
         history_path_and_countdown_checked=True,whole_root_freeze_capacity_retry=True,
         old_memory_released_after_pending_observations=True,new_market_request_from_original_Actor=True,
         end_resource_failure_preserves_accepted_frontier=end_retry,market_release_calls=release_calls,
@@ -580,6 +598,10 @@ def main():
     spec=importlib.util.spec_from_file_location('model_native_inputs',path);codec=importlib.util.module_from_spec(spec);spec.loader.exec_module(codec)
     def progress(row):
         with (artifact/'continuous-progress.jsonl').open('a') as out:out.write(json.dumps(row)+'\n')
+        if source.get('continuous_full_warmup') and row['stage'] in ('continuous_event','continuous_freeze'):
+            at=row['at'][0]
+            if at%1000:return
+            row=dict(row,observation_position=max(0,(at-271000)//100+1),observations_total=309)
         print(json.dumps(row),file=sys.stderr,flush=True)
     report=check(source,codec.post_terms_batch_v2,progress,before_drive=lambda *args,**kwargs:bounded(*args,codec,artifact,continuous=lambda *a:continuous(*a,second_buy='--out-of-order-buy' in sys.argv),**kwargs),defer_initial_send=True)
     print(json.dumps(report),flush=True)
