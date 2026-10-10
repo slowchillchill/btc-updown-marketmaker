@@ -127,7 +127,7 @@ def public_open(source):
         ledger=AdmissionLifecycle.open(platform,EvidenceBank.empty('cuda'),columns,integers([p['ledger_entry_seq']]),
             integers([p['ledger_local_prefix']]),pools,position_costs=PositionCosts.empty(1,count_markets,'cuda'),
             order_funds=OrderFunds.empty(1,1,1,0,'cuda'),rebate_days=RebateDays.empty(T([list(range(count_markets))]),1),
-            accepted_principal=AcceptedPrincipal.open(1,T([0]),known=True),
+            accepted_principal=AcceptedPrincipal.open(1,T(list(range(count_markets))),known=True),
             projected_markets=ProjectedMarkets.open(T(list(range(count_markets))),T([[False]*count_markets],torch.bool),T([True],torch.bool)))
         count=len(source['posts'])
         ledger=replace(ledger,reservations=ledger.reservations.resized(count),global_requests=T([[-1]*count]),item_ordinals=T([[-1]*count]))

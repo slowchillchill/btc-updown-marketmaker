@@ -68,7 +68,7 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
         hidden_frontier=HiddenBucketFrontier.open(HiddenBucketColumns.from_block(block),1))
     runtime=runtime.install_hidden_market_controls()
     public=replace(public,ledger=run(lambda:install_opening(replace(public.ledger,
-        unresolved_markets=UnresolvedMarkets.open(public.ledger.success_pools,zero)),source)),
+        unresolved_markets=UnresolvedMarkets.open(public.ledger.success_pools,T(list(range(0,len(assets),2))))),source)),
         cancellations=run(lambda:PublicCancellationState.open(integers([]),T([[]],torch.bool))))
     bank=lambda p:p.normalizer.bank if p.normalizer is not None else EvidenceBank.empty('cuda')
     end=T([source['market_end']]*len(assets))

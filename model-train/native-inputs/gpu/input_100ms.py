@@ -37,6 +37,18 @@ class FrozenMarket100ms:
     required: torch.Tensor  # [roots,5]：PM、Binance、事实、来源、成交人口。
     resources_fit: torch.Tensor  # 不含精确字资源；由同一device_exact_batch.fits协调。
 
+    def rows(self, indices):
+        """从同一冻结选择市场行；精确历史/端点沿原行坐标选择，不改身份。"""
+        rows=self.role.numel()
+        def take(value):
+            if value is None:return None
+            if hasattr(value,'words') and hasattr(value,'sign'):
+                width=value.sign.numel()//rows
+                return _take(value,(indices[:,None]*width+torch.arange(width,device=indices.device)).flatten())
+            if isinstance(value,torch.Tensor):return value[indices]
+            return replace(value,**{field.name:take(getattr(value,field.name)) for field in fields(value)})
+        return take(self)
+
     def snapshot(self):
         """图外成功发布时拥有全部冻结值/记忆；共享只读DPT列不在本对象中。"""
         return _snapshot_owned(self)
@@ -97,7 +109,7 @@ class MarketInputs100ms:
     def prefix_at(self, observation_ms):
         return torch.searchsorted(self.delivered_cutoffs,observation_ms,right=True)-1
 
-    def freeze(self, observation_ms, market_indices, root_started_at, source_memory, endpoint_memory, *, applied_prefix=None):
+    def freeze(self, observation_ms, market_indices, root_started_at, source_memory, endpoint_memory, *, applied_prefix=None, events=None):
         """观察时刻固定在UTC100ms；调用方先接纳截至C的全部完整组，再冻结。
 
         不提交账户/订单/随机数/GRU。只有全部公共及Native计算成功后，协调器才能一次接纳
@@ -147,7 +159,7 @@ class MarketInputs100ms:
             symbols,observation_ms,endpoint_memory.binance_sides)
         reference = self.reference.encode(self.reference.state.frame(prefixes),market_frame,market_indices,observation_ms)
         lifecycle = self.lifecycle.encode(market_frame,market_indices,assets,observation_ms)
-        events = self.events.encode(endpoint_memory.previous_prefix,prefixes,observation_ms)
+        if events is None:events = self.events.encode(endpoint_memory.previous_prefix,prefixes,observation_ms)
         trades = self.trades.encode(endpoint_memory.previous_prefix,prefixes,assets,observation_ms)
         rules = self.rules.encode(observed,assets,observation_ms)
         history = self.source_history.freeze(source_memory)

@@ -365,17 +365,18 @@ async fn gpu_pending_post_uses_request_market_for_asset_admission() {
 // 本来源只有原GTC/FOK及未结束市场，不装造GTD/FAK/结算义务。
 #[cfg(feature="shared-execution")]
 async fn pending_actor_send_original_source() -> serde_json::Value {
-    pending_actor_send_original_source_with_history(false).await
+    pending_actor_send_original_source_with_history(false,false).await
 }
 
 #[cfg(feature="shared-execution")]
-async fn pending_actor_send_original_source_with_history(nonzero_history:bool) -> serde_json::Value {
+async fn pending_actor_send_original_source_with_history(nonzero_history:bool,two_markets:bool) -> serde_json::Value {
     let mut sources=pending_post_original_sources_at(&["fok_success"],false,Some(1410)).await;
     let source=&mut sources[0];
-    let initial:Vec<ExecutionMarketEventV3>=serde_json::from_value(source["initial"].clone()).unwrap();
+    let mut initial:Vec<ExecutionMarketEventV3>=serde_json::from_value(source["initial"].clone()).unwrap();
     // 两条正式原消息：公开领取界=1414；下一hidden桶恰为1414，仅同刻项增加原ask数量。
-    let mut events=vec![decoded_maker_level_event(BookSide::Ask,"0.5","1000.001","1000.001",1413,1413,10),
-        decoded_maker_level_event(BookSide::Ask,"0.5","1000.001","1000.002",1414,1414,11)];
+    let offset=if two_markets {299000}else{0};
+    let mut events=vec![decoded_maker_level_event(BookSide::Ask,"0.5","1000.001","1000.001",1413+offset,1413+offset,10),
+        decoded_maker_level_event(BookSide::Ask,"0.5","1000.001","1000.002",1414+offset,1414+offset,11)];
     if nonzero_history {
         for (sequence,at,bid) in [(20,1250,"0.4"),(21,1350,"0.42"),(22,1450,"0.44")] {
             let mut event=crate::task21_tests::sealed_event(
@@ -383,7 +384,7 @@ async fn pending_actor_send_original_source_with_history(nonzero_history:bool) -
                     asset:crate::task21_tests::asset("1",0,"Up"),
                     best_bid_pusd_per_share:Some(ExactDecimal(bid.into())),
                     best_ask_pusd_per_share:Some(ExactDecimal("0.5".into()))}),
-                crate::task21_tests::orderbook_evidence(at,at,sequence),crate::task21_tests::fresh_quality());
+                crate::task21_tests::orderbook_evidence(at+offset,at+offset,sequence),crate::task21_tests::fresh_quality());
             event.market=initial[0].market.clone();
             event.event_id=data_pipeline_core::derive_execution_market_event_v3_id(&event).unwrap();
             events.push(data_pipeline_core::decode_execution_market_event_v3(&data_pipeline_core::encode_execution_market_event_v3(&event).unwrap()).unwrap());
@@ -391,6 +392,51 @@ async fn pending_actor_send_original_source_with_history(nonzero_history:bool) -
         events.sort_by_key(|event|event.time.source_event_at_utc_ms);
         // row()实际collector admission=received+1；仅有限源的独立history期望。
         source["nonzero_history_samples"]=serde_json::json!([["0.45",1251],["0.46",1351],["0.47",1451]]);
+    }
+    if two_markets {
+        // 本有限材料采用相邻5min窗口；原FOK经济来源/同账户仍由上面的真实接口给出。
+        for event in &mut initial {
+            event.market.window.end_at_utc_ms=301000;
+            event.event_id=data_pipeline_core::derive_execution_market_event_v3_id(event).unwrap();
+        }
+        for event in &mut events {
+            event.market=initial[0].market.clone();
+            event.event_id=data_pipeline_core::derive_execution_market_event_v3_id(event).unwrap();
+        }
+        let mut next=initial.clone();
+        for (index,event) in next.iter_mut().enumerate() {
+            event.market.condition_id=ConditionId(format!("0x{}","2".repeat(64)));
+            event.market.clob_market_id=ClobMarketId("124".into());
+            event.market.window.start_at_utc_ms=301000;event.market.window.end_at_utc_ms=601000;
+            let ExecutionMarketEventPayloadV3::InitialL2Snapshot(book)=&mut event.payload else {unreachable!()};
+            book.asset.token_id=TokenId((index+3).to_string());
+            book.bids[0].price_pusd_per_share=ExactDecimal("0.2".into());
+            book.bids[0].quantity_shares=ExactDecimal("4".into());
+            event.event_id=data_pipeline_core::derive_execution_market_event_v3_id(event).unwrap();
+        }
+        for (sequence,at,bid) in [(30,1250,"0.2"),(31,1350,"0.24"),(32,1450,"0.28")] {
+            let mut event=crate::task21_tests::sealed_event(ExecutionMarketEventPayloadV3::BestBidAsk(contracts::BestBidAskV2 {
+                asset:crate::task21_tests::asset("3",0,"Up"),best_bid_pusd_per_share:Some(ExactDecimal(bid.into())),
+                best_ask_pusd_per_share:Some(ExactDecimal("0.5".into()))}),
+                crate::task21_tests::orderbook_evidence(at+299000,at+299000,sequence),crate::task21_tests::fresh_quality());
+            event.market=next[0].market.clone();event.event_id=data_pipeline_core::derive_execution_market_event_v3_id(&event).unwrap();
+            events.push(data_pipeline_core::decode_execution_market_event_v3(&data_pipeline_core::encode_execution_market_event_v3(&event).unwrap()).unwrap());
+        }
+        for (sequence,at,token,bid) in [(40,1990,"1","0.46"),(41,1990,"3","0.3"),
+            (42,1991,"3","0.32"),(43,1992,"3","0.34"),(44,1993,"3","0.36")] {
+            let mut event=crate::task21_tests::sealed_event(ExecutionMarketEventPayloadV3::BestBidAsk(contracts::BestBidAskV2 {
+                asset:crate::task21_tests::asset(token,0,"Up"),best_bid_pusd_per_share:Some(ExactDecimal(bid.into())),
+                best_ask_pusd_per_share:Some(ExactDecimal("0.5".into()))}),
+                crate::task21_tests::orderbook_evidence(at+offset,at+offset,sequence),crate::task21_tests::fresh_quality());
+            event.market=if token=="1" {initial[0].market.clone()}else{next[0].market.clone()};
+            event.event_id=data_pipeline_core::derive_execution_market_event_v3_id(&event).unwrap();
+            events.push(data_pipeline_core::decode_execution_market_event_v3(&data_pipeline_core::encode_execution_market_event_v3(&event).unwrap()).unwrap());
+        }
+        initial.extend(next);events.sort_by_key(|event|event.time.source_event_at_utc_ms);
+        source["initial"]=serde_json::json!(initial);source["two_market_history_samples"]=serde_json::json!([
+            [["0.45",300251],["0.46",300351],["0.47",300451],["0.48",300991]],
+            [["0.35",300251],["0.37",300351],["0.39",300451],["0.40",300991],["0.41",300992],["0.42",300993],["0.43",300994]] ]);
+        source["continuous_two_markets"]=serde_json::json!(true);source["continuous_observation_offset"]=serde_json::json!(299000);source["market_end"]=serde_json::json!(301000);
     }
     let (directory,mut hidden)=public_consumption_tests::gpu_compact_hidden_for_order_fixture(&initial,&events,false);
     let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
@@ -437,12 +483,19 @@ async fn gpu_continuous_nonzero_history_preserves_windows() {bounded_gpu_actor_c
 
 #[cfg(feature="shared-execution")]
 #[tokio::test(flavor="current_thread")]
+#[ignore="同账户相邻5min市场T−30热身/完整GRU/积压跨开市"]
+async fn gpu_continuous_two_markets_share_account_and_keep_market_memory() {
+    bounded_gpu_actor_check(Some("--two-markets")).await;
+}
+
+#[cfg(feature="shared-execution")]
+#[tokio::test(flavor="current_thread")]
 #[ignore="locked GPU; real NoTrade at the bounded send boundary"]
 async fn gpu_frozen_actor_no_trade_at_real_send_boundary() {bounded_gpu_actor_check(Some("--no-trade")).await;}
 
 #[cfg(feature="shared-execution")]
 async fn bounded_gpu_actor_check(mode:Option<&str>) {
-    let source=pending_actor_send_original_source_with_history(mode==Some("--nonzero-history")).await;
+    let source=pending_actor_send_original_source_with_history(mode==Some("--nonzero-history")||mode==Some("--two-markets"),mode==Some("--two-markets")).await;
     let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
     let mut command=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap());
     command.arg(std::env::var("B_GPU_ACTOR_SEND_VALIDATOR").unwrap());

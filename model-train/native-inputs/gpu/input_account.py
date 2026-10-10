@@ -241,3 +241,15 @@ def account_inputs_at_prefix(account, market, condition_slots, prefixes, root_st
                 unknown_value[:,None,:],value).flatten(1)
     return NativeAccountAtPrefix(FrozenAccountInputs(slow,inputs.provided,inputs.order_fields,
         inputs.cutoff,inputs.fault | scopes.fault,inputs.repair),scopes)
+
+
+def model_account_rows(inputs, row_roots, row_role):
+    """同根Native slow只读投影；沿NativeInputRoot仅93/94随市场行角色变化。
+
+    订单、精确repair等仍由原根冻结拥有；模型行只消费slow/provided/cutoff/fault。
+    """
+    slow=inputs.slow[row_roots].clone();provided=inputs.provided[row_roots].clone()
+    slow[:,93]=(row_role==1).float();slow[:,94]=(row_role==0).float()
+    provided[:,93:95]=(row_role>=0)[:,None]
+    return FrozenAccountInputs(slow,provided,None,inputs.cutoff[row_roots].clone(),
+        inputs.fault[row_roots].clone())

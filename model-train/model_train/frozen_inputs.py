@@ -37,6 +37,9 @@ class FrozenPolicyInputs100ms:
             market.book_mask.clone(),market.role.clone(),identities.clone(),account.cutoff.clone(),
             account.provided.clone(),fault.clone(),(market.resources_fit&exact_fits).clone())
 
+    def rows(self, indices):
+        return type(self)(**{name:value[indices] for name,value in vars(self).items()})
+
     def model_inputs(self):
         return self.fast,self.slow,self.book_levels,self.book_mask
 

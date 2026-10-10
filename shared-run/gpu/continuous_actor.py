@@ -68,6 +68,7 @@ class ContinuousActorRun:
                 elif selected_kind==2:
                     complete=self.models.finish(ready)
                     blocked |= ready&~complete
+            self.models.retire_consumed_markets(self.next_observation-100)
             count+=1
             if progress:progress('continuous_event',events=count,kind=selected_kind,
                 at=at.detach().cpu().tolist(),active=active.detach().cpu().tolist(),blocked=blocked.detach().cpu().tolist())

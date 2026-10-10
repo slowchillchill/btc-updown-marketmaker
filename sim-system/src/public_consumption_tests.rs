@@ -391,9 +391,13 @@ pub(super) fn gpu_compact_hidden_for_order_fixture(
     let (directory,public)=gpu_public_for_order_fixture(initial,events,empty_initial);
     let public_path=directory.path().join("public");
     let hidden_path=directory.path().join("hidden");
-    let market=&initial[0].market;
-    let context=public.pm_context(&market.condition_id.0).unwrap();
-    let assets=context.assets.iter().map(|v|v.asset.clone()).collect::<Vec<_>>();
+    let mut assets=Vec::new();
+    let mut conditions=std::collections::BTreeSet::new();
+    for event in initial {
+        if conditions.insert(&event.market.condition_id.0) {
+            assets.extend(public.pm_context(&event.market.condition_id.0).unwrap().assets.into_iter().map(|v|v.asset));
+        }
+    }
     let mut sort=config().sort;sort.merge_workers=8;
     let order=Arc::new(GpuInitialRunOrderV1::start(Path::new(&std::env::var("B_GPU_PYTHON").unwrap()),
         Path::new(&std::env::var("B_GPU_SORT_WORKER").unwrap())).unwrap());
@@ -414,21 +418,26 @@ pub(super) fn gpu_public_for_order_fixture(
     use data_pipeline_training::compact_public::PublicCompactWriterV1;
     let directory=tempfile::tempdir().unwrap();
     let public_path=directory.path().join("public");
-    let market=&initial[0].market;
-    let assets=initial.iter().map(|event|match &event.payload {
-        ExecutionMarketEventPayloadV3::InitialL2Snapshot(v)=>v.asset.clone(),
-        _=>panic!("原初始化必须是双资产完整快照"),
-    }).collect::<Vec<_>>();
-    let received=market.window.start_at_utc_ms-100;
-    let mut metadata=metadata_snapshot_row();
-    metadata.condition_id=market.condition_id.0.clone();metadata.clob_market_id=market.clob_market_id.0.clone();
-    metadata.asset_ids=serde_json::to_string(&assets.iter().map(|v|&v.token_id.0).collect::<Vec<_>>()).unwrap();
-    metadata.outcomes_raw=Some(serde_json::to_string(&assets.iter().map(|v|&v.outcome.label).collect::<Vec<_>>()).unwrap());
-    metadata.market_start_utc=market.window.start_at_utc_ms;metadata.market_end_utc=market.window.end_at_utc_ms;
-    metadata.timestamp_received=received;metadata.collector_admission_time_utc_ms=received+1;
-    metadata.fixed_identity_verified_at_utc=received-1;metadata.metadata_fetch_start_utc=Some(received-10);
-    metadata.source_evidence_received_at_utc=Some(received);metadata.row_evidence_validation_completed_at_utc=Some(received+1);
-    let mut inputs=vec![record(0,TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata))))];
+    let received=initial[0].market.window.start_at_utc_ms-100;
+    let mut inputs=Vec::new();
+    let mut conditions=std::collections::BTreeSet::new();
+    for event in initial {
+        let market=&event.market;
+        if !conditions.insert(&market.condition_id.0) {continue;}
+        let assets=initial.iter().filter(|event|event.market==*market).map(|event|match &event.payload {
+            ExecutionMarketEventPayloadV3::InitialL2Snapshot(v)=>v.asset.clone(),
+            _=>panic!("原初始化必须是双资产完整快照"),
+        }).collect::<Vec<_>>();
+        let mut metadata=metadata_snapshot_row();
+        metadata.condition_id=market.condition_id.0.clone();metadata.clob_market_id=market.clob_market_id.0.clone();
+        metadata.asset_ids=serde_json::to_string(&assets.iter().map(|v|&v.token_id.0).collect::<Vec<_>>()).unwrap();
+        metadata.outcomes_raw=Some(serde_json::to_string(&assets.iter().map(|v|&v.outcome.label).collect::<Vec<_>>()).unwrap());
+        metadata.market_start_utc=market.window.start_at_utc_ms;metadata.market_end_utc=market.window.end_at_utc_ms;
+        metadata.timestamp_received=received;metadata.collector_admission_time_utc_ms=received+1;
+        metadata.fixed_identity_verified_at_utc=received-1;metadata.metadata_fetch_start_utc=Some(received-10);
+        metadata.source_evidence_received_at_utc=Some(received);metadata.row_evidence_validation_completed_at_utc=Some(received+1);
+        inputs.push(record(inputs.len() as u64,TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata)))));
+    }
     for event in initial.iter().chain(events) {
         let payload=match &event.payload {
             ExecutionMarketEventPayloadV3::InitialL2Snapshot(v)=>PolymarketOrderbookEvent::Book {
@@ -449,7 +458,7 @@ pub(super) fn gpu_public_for_order_fixture(
         };
         let source=event.time.source_event_at_utc_ms.expect("原PM须有真实源时刻");
         let mut pm=row("epoch-1",inputs.len() as u64,source,event.time.received_at_utc_ms,payload);
-        pm.market=market.condition_id.0.clone();
+        pm.market=event.market.condition_id.0.clone();
         inputs.push(record(inputs.len() as u64,TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(pm))));
     }
     inputs.push(end(inputs.len() as u64));

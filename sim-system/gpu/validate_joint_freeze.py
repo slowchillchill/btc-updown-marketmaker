@@ -26,18 +26,20 @@ def install_opening(ledger,source):
     from resolution import ResolutionSources,MarketResolutions
     from settlement_accounting import SettlementCosts,ExternalCashIdentities
     from rebate_day import RebateDays
-    zero=torch.zeros(1,dtype=torch.int64,device='cuda');yes=torch.ones(1,dtype=torch.bool,device='cuda')
+    yes=torch.ones(1,dtype=torch.bool,device='cuda')
     opening=source['opening_ledger']['projection']
     assert opening['platform_source_prefix']==0 and not opening['market_projections']
     assert not opening['platform_confirmed_projection']['outcome_balances']
     assert not source['opening_ledger']['resolutions'] and not source['opening_ledger']['settlement_costs']
     assert not source['opening_ledger']['rebate_days'] and source['opening_ledger']['other_cash']=='0'
-    sources=ResolutionSources.bind(SimpleNamespace(terminals=[],canonical_ids=[]),['1','2'])
-    return replace(ledger,projected_markets=ProjectedMarkets.open(zero,~yes[:,None],yes),
+    conditions=torch.arange(len({event['market']['condition_id'] for event in source['initial']}),device='cuda')
+    tokens=[event['payload']['event']['asset']['token_id'] for event in source['initial']]
+    sources=ResolutionSources.bind(SimpleNamespace(terminals=[],canonical_ids=[]),tokens)
+    return replace(ledger,projected_markets=ProjectedMarkets.open(conditions,torch.zeros((1,len(conditions)),dtype=torch.bool,device='cuda'),yes),
         resolutions=MarketResolutions.open(ledger.success_pools,ledger.unresolved_markets,sources),
         settlement_costs=SettlementCosts.empty(1,1,'cuda',known=True),
         external_cash=ExternalCashIdentities.empty(1,1,'cuda',known=True),
-        rebate_days=RebateDays.empty(zero[:,None],1),other_cash=rational(['0']))
+        rebate_days=RebateDays.empty(conditions[None,:],1),other_cash=rational(['0']))
 
 
 class JointFreezeValidation:

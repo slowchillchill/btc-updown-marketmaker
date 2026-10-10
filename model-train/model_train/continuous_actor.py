@@ -32,15 +32,19 @@ class ActorModelQueue:
     timing返回显式有限逻辑calculation/dispatch，不使用GPU墙钟。
     sender_factory将本任务已经绑定的评估/版本接原FrozenActorSend。
     """
-    def __init__(self,hidden,identities,initial_completed_at,policy_at_start,timing,sender_factory):
+    def __init__(self,hidden,identities,initial_completed_at,policy_at_start,timing,sender_factory,*,row_roots=None,market_ends=None,release_markets=None):
         self.hidden=hidden.clone();self.identities=identities.clone()
         self.last_completed_at=initial_completed_at.clone()
         self.policy_at_start=policy_at_start;self.timing=timing;self.sender_factory=sender_factory
         self.tasks=[]
+        self.row_roots=torch.arange(len(identities),device=identities.device) if row_roots is None else row_roots
+        self.market_ends=market_ends;self.release_markets=release_markets
 
     def enqueue(self,observation,active):
         calculation,dispatch=self.timing(observation)
-        self.tasks.append(FrozenActorTask(observation,(active&(observation.frozen.role>=0)).clone(),torch.zeros_like(active,dtype=torch.int64),
+        has_rows=torch.zeros_like(active,dtype=torch.int32).scatter_reduce(0,self.row_roots,
+            (observation.frozen.role>=0).to(torch.int32),reduce='amax').bool()
+        self.tasks.append(FrozenActorTask(observation,(active&has_rows).clone(),torch.zeros_like(active,dtype=torch.int64),
             calculation.clone(),dispatch.clone()))
 
     def next_event(self):
@@ -49,7 +53,7 @@ class ActorModelQueue:
         running=torch.zeros_like(present)
         for task in self.tasks:running |= task.active&(task.stage==1)
         for index,task in enumerate(self.tasks):
-            row=task.observation.frozen
+            row=task.observation.account
             waiting=task.active&(task.stage==0)&~running
             completing=task.active&(task.stage==1)
             sending=task.active&(task.stage==2)
@@ -71,9 +75,25 @@ class ActorModelQueue:
             active=enabled&(event.task==index)&(event.kind==1)
             if not bool(active.any().cpu()):continue
             policy,version=self.policy_at_start(task.observation,active)
-            with torch.no_grad():evaluation=policy.frozen_state_and_value(task.observation.frozen,self.hidden,self.identities,version)
-            fault |= torch.where(active,evaluation.fault,0)
-            accepted=active&evaluation.ready&(evaluation.fault==0);ready |= accepted
+            from .frozen_inputs import FrozenPolicyEvaluation
+            frozen=task.observation.frozen;rows=self.row_roots
+            state=torch.zeros((len(rows),self.hidden.size(2)),device=self.hidden.device)
+            value=torch.zeros(len(rows),device=self.hidden.device)
+            next_hidden=self.hidden.clone();row_fault=torch.zeros_like(rows,dtype=torch.int32)
+            row_ready=torch.ones_like(rows,dtype=torch.bool)
+            # 独立市场批量递推；ContextOnly批先于DecisionRequired批。
+            for role in (0,1):
+                indices=torch.nonzero(active[rows]&(frozen.role==role)).flatten()
+                if not indices.numel():continue
+                with torch.no_grad():part=policy.frozen_state_and_value(frozen.rows(indices),
+                    self.hidden[:,indices],self.identities[indices],version[rows[indices]])
+                state[indices]=part.state;value[indices]=part.value;next_hidden[:,indices]=part.hidden
+                row_fault[indices]=part.fault;row_ready[indices]=part.ready
+            evaluation=FrozenPolicyEvaluation(state,value,next_hidden,version[rows].clone(),row_ready,row_fault)
+            failure=torch.zeros_like(active,dtype=torch.int32).scatter_reduce(0,rows,
+                ((~row_ready)|(row_fault!=0)).to(torch.int32),reduce='amax')
+            fault |= torch.where(active,failure,0)
+            accepted=active&(failure==0);ready |= accepted
             # 仅本次真实开始的根绑定这个版本，未开始根仍留原冻结队列。
             started=FrozenActorTask(task.observation,accepted,torch.ones_like(task.stage),
                 task.calculation_duration,task.dispatch_delay,event.at.clone(),event.at+task.calculation_duration,
@@ -88,17 +108,17 @@ class ActorModelQueue:
         for index,task in enumerate(self.tasks):
             active=enabled&(event.task==index)&(event.kind==2)
             if not bool(active.any().cpu()):continue
-            actionable=task.observation.frozen.role==1
+            actionable=task.observation.frozen.role[task.observation.decision_rows]==1
             accepted=active&~actionable
             if bool((active&actionable).any().cpu()):
-                if task.sender is None:task.sender=self.sender_factory(task)
+                if task.sender is None:task.sender=self.make_sender(task)
                 publication=task.sender.publication.publish(task.sender.driver,task.sender.control,active&actionable)
                 accepted |= active&actionable&publication.published
                 if publication.action is not None:
                     inactive=publication.action.family<1
                     task.sender.complete |= accepted&inactive
                     actionable &= ~inactive
-            self.hidden=torch.where(accepted[None,:,None],task.evaluation.hidden,self.hidden)
+            self.hidden=torch.where(accepted[self.row_roots][None,:,None],task.evaluation.hidden,self.hidden)
             self.last_completed_at=torch.where(accepted,event.at,self.last_completed_at)
             task.stage=torch.where(accepted,torch.where(actionable,2,3),task.stage)
             complete |= accepted
@@ -110,7 +130,7 @@ class ActorModelQueue:
         for index,task in enumerate(self.tasks):
             active=enabled&(event.task==index)&(event.kind==3)
             if not bool(active.any().cpu()):continue
-            if task.sender is None:task.sender=self.sender_factory(task)
+            if task.sender is None:task.sender=self.make_sender(task)
             result=task.sender.execute(clock,active,progress=progress)
             complete |= active&result.complete
             if result.advance is not None:
@@ -118,3 +138,22 @@ class ActorModelQueue:
                 if bool((active&~result.advance.complete).any().cpu()):blocked_advance=result.advance
             task.stage=torch.where(active&result.complete,3,task.stage)
         return complete,fault,blocked_advance
+
+    def make_sender(self, task):
+        observation=task.observation.actor_view();indices=task.observation.decision_rows
+        evaluation=replace(task.evaluation,state=task.evaluation.state[indices],
+            value=task.evaluation.value[indices],hidden=task.evaluation.hidden[:,indices],
+            policy_version=task.evaluation.policy_version[indices],ready=task.evaluation.ready[indices],
+            fault=task.evaluation.fault[indices])
+        return self.sender_factory(replace(task,observation=observation,evaluation=evaluation))
+
+    def retire_consumed_markets(self,observed_at):
+        if self.market_ends is None:return
+        ended=(self.market_ends<=observed_at[self.row_roots])&(self.identities[:,2]>=0)
+        pending=torch.zeros_like(ended)
+        for task in self.tasks:
+            pending |= (task.active&(task.stage<2))[self.row_roots]&(task.observation.frozen.role>=0)
+        released=ended&~pending
+        self.hidden=torch.where(released[None,:,None],0.,self.hidden)
+        self.identities[:,2]=torch.where(released,-1,self.identities[:,2])
+        if self.release_markets is not None and bool(released.any().cpu()):self.release_markets(released)
