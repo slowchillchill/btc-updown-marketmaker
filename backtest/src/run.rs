@@ -673,7 +673,6 @@ where
         mut health_at,
         mut health_summary,
         mut unconsumed_required_trigger_at,
-        mut coordinator,
         mut delivery_summary,
         mut day_economics,
     } = saved_loop.unwrap_or_default();
@@ -1033,8 +1032,8 @@ where
                 .map_err(|cause| sim_error("observe_at", at, cause))?;
             if operating {
                 shared
-                    .advance_settlement(&mut coordinator, &mut driver)
-                    .map_err(HistoricalFailureCauseV1::Settlement)?;
+                    .apply_closed()
+                    .map_err(HistoricalFailureCauseV1::Ledger)?;
             }
             if pending.is_none() && dirty && start_at.is_none() {
                 start_at = Some(
@@ -1149,7 +1148,6 @@ where
                         health_at,
                         health_summary: &health_summary,
                         unconsumed_required_trigger_at,
-                        coordinator: &coordinator,
                         delivery_summary: &delivery_summary,
                         day_economics: &day_economics,
                     },
@@ -1176,8 +1174,8 @@ where
                 )
             })?;
         shared
-            .advance_settlement(&mut coordinator, &mut driver)
-            .map_err(HistoricalFailureCauseV1::Settlement)?;
+            .apply_closed()
+            .map_err(HistoricalFailureCauseV1::Ledger)?;
         // 原尾观察已领取经济反馈；在该观察时点更新统计，随后延续至范围结束。
         if tail_at >= economics_start {
             sample_day_economics(&driver, &shared, tail_at, &mut day_economics);
@@ -1258,7 +1256,6 @@ pub(crate) struct RuntimeLoopCheckpointV1<D> {
     health_at: Option<i64>,
     health_summary: SourceHealthRunSummaryV1,
     unconsumed_required_trigger_at: Option<i64>,
-    coordinator: SettlementCoordinatorV1,
     delivery_summary: HistoricalDeliverySummaryV1,
     day_economics: crate::day_economics::DayEconomicsStateV1,
 }
@@ -1279,7 +1276,6 @@ impl<D> Default for RuntimeLoopCheckpointV1<D> {
                 last_invalidated_calculation_timing: None,
             },
             unconsumed_required_trigger_at: None,
-            coordinator: Default::default(),
             delivery_summary: Default::default(),
             day_economics: Default::default(),
         }
@@ -1296,7 +1292,6 @@ pub(crate) struct RuntimeLoopCheckpointRefV1<'a, D> {
     health_at: Option<i64>,
     health_summary: &'a SourceHealthRunSummaryV1,
     unconsumed_required_trigger_at: Option<i64>,
-    coordinator: &'a SettlementCoordinatorV1,
     delivery_summary: &'a HistoricalDeliverySummaryV1,
     day_economics: &'a crate::day_economics::DayEconomicsStateV1,
 }

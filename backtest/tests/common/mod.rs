@@ -75,7 +75,45 @@ fn book(
         }),
     }
 }
-fn material(root: &Path, base: i64, utc_day: &str) -> std::path::PathBuf {
+// 仅终态专用夹具使用原 collector 定时状态行；不改变普通夹具。
+fn local_transition(base: i64, end: bool) -> PolymarketMarketMetadataV5Row {
+    let at = base + if end { 10000 } else { 1000 };
+    let payload = r#"{"orderPriceMinTickSize":"0.01"}"#;
+    let mut row: PolymarketMarketMetadataRow = serde_json::from_value(json!({
+        "metadata_row_kind": "market_state_transition", "timestamp_received": at,
+        "metadata_origin": "local_market_state_timer", "collector_host_id": "synthetic-collector", "collector_region": "test",
+        "schema_version": "polymarket_market_metadata_v5", "slug": "btc-updown-5m-engineering",
+        "condition_id": FIRST, "clob_market_id": "3195576", "asset_ids": "[\"20\",\"3\"]",
+        "market_start_utc": base+1000, "market_end_utc": base+10000, "fixed_identity_verified_at_utc": base-1,
+        "market_lifecycle_state": "active", "market_runtime_role": if end { "resolution_pending" } else { "current" },
+        "source_endpoint": "https://gamma-api.polymarket.com/markets",
+        "source_evidence_origin": "gamma_markets_discovery", "source_evidence_event_type": "gamma_markets_discovery_response",
+        "source_evidence_received_at_utc": base, "source_evidence_raw_sha256": format!("{:x}",Sha256::digest(payload.as_bytes())),
+        "market_lifecycle_transition": if end { None } else { Some("prefetched_to_active") },
+        "lifecycle_scheduled_at_utc": if end { None } else { Some(at) },
+        "lifecycle_applied_at_utc": if end { None } else { Some(at) },
+        "market_runtime_role_transition": if end { "current_to_resolution_pending" } else { "next_to_current" },
+        "runtime_role_scheduled_at_utc": at, "runtime_role_applied_at_utc": at,
+        "active_unavailable_reason": "not_applicable_for_row_kind", "response_fields_unavailable_reason": "not_applicable_for_row_kind",
+        "resolution_budget_horizon_utc": if end { Some(base+10000+8*60_000) } else { None },
+        "resolution_followup_status": if end { Some("pending") } else { None }
+    })).unwrap();
+    row.collector_admission_sequence = if end { 4 } else { 2 };
+    row.collector_admission_time_utc_ms = at + 1;
+    let row = PolymarketMarketMetadataV5Row::from_common(row, None, None);
+    let validation = row.validate();
+    assert!(
+        validation.is_complete(),
+        "collector 正式定时状态: {validation:?}"
+    );
+    row
+}
+fn material(
+    root: &Path,
+    base: i64,
+    utc_day: &str,
+    terminal: Option<(PolymarketMarketMetadataV5Row, PolymarketOrderbookV3Message)>,
+) -> std::path::PathBuf {
     let day = root.join("inputs");
     std::fs::create_dir(&day).unwrap();
     let mut metadata_writer = TypedParquetSegmentWriter::create_for_typed_source(
@@ -85,29 +123,37 @@ fn material(root: &Path, base: i64, utc_day: &str) -> std::path::PathBuf {
         "polymarket_market_metadata",
     )
     .unwrap();
+    let (terminal_metadata, terminal_pm) =
+        terminal.map_or((None, None), |(m, p)| (Some(m), Some(p)));
+    let mut metadata_rows = vec![
+        metadata(
+            FIRST,
+            "3195576",
+            ["20", "3"],
+            base,
+            base + 1000,
+            base + 10000,
+            1,
+        ),
+        metadata(
+            SECOND,
+            "3195577",
+            ["21", "4"],
+            base + 6000,
+            base + 10000,
+            base + 20000,
+            if terminal_metadata.is_some() { 3 } else { 2 },
+        ),
+    ];
+    if let Some(terminal) = terminal_metadata {
+        metadata_rows.insert(1, local_transition(base, false));
+        metadata_rows.push(local_transition(base, true));
+        metadata_rows.push(terminal);
+    }
     metadata_writer
-        .write_polymarket_market_metadata_v5_rows(&[
-            metadata(
-                FIRST,
-                "3195576",
-                ["20", "3"],
-                base,
-                base + 1000,
-                base + 10000,
-                1,
-            ),
-            metadata(
-                SECOND,
-                "3195577",
-                ["21", "4"],
-                base + 6000,
-                base + 10000,
-                base + 20000,
-                2,
-            ),
-        ])
+        .write_polymarket_market_metadata_v5_rows(&metadata_rows)
         .unwrap();
-    metadata_writer.append_key_value_metadata("data_collect_daily_file_fact_v1", json!({"source_kind":"polymarket_market_metadata","schema_version":"polymarket_market_metadata_v5","utc_hour":format!("{utc_day}T00"),"part":0,"rows":2}).to_string()).unwrap();
+    metadata_writer.append_key_value_metadata("data_collect_daily_file_fact_v1", json!({"source_kind":"polymarket_market_metadata","schema_version":"polymarket_market_metadata_v5","utc_hour":format!("{utc_day}T00"),"part":0,"rows":metadata_rows.len()}).to_string()).unwrap();
     let metadata = metadata_writer.finalize().unwrap();
     let mut pm_writer = TypedParquetSegmentWriter::create_for_typed_source(
         &day,
@@ -116,21 +162,23 @@ fn material(root: &Path, base: i64, utc_day: &str) -> std::path::PathBuf {
         "polymarket_market",
     )
     .unwrap();
+    let mut pm_rows = vec![
+        book(FIRST, "20", base + 1100, base + 1100, 1, "0.6"),
+        book(FIRST, "3", base + 1100, base + 1100, 2, "0.6"),
+        // 隐藏撮合先在1700发生；公开直到2200才接收，不能提前更新策略盘口。
+        book(FIRST, "3", base + 1300, base + 1300, 3, "0.65"),
+        book(FIRST, "20", base + 1701, base + 2200, 4, "0.5"),
+        book(SECOND, "21", base + 10100, base + 10200, 5, "0.6"),
+        book(SECOND, "4", base + 10100, base + 10200, 6, "0.6"),
+    ];
+    pm_rows.extend(terminal_pm);
     pm_writer
         .write_polymarket_orderbook_v3_messages(
-            &[
-                book(FIRST, "20", base + 1100, base + 1100, 1, "0.6"),
-                book(FIRST, "3", base + 1100, base + 1100, 2, "0.6"),
-                // 隐藏撮合先在1700发生；公开直到2200才接收，不能提前更新策略盘口。
-                book(FIRST, "3", base + 1300, base + 1300, 3, "0.65"),
-                book(FIRST, "20", base + 1701, base + 2200, 4, "0.5"),
-                book(SECOND, "21", base + 10100, base + 10200, 5, "0.6"),
-                book(SECOND, "4", base + 10100, base + 10200, 6, "0.6"),
-            ],
+            &pm_rows,
             &mut PolymarketOrderbookV3WriteSequenceState::default(),
         )
         .unwrap();
-    pm_writer.append_key_value_metadata("data_collect_daily_file_fact_v1", json!({"source_kind":"polymarket_market","schema_version":POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,"utc_hour":format!("{utc_day}T00"),"part":0,"rows":6}).to_string()).unwrap();
+    pm_writer.append_key_value_metadata("data_collect_daily_file_fact_v1", json!({"source_kind":"polymarket_market","schema_version":POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,"utc_hour":format!("{utc_day}T00"),"part":0,"rows":pm_rows.len()}).to_string()).unwrap();
     let pm = pm_writer.finalize().unwrap();
     let files=[(&metadata,"polymarket_market_metadata","polymarket_market_metadata_v5"),(&pm,"polymarket_market",POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION)].map(|(file,source,version)|json!({"path":file.final_path.file_name().unwrap().to_str().unwrap(),"source_kind":source,"schema_version":version,"utc_hour":format!("{utc_day}T00"),"part":0,"rows":file.row_count,"bytes":std::fs::metadata(&file.final_path).unwrap().len(),"sha256":file.sha256}));
     let manifest = json!({"schema_version":"data_collect_daily_manifest_v3","state":"closed","utc_day":utc_day,"closure_reason":"utc_day_barrier","collection_day_coverage":{"schema_version":"data_collect_collection_day_coverage_v1","state":"ended_known","first_started_utc_ms":base,"last_started_utc_ms":base,"ended_utc_ms":base+86400000,"reactivated_within_day":false},"producer_barriers":["binance_aggtrade","binance_depth","polymarket","polymarket_rtds"],"writer_finalize_acks":["binance_aggtrade","binance_depth_snapshot","binance_depth_update","polymarket_market","polymarket_market_metadata","polymarket_rtds_chainlink_btc_usd"],"files":files});
@@ -146,7 +194,22 @@ pub(crate) fn setup_day(
     base: i64,
     utc_day: &str,
 ) -> (HistoricalRunConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
-    let manifest = material(root, base, utc_day);
+    setup_day_with_terminal(root, base, utc_day, None)
+}
+pub(crate) fn setup_with_terminal(
+    root: &Path,
+    metadata: PolymarketMarketMetadataV5Row,
+    pm: PolymarketOrderbookV3Message,
+) -> (HistoricalRunConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
+    setup_day_with_terminal(root, BASE, "2026-08-24", Some((metadata, pm)))
+}
+fn setup_day_with_terminal(
+    root: &Path,
+    base: i64,
+    utc_day: &str,
+    terminal: Option<(PolymarketMarketMetadataV5Row, PolymarketOrderbookV3Message)>,
+) -> (HistoricalRunConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
+    let manifest = material(root, base, utc_day, terminal);
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .find(|path| path.join("sim-system").is_dir())
