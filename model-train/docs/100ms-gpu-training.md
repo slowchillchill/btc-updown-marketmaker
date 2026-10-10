@@ -727,7 +727,7 @@ hidden 同 codec 的接口为 `data-pipeline/gpu/hidden_device_page.py`。一次
 位置、合法 closure、reference 与 Terminal身份检查；每个参考只读取一次事实并
 产生原市场身份。严格遍历当前桶时，在下一项预读前直接收集已物化步骤，
 闭桶后交付GPU入口；后续不再重读桶内消息。reader只保留当前消息恢复结果，
-GPU持有当前完整桶输出，切换后不缓存整段历史。
+原 `--gpu-pm-source` 冷装箱仍收集全部完整桶；运行时分页不等于冷准备有界。
 随后保存步骤/tag、快照 ragged、参考分派、完整桶时间/offset/closure 与完整 u64 index 列。
 资产/价位目录、精确 bank、完整 Terminal/canonical ID 及原完整桶身份字节 bank
 共享；不持久化逐事件全盘口。hidden列布局仍为 `hidden_device_columns_v1`，
@@ -739,6 +739,41 @@ GPU持有当前完整桶输出，切换后不缓存整段历史。
 事件 JSON 解包、decimal/GCD/排序或从头到 EOF 的来源读取 CLI。原完整桶身份
 按需冷读，固定类型设备图直接读原 typed 列。运行参考游标保持页内坐标；
 Terminal 候选、执行义务、NOE 和 Ledger 使用同源稳定参考 ID。
+
+新的 hidden 完整桶块输出入口为 `build_hidden_device_pages(assets, slots, destination,
+source_binding, buckets_per_part=...)`，产物为 `hidden_device_pages_v1`。
+根所属子块使用内部格式 `hidden_device_columns_part_v1`。旧公开
+`PreparedHiddenMaterial` 只接受 `hidden_device_columns_v1` 完整材料，不能把末子块
+单独视为完整来源。根读取器核验目录后，经内部入口复用原成员、来源和闭桶检查。
+原 `dpt-compact-hidden --gpu-pm-pages` 在严格 reader 完成原来源目录核验后输出目录，
+随后仍按原顺序输出完整桶；最终核验完成及子进程成功后才发布根 manifest。
+准备器只装配当前完整桶块，不把所有桶、步骤或事件数字搬入另一个全量容器。
+块大小是物理选择；一个完整桶不拆分，不因块预算增加业务拒绝。
+
+`PreparedHiddenPages.page(begin,end)` 沿同一根目录载入当前物理块。
+每块保留原完整桶正文、canonical ID、closure 与完整 u64 index；原桶坐标连续。
+块末 `NextGlobalEventAt` 仍只表示相邻完整桶，唯一 `EndOfInput` 属于完整来源末尾。
+固定资产、市场、价格槽及来源目录的文件使用硬链接；设备上的资产/价位索引和冷身份
+bank 由同一 catalog 共享。事件步骤、快照、参考及精确数字表属于当前块；仍被旧调用方
+引用的块继续拥有自己的输入。根级桶时间是只读文件映射，不上传全部桶位置到设备。
+
+共享 Terminal 表只保存真实 Terminal 引用的行、完整 Terminal、canonical ID、payout
+和原参考坐标映射，不为全部纯引用分配空设备行。其行数随真实 Terminal 引用数增长，
+完整值及 ID 目录按各自完整值去重。lifecycle 目录保留不同的完整 mapped 值。
+这些目录服务原 SIM 控制与跨块后继结算，不能统称永远固定。固定身份/价格目录随所选
+完整来源范围的人口变化；公共原消息总数不决定它们的大小。每块精确词法表保留固定
+价格和此前 Terminal payout 的共同前缀，再加入当前块事件数字；不保留此前事件数字。
+物理块目录和桶时间仍随块/桶数增长。本增量只消除 Python 的全桶、步骤和事件精确数表
+积累；原 Rust 严格 reader 的 `expected_references`、`messages`、`offsets` 及运行时
+`reference_facts`／`reference_locations` 仍按完整来源人口增长。因此不能把本增量称为
+完整 hidden 有界准备；这些读取与目录边界仍须与公共列、Native 冷构造一起收敛。
+
+有界小块代表沿真实 typedraw→compact→SIM/NOE/Ledger，复用原独立 CPU 业务结果。
+非空 GTC 入口用两块，每块一个完整桶；Terminal 入口用五个完整桶、三块，保留真实
+Maker 待确认、Terminal、结算成功和次日 Maker 付款。当前小块通过不构成完整15／3日
+工作集有界证明。公共全列导出安装、Native 历史/身份冷构造、跨 UTC 日的完整连续根及
+完整范围准备仍未交付；不启动正式训练。
+
 
 `HiddenBucketFrontier.handoff` 是退出图后的物理页边界操作。它检查所有根已经
 完整提交本页、完整 u64 index 等于相邻原桶起点，再重绑定新页游标；closed 时间、
@@ -2137,8 +2172,9 @@ hidden 换页仍须全部根完整耗尽旧页，保原消费前沿、共享目�
 原冻结输入、发布候选与正文、RNG、receipt 仍由真实消费者持有；独立 Actor 重放的
 生命周期继续由其调用者管理。这项释放针对已完成任务的计算产物，不增加业务拒绝条件。
 
-本接线只覆盖同一已准备材料内部的页续接。公共列仍整份导出安装，hidden 初建仍积累
-全桶，尚未交完整15／3日材料的有界准备、跨材料／UTC日连续根、PPO或活动恢复。
+本自动接线覆盖同一已准备材料内部的页续接。公共列仍整份导出安装；旧 hidden 冷初建
+仍积累全桶，新完整桶块准备入口见上文。完整15／3日准备工作集、跨材料／UTC日连续根、
+PPO或活动恢复仍未交付。
 连续宿主的 Terminal 与结算经济尾段接线见下一节。原有序 compact v1／v2 成员遍历
 与这些未完成能力不能混为一项。
 

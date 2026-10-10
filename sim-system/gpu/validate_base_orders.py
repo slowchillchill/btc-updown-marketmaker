@@ -119,18 +119,31 @@ def main(source=None):
         block=HiddenPmBlock(material['assets'],slots,source_binding=material['source_binding'])
         assert all(not value['references'] for value in block.buckets), '该有限源尚未接市场reference处理器'
         assert len(block.buckets)==2, '初始双Book一桶，七条Maker消息同一完整桶'
-        if os.environ.get('B_GPU_HIDDEN_ORDER_PAGES')=='1':
+        if os.environ.get('B_GPU_HIDDEN_ORDER_PAGES') in ('1','bounded'):
             from hidden_device_page import build_hidden_device_columns,PreparedHiddenMaterial
             destination=Path(os.environ['B_GPU_ORDER_ARTIFACT_DIR'])/'hidden-order-columns'
-            build_hidden_device_columns(block,destination,material['source_binding'],progress=progress)
-            prepared_hidden=PreparedHiddenMaterial(destination,material['source_binding'])
-            compare(prepared_hidden.decimals,block.decimals,'order_pages_shared_exact_source')
+            if os.environ.get('B_GPU_HIDDEN_ORDER_PAGES')=='bounded':
+                from hidden_device_page import build_hidden_device_pages,PreparedHiddenPages
+                build_hidden_device_pages(material['assets'],slots,destination,material['source_binding'],
+                    buckets_per_part=1,progress=progress)
+                prepared_hidden=PreparedHiddenPages(destination,material['source_binding'])
+                assert all(p['end']-p['begin']==1 for p in prepared_hidden.parts)
+                assert len(prepared_hidden.parts)==len(block.buckets)==2
+            else:
+                build_hidden_device_columns(block,destination,material['source_binding'],progress=progress)
+                prepared_hidden=PreparedHiddenMaterial(destination,material['source_binding'])
+                compare(prepared_hidden.decimals,block.decimals,'order_pages_shared_exact_source')
             # CLI结构字段与独立Rust Value键序不同；仍比较每个完整桶及原数组顺序。
-            actual_buckets=[prepared_hidden.banks['buckets'][index] for index in range(len(prepared_hidden.banks['buckets']))]
+            if os.environ.get('B_GPU_HIDDEN_ORDER_PAGES')=='bounded':
+                actual_buckets=[HiddenPmBlock.from_prepared(prepared_hidden.page(index,index+1)).buckets[0]
+                    for index in range(len(block.buckets))]
+            else:
+                actual_buckets=[prepared_hidden.banks['buckets'][index] for index in range(len(prepared_hidden.banks['buckets']))]
             assert actual_buckets==material['buckets'], '原完整桶身份、引用、步骤及闭桶字段'
             block=HiddenPmBlock.from_prepared(prepared_hidden.page(0,1))
             hidden_page_report={'nonempty_hidden_pages':[[0,1],[1,2]],
-                'nonempty_hidden_columns_bytes':sum(p.stat().st_size for p in destination.iterdir()),
+                'nonempty_hidden_columns_bytes':sum(p.stat().st_size for p in destination.rglob('*') if p.is_file()),
+                'bounded_hidden_preparation':os.environ.get('B_GPU_HIDDEN_ORDER_PAGES')=='bounded',
                 'nonempty_once_build_uses_same_original_DPT_material':True}
         hidden_state=Numbers.run_exact_batch(lambda:block.empty_state(segment_capacity=2))
         frontier=Numbers.run_exact_batch(lambda:HiddenBucketFrontier.open(HiddenBucketColumns.from_block(block),1))

@@ -20,13 +20,21 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         eprintln!("{}",serde_json::json!({"stage":stage,"member":member,
             "completed":completed,"total":total,"unit":if member=="inputs" {"inputs"} else {"bytes"},"elapsed_seconds":started.elapsed().as_secs_f64()}));
     };
-    if args.len()==7 && (args[1]=="--inspect" || args[1]=="--gpu-pm-buckets" || args[1]=="--gpu-pm-source") {
+    if args.len()==7 && (args[1]=="--inspect" || args[1]=="--gpu-pm-buckets" || args[1]=="--gpu-pm-source" || args[1]=="--gpu-pm-pages") {
         let mut reader = CompactHiddenMaterialReaderV1::open_with_progress_interval(Path::new(&args[2]),Path::new(&args[3]),
             args[4].parse()?,args[5].parse()?,args[6].parse()?,interval,publication)?;
-        if args[1]=="--gpu-pm-buckets" || args[1]=="--gpu-pm-source" {
+        if args[1]=="--gpu-pm-buckets" || args[1]=="--gpu-pm-source" || args[1]=="--gpu-pm-pages" {
             use std::io::Write;
             let stdout = std::io::stdout();
             let mut output = std::io::BufWriter::new(stdout.lock());
+            if args[1]=="--gpu-pm-pages" {
+                serde_json::to_writer(&mut output, &serde_json::json!({
+                    "source_scene":reader.source_scene,
+                    "material_manifest_sha256":reader.material_manifest_sha256,
+                    "source_manifest_sha256":reader.manifest.source_manifest_sha256}))?;
+                output.write_all(b"\n")?;
+                output.flush()?;
+            }
             let mut count = 0_u64;
             let mut last = Instant::now();
             while let Some(bucket) = data_pipeline_training::compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1(&mut reader)? {
@@ -39,7 +47,7 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
                     last=Instant::now();
                 }
             }
-            if args[1]=="--gpu-pm-source" {
+            if args[1]=="--gpu-pm-source" || args[1]=="--gpu-pm-pages" {
                 serde_json::to_writer(&mut output, &serde_json::json!({
                     "source_scene":reader.source_scene,
                     "material_manifest_sha256":reader.material_manifest_sha256,
@@ -70,7 +78,7 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Ok(());
     }
     if args.len()!=6 {
-        return Err("用法: dpt-compact-hidden [--progress-interval-seconds N (0关闭)] <source-compact> <target> <config.json> <locked-python> <same-commit-sort_worker.py>; --inspect、--gpu-pm-buckets 或 --gpu-pm-source <hidden> <source> <rows> <bytes> <max-packet-bytes>".into());
+        return Err("用法: dpt-compact-hidden [--progress-interval-seconds N (0关闭)] <source-compact> <target> <config.json> <locked-python> <same-commit-sort_worker.py>; --inspect、--gpu-pm-buckets 、--gpu-pm-source 或 --gpu-pm-pages <hidden> <source> <rows> <bytes> <max-packet-bytes>".into());
     }
     let value: serde_json::Value = serde_json::from_reader(File::open(&args[3])?)?;
     if value["sort"]["merge_workers"].as_u64().is_none() {

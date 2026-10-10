@@ -49,6 +49,38 @@ def main():
     price=kind['limit_price_pusd_per_share']
     # 运行价位来自原合法意图，源Book不需要有该档，也不虚构外部盘口。
     block=HiddenPmBlock(source['assets'],[(token,'BID',price)],source_binding=source['source_binding'])
+    if os.environ.get('B_GPU_HIDDEN_TERMINAL_PAGES')=='bounded':
+        from hidden_device_page import (build_hidden_device_pages,PreparedHiddenPages,
+            build_hidden_device_columns,PreparedHiddenMaterial,PART_VERSION)
+        destination=Path(os.environ['B_GPU_ORDER_ARTIFACT_DIR'])/'hidden-terminal-parts'
+        build_hidden_device_pages(source['assets'],[(token,'BID',price)],destination,
+            source['source_binding'],buckets_per_part=2,progress=progress)
+        prepared=PreparedHiddenPages(destination,source['source_binding'])
+        assert all(0<p['end']-p['begin']<=2 for p in prepared.parts)
+        assert prepared.manifest['buckets']==len(source['buckets'])==5
+        assert len(prepared.parts)==3
+        last_part=destination/prepared.parts[-1]['directory']
+        assert json.loads((last_part/'manifest.json').read_bytes())['version']==PART_VERSION
+        try:
+            PreparedHiddenMaterial(last_part,source['source_binding'])
+        except ValueError as error:
+            assert '原材料绑定错误' in str(error),str(error)
+        else:
+            raise AssertionError('末子块不得由旧完整材料入口接受')
+        legacy=destination.parent/'hidden-terminal-legacy'
+        build_hidden_device_columns(block,legacy,source['source_binding'])
+        legacy_material=PreparedHiddenMaterial(legacy,source['source_binding'])
+        assert len(legacy_material.banks['buckets'])==5
+        progress('hidden_root_part_rejected_by_legacy_full_material_and_legacy_full_accepted')
+        # 原完整source/canonical ID和闭桶坐标逐值核对，当前物理映射不是新来源身份。
+        for index,original in enumerate(source['buckets']):
+            actual=HiddenPmBlock.from_prepared(prepared.page(index,index+1))
+            assert actual.buckets[0]==original
+        terminal=int(source['terminal_reference_index'])
+        assert prepared.arrays['terminal_source_indices'].tolist()==[terminal]
+        assert prepared.terminal_columns.canonical_ids==list(block.terminal_columns.canonical_ids)
+        block=HiddenPmBlock.from_prepared(prepared.page(0,2))
+
     asset=next(i for i,value in enumerate(block.assets) if value['token_id']==token)
     before=source['ledger_before']['projection']
     opening=before['platform_confirmed_projection']

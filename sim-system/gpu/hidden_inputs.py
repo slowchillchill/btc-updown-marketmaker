@@ -41,7 +41,10 @@ class HiddenPmBlock:
                 raise ValueError('hidden严格原材料读取失败')
         if last is None:
             raise ValueError('hidden严格原材料读取未完成')
-        self.source_verification = last
+        self._install_verified(assets, slots, buckets, last, device)
+
+    def _install_verified(self, assets, slots, buckets, verification, device, decimal_prefix=()):
+        self.source_verification = verification
         # 原首次FixedIdentity的完整市场成员来自reader；不从当前PM步骤人口推断Active。
         scene = self.source_verification['source_scene']
         registry = {}
@@ -80,6 +83,7 @@ class HiddenPmBlock:
                 texts.append(text)
             return table[text]
 
+        for text in decimal_prefix: intern(text)
         self.reference_rows, self.lifecycle_values = reference_columns(
             buckets, scene, assets, intern, QUALITY, device)
         self.terminal_columns = TerminalColumns.from_buckets(buckets, intern, QUALITY, device)

@@ -78,7 +78,7 @@ class HiddenBucketFrontier:
                 or old.end_of_input or columns.bucket_base!=old.bucket_base+old.at.numel()):
             raise ValueError('hidden换页须保持原共享bank和相邻完整桶范围')
         page=columns.source.prepared_page
-        first=_take(source.index_starts,torch.full_like(self.next_bucket,page.begin))
+        first=source.index_start(page.begin,self.next_bucket)
         match=Numbers.run_exact_batch(lambda:self.index_position.compare(first))
         ready=(self.next_bucket==old.at.numel()) & ~self.applying & (self.fault==0)
         ready &= (match.order==0) & (match.fault==0)
