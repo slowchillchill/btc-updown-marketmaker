@@ -9,7 +9,7 @@ use sim_system::{
 };
 use std::{
     collections::VecDeque,
-    io::Write,
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
 };
@@ -427,13 +427,14 @@ pub(crate) struct CheckpointPublicationV1 {
 pub(crate) const DAY_CHECKPOINT_FORMAT: &str = "original-parquet-day-checkpoint-v1";
 pub(crate) fn write_cbor(path: &Path, value: &impl Serialize) -> Result<(), MaterialError> {
     std::fs::create_dir_all(path.parent().unwrap())?;
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(path)?;
-    ciborium::ser::into_writer(value, &mut file)?;
-    file.flush()?;
-    file.sync_all()?;
+    let mut writer = BufWriter::new(file);
+    ciborium::ser::into_writer(value, &mut writer)?;
+    writer.flush()?;
+    writer.get_ref().sync_all()?;
     Ok(())
 }
 pub(crate) fn hash_file(path: &Path) -> Result<String, MaterialError> {
