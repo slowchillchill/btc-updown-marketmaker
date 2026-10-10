@@ -1,7 +1,7 @@
 """原已编码Base短链NOE→平台/预留/生命周期的设备协调候选。
 
 Ledger entry/local/platform三个序独立；原位置成功后才登记，缺前驱/关联保留待消费。
-成功成本池和未配对成交贡献按首次经济成功接纳；返佣日归属、结算及完整账户读面
+成功成本池按首次经济成功接纳；返佣日归属、结算及完整账户读面
 仍须接入，不能代替全Ledger或活动根恢复。
 """
 from dataclasses import dataclass,replace,fields
@@ -462,7 +462,7 @@ class AdmissionLifecycle:
             # 候选提交，保留原NOE及全部业务状态，不把合法成交归为业务拒绝。
             fault|=(trade_event|economic_trade|((lifecycle_use&use)&((tag==9)|(tag==14)))).to(torch.int32)
         else:
-            trade_success,success_pools=trade_success.apply_success(success_pools,trades,trade_at,(trade_event|economic_trade)&(fault==0))
+            trade_success,success_pools=trade_success.apply_success(success_pools,trade_at,(trade_event|economic_trade)&(fault==0))
             fault|=success_pools.fault
         contribution_event=lifecycle_use & (tag==9)
         contributions,required,_=self.rebate_contributions.add(fill,self.lifecycle.contribution_kinds[root,local],

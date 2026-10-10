@@ -13,7 +13,6 @@ from success_pool import SuccessPools
 from trade_success import TradeSuccess
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'execution-normalization/gpu'))
 from device_identity import sim_trade_order_key
-from types import SimpleNamespace
 from validate_base_execution import integers
 
 
@@ -32,9 +31,8 @@ def main():
     pool=Numbers.run_exact_batch(lambda:SuccessPools.open(torch.tensor([0,0],device='cuda'),
         torch.tensor([0,0],device='cuda'),torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1))
     rows=len(source['trace'])
-    directory=SimpleNamespace(keys=integers([row['fact']['fill_sequence'] for row in source['trace']]),
-        occupied=torch.ones((1,rows),dtype=torch.bool,device='cuda'))
     trade=Numbers.run_exact_batch(lambda:TradeSuccess.open(1,rows,zero.device))
+    pool_fields=['quantity','cost','success_quantity','success_cost','paired_quantity','paired_cost']
     for slot,row in enumerate(source['trace']):
         fact=row['fact']
         assert fact['economic_disposition']=='FinalSuccess'
@@ -43,9 +41,25 @@ def main():
         assert fact['token_id'] in [source['up_token'],source['down_token']]
         enabled=torch.tensor([True],device='cuda')
         at=torch.tensor([slot],device='cuda')
+        # 真实详情先以 Pending 到达；经济已应用仍不得提前进入成功池。
+        trade=Numbers.run_exact_batch(lambda:trade.update(at,zero,torch.full_like(zero,token),rational([fact['base_quantity_shares']]),
+            rational([fact['quote_amount_pusd']]),torch.full_like(zero,1),enabled,enabled,enabled))
+        before=[fractions(getattr(pool,name)) for name in pool_fields]
+        trade,pool=Numbers.run_exact_batch(lambda:trade.apply_success(pool,at,enabled))
+        assert [fractions(getattr(pool,name)) for name in pool_fields]==before
+        assert not trade.success_applied[0,slot].item()
         trade=Numbers.run_exact_batch(lambda:trade.update(at,zero,torch.full_like(zero,token),rational([fact['base_quantity_shares']]),
             rational([fact['quote_amount_pusd']]),torch.full_like(zero,2),enabled,enabled,enabled))
-        trade,pool=Numbers.run_exact_batch(lambda:trade.apply_success(pool,directory,at,enabled))
+        trade,pool=Numbers.run_exact_batch(lambda:trade.apply_success(pool,at,enabled))
+        after=[fractions(getattr(pool,name)) for name in pool_fields]
+        # 同成功再消费，以及较旧 Pending 晚到，都保持成功量／成本恰好一次。
+        trade,pool=Numbers.run_exact_batch(lambda:trade.apply_success(pool,at,enabled))
+        assert [fractions(getattr(pool,name)) for name in pool_fields]==after
+        trade=Numbers.run_exact_batch(lambda:trade.update(at,zero,torch.full_like(zero,token),rational([fact['base_quantity_shares']]),
+            rational([fact['quote_amount_pusd']]),torch.full_like(zero,1),enabled,enabled,enabled))
+        trade,pool=Numbers.run_exact_batch(lambda:trade.apply_success(pool,at,enabled))
+        assert [fractions(getattr(pool,name)) for name in pool_fields]==after
+        assert trade.success_applied[0,slot].item() and trade.dispositions[0,slot].item()==2
         assert pool.fault.cpu().tolist()==[0]
     market=source['market']
     up=next(i for i,a in enumerate(market['assets']) if a['token_id']==source['up_token'])
@@ -56,10 +70,6 @@ def main():
     assert fractions(pool.paired_cost)==[ratio(source['allocated_up_cost']),ratio(market['success_principal_cost_pusd'][1-up])]
     assert fractions(pool.cost)==[ratio(source['remaining_up_cost']),Fraction(0)]
     assert fractions(pool.cost)[0]+fractions(pool.paired_cost)[0]==Fraction(1)
-    expected_contribution={row['fill_sequence']:ratio(row['remaining']) for row in source['contribution_expected']}
-    for row,value in zip(source['trace'],fractions(trade.unpaired_contribution)):
-        fact=row['fact']
-        assert value==(expected_contribution[fact['fill_sequence']] if fact['token_id']==source['up_token'] else Fraction(0))
     sys.path[:0]=[str(Path(__file__).resolve().parents[1]/'native-inputs/gpu'),
                   str(Path(__file__).resolve().parents[2]/'data-pipeline/gpu')]
     from input_success import success_inputs,write_success_fields
@@ -96,9 +106,9 @@ def main():
     encoded=[bytes(row).rstrip(b'\0').decode() for row in keys.bytes.cpu().tolist()]
     assert encoded==[str(value) for value in identifiers]
     assert sorted(range(len(encoded)),key=lambda i:encoded[i])==[0,1,3,2]
-    print(json.dumps({'actual_success_population':len(source['trace']),'fractional':source['fractional'],
+    print(json.dumps({'actual_success_population':len(source['trace']),'pending_late_success_and_repeat_checked':True,'fractional':source['fractional'],
         'market_paired_known_independent_of_missing_outcome_checked':True,'paired_cost_and_source_tail_checked':True,'Native_actual_success_pair_orphan_fields_122_to_163_checked':True,'elapsed_seconds':time.perf_counter()-started,
-        'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),'actual_finite_contribution_checked':True,'full_u64_legacy_string_order_checked':True,'rebate_day_policy_delivered':False}))
+        'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),'full_u64_legacy_string_order_checked':True,'rebate_day_policy_delivered':False}))
 
 
 if __name__=='__main__':
