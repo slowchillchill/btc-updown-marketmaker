@@ -33,6 +33,33 @@ class BoundedSendClock:
         self.observation_known=torch.zeros_like(self.gates.has_public_visible)
 
     def advance_before(self,at,enabled,*,progress=None):
+        return self._advance(at,enabled,before=True,progress=progress)
+
+    def advance_through(self,at,enabled,*,progress=None):
+        """尾段处理真实同刻事件后关闭双门；不借at+1改变实际公开时刻。"""
+        return self._advance(at,enabled,before=False,progress=progress)
+
+    def next_event(self,enabled):
+        """原SIM、来源与未领取反馈的下一真实时刻；缺页仍保真实下界。"""
+        from scheduling import ScheduledTime
+        maximum=torch.full_like(self.source.position,torch.iinfo(torch.int64).max)
+        frontier=self.runtime.hidden_frontier
+        hidden,eof=frontier.scheduled()
+        choice=self.runtime.choose(hidden,eof,maximum,enabled,gtd=self.gtd)
+        group=self.source.next()
+        times=[choice.at,group.at];present=[choice.present,enabled&~group.eof]
+        if frontier.columns.next_bucket_at is not None:
+            times.append(frontier.columns.next_bucket_at.expand_as(maximum))
+            present.append(enabled&~hidden.present&~eof)
+        pending=self.public.pending_noe
+        if pending.active.size(1):
+            times.append(torch.where(pending.active,pending.received_at,maximum[:,None]).min(1).values)
+            present.append(enabled&pending.active.any(1))
+        valid=torch.stack(present,1);at=torch.stack(times,1)
+        next_at=torch.where(valid,at,maximum[:,None]).min(1).values
+        return ScheduledTime(next_at,valid.any(1),choice.fault|group.fault|pending.fault)
+
+    def _advance(self,at,enabled,*,before,progress=None):
         processed=0
         while True:
             group=self.source.next()
@@ -40,11 +67,11 @@ class BoundedSendClock:
             if frontier is None:
                 raise ValueError('发送推进需要绑定实际hidden reader前沿，不能用None隐藏来源')
             hidden,eof=frontier.scheduled()
-            choice=self.runtime.choose(hidden,eof,at,enabled,gtd=self.gtd,before=True)
-            public_due=enabled&~group.eof&(group.at<at)
+            choice=self.runtime.choose(hidden,eof,at,enabled,gtd=self.gtd,before=before)
+            public_due=enabled&~group.eof&((group.at<at) if before else (group.at<=at))
             hidden_bound=frontier.columns.next_bucket_at
             hidden_known=hidden.present|eof
-            if hidden_bound is not None:hidden_known|=hidden_bound.expand_as(at)>=at
+            if hidden_bound is not None:hidden_known|=(hidden_bound.expand_as(at)>=at) if before else (hidden_bound.expand_as(at)>at)
             missing_hidden=enabled&~hidden_known
             missing_public=public_due&~group.present
             # 冷资源装配仅安装原页；不消费组/桶、不推进时钟，也不替换旧冻结。
@@ -91,7 +118,7 @@ class BoundedSendClock:
                     frontier,commit_fault=Numbers.run_exact_batch(lambda:self.runtime.input_frontier.commit(fresh))
                     if bool(commit_fault.any().cpu()):return SendAdvance(torch.zeros_like(enabled),missing_public,missing_hidden,commit_fault,processed)
                     self.runtime=replace(self.runtime,input_frontier=frontier)
-                self.gates=self.gates.before(at,complete)
+                self.gates=self.gates.before(at,complete) if before else self.gates.set_receive(at,complete).set_public(at,complete)
                 return SendAdvance(complete,missing_public,missing_hidden,fault,processed)
             # 只读取一次原设备已选阶段用于调用所属处理器，不在CPU选择订单或市场。
             phase=int(choice.phase[choice.present].min().cpu())

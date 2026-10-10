@@ -268,7 +268,7 @@ class Projection:
                 requests.append(response.request_key);ordinals.append(item.ordinals)
         return records,source_fault,requests,ordinals
 
-    def fill_from_origin(self,sampler,orders,pool,frame,asset_tokens,calendars,rebate_rate,at,*,maker_results=()):
+    def fill_from_origin(self,sampler,orders,pool,frame,asset_tokens,calendars,rebate_rate,at,*,maker_results=(),rebate_phases=None):
         """首Maker反馈或后续唯一最终性义务均取同一实际fill来源，不读取冷结果正文。"""
         from queues import _take
         from fill_pool import _take_record
@@ -294,7 +294,7 @@ class Projection:
         fault=bound.emitter.fault | pool.fault | torch.where(enabled,error,0)
         bound=replace(bound,emitter=replace(bound.emitter,fault=fault))
         return bound.finality(sampler,_take_record(pool.records,index),frame,origin.prices,rebate_rate,at,
-            maker_results=maker_results,liquidity_role=origin.roles,maker_fee_equivalent=equivalent)
+            maker_results=maker_results,rebate_phases=rebate_phases,liquidity_role=origin.roles,maker_fee_equivalent=equivalent)
 
     def settlement_success(self,sampler,conditions,resolutions,policy,assets,tokens,delta,at,emitted,fault,*,observation=None):
         """一条实际成功Request及可选多资产经济，原同private/source顺序。"""
@@ -641,23 +641,26 @@ class Projection:
         return self._finish(emitter,records,emission.root_fault | ordinals.fault)
 
     def finality(self,sampler,record,frame,price,rebate_rate,at,*,finalized=(),payments=(),kind=None,
-                 maker_results=(),liquidity_role=None,maker_fee_equivalent=None):
+                 maker_results=(),liquidity_role=None,maker_fee_equivalent=None,rebate_phases=None):
         from queues import _take,ExactRational
         roots=self.account_slots.numel()
-        population=tuple((result,False) for result in finalized)+tuple((result,True) for result in payments)
+        population=tuple((result,False,kind) for result in finalized)+tuple((result,True,kind) for result in payments)
+        if rebate_phases is not None:
+            population += tuple((result,False,torch.full_like(at,k)) for k,result in rebate_phases.finalized)
+            population += tuple((result,True,torch.full_like(at,k)) for k,result in rebate_phases.payments)
         width=2+len(maker_results)+len(population)
         active=torch.stack([frame.event.emitted,frame.event.rebate_delta.emitted,
             *[result.emitted for result in maker_results],
-            *[result.emitted for result,_ in population]],dim=1)
+            *[result.emitted for result,_,_ in population]],dim=1)
         source_fault=torch.stack([frame.event.fault,frame.event.fault,
-            *[result.fault for result in maker_results],*[result.fault for result,_ in population]],dim=1)
+            *[result.fault for result in maker_results],*[result.fault for result,_,_ in population]],dim=1)
         platform=at[:,None].expand(roots,width)
         direct=torch.zeros_like(active)
         emitter,emission=self.emitter.emit(sampler,active,direct,platform,platform,platform,source_fault)
         counts=torch.stack([1+(frame.event.economic_delta.emitted | frame.event.failure_delta.emitted).to(torch.int64),
             1+frame.event.rebate_delta.emitted.to(torch.int64),
             *[1+result.account_delta.emitted.to(torch.int64) for result in maker_results],
-            *[1+result.account_delta.emitted.to(torch.int64) for result,_ in population]],dim=1)
+            *[1+result.account_delta.emitted.to(torch.int64) for result,_,_ in population]],dim=1)
         categories=torch.tensor([2,3]+[3]*(len(maker_results)+len(population)),device=at.device).expand(roots,width)
         ordinals=map_source_ordinals(emission.emitted,categories,counts,source_fault)
         def sequence(column):
@@ -688,9 +691,9 @@ class Projection:
         for column,result in enumerate(maker_results,start=2):
             private,batch,time=sequence(column)
             records.extend(self._maker_records(result,at,private,batch,time,ordinals.first_ordinals[:,column]))
-        for column,(result,is_payment) in enumerate(population,start=2+len(maker_results)):
+        for column,(result,is_payment,rebate_kind) in enumerate(population,start=2+len(maker_results)):
             private,batch,time=sequence(column)
-            records.extend(self._rebate_records(result,is_payment,kind,at,private,batch,time,ordinals.first_ordinals[:,column]))
+            records.extend(self._rebate_records(result,is_payment,rebate_kind,at,private,batch,time,ordinals.first_ordinals[:,column]))
         return self._finish(emitter,records,emission.root_fault | ordinals.fault)
 
     def _maker_records(self,result,at,private,batch,received,ordinal):

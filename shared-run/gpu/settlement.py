@@ -59,3 +59,24 @@ class SettlementCoordinator:
         handled=torch.where(active & repeat,state.observations,self.handled)
         return replace(self,handled=handled), SettlementActions(roots,resolutions.conditions,
             read.identities,frozen.cutoff[roots],request,query,fault)
+
+
+class PublicSettlementRun:
+    """同次公开账户→原协调器→所属SIM请求入口；不构造模型观察。"""
+    def __init__(self,coordinator,freeze_account,submit):
+        self.coordinator=coordinator;self.freeze_account=freeze_account;self.submit=submit
+
+    def advance(self,clock,enabled):
+        from queues import Numbers
+        frozen=Numbers.run_exact_batch(lambda:self.freeze_account(clock.public,clock.gates.public_visible_at))
+        coordinator,actions=Numbers.run_exact_batch(lambda:self.coordinator.advance(frozen,enabled))
+        runtime=self.submit(clock.runtime,actions)
+        roots=torch.arange(frozen.fault.numel(),device=frozen.fault.device)
+        fault=frozen.fault|Numbers.combine_fault_rows(torch.where(
+            roots[:,None]==actions.roots[None,:],actions.fault[None,:],0))
+        if runtime.settlement_registrations is not None:fault |= runtime.settlement_registrations.fault
+        committed=enabled&(fault==0)
+        self.coordinator=replace(coordinator,handled=torch.where(committed[actions.roots],
+            coordinator.handled,self.coordinator.handled))
+        clock.runtime=runtime
+        return committed,fault

@@ -2,6 +2,10 @@
 from validate_actor_send import *
 from actor_send import SubmittedActorRequests,decimal_values
 from continuous_actor import ContinuousActorRun
+if os.environ.get('B_GPU_CONTINUOUS_OLD_PRIORITY'):
+    spec=importlib.util.spec_from_file_location('old_continuous_priority',os.environ['B_GPU_CONTINUOUS_OLD_PRIORITY'])
+    previous=importlib.util.module_from_spec(spec);sys.modules[spec.name]=previous;spec.loader.exec_module(previous)
+    ContinuousActorRun=previous.ContinuousActorRun
 from continuous_execution import ContinuousExecution
 from model_train.continuous_actor import ActorModelQueue
 from model_train.continuous_inputs import ContinuousActorInputs
@@ -57,6 +61,10 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     evidence=[];original_stage=stage;page_changes=0;hidden_pages=[]
     def stage(name,**row):
         nonlocal page_changes
+        if name=='publication_boundary' and os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL') and int(clock.gates.public_visible_at.cpu()[0])==87_000_009:
+            actual=amounts(clock.public.ledger.platform.balances)[0]
+            assert actual==same_tick_cash,('Sk不得读取同刻新增现金',actual,same_tick_cash)
+            same_tick_boundaries.append(actual)
         if name=='public_page':page_changes+=1
         if name=='hidden_page':hidden_pages.append(row)
         if name=="continuous_event":
@@ -109,7 +117,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     valuation=PortfolioValuation(pm,tokens,clock.public.ledger.success_pools.asset_roots)
     known={name:yes for name in ('executed_prefix_known','success_prefix_known','rebate_prefix_known','settlement_prefix_known',
         'ledger_prefix_known','economic_liability_prefix_known','economic_prefix_known')}
-    request_end=(2900 if full_warmup else 2800)+offset if two else 1900
+    request_end=(2900 if full_warmup else 2800)+offset if two else (2000 if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") else 1900)
     request_ids=[source['request_id']]+['continuous-'+str(at) for at in range(first_observation,request_end,100)]
     ranks={key:i for i,key in enumerate(sorted(request_ids))}
     def account_builder(public,frozen,bank,market_indices,row_identities):
@@ -194,6 +202,8 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             head.variant.weight.zero_();head.variant.bias.copy_(T([40,0]).float())
             head.price.weight.zero_();head.price.bias.zero_();head.price.bias[38]=40.
         policies[at]=policy
+    if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") and not two:policies[1900]=policies[1800]
+    if os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL'):policies[1900]=policies[1300]
     if two:
         for at in range(1900+offset,2800+offset,100):
             policy=copy.deepcopy(policies[1800+offset])
@@ -308,6 +318,8 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     def timing(observation):
         at=int(observation.account.cutoff.cpu()[0])
         duration=150 if two else 114
+        if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") and not two and at==1800:duration=214
+        if os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL') and at==1900:duration=87_000_009-2084
         if full_warmup and at!=1900+offset:duration=20
         return zero+duration,zero+120 if at==1300+offset else zero
     models=ActorModelQueue(torch.zeros((2,len(market_indices),64),device='cuda'),identities,T([first_observation]),policy_start,
@@ -323,7 +335,8 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                     'batch_sequences','record_ordinals','platform_at','request_slots','item_ordinals'))
                     for batch in public.ledger.columns.projection_batches])
         return receive_current(public,delivery,stage,enabled)
-    shared=ContinuousActorRun(clock,T([first_observation]),models,freeze,receive_observation)
+    shared=ContinuousActorRun(clock,T([first_observation]),models,freeze,receive_observation,
+        trading_until=T([2000]) if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") and not two else None)
     continuations=0
     while True:
         result=shared.advance_before(T([2801+offset if two else 1901]),yes,progress=stage)
@@ -451,7 +464,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         at=int(task.observation.frozen.cutoff.cpu()[0])
         assert task.policy is policies[at] and task.evaluation.policy_version.cpu().tolist()==[at]
     pending_models=[task for task in models.tasks if task.active.any().cpu().item() and (task.stage<3).any().cpu().item()]
-    assert any(task.completed_at is not None and task.completed_at.cpu().tolist()==[1984] for task in pending_models)
+    assert any(task.completed_at is not None and task.completed_at.cpu().tolist()==[2084 if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") else 1984] for task in pending_models)
     if second_buy:
         assert senders[1].control.execute_at.cpu().tolist()==[1528] and senders[0].control.execute_at.cpu().tolist()==[1534]
         assert senders[1].receipt is not None and senders[0].receipt is not None
@@ -492,6 +505,75 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             funds={name:[str(x) for x in amounts(getattr(actual_funds,name))] for name in ('actual_available','maker_available','actual_reserved','maker_reserved')}),
         evidence=evidence,scope='raw production outputs for independent CPU posterior'),indent=2)+'\n')
     (artifact/'actual-continuous-requests.json').write_text(json.dumps(result['requests'],indent=2)+'\n')
+    if os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL'):
+        same_tick_boundaries=[]
+        # C1900已接纳；从原完成2084起算，finish=Sk且dispatch=0。
+        sk=T([87_000_009])
+        before=shared.advance_before(sk,yes,progress=stage)
+        assert before.complete.cpu().tolist()==[True] and before.fault.cpu().tolist()==[0]
+        same_tick_cash=amounts(clock.public.ledger.platform.balances)[0]
+        assert clock.public.pending_noe.active.any().cpu().item()
+        assert shared.next_observation.cpu().tolist()==[2000]
+        after=shared.advance_before(sk+1,yes,progress=stage)
+        while not after.complete.all().cpu().item():
+            sender=senders[-1];old=clock.public.ledger
+            required=int(sender.publication.reservation.decision.required_capacity.max().cpu())
+            requests=clock.runtime.requests.capacity if sender.receipt is None else int(sender.receipt.required_requests.max().cpu())
+            assert after.fault.cpu().tolist()==[0] and (required>old.reservations.capacity or requests>clock.runtime.requests.capacity)
+            if required>old.reservations.capacity:
+                pad=required-old.reservations.capacity
+                clock.public=replace(clock.public,ledger=replace(old,reservations=old.reservations.resized(required),
+                    global_requests=torch.nn.functional.pad(old.global_requests,(0,pad),value=-1),
+                    item_ordinals=torch.nn.functional.pad(old.item_ordinals,(0,pad),value=-1)))
+            if requests>clock.runtime.requests.capacity:
+                clock.runtime=replace(clock.runtime,requests=clock.runtime.requests.resized(requests,clock.runtime.requests.action_capacity))
+            after=shared.advance_before(sk+1,yes,progress=stage)
+        assert after.complete.cpu().tolist()==[True] and after.fault.cpu().tolist()==[0]
+        assert same_tick_boundaries
+        sender=senders[-1]
+        assert sender.publication.action.family.cpu().tolist()==[2]
+        assert sender.control.execute_at.cpu().tolist()==sk.cpu().tolist()
+        assert sender.sent.cpu().tolist()==[True] and sender.receipt.registered.cpu().tolist()==[True]
+        assert sender.publication.reservation.decision.outcomes.cpu().tolist()==[[1,1]]
+        cpu_accrued=Fraction(source['received_ledger']['projection']['platform_confirmed_projection']['taker_rebate_receivable_pusd'])
+        payable=Fraction((cpu_accrued*10000).numerator//(cpu_accrued*10000).denominator,10000)
+        assert amounts(clock.public.ledger.platform.balances)[0]==same_tick_cash+payable
+        result.update(same_tick_finish_send_and_cash_checked=True,send_at=87_000_009,
+            pre_send_cash=str(same_tick_cash),subsequent_payment=str(payable))
+    elif os.environ.get('B_GPU_ACTOR_WINDOW_TAIL') and not two:
+        original_observations=list(result['observations']);original_frozen={id(task.observation) for task in models.tasks}
+        started_versions=[task.evaluation.policy_version.clone() for task in actual]
+        tail=shared.advance_before(T([2300]),yes,progress=stage)
+        assert tail.complete.cpu().tolist()==[True] and tail.fault.cpu().tolist()==[0]
+        assert shared.next_observation.cpu().tolist()==[2000]
+        assert all(id(task.observation) in original_frozen for task in models.tasks)
+        assert [int(o.frozen.cutoff.cpu()[0]) for o in observations]==original_observations
+        assert all(not (task.active&(task.stage<3)).any().cpu().item() for task in models.tasks)
+        assert all(torch.equal(task.evaluation.policy_version,version) for task,version in zip(actual,started_versions,strict=True))
+        torch.testing.assert_close(models.hidden,models.tasks[-1].evaluation.hidden)
+        result['window_stops_at']=2000;result['tail_checked_through_open_endpoint']=2300
+        result['accepted_models_finish_after_window']=2084
+        # 原CPU FOK参考给应收，原日规则给付款；金额不从GPU付款后态生成。
+        cpu_accrued=Fraction(source['received_ledger']['projection']['platform_confirmed_projection']['taker_rebate_receivable_pusd'])
+        assert cpu_accrued==Fraction('1.4000016')
+        payable=Fraction((cpu_accrued*10000).numerator//(cpu_accrued*10000).denominator,10000)
+        pre_day=clock.public.ledger.platform.balances
+        assert amounts(pre_day)[5]==cpu_accrued
+        pre_cash=amounts(pre_day)[0];pre_entry=values(clock.public.ledger.current_entry_sequence)
+        before_day=shared.advance_before(T([87_000_000]),yes,progress=stage)
+        assert before_day.complete.cpu().tolist()==[True] and before_day.fault.cpu().tolist()==[0]
+        assert amounts(clock.public.ledger.platform.balances)[0]==pre_cash
+        assert values(clock.public.ledger.current_entry_sequence)==pre_entry
+        after_day=shared.advance_before(T([87_010_000]),yes,progress=stage)
+        assert after_day.complete.cpu().tolist()==[True] and after_day.fault.cpu().tolist()==[0]
+        paid_balance=amounts(clock.public.ledger.platform.balances)
+        assert paid_balance[0]==pre_cash+payable and paid_balance[5]==0 and paid_balance[7]==cpu_accrued-payable
+        assert values(clock.public.ledger.current_entry_sequence)==[pre_entry[0]+4]
+        assert all(id(task.observation) in original_frozen for task in models.tasks) and shared.next_observation.cpu().tolist()==[2000]
+        assert not (clock.public.waiting.received&~clock.public.waiting.consumed).any().cpu().item()
+        result['taker_day_at_utc_ms']=87_000_000;result['taker_paid_pusd']=str(payable)
+        result['taker_locked_pusd']=str(cpu_accrued-payable)
+        result['elapsed_seconds']=time.perf_counter()-started
     return result
 
 

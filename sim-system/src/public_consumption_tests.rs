@@ -528,7 +528,7 @@ async fn public_execution_with_scenario_capacity_and_projection(
     finality: Option<Arc<TradeFinalityPolicyV2>>,
 ) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
     public_execution_with_scenario_capacity_configuration(
-        path,scenario,role,capacity,rules,make_projection,finality,None,false,
+        path,scenario,role,capacity,rules,make_projection,finality,None,false,"10",
     ).await
 }
 async fn public_execution_with_scenario_capacity_layout(
@@ -541,7 +541,7 @@ async fn public_execution_with_scenario_capacity_layout(
     finite_historical: bool,
 ) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
     public_execution_with_scenario_capacity_configuration(
-        path,scenario,role,capacity,rules,None,None,day_binding,finite_historical,
+        path,scenario,role,capacity,rules,None,None,day_binding,finite_historical,"10",
     ).await
 }
 async fn public_execution_with_scenario_capacity_configuration(
@@ -554,6 +554,7 @@ async fn public_execution_with_scenario_capacity_configuration(
     finality: Option<Arc<TradeFinalityPolicyV2>>,
     day_binding: Option<HistoricalDayLogBindingV1>,
     finite_historical: bool,
+    cash: &str,
 ) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
     let rules = match rules {
         Some(rules) => rules,
@@ -622,6 +623,7 @@ async fn public_execution_with_scenario_capacity_configuration(
     .unwrap();
     let mut session = spec("public-consumption-test", "create-public");
     session.caller_role = role;
+    session.initial_account_state.available_pusd = ExactDecimal(cash.into());
     finite_feeding::feed(
         &mut execution,
         |execution| execution.create_session(session.clone()),

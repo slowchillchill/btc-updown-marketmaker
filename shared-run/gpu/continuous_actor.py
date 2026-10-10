@@ -18,19 +18,31 @@ class ContinuousActorRun:
     freeze接实际当前公开账户并返回模型自有冻结材料；models拥有模型队列、
     hidden及权重版本。receive只续原waiting。显式horizon保持开放，不排空未来。
     """
-    def __init__(self,clock,first_observation,models,freeze,receive):
+    def __init__(self,clock,first_observation,models,freeze,receive,*,trading_until=None,settlement=None):
         self.clock=clock;self.next_observation=first_observation.clone()
         self.models=models;self.freeze=freeze;self.receive=receive
+        self.trading_until=trading_until;self.settlement=settlement
+        self.economic_resume=torch.zeros_like(first_observation,dtype=torch.bool)
 
     def advance_before(self,horizon,enabled,*,progress=None):
         blocked=torch.zeros_like(enabled);fault=torch.zeros_like(horizon,dtype=torch.int32)
         count=0;stage=None;blocked_stage=None
         while True:
             event=self.models.next_event()
-            observe=(~event.present)|(self.next_observation<=event.at)
+            observing=torch.ones_like(enabled) if self.trading_until is None else self.next_observation<self.trading_until
+            observe=observing&((~event.present)|(self.next_observation<=event.at))
             at=torch.where(observe,self.next_observation,event.at)
             kind=torch.where(observe,torch.zeros_like(event.kind),event.kind)
-            due=enabled&~blocked&(at<horizon)
+            present=observe|event.present
+            if self.trading_until is not None:
+                economic=self.clock.next_event(enabled&~observing&~blocked)
+                resume=self.economic_resume&enabled&~blocked
+                economic_at=torch.where(resume,self.clock.gates.public_visible_at,economic.at)
+                economic_present=economic.present|resume
+                take=~observing&economic_present&(~present|(economic_at<at))
+                at=torch.where(take,economic_at,at);kind=torch.where(take,4,kind)
+                present |= take;fault |= economic.fault
+            due=enabled&~blocked&present&(at<horizon)&(fault==0)
             if not bool(due.any().cpu()):
                 boundary=enabled&~blocked
                 stage=self.clock.advance_before(horizon,boundary,progress=progress)
@@ -46,7 +58,7 @@ class ContinuousActorRun:
                 if send_advance is not None:blocked_stage=send_advance
                 blocked |= active&~complete
             else:
-                stage=self.clock.advance_before(at,active,progress=progress)
+                stage=self.clock.advance_through(at,active,progress=progress) if selected_kind==4 else self.clock.advance_before(at,active,progress=progress)
                 fault |= stage.fault
                 if bool((active & ~stage.complete).any().cpu()):blocked_stage=stage
                 ready=active&stage.complete&(fault==0)
@@ -56,6 +68,9 @@ class ContinuousActorRun:
                     self.clock.public,received=self.receive(self.clock.public,delivery,ready)
                     ready &= received
                     blocked |= active&~ready
+                    if self.settlement is not None and bool(ready.any().cpu()):
+                        complete,error=self.settlement.advance(self.clock,ready)
+                        fault |= error;blocked |= ready&~complete;ready &= complete
                     if bool(ready.any().cpu()):
                         frozen,accepted=self.freeze(self.clock,at,ready)
                         self.models.enqueue(frozen,accepted)
@@ -68,6 +83,14 @@ class ContinuousActorRun:
                 elif selected_kind==2:
                     complete=self.models.finish(ready)
                     blocked |= ready&~complete
+                elif selected_kind==4 and bool(ready.any().cpu()):
+                    delivery=self.clock.receive_first(enabled=ready)
+                    self.clock.public,received=self.receive(self.clock.public,delivery,ready)
+                    self.economic_resume=torch.where(ready,~received,self.economic_resume)
+                    blocked |= ready&~received
+                    if self.settlement is not None and bool(received.any().cpu()):
+                        complete,error=self.settlement.advance(self.clock,received)
+                        fault |= error;blocked |= received&~complete
             self.models.retire_consumed_markets(self.next_observation-100)
             count+=1
             if progress:progress('continuous_event',events=count,kind=selected_kind,

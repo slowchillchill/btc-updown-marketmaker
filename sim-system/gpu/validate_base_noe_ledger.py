@@ -11,13 +11,14 @@ from queues import Numbers
 from validate_base_execution import integers,rational,values
 
 
-def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=False):
+def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=False,return_opening=False):
     root=Path(__file__).resolve().parents[2]
     sys.path[:0]=[str(root/'ledger/gpu'),str(root/'shared-run/gpu')]
     from memory import EconomicColumns
     from admission import AdmissionLifecycle
     from closed import ClosedAdmission
     from position_cost import PositionCosts
+    from rebate_day import RebateDays
     from order_funds import OrderFunds
     from success_pool import SuccessPools
     from market_economics import UnresolvedMarkets
@@ -57,6 +58,7 @@ def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=Fa
         integers([initial['ledger_entry_seq']]),integers([initial['ledger_local_prefix']]),pools,
         position_costs=PositionCosts.empty(1,max(1,width),'cuda'),
         order_funds=OrderFunds.empty(1,max(1,width),max(1,width),width,'cuda'),
+        rebate_days=RebateDays.empty(tensor([[0]]),1) if return_opening else None,
         unresolved_markets=UnresolvedMarkets.open(pools,zero),
         market_balance_origin=market_origin(source['opening_ledger'],source['initial'][0]['market']['condition_id']),
         query_associations=query_associations))
@@ -184,6 +186,7 @@ def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=Fa
     assert canceled.fault.cpu().tolist()==[0] and canceled.orders.cancellable.cpu().tolist()==[[False]]
     assert amounts(canceled.funds.actual_available)==[Fraction(source['cancel_ledger_after']['cash']['actual_available_pusd'])]
     assert amounts(frozen.funds.actual_available)==[Fraction(source['cancel_ledger_before']['cash']['actual_available_pusd'])]
+    if return_opening:return state,admission
     if return_state:return state
     return {'natural_dynamic_base_batches_to_single_public_ledger_checked':True,
         'initialization_only_at_original_opening_checked':True,

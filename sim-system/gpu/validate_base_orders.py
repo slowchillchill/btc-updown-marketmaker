@@ -440,7 +440,13 @@ def main(source=None):
     from validate_base_noe_ledger import check as check_public_account
     account_report=check_public_account(source,noe,batches,orders.read(slot),receipt,
         Numbers.run_exact_batch(lambda:rational([original_kind['size_shares']])),cancel_batch,
-        return_state=source.get('order_queries') is not None)
+        return_state=source.get('order_queries') is not None,
+        return_opening=source.get('rebate_tail_reference') is not None)
+    if source.get('rebate_tail_reference') is not None:
+        sys.path[:0]=[str(root/p) for p in ('model-train','shared-run/gpu','data-pipeline/gpu','model-train/native-inputs/gpu')]
+        from validate_continuous_tail import verify_rebate_days
+        verify_rebate_days(source,runtime,noe,sampler,rebate,maker_rate,account_report,started)
+        return
     if source.get('order_queries') is not None:
         from validate_sim_order_query import check
         query_report=check(source,runtime,noe,sampler,asset_tokens,account_report,live_query_resources)

@@ -232,7 +232,7 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     let canceled = canceled.expect("真实取消请求处理");
     assert!(matches!(canceled.business, MutationActionBusinessEffectV3::Cancel(_)));
     let mut cancel_batches = Vec::new();
-    let state = gpu_accept_projection_reference(&mut actor, state, BusinessReducerOutputV2::MutationAction(Some(canceled)), &mut cancel_batches);
+    let mut state = gpu_accept_projection_reference(&mut actor, state, BusinessReducerOutputV2::MutationAction(Some(canceled)), &mut cancel_batches);
     let closed_at = if live_query.is_some() {
         let received=cancel_batches.iter().flat_map(|batch| {
             let order=batch["orders"].as_array().unwrap().iter().map(|value|value["metadata"]["feedback_received_at_utc_ms"].as_i64().unwrap());
@@ -270,6 +270,28 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     assert_eq!(cancel_records.len(), 4, "CallerCanceled、真实释放、Target与Completed");
     assert!(observation.take_closed_records().is_empty());
     checkpoints.push(serde_json::json!({"stage":"canceled", "state":snapshot(&state)}));
+    let rebate_tail = std::env::var_os("B_GPU_REBATE_DAY_RESOURCE").is_some();
+    let mut rebate_tail_reference = Vec::new();
+    if rebate_tail {
+        for (position, at) in [initial[0].market.window.end_at_utc_ms, 87_000_000, 89_100_000].into_iter().enumerate() {
+            let (next, effects) = advance_rebate_clock_to_candidate(state, at);
+            state = next;
+            let lifecycle = effects.into_lifecycle_feedback().unwrap();
+            if !lifecycle.is_empty() {
+                state = gpu_accept_projection_reference(&mut actor, state,
+                    BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2 { lifecycle, ..Default::default() }), &mut Vec::new());
+            }
+            actor.projection_port.close_receive_prefix(at + 10_000);
+            actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
+                crate::public_consumption::ActorTimeRecordV1 { run_id: actor.opened.run_id.clone(),
+                    drive_position: position as u64 + 2, logical_time_utc_ms: at + 10_000 }));
+            let records = observation.take_closed_records();
+            let rows = records.iter().map(|r| serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
+            for record in &records { ledger.apply_noe_memory_v2(record).unwrap(); }
+            rebate_tail_reference.push(serde_json::json!({"at":at,"records":rows,
+                "ledger":gpu_ledger_reservation_checkpoint(&ledger,"actual_rebate_day")}));
+        }
+    }
     let mut confirmed_path = serde_json::to_value(actor._finality_policy.normal_path()).unwrap();
     confirmed_path["economic_application_ordinal"] = serde_json::json!(2);
     let confirmed_policy = TradeFinalityPolicyV2::decode_and_seal(&serde_json::to_vec(&serde_json::json!({
@@ -287,7 +309,7 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     let order_queries=std::env::var_os("B_GPU_SIM_ORDER_QUERY").map(|_| {
         gpu_actual_order_query_reference(&mut actor,state,&observation,&mut ledger,closed_at,&condition)
     });
-    let joint_public=std::env::var_os("B_GPU_JOINT_FREEZE").map(|_| {
+    let joint_public=(std::env::var_os("B_GPU_JOINT_FREEZE").is_some() || rebate_tail).then(|| {
         public_consumption_tests::gpu_public_for_order_fixture(&initial,&events,false)
     });
     let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
@@ -317,12 +339,14 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         "cancel_ledger_before":cancel_ledger_before,"cancel_ledger_after":cancel_ledger_after,"cancel_ledger_attempts":cancel_ledger_attempts,
         "next_private":next_private,"next_batch":next_batch,"session_seed":session_seed,
         "order_queries":order_queries});
-    input["joint_public"]=serde_json::to_value(joint_public.as_ref().map(|_|serde_json::json!({
+    input["rebate_tail_reference"]=serde_json::to_value(if rebate_tail {Some(rebate_tail_reference)} else {None}).unwrap();
+    input["tail_public"]=serde_json::to_value(if rebate_tail {Some(std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap()).join("public-compact"))} else {None}).unwrap();
+    input["joint_public"]=serde_json::to_value(joint_public.as_ref().filter(|_|std::env::var_os("B_GPU_JOINT_FREEZE").is_some()).map(|_|serde_json::json!({
         "compact":std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap()).join("public-compact"),
         "root_started_at":-29000,"model_hidden_start":1500,"cutoffs":[1500,1600]}))).unwrap();
     let mut command=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap());
     command.arg(std::env::var("B_GPU_ORDER_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped());
-    if std::env::var_os("B_GPU_SIM_ORDER_QUERY").is_some() {
+    if std::env::var_os("B_GPU_SIM_ORDER_QUERY").is_some() || rebate_tail {
         let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
         serde_json::to_writer(std::fs::File::create(artifact.join("original-source.json")).unwrap(),&input).unwrap();
         fn copy_source(from:&std::path::Path,to:&std::path::Path) {
@@ -345,7 +369,7 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     let mut child=command.spawn().unwrap();
     serde_json::to_writer(child.stdin.take().unwrap(), &input).unwrap();
     let result = child.wait_with_output().unwrap();
-    if std::env::var_os("B_GPU_SIM_ORDER_QUERY").is_some() {
+    if std::env::var_os("B_GPU_SIM_ORDER_QUERY").is_some() || rebate_tail {
         let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
         std::fs::write(artifact.join("GPU.exit"),format!("{}\n",result.status.code().unwrap_or(-1))).unwrap();
     }

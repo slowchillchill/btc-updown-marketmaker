@@ -118,6 +118,10 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
     use data_pipeline_training::{compact_public::{PublicCompactWriterV1, CompactFactPayloadV1},
         compact_hidden_material::{prepare_compact_hidden_material_v1, CompactHiddenMaterialReaderV1},
         compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1, gpu_initial_sort::GpuInitialRunOrderV1};
+    let payable_maker = with_pending && std::env::var_os("B_GPU_CONTINUOUS_TAIL").is_some();
+    let late_maker = payable_maker && std::env::var_os("B_GPU_TAIL_LATE_CONFIRMATION").is_some();
+    let confirmed_at = if late_maker {90_027_000} else {33000};
+    let reference_shift = if late_maker {90_000_000} else {0};
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("public");
     let hidden = temp.path().join("hidden");
@@ -148,7 +152,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
     if with_pending {
         let delta=|size:&str|PolymarketOrderbookEvent::PriceChange {price_changes:vec![PolymarketPriceChangeEntry {
             asset_id:UP_TOKEN_ID.into(),price:"0.4".into(),size:Some(size.into()),side:PolymarketSide::Buy,best_bid:None,best_ask:None}]};
-        inputs.insert(6,pm(6,3,26000,delta("3")));
+        inputs.insert(6,pm(6,3,26000,delta(if payable_maker {"300"} else {"3"})));
         inputs.insert(7,pm(7,4,27000,delta("0")));
     }
     inputs.push(end(if with_pending {10} else {8}));
@@ -212,7 +216,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
         market(), assets.clone().try_into().unwrap()).unwrap()]);
     // 有限工程profile，仅将真实Maker终态放在Terminal之后，不是训练默认。
     let finality_path=serde_json::json!({"steps":[{"state":"MATCHED","offset_ms":0},
-        {"state":"MINED","offset_ms":5000},{"state":"CONFIRMED","offset_ms":6000}],"economic_application_ordinal":1});
+        {"state":"MINED","offset_ms":5000},{"state":"CONFIRMED","offset_ms":confirmed_at-27000}],"economic_application_ordinal":1});
     let finality=with_pending.then(||Arc::new(TradeFinalityPolicyV2::decode_and_seal(
         &serde_json::to_vec(&serde_json::json!({"schema_version":"trade_finality_policy_v2",
         "normal_path":finality_path,"failure_overrides":[]})).unwrap()).unwrap()));
@@ -220,7 +224,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
     let capture=Rc::clone(&saved);
     let normalization=Rc::new(RefCell::new(Vec::new()));
     let normalization_capture=Rc::clone(&normalization);
-    let (mut execution,_)=public_execution_with_scenario_capacity_and_projection(
+    let (mut execution,_)=public_execution_with_scenario_capacity_configuration(
         &temp.path().join("sim.jsonl"),scenario.clone(),SimCallerRoleV1::ModelTrain,32,None,
         Some(Box::new(move |path,opened| {
             opened.projection_version=crate::runtime_v2::BusinessProjectionVersionV1::V4;
@@ -232,7 +236,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
             let durable=noe_projection::SimV2NoeProjectionPortV4::new(path.parent().unwrap().join("noe-durable"),
                 opened.clone(),reference.clone(),reference,"create-public".into(),"gpu-hidden-terminal".into());
             Box::new(GpuNoeReferencePort {memory,durable,normalization_reference:normalization_capture,normalization_core:None})
-        })),finality).await;
+        })),finality,None,false,if payable_maker {"2000"} else {"10"}).await;
     // 有pending成交例显式Registered→TerminalSuccess，有限工程scenario非训练默认。
     let with_query=with_pending && std::env::var_os("B_GPU_SETTLEMENT_QUERY").is_some();
     let settlement_scenario=crate::ResolutionRedeemScenarioV1 {
@@ -333,7 +337,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
                 context:RequestContextV2 {global_request_id:"gpu-terminal-resting-post".into(),caller_correlation_id:None},
                 items:vec![PostOrderBatchItemV2 {batch_item_ordinal:0,item:post_item("gpu-terminal-resting-post:0",
                     &ConditionId(CONDITION_ID.into()),&TokenId(UP_TOKEN_ID.into()),SimBuyOrderKindV1::GtcLimit {
-                        limit_price_pusd_per_share:"0.4".parse().unwrap(),size_shares:"5".parse().unwrap(),post_only:false})}],
+                        limit_price_pusd_per_share:"0.4".parse().unwrap(),size_shares:if payable_maker {"500"} else {"5"}.parse().unwrap(),post_only:false})}],
             });
             let (next,receipt)=register_request_candidate(&execution.actor.opened,scenario.initial_market_directory(),state,
                 &request_cutoff(22100),&request,11,execution.actor._latency_profile.as_ref(),execution.actor._rule_snapshot.snapshot());
@@ -399,15 +403,20 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
     if with_pending {
         assert_eq!(maker_checkpoints.len(),1,"一条真实Maker fill");
         assert_eq!(resolutions[0]["economic_predecessors_closed"],serde_json::json!({"Known":false}));
-        for at in [32000,33000] {
+        for at in [32000,confirmed_at] {
+            if late_maker && at==confirmed_at {
+                let (next,effects)=advance_rebate_clock_to_candidate(state,89_100_000);
+                state=next;
+                assert!(effects.into_lifecycle_feedback().unwrap().is_empty(),"日已成熟仍等待真实pending，不提前日结或付款");
+            }
             let (next,effects)=advance_finality_to_candidate(state,at,execution.actor._rule_snapshot.snapshot(),execution.actor._finality_policy.as_ref());
             state=next;
             let lifecycle=effects.into_lifecycle_feedback().unwrap();
             state=gpu_accept_projection_reference(&mut execution.actor,state,
                 BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2 {lifecycle,..Default::default()}),&mut batches);
-            execution.actor.projection_port.close_receive_prefix(50000);
+            execution.actor.projection_port.close_receive_prefix(50000+reference_shift);
             execution.actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
-                crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:1,logical_time_utc_ms:50000}));
+                crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:1,logical_time_utc_ms:50000+reference_shift}));
             let received=observation.take_closed_records();
             let rows=received.iter().map(|r|serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
             for record in &received {ledger.apply_noe_memory_v2(record).unwrap();}
@@ -428,7 +437,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
             account:state.session.as_ref().unwrap().opening_fact.account_instance_key.clone(),
             condition_id:ConditionId(CONDITION_ID.into()),resolution_identity:qualified_sources[0]["event_id"].as_str().unwrap().into(),
             policy_version:"RESOLUTION_REDEEM_ONLY".into()},index_sets:["1".parse().unwrap(),"2".parse().unwrap()]};
-        let sent_at=50000;
+        let sent_at=50000+reference_shift;
         let operation=BusinessInputV2::Settlement(SettlementOperationV1::Request {request:request.clone(),requested_at_utc_ms:sent_at});
         let (next,output)=reduce_actor_input_v2(&execution.actor.opened,scenario.initial_market_directory(),state,&operation,12,
             execution.actor._latency_profile.as_ref(),execution.actor._rule_snapshot.snapshot(),execution.actor._finality_policy.as_ref()).unwrap();
@@ -442,9 +451,9 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
             execution.actor._finality_policy.as_ref(),&mut output).unwrap();
         assert_eq!(output.lifecycle.len(),1,"单Registered scenario只有一条原请求反馈，没有账户delta");
         state=gpu_accept_projection_reference(&mut execution.actor,state,BusinessReducerOutputV2::LogicalDrive(output),&mut batches);
-        execution.actor.projection_port.close_receive_prefix(60000);
+        execution.actor.projection_port.close_receive_prefix(60000+reference_shift);
         execution.actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
-            crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:1,logical_time_utc_ms:60000}));
+            crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:1,logical_time_utc_ms:60000+reference_shift}));
         let received=observation.take_closed_records();
         assert_eq!(received.len(),1,"真实Request证据是独立NOE，不增加平台经济人口");
         let rows=received.iter().map(|r|serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
@@ -459,9 +468,9 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
                 state=drain_scheduled_obligations_at_v2(state,at,execution.actor._rule_snapshot.snapshot(),
                     execution.actor._finality_policy.as_ref(),&mut output).unwrap();
                 state=gpu_accept_projection_reference(&mut execution.actor,state,BusinessReducerOutputV2::LogicalDrive(output),&mut batches);
-                execution.actor.projection_port.close_receive_prefix(close);
+                execution.actor.projection_port.close_receive_prefix(close+reference_shift);
                 execution.actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
-                    crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:2,logical_time_utc_ms:close}));
+                    crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:2,logical_time_utc_ms:close+reference_shift}));
                 let received=observation.take_closed_records();
                 assert_eq!(received.len(),if stage=="Timeout" {1} else {2});
                 let rows=received.iter().map(|r|serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
@@ -469,7 +478,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
                 settlement_query_reference.push(serde_json::json!({"stage":stage,"at":at,"public_at":close,"records":rows,
                     "ledger":gpu_ledger_reservation_checkpoint(&ledger,stage),"public_request":ledger.economic_read().unwrap().resolutions().next().unwrap().request}));
                 if stage=="Timeout" {
-                    let query=BusinessInputV2::Settlement(SettlementOperationV1::Query {identity:request.identity.clone(),requested_at_utc_ms:close});
+                    let query=BusinessInputV2::Settlement(SettlementOperationV1::Query {identity:request.identity.clone(),requested_at_utc_ms:close+reference_shift});
                     let (next,output)=reduce_actor_input_v2(&execution.actor.opened,scenario.initial_market_directory(),state,&query,13,
                         execution.actor._latency_profile.as_ref(),execution.actor._rule_snapshot.snapshot(),execution.actor._finality_policy.as_ref()).unwrap();
                     let (next,_,batch)=finalize_projection_batch_v2(&execution.actor.opened.run_id,next,output,execution.actor._latency_profile.as_ref()).unwrap();
@@ -487,9 +496,9 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
         assert_eq!(output.lifecycle.len(),1);
         state=gpu_accept_projection_reference(&mut execution.actor,state,BusinessReducerOutputV2::LogicalDrive(output),&mut batches);
         let success_visible=if with_query {120000} else {80000};
-        execution.actor.projection_port.close_receive_prefix(success_visible);
+        execution.actor.projection_port.close_receive_prefix(success_visible+reference_shift);
         execution.actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
-            crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:2,logical_time_utc_ms:success_visible}));
+            crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:2,logical_time_utc_ms:success_visible+reference_shift}));
         let received=observation.take_closed_records();
         assert_eq!(received.len(),if with_query {1} else {2},"已查询成功的后续成功回执不再生成经济");
         let rows=received.iter().map(|r|serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
@@ -504,9 +513,25 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
                 "paired_receivable":r.paired_receivable_pusd,"orphan_receivable":r.winner_orphan_receivable_pusd})).collect::<Vec<_>>()}));
 
     }
+    let mut rebate_reference=None;
+    if payable_maker {
+        if !late_maker {
+            let (next,effect)=advance_rebate_clock_to_candidate(state,89_100_000);
+            state=gpu_accept_projection_reference(&mut execution.actor,next,
+                BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2 {
+                    lifecycle:effect.into_lifecycle_feedback().unwrap(),..Default::default()}),&mut batches);
+        }
+        execution.actor.projection_port.close_receive_prefix(89_110_000+reference_shift);
+        execution.actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
+            crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:3,logical_time_utc_ms:89_110_000+reference_shift}));
+        let received=observation.take_closed_records();
+        assert_eq!(received.len(),if late_maker {0} else {3},"真实Maker日结、Payment与现金Economic");
+        for record in &received {ledger.apply_noe_memory_v2(record).unwrap();}
+        rebate_reference=Some(gpu_ledger_reservation_checkpoint(&ledger,"Maker_day_payment"));
+    }
     let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,"with_pending":with_pending,"without_initial_books":without_initial_books,
-        "settlement_reference":settlement_reference,"settlement_success_reference":settlement_success_reference,
-        "with_query":with_query,"settlement_query_reference":settlement_query_reference,
+        "settlement_reference":settlement_reference,"settlement_success_reference":settlement_success_reference,"rebate_reference":rebate_reference,
+        "with_query":with_query,"late_maker":late_maker,"confirmed_at":confirmed_at,"settlement_query_reference":settlement_query_reference,
         "engineering_finality_path":finality_path,"maker_checkpoints":maker_checkpoints,"finality_reference":finality_reference,
         "original_controls":controls,"qualified_sources":qualified_sources,"resolved_records":records,
         "ledger_before":ledger_before,"ledger_after":ledger_after,"ledger_resolutions":resolutions,

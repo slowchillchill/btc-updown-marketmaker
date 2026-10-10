@@ -90,7 +90,7 @@ def main():
     assert choice.enabled(5).cpu().tolist()==[True]
     runtime,effect=Numbers.run_exact_batch(lambda:runtime.accept_base(choice,terms,tensor([[-1]]),fee,1,tensor([[0]*runtime.hidden.queues.capacity]),rebate,zero,zero))
     assert effect.order.emitted.cpu().tolist()==[True] and effect.fault.cpu().tolist()==[0]
-    assert values(runtime.orders.read(effect.order.slots).quantity.open_base_units)==[5_000_000]
+    assert values(runtime.orders.read(effect.order.slots).quantity.open_base_units)==[units(kind['size_shares'])]
     assert (runtime.hidden.queues.kind==2).sum().cpu().item()==1 and not runtime.fills.occupied.any().cpu().item()
     progress('actual_empty_book_GTC_accepted')
     sys.path.insert(0,str(root/'execution-normalization/gpu'))
@@ -102,6 +102,12 @@ def main():
     projection=Projection.open(emitter,zero,zero,zero,zero,tensor([0,0]),integers([0]),zero,zero,zero,zero)
     projection,accepted_batch=Numbers.run_exact_batch(lambda:projection.pending_base_acceptance(sampler,runtime.orders,runtime.fills,effect,tensor([0,1])))
     assert accepted_batch.emitted.sum().cpu().item()==3
+    if os.environ.get('B_GPU_CONTINUOUS_TAIL'):
+        sys.path[:0]=[str(root/path) for path in ('model-train','shared-run/gpu','data-pipeline/gpu',
+            'ledger/gpu','model-train/native-inputs/gpu')]
+        from validate_continuous_tail import verify
+        verify(source,runtime,projection,accepted_batch,block,sampler,receipt,kind,asset,fee,rebate,started)
+        return
     maker_batches=[]
     if with_pending:
         horizon.fill_(27000)

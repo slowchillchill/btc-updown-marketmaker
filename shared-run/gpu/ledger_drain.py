@@ -157,3 +157,22 @@ def installed_word_capacity(value):
     if is_dataclass(value): return max((installed_word_capacity(getattr(value,f.name)) for f in fields(value)),default=4)
     if isinstance(value,(tuple,list)): return max((installed_word_capacity(v) for v in value),default=4)
     return 4
+
+
+class PublicLedgerReceiver:
+    """首次公开领取之后续原waiting扫描；保留原资源需求供冷增长。"""
+    def __init__(self,*,word_capacity=None,progress=None):
+        self.word_capacity=word_capacity;self.progress=progress;self.captured=None
+
+    def __call__(self,state,delivery,enabled):
+        self.captured=None
+        pending=(state.waiting.received&~state.waiting.consumed)&enabled[:,None]
+        if bool(pending.any().cpu()):
+            capacity=installed_word_capacity(state.ledger) if self.word_capacity is None else self.word_capacity
+            storage=LedgerDrainStorage(state.ledger,state.waiting,word_capacity=capacity)
+            self.captured=CapturedLedgerDrain(storage,enabled[:,None].expand_as(state.ledger.columns.enabled),
+                word_capacity=capacity,progress=self.progress)
+            state=state.drain_captured(self.captured)
+        # 整轮无进展表示合法前驱等待；仅物理不足须续此刻扫描。
+        fit=torch.ones_like(enabled) if self.captured is None else self.captured.resources_fit.expand_as(enabled)
+        return state,enabled&fit&((state.ledger.fault|state.waiting.fault|delivery.fault)==0)
