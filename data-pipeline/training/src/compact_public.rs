@@ -433,7 +433,8 @@ pub struct PublicCompactReaderV1 {
     next_step: u64,
     next_report: u64,
     max_packet_bytes: usize,
-    reference_sources: std::collections::BTreeMap<u64,(ChainlinkBtcUsdTwapReferenceV1,SourceEvidenceRefV3)>,
+    /// 仅最近实际选择的源记录；按原输入位置冷读，不保存历史TWAP全集。
+    reference_source: Option<(u64,ChainlinkBtcUsdTwapReferenceV1,SourceEvidenceRefV3)>,
     reference_markets: std::collections::BTreeMap<String,MarketIdentityV2>,
 }
 impl PublicCompactReaderV1 {
@@ -546,7 +547,7 @@ impl PublicCompactReaderV1 {
                   columns: File::open(root.join(expected[2]))?, sources: File::open(root.join(expected[3]))?,
                   manifest, next: 0, next_group: 0, next_fact: 0, next_offset: 0,
                   next_pm: 0, next_step: 0, next_report: 0, max_packet_bytes,
-                  reference_sources:Default::default(),reference_markets:Default::default() })
+                  reference_source:None,reference_markets:Default::default() })
     }
     fn decode_packet_at(&mut self, position: u64) -> RecordingResult<(PublicCompactPacketV1, u64, u64)> {
         let offset = position.checked_mul(8)
@@ -588,13 +589,13 @@ impl PublicCompactReaderV1 {
         if self.manifest.schema_version != SCHEMA && packet.reference_preparation.is_some() {
             return Err(io::Error::other("旧schema不能声明新参考选择能力").into());
         }
-        if let DptIngressV1::Message {row:TypedRawRowV2::PolymarketRtdsChainlinkTwap(row),source_evidence} = &packet.input.ingress {
+        let current_reference = if let DptIngressV1::Message {row:TypedRawRowV2::PolymarketRtdsChainlinkTwap(row),source_evidence} = &packet.input.ingress {
             let event = data_pipeline_core::public_reference::canonicalize_chainlink_twap_v1(
                 row,source_evidence,&self.manifest.header.canonical_rule_version)?;
             if let CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(value) = event.payload {
-                self.reference_sources.insert(self.next,(value,source_evidence.clone()));
-            }
-        }
+                Some((value,source_evidence.clone()))
+            } else { None }
+        } else { None };
         for fact in packet.groups.iter().flat_map(|g|&g.records) {
             if let CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact {
                 market,payload:CanonicalMarketFactPayloadV1::FixedIdentity {..},
@@ -613,15 +614,29 @@ impl PublicCompactReaderV1 {
                     match (&selection.selected_record_ref,&selection.selected_value,&selection.direct_anchor) {
                         (None,None,None)=>{},
                         (Some(record),Some(value),Some(anchor))=>{
-                            let expected = self.reference_sources.get(&record.input_position)
-                                .ok_or_else(||io::Error::other("参考选择没有实际TWAP源记录"))?;
+                            if self.reference_source.as_ref().map(|cached|cached.0)!=Some(record.input_position) {
+                                let expected = if record.input_position==self.next {
+                                    current_reference.clone()
+                                } else {
+                                    let input = self.cold_input_record(record)?;
+                                    if let DptIngressV1::Message {row:TypedRawRowV2::PolymarketRtdsChainlinkTwap(row),source_evidence} = input.ingress {
+                                        let event = data_pipeline_core::public_reference::canonicalize_chainlink_twap_v1(
+                                            &row,&source_evidence,&self.manifest.header.canonical_rule_version)?;
+                                        if let CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(value) = event.payload {
+                                            Some((value,source_evidence))
+                                        } else {None}
+                                    } else {None}
+                                }.ok_or_else(||io::Error::other("参考选择没有实际TWAP源记录"))?;
+                                self.reference_source=Some((record.input_position,expected.0,expected.1));
+                            }
+                            let (_,expected_value,expected_source)=self.reference_source.as_ref().unwrap();
                             if record.input_stream_id!=packet.input.input_stream_id || record.input_position>self.next
                                 || (record.input_position<self.next && !packet.input.dependency_record_refs.contains(record))
-                                || value!=&expected.0 || anchor.position.input_stream_id!=record.input_stream_id
+                                || value!=expected_value || anchor.position.input_stream_id!=record.input_stream_id
                                 || anchor.position.closed_at_input_position!=record.input_position || anchor.position.fact_ordinal!=0
-                                || anchor.group_id!=expected.1.source_message_id || anchor.source_message_id!=expected.1.source_message_id
-                                || anchor.source_event_at_utc_ms!=expected.1.source_event_at_utc_ms
-                                || anchor.received_at_utc_ms!=expected.1.received_at_utc_ms
+                                || anchor.group_id!=expected_source.source_message_id || anchor.source_message_id!=expected_source.source_message_id
+                                || anchor.source_event_at_utc_ms!=expected_source.source_event_at_utc_ms
+                                || anchor.received_at_utc_ms!=expected_source.received_at_utc_ms
                                 || anchor.field_path!=if value.window_s==30 {"chainlink_twap_thirty"} else {"chainlink_twap_sixty"} {
                                 return Err(io::Error::other("参考选择精确值/源引用/直接锚点不闭合").into());
                             }
