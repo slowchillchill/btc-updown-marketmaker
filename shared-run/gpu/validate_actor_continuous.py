@@ -60,9 +60,9 @@ def diagnostic_columns(value,names):
     return {name:plain(getattr(value,name)) for name in names}
 
 
-def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,receipt,intents,asks,taker,maker,codec,artifact,stage,*,second_buy=False,assembled):
+def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,receipt,intents,asks,taker,maker,codec,artifact,stage,*,second_buy=False,assembled,root_runtime=None):
     evidence=[];original_stage=stage;page_changes=0;hidden_pages=[]
-    receiver=PublicLedgerReceiver()
+    receiver=PublicLedgerReceiver() if root_runtime is None else root_runtime.receiver
     received_checks=[]
     def stage(name,**row):
         nonlocal page_changes
@@ -87,35 +87,31 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     conditions=source.get('cold_conditions',tuple(event['market']['condition_id'] for event in source['initial'][::2]))
     condition=conditions[0];tokens=source.get('cold_tokens',tuple(a['token_id'] for a in source['bounded_hidden']['assets']))
     asset_ends=source.get('cold_asset_ends',tuple(event['market']['window']['end_at_utc_ms'] for event in source['initial']))
-    if 'cold_authority' in source:
-        legs=run(lambda:SubmittedLegs(empty.bool(),empty.bool(),empty,empty,rational([]),empty.bool(),empty,empty,empty.bool(),
-            SubmittedBuyTerms(empty,empty.bool(),rational([]),rational([]),empty),integers([]),empty.bool()))
-    else:
+    if root_runtime is None:
         legs=run(lambda:SubmittedLegs(T([[True,False]],torch.bool),T([[False,False]],torch.bool),T([[0,-1]]),T([[0,1]]),
             rational(['1000.001','0']),T([[True,False]],torch.bool),T([[0,-1]]),T([[0,1]]),T([[True,False]],torch.bool),
             SubmittedBuyTerms(T([[2,0]]),T([[False,False]],torch.bool),rational(['0.5','0']),rational(['500.0005','0']),T([[0,-1]]))))
         legs=run(lambda:bind_submission_receipt(legs,zero,receipt))
-    population=SubmittedActorRequests(intents,legs)
-    # 此刻源账户尚无一次公开NOE，冷开户原记录明确没有取消历史。
-    assert not clock.public.registry.events.received.any().cpu().item()
-    history_targets=run(lambda:CancellationTargetHistory.open(integers([]),empty.bool()))
-    clock.public=replace(clock.public,cancellation_target_history=history_targets)
-    scenario=run(lambda:CancelFailureScenario(empty,integers([]),integers([]),empty.bool(),zero.to(torch.int32)))
-    def paths(kind,world,selected):
-        width=world.hidden.queues.capacity*(selected.size(1) if kind=='taker' else 1)
-        return T([[0]*width])
-    backend=ContinuousExecution(population,rule,codec,sampler,asks,T(list(range(len(tokens)))),
-        T(asset_ends),taker,maker,
-        assembled.condition_by_asset,block.asset_axis,paths,scenario,
-        condition_by_market=T([list(range(len(conditions)))]),
-        market_end_by_market=T([[next(market['window']['end_at_utc_ms'] for market in
-            clock.source.prepared.columns['markets'] if market['condition_id']==condition) for condition in conditions]]))
+        population=SubmittedActorRequests(intents,legs)
+        assert not clock.public.registry.events.received.any().cpu().item()
+        history_targets=run(lambda:CancellationTargetHistory.open(integers([]),empty.bool()))
+        clock.public=replace(clock.public,cancellation_target_history=history_targets)
+        from actor_runtime import ActorDirectory,ActorRuntime,configure_continuous_execution
+        directory=ActorDirectory(tuple(conditions),tuple(tokens),tuple(a['token_id'] for a in clock.source.prepared.columns['assets']),
+            tuple(asset_ends),market_indices,assembled.condition_by_asset,block.asset_axis,asks)
+        scenario=run(lambda:CancelFailureScenario(empty,integers([]),integers([]),empty.bool(),zero.to(torch.int32)))
+        def paths(kind,world,selected):
+            width=world.hidden.queues.capacity*(selected.size(1) if kind=='taker' else 1)
+            return T([[0]*width])
+        configure_continuous_execution(clock,directory,population,rule,codec,sampler,taker,maker,paths,scenario)
+        clock.source.states=(pm,market,reference,binance)
+        root_runtime=ActorRuntime(clock,directory,population,receiver,{})
+    else:population=root_runtime.population
     if two and 'cold_authority' not in source:
         from maker_days import MakerDays
         from rebate_coordinator import RebateCoordinator
         clock.runtime=replace(clock.runtime,calendars=run(lambda:RebateCoordinator(
             MakerDays.empty(condition_slots[None,:],T([[301000,601000]]),yes[:,None].expand(1,2)),clock.runtime.calendars.taker)))
-    clock.handlers=backend.handlers()
     mutation=clock.handlers[5]
     def diagnostic_mutation(world,projection,choice):
         candidate,projected,batches,effect=mutation(world,projection,choice)
@@ -126,71 +122,6 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                 pending=diagnostic_columns(world.requests.next_pending(),('request_key','item_ref','ordinal','effective_at','fault')))
         return candidate,projected,batches,effect
     clock.handlers[5]=diagnostic_mutation
-    initial_columns=(clock.source.initial_input_pages[0].columns if clock.source.initial_input_pages else clock.source.prepared.columns)
-    history=SourceHistoryInputs(pm,market,reference,initial_columns)
-    encoder=MarketInputs100ms(pm,market,reference,binance,history,rule,initial_columns,pm.causal_visible_at)
-    initial_prefix=clock.source.initial_prefix_at(pm,T([first_observation-100]))
-    valuation=PortfolioValuation(pm,tokens,clock.public.ledger.success_pools.asset_roots)
-    known={name:yes for name in ('executed_prefix_known','success_prefix_known','rebate_prefix_known','settlement_prefix_known',
-        'ledger_prefix_known','economic_liability_prefix_known','economic_prefix_known')}
-    request_directory=ActorRequestDirectory(zero.device)
-    if 'cold_authority' not in source:
-        request_directory.append(source['request_id'])  # 旧有限来源的已登记请求；不是未来任务。
-    task_requests=ActorTaskRequests(request_directory,(source['run_id']+'/'+source['session_id'],))
-    def account_builder(encoder,public,frozen,bank,market_indices,row_identities):
-        market=encoder.market
-        valuation=PortfolioValuation(encoder.shared,tokens,public.ledger.success_pools.asset_roots)
-        frame=market.frame(frozen.prefixes)
-        markets=CancelObjectDirectory(frame.admitted,market.times[:,0][None,:],condition_slots[None,:],yes[:,None].expand(1,len(condition_slots)),
-            empty.bool(),empty.reshape(1,0,2),empty)
-        leg_ranks=request_directory.identity_order(population.submitted_legs.request_slots)
-        account=population.freeze_account(public,frozen.endpoint_memory.previous_observation_ms,markets,leg_ranks)
-        directory=account.intent_orders
-        formation=public.registry.freeze_order_formation(directory,population.submitted_legs,account.cutoff,markets.market_present)
-        location=formation.market;located=location>=0
-        quoted=valuation.freeze(frozen.prefixes,account.cutoff)
-        native=account_inputs_at_prefix(account,market,condition_slots,frozen.prefixes,start,location,located,
-            T([a['outcome']['index'] for a in source['bounded_hidden']['assets']]),row_role=frozen.role,valuation=quoted,**known)
-        actor=publish_actor_context(account,native,encoder,frozen,market_indices,condition_slots,row_identities,account.cancel_objects)
-        if int(account.cutoff.cpu()[0]) in (1600,1700):
-            from actor_support import DeviceNativeActor
-            support=run(lambda:DeviceNativeActor(actor).support(DeviceNativeActor(actor).initial()))
-            stage('actual_public_freeze_diagnostic',at=account.cutoff.cpu().tolist(),
-                registry=diagnostic_columns(public.registry.events,('received','kinds','orders','private_sequences','delivery_sequences',
-                    'record_ordinals','batch_sequences','record_refs','available_at','received_at','platform_at','processing_at',
-                    'formation','condition_slots','request_slots','item_ordinals')),
-                bindings=diagnostic_columns(public.submission_bindings,('received','accepted','request_slots','item_ordinals','orders','private_sequences','receive_rank')),
-                intents=diagnostic_columns(directory,('present','identities','origin_known','receipt_known','term_leg_slots')),
-                legs=diagnostic_columns(population.submitted_legs,('present','receipt_known','request_slots','item_ordinals','input_sequences','input_sequence_known')),
-                formation=diagnostic_columns(formation,('evidence','market','processing_known','processing_at','input_sequences','item_ordinals','source_known','source_sequences')),
-                pair=diagnostic_columns(account.cancel_directory,('paired_present','paired_members','paired_origin_order')),
-                objects=diagnostic_columns(account.cancel_objects,('present','kinds','origin_pairs','members')),
-                family_support=support.family.cpu().tolist())
-        scopes=population.cancel_scopes(directory)
-        objects=account.cancel_objects;object_scopes=CancellationScopes(objects.kinds==2,objects.markets,objects.members)
-        target_history=public.cancellation_target_history
-        # 相同原身份轴重定位既有目标；此冻结候选不修改持续历史。
-        target_history=target_history.with_orders(directory.identities,directory.present)
-        retained=directory.present
-        snapshot=freeze_cancel_snapshot(public.cancellations,scopes,object_scopes,objects.present,location,located,
-            retained,target_history.targets,account.cutoff)
-        requests=freeze_scoped_cancel_requests(snapshot.state,scopes,object_scopes,location,snapshot.location_known,
-            snapshot.targets,account.cutoff)
-        leg_count=population.submitted_legs.present.size(1)
-        sides=(population.submitted_legs.outcome_indices.gather(1,directory.term_leg_slots.clamp(0,leg_count-1))
-            if leg_count else torch.full_like(directory.term_leg_slots,-1))
-        sides=torch.where(directory.origin_known,sides,-1)
-        funds=public.ledger.order_funds
-        cancels=cancel_inputs(objects,account.cancel_directory,directory,account.orders,account.order_sources,
-            funds,funds.read(public.ledger.lifecycle),bank,requests,account.cutoff,location,sides,zero[:,None],
-            native.scopes.conditions,native.scopes.present)
-        return account,native,actor,cancels
-    if source.get('nonzero_history_samples'):
-        # 原PublicFactWindow允许正初始容量；两条真实1413/1414事实形成已知窄窗需求。
-        from fact_window import PublicFactWindow
-        encoder.events.window=PublicFactWindow(initial_columns,initial_capacity=1)
-    material=ContinuousActorInputs(encoder,history,market_indices,start,identities,account_builder,
-        word_capacity=16,row_roots=row_roots,root_prefix=initial_prefix,root_previous_at=T([first_observation-100]))
     torch.manual_seed(181606)
     template=Policy100ms(ModelShape100ms(2,64)).cuda().eval();policies={}
     for at,family in [(1300,2),(1400,2 if second_buy else 0),(1500,0),(1600,0),(1700,4),(1800,0)]:
@@ -251,7 +182,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         now=int(at.cpu()[0]);previous=int(material.previous_observation_ms.cpu()[0])
         before=stored_actual(material.memory);endpoint=stored_actual(material.endpoints)
         random_before=random.counter.clone()
-        observed,accepted=material.freeze(world,at,enabled)
+        observed,accepted=model_root.freeze(world,at,enabled)
         if observed is None:
             assert accepted.cpu().tolist()==[True] and torch.equal(random.counter,random_before)
             empty_rows.append(dict(at=now,hot_rows=len(material.market_indices),prefix=material.previous_prefix.cpu().tolist(),random=random.counter.cpu().tolist()))
@@ -355,22 +286,9 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         received_checks.append(row);stage('public_ledger_receive',**row)
         return public,ready
     def sender_factory(task):
-        observation=task.observation
-        inputs=ActorPolicyInputs.publish(observation.actor,observation.market,observation.frozen,task.evaluation,observation.cancels)
-        control=task.request_identity.control(task.send_at)
-        driver=CapturedDeviceActor(task.policy,inputs,random,word_capacity=16,path_capacity=32)
-        publication=ActorSelection(random)
-        order_values=values(observation.account.intent_orders.identities)
-        ids=codec.sim_order_ids_v1(order_values);orders=dict(zip(order_values,ids,strict=True))
-        slots={}
-        submit=ActorRequestSubmission(control,control.leg_requests,sampler,rule,None,None,
-            (tuple(conditions),),(tuple(tokens),),(slots,),
-            (tuple(int(clock.source.prepared.columns['markets'][i]['window']['end_at_utc_ms']) for i in market_indices.cpu().tolist()),),codec,population=population,
-            order_sequences=({value:key for key,value in orders.items()},),identity_directory=request_directory)
-        ids=IntentRequestIdentities(task.request_identity.contexts,
-            (tuple(conditions),),(tuple(a['token_id'] for a in clock.source.prepared.columns['assets']),),(orders,))
-        sender=FrozenActorSend(publication,driver,control,ids,codec,submit,receive,observation.source_snapshot,
-            decision_cutoff=observation.cutoff)
+        sender=model_root.sender_factory(task)
+        # 此消费者仅在有限代表即时比较，完成后原列表释放。
+        sender.receive=receive
         senders.append(sender);return sender
     def model_started(task):
         nonlocal warm_steps,opened
@@ -431,10 +349,19 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         if os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL') and at==1900:duration=87_000_009-2084
         if full_warmup and at!=1900+offset:duration=20
         return zero+duration,zero+120 if at==1300+offset else zero
-    models=ActorModelQueue(torch.zeros((2,len(market_indices),64),device='cuda'),identities,T([first_observation]),policy_start,
-        timing,sender_factory,
-        row_roots=row_roots,market_ends=market.times[market_indices,1],
-        release_markets=release_markets,request_identities=task_requests,on_started=model_started,on_completed=model_completed)
+    from model_train.continuous_root import ContinuousActorRoot
+    model_root=ContinuousActorRoot(root_runtime,codec,rule,sampler,started_at=start,first_observation=T([first_observation]),
+        trading_until=T([2000]) if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") and not two else None,
+        request_namespace=source['run_id']+'/'+source['session_id'],policy_at_start=policy_start,timing=timing,
+        random=random,model_shape=template.shape,word_capacity=16,path_capacity=32)
+    material=model_root.inputs;models=model_root.models;shared=model_root.run
+    history=material.history;encoder=material.encoder
+    request_directory=model_root.request_directory;task_requests=model_root.task_requests
+    if 'cold_authority' not in source:request_directory.append(source['request_id'])
+    models.sender_factory=sender_factory
+    models.on_started=model_started;models.on_completed=model_completed;models.release_markets=release_markets
+    if source.get('nonzero_history_samples'):
+        encoder.events.window.fact_capacity=encoder.events.window.source_capacity=1
     def receive_observation(public,delivery,enabled):
         at=clock.gates.public_visible_at.cpu().tolist()
         if at[0] in (1600,1700):
@@ -444,8 +371,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                     'batch_sequences','record_ordinals','platform_at','request_slots','item_ordinals'))
                     for batch in public.ledger.columns.projection_batches])
         return receive(public,delivery,enabled)
-    shared=ContinuousActorRun(clock,T([first_observation]),models,freeze,receive_observation,
-        trading_until=T([2000]) if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") and not two else None,inputs=material)
+    shared.freeze=freeze;shared.receive=receive_observation
     def grow_cancel_results(effect,fault):
         if effect is not None and hasattr(effect,'required_results'):
             capacity=1 if clock.runtime.cancel_results is None else clock.runtime.cancel_results.capacity
@@ -456,7 +382,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                 old=clock.runtime.cancel_results or CancelResults(1)
                 first_groups=old.groups;old_done=clock.runtime.requests.done.clone();old_random=random.counter.clone()
                 old_input=values(clock.runtime.input_frontier.next_sequence);old_private=values(clock.projection.emitter.next_private_sequence)
-                clock.runtime=replace(clock.runtime,cancel_results=old.resized(required))
+                assert model_root.grow_cancel_results(effect)
                 assert clock.runtime.cancel_results.groups is first_groups
                 assert torch.equal(clock.runtime.requests.done,old_done) and torch.equal(random.counter,old_random)
                 assert values(clock.runtime.input_frontier.next_sequence)==old_input and values(clock.projection.emitter.next_private_sequence)==old_private
@@ -502,7 +428,8 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                 assert probe.hidden.shape==(2,1,64)
                 assert torch.equal(probe.hidden[:,0],hidden_before[:,1])
                 end_retry=True
-            material.encoder.grow_resources(required);history_retry=True;resource_candidate=None
+            assert model_root.resume_resources(result)
+            history_retry=True;resource_candidate=None
             stage('whole_root_input_growth',at=shared.next_observation.cpu().tolist(),required=required,end_retry=end_retry)
             continue
         required_requests=max([clock.runtime.requests.capacity]+[int(s.receipt.required_requests.max().cpu()) for s in senders if s.receipt is not None])
@@ -512,15 +439,11 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         if required_legs>old.reservations.capacity or required_requests>clock.runtime.requests.capacity:
             stage('continuous_capacity_requirement',requests=clock.runtime.requests.capacity,required_requests=required_requests,
                 legs=old.reservations.capacity,required_legs=required_legs)
-            if required_legs>old.reservations.capacity:
-                pad=required_legs-old.reservations.capacity
-                clock.public=replace(clock.public,ledger=replace(old,reservations=old.reservations.resized(required_legs),
-                    global_requests=torch.nn.functional.pad(old.global_requests,(0,pad),value=-1),
-                    item_ordinals=torch.nn.functional.pad(old.item_ordinals,(0,pad),value=-1)))
-            if required_requests>clock.runtime.requests.capacity:
-                clock.runtime=replace(clock.runtime,requests=clock.runtime.requests.resized(required_requests,clock.runtime.requests.action_capacity))
+            assert model_root.resume_resources(result)
             continuations+=1
             continue
+        if model_root.resume_resources(result):
+            continuations+=1;continue
         frozen=observations[-1] if observations else None
         if frozen is not None:stage('blocked_unknown',fault=frozen.frozen.fault.cpu().tolist(),required=frozen.market.required.cpu().tolist())
         raise AssertionError('真实连续路径未完成且尚无已报告物理需求')
@@ -604,11 +527,16 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                 early=next(row for row in received_checks if row['at']==[301600])
                 later=next(row for row in received_checks if row['at']==[301700])
                 assert early['ready']==[True] and early['resources_fit'] and early['platform_prefix']==[6]
-                assert early['late_predecessor']==[dict(row=207,sequence=7,received=False,consumed=False,first_available_at=0),
-                    dict(row=223,sequence=8,received=True,consumed=False,first_available_at=301600)]
+                expected_early=[dict(sequence=7,received=False,consumed=False,first_available_at=0),
+                    dict(sequence=8,received=True,consumed=False,first_available_at=301600)]
+                expected_later=[dict(sequence=7,received=True,consumed=True,first_available_at=301700),
+                    dict(sequence=8,received=True,consumed=True,first_available_at=301600)]
+                assert [{k:v for k,v in row.items() if k!='row'} for row in early['late_predecessor']]==expected_early
                 assert later['ready']==[True] and later['platform_prefix']==[8] and not later['waiting']
-                assert later['late_predecessor']==[dict(row=207,sequence=7,received=True,consumed=True,first_available_at=301700),
-                    dict(row=223,sequence=8,received=True,consumed=True,first_available_at=301600)]
+                assert [{k:v for k,v in row.items() if k!='row'} for row in later['late_predecessor']]==expected_later
+                early_rows=[row['row'] for row in early['late_predecessor']]
+                assert len(set(early_rows))==2 and min(early_rows)>=0
+                assert [row['row'] for row in later['late_predecessor']]==early_rows
                 late_predecessor=[early,later]
             result['real_cold_opening']=dict(session_sequences=source['cold_authority']['session_sequences'],
                 ledger_entry=source['cold_authority']['ledger_projection']['ledger_entry_seq'],activation=source['cold_authority']['activation'],

@@ -18,7 +18,24 @@ class ActorOpening:
     asset_ends: tuple
 
 
-def open_actor_root(public,hidden,codec,request,*,page_groups=256,hidden_page_buckets=64,auto_redemption=False):
+@dataclass(frozen=True)
+class ActorOpeningCapacities:
+    segments: int
+    requests: int
+    request_actions: int
+    orders: int
+    fills: int
+    result_requests: int
+    result_items: int
+    calendar_fills: int
+    calendar_days: int
+    ledger_orders: int
+    ledger_trades: int
+    rebate_days: int
+    settlements: int
+
+
+def open_actor_root(public,hidden,codec,request,*,page_groups=256,hidden_page_buckets=64,auto_redemption=False,capacities=None):
     """已准备完整目录不是已见市场事实；资金仅来自本次合法SessionSpec。"""
     from hidden_inputs import HiddenPmBlock
     from account_state import PlatformAccountState
@@ -52,6 +69,8 @@ def open_actor_root(public,hidden,codec,request,*,page_groups=256,hidden_page_bu
     from public_ledger import PublicLedgerState
     from registry import PublicRegistryState,PublicRegistryEvents,PublicCancellationState
     from commitments import SubmissionBindings
+    # 旧调用保原物理配置；通用连续入口必须显式提供配置。
+    caps=capacities or ActorOpeningCapacities(*([1]*13))
     count=len(hidden.arrays['bucket_times'])
     block=HiddenPmBlock.from_prepared(hidden.page(0,min(hidden_page_buckets,count)))
     device=block.level_assets.device
@@ -84,13 +103,13 @@ def open_actor_root(public,hidden,codec,request,*,page_groups=256,hidden_page_bu
         fill=FillRecord.create(integer([1]),integer([1]),blank,zero,zero,~yes,request['finality_policy']['normal_path'])
         account=replace(PlatformAccountState.open(integer([int(Fraction(balance['cash_pusd'])*1000000)]),roots),
             next_sequence=integer([account_sequence]))
-        runtime=BaseSimRuntime(block.empty_state(segment_capacity=1),MutationRequests.empty(blank,capacity=1,action_capacity=1),
-            BaseOrders.empty(quantity,capacity=1),account,FillPool.empty(fill,capacity=1),
+        runtime=BaseSimRuntime(block.empty_state(segment_capacity=caps.segments),MutationRequests.empty(blank,capacity=caps.requests,action_capacity=caps.request_actions),
+            BaseOrders.empty(quantity,capacity=caps.orders),account,FillPool.empty(fill,capacity=caps.fills),
             RebateCoordinator(MakerDays.empty(t([list(range(len(conditions)))]),
                 t([[by_condition[c]['window']['end_at_utc_ms'] for c in conditions]]),
-                t([[True]*len(conditions)],torch.bool),fills=1,days=1),TakerDays.empty(1,device,fills=1,days=1)),
+                t([[True]*len(conditions)],torch.bool),fills=caps.calendar_fills,days=caps.calendar_days),TakerDays.empty(1,device,fills=caps.calendar_fills,days=caps.calendar_days)),
             input_frontier=InputCommitFrontier(integer([sequence]),request['session']['run_id'],request['session']['session_id']),
-            post_results=PostResults.empty(quantity,1,1))
+            post_results=PostResults.empty(quantity,caps.result_requests,caps.result_items))
         import importlib.util,sys
         from pathlib import Path
         spec=importlib.util.spec_from_file_location('actor_opening_ledger_platform',Path(__file__).resolve().parents[2]/'ledger/gpu/platform.py')
@@ -104,12 +123,12 @@ def open_actor_root(public,hidden,codec,request,*,page_groups=256,hidden_page_bu
         resolutions=MarketResolutions.open(pools,unresolved,ResolutionSources.bind(block.terminal_columns,tokens,device=device))
         ledger=AdmissionLifecycle.open(platform,EvidenceBank.empty(device),columns,
             integer([projection['ledger_entry_seq']]),integer([projection['ledger_local_prefix']]),pools,
-            position_costs=PositionCosts.empty(1,len(conditions),device),order_funds=OrderFunds.empty(1,1,1,0,device),
-            rebate_days=RebateDays.empty(t([list(range(len(conditions)))]),1),
+            position_costs=PositionCosts.empty(1,len(conditions),device),order_funds=OrderFunds.empty(1,caps.ledger_orders,caps.ledger_trades,0,device),
+            rebate_days=RebateDays.empty(t([list(range(len(conditions)))]),caps.rebate_days),
             accepted_principal=AcceptedPrincipal.open(1,t(list(range(len(conditions)))),known=True),
             projected_markets=ProjectedMarkets.open(t(list(range(len(conditions)))),t([[False]*len(conditions)],torch.bool),yes),
-            unresolved_markets=unresolved,resolutions=resolutions,settlement_costs=SettlementCosts.empty(1,1,device,known=True),
-            external_cash=ExternalCashIdentities.empty(1,1,device,known=True),other_cash=rational(['0']))
+            unresolved_markets=unresolved,resolutions=resolutions,settlement_costs=SettlementCosts.empty(1,caps.settlements,device,known=True),
+            external_cash=ExternalCashIdentities.empty(1,caps.settlements,device,known=True),other_cash=rational(['0']))
         pending=PendingRecords.from_columns(empty.bool(),empty,integer([]),integer([]),empty,integer([0]))
         public_state=PublicLedgerState(pending,PublicRegistryState(PublicRegistryEvents.empty(1,device)),ClosedAdmission.empty(columns),ledger,
             submission_bindings=SubmissionBindings.empty(1,device,prefix_known=True),

@@ -88,6 +88,7 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
     phase_done('hidden_root_preparation',phase,buckets=len(prepared_hidden.arrays['bucket_times']),
         parts=len(prepared_hidden.parts))
     phase=phase_start()
+    root_runtime=None
     if cold_request is None:
         assembled=install_actor_sources(prepared,prepared_hidden,runtime,
             [event['market']['condition_id'] for event in source['initial'][::2]],
@@ -102,18 +103,27 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
             unresolved_markets=UnresolvedMarkets.open(public.ledger.success_pools,T(list(range(0,len(assets),2))))),source)),
             cancellations=run(lambda:PublicCancellationState.open(integers([]),T([[]],torch.bool))))
     else:
-        from actor_opening import open_actor_root
-        cold=open_actor_root(prepared,prepared_hidden,codec,cold_request,page_groups=3,hidden_page_buckets=1,
-            auto_redemption=True)
-        assembled=cold.sources;runtime,public,noe=assembled.runtime,cold.public,cold.projection
-        public_source,block=assembled.source,assembled.block
-        pm,market,reference,binance=assembled.states
-        source={**source,'cold_authority':cold.authority,'cold_conditions':cold.conditions,'cold_tokens':cold.tokens,
-            'cold_asset_ends':cold.asset_ends,'bounded_hidden':{**hidden_source,'assets':block.assets}}
-        rows=[[i for i,(asset,side) in enumerate(zip(block.level_assets.cpu().tolist(),block.level_sides.cpu().tolist()))
-            if asset==a and side==1] for a in range(len(cold.tokens))]
-        width=max(map(len,rows));ask_directory=T([row+[-1]*(width-len(row)) for row in rows])
-        (artifact/'cold-authority.json').write_text(json.dumps(cold.authority,indent=2))
+        from actor_opening import ActorOpeningCapacities
+        from actor_runtime import open_continuous_runtime
+        from pending_cancel_intents import CancelFailureScenario
+        from types import SimpleNamespace
+        def paths(kind,world,selected):
+            width=world.hidden.queues.capacity*(selected.size(1) if kind=='taker' else 1)
+            return T([[0]*width])
+        scenario=run(lambda:CancelFailureScenario(T([[]]),integers([]),integers([]),T([[]],torch.bool),zero.to(torch.int32)))
+        root_runtime=open_continuous_runtime(prepared,prepared_hidden,codec,cold_request,rule,sampler,
+            capacities=ActorOpeningCapacities(*([1]*13)),page_groups=3,hidden_page_buckets=1,
+            taker_rate=taker,maker_rate=maker,fill_paths=paths,cancel_scenario=scenario,
+            gtd=ScheduledTime.absent(zero),auto_redemption=True)
+        runtime,public,noe=root_runtime.clock.runtime,root_runtime.clock.public,root_runtime.clock.projection
+        public_source=root_runtime.clock.source;block=runtime.hidden_frontier.columns.source
+        pm,market,reference,binance=public_source.states
+        directory=root_runtime.directory
+        assembled=SimpleNamespace(market_indices=directory.market_indices,condition_by_asset=directory.condition_by_asset)
+        source={**source,'cold_authority':root_runtime.authority,'cold_conditions':directory.conditions,'cold_tokens':directory.tokens,
+            'cold_asset_ends':directory.asset_ends,'bounded_hidden':{**hidden_source,'assets':block.assets}}
+        ask_directory=directory.ask_rows
+        (artifact/'cold-authority.json').write_text(json.dumps(root_runtime.authority,indent=2))
         phase_done('actor_cold_opening_and_installation',phase)
         assert values(runtime.account.cash)==[2000000000]
         assert not runtime.orders.occupied.any().cpu().item()
@@ -157,8 +167,9 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
         # 原来源实际CreateSession/ActivateSession的冷初始化已成功，不移植CPU物理编号。
         frontier,_=run(lambda:frontier.commit(yes));frontier,_=run(lambda:frontier.commit(yes))
         runtime=replace(runtime,input_frontier=frontier)
-    clock=BoundedSendClock(runtime,noe,public,public_source,{4:hidden,5:post,2:finality},ScheduledTime.absent(zero),bank,
-        hidden_page_buckets=2)
+    clock=(root_runtime.clock if root_runtime is not None else
+        BoundedSendClock(runtime,noe,public,public_source,{4:hidden,5:post,2:finality},ScheduledTime.absent(zero),bank,
+            hidden_page_buckets=2))
     trace=[]
     def stage(name,**row):
         value=dict(stage=name,elapsed_seconds=time.perf_counter()-started,**row);trace.append(value);progress(value)
@@ -173,14 +184,18 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
         clock.runtime=replace(clock.runtime,input_frontier=frontier);clock.public=replace(clock.public,ledger=ledger)
         stage("original_request_commit",gpu_input_sequence=values(receipt.input_sequence),cpu_reference_input=source["input_sequence"])
         assert receipt.arrived_at.cpu().tolist()==[source["receipt"]["arrived_at"]]
-    advance=clock.advance_before(ck,yes,progress=stage)
-    assert not advance.fault.any().cpu().item() and advance.complete.cpu().item()
-    assert not clock.public.pending_noe.active.any().cpu().item()
+    if continuous is None or root_runtime is None:
+        advance=clock.advance_before(ck,yes,progress=stage)
+        assert not advance.fault.any().cpu().item() and advance.complete.cpu().item()
+        assert not clock.public.pending_noe.active.any().cpu().item()
+    else:
+        # 新生产冷入口直接交模型装配；首窗推进由其原时钟初始化负责。
+        assert clock.source.position.cpu().tolist()==[0]
     if cold_request is None:checkpoint(clock.public.ledger,source['sent_ledger'])
     assert values(clock.runtime.account.cash)==[int(Fraction(source['cash'])*1000000)]
     if continuous is not None:
         return continuous(source,clock,pm,market,reference,binance,block,sampler,rule,receipt,intents,
-            ask_directory,taker,maker,codec,artifact,stage,assembled=assembled)
+            ask_directory,taker,maker,codec,artifact,stage,assembled=assembled,root_runtime=root_runtime)
     # 只消费实际完成Ck的完整原group，并将该位置上限交给原100ms编码器。
     source_snapshot=public_source.snapshot();prefix=public_source.prefix_at(pm,ck)
     decision_cutoff=None

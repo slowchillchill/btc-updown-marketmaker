@@ -18,9 +18,9 @@ class ContinuousActorRun:
     freeze接实际当前公开账户并返回模型自有冻结材料；models拥有模型队列、
     hidden及权重版本。receive只续原waiting。显式horizon保持开放，不排空未来。
     """
-    def __init__(self,clock,first_observation,models,freeze,receive,*,trading_until=None,settlement=None,inputs=None):
+    def __init__(self,clock,first_observation,models,freeze,receive,*,trading_until=None,settlement=None,inputs=None,initialize=None):
         self.clock=clock;self.next_observation=first_observation.clone()
-        self.models=models;self.freeze=freeze;self.receive=receive
+        self.models=models;self.freeze=freeze;self.receive=receive;self.initialize=initialize
         self.trading_until=trading_until;self.settlement=settlement
         self.economic_resume=torch.zeros_like(first_observation,dtype=torch.bool)
         owner=inputs if inputs is not None else getattr(freeze,'__self__',None)
@@ -31,6 +31,13 @@ class ContinuousActorRun:
     def advance_before(self,horizon,enabled,*,progress=None):
         blocked=torch.zeros_like(enabled);fault=torch.zeros_like(horizon,dtype=torch.int32)
         count=0;stage=None;blocked_stage=None
+        if self.initialize is not None:
+            stage=self.initialize(horizon,enabled,progress=progress)
+            if stage is not None:
+                fault |= stage.fault
+                ready=enabled&stage.complete&(fault==0)
+                if not bool((~enabled|ready).all().cpu()):
+                    return ContinuousAdvance(ready,enabled&~ready,fault,0,stage)
         while True:
             event=self.models.next_event()
             observing=torch.ones_like(enabled) if self.trading_until is None else self.next_observation<self.trading_until
