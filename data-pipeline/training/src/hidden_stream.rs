@@ -15,7 +15,7 @@ pub struct StreamingHiddenStateV1 {
     source_identity: Sha256Hex,
     epochs: BTreeMap<String, u64>,
     states: BTreeMap<String, PmOwnedStateV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>,
-    pending_pm: BTreeMap<PmOrder, CanonicalPmMessageV1>,
+    pending_pm: BTreeMap<PmOrder, PreparedPmMessageV1>,
     pending_records: BTreeMap<BucketOrder, ResolvedHiddenRecordV1>,
     next_pm_position: u64,
     next_index_position: u64,
@@ -65,15 +65,7 @@ impl StreamingHiddenStateV1 {
     ) -> RecordingResult<()> {
         match record {
             CanonicalEventRecordV2::PolymarketMessage(message) => {
-                let source = &message.lineage.source_evidence[0];
-                let coordinate = source.collector_admission.as_ref().unwrap();
-                let key = (
-                    self.epochs[&coordinate.source_sequence_epoch_id],
-                    source.source_event_at_utc_ms.unwrap(),
-                    coordinate.collector_admission_sequence,
-                    canonical_position,
-                );
-                self.pending_pm.insert(key, message);
+                self.push_prepared_pm(canonical_position, PreparedPmMessageV1::prepare(message)?);
             }
             record => {
                 let at = match &record {
@@ -98,6 +90,17 @@ impl StreamingHiddenStateV1 {
         }
         Ok(())
     }
+    pub fn push_prepared_pm(&mut self, canonical_position: u64, prepared: PreparedPmMessageV1) {
+        let source = &prepared.message().lineage.source_evidence[0];
+        let coordinate = source.collector_admission.as_ref().unwrap();
+        let key = (
+            self.epochs[&coordinate.source_sequence_epoch_id],
+            source.source_event_at_utc_ms.unwrap(),
+            coordinate.collector_admission_sequence,
+            canonical_position,
+        );
+        self.pending_pm.insert(key, prepared);
+    }
     pub fn push_depth_reference(
         &mut self,
         canonical_position: u64,
@@ -118,7 +121,7 @@ impl StreamingHiddenStateV1 {
     /// pm_lower覆盖全部未读PM；None表示PM来源已完整结束。
     pub fn advance_pm(&mut self, pm_lower: Option<PmOrder>) -> RecordingResult<()> {
         use rayon::prelude::*;
-        let mut markets: BTreeMap<String, Vec<(PmOrder, CanonicalPmMessageV1)>> = BTreeMap::new();
+        let mut markets: BTreeMap<String, Vec<(PmOrder, PreparedPmMessageV1)>> = BTreeMap::new();
         while self
             .pending_pm
             .first_key_value()
@@ -126,7 +129,7 @@ impl StreamingHiddenStateV1 {
         {
             let (key, message) = self.pending_pm.pop_first().unwrap();
             markets
-                .entry(message.market.condition_id.0.clone())
+                .entry(message.message().market.condition_id.0.clone())
                 .or_default()
                 .push((key, message));
         }
@@ -145,8 +148,7 @@ impl StreamingHiddenStateV1 {
             .into_par_iter()
             .map(|(id, mut state, messages)| -> RecordingResult<_> {
                 let mut output = Vec::new();
-                for (key, message) in messages {
-                    let prepared = PreparedPmMessageV1::prepare(message)?;
+                for (key, prepared) in messages {
                     let result = compute_pm_message_steps_v1(
                         state.context(),
                         &state,
@@ -210,7 +212,16 @@ impl StreamingHiddenStateV1 {
         ended: bool,
     ) -> Option<StreamingHiddenBucketV1> {
         let at = self.pending_records.first_key_value()?.0.0;
-        let pm_at = self.pending_pm.keys().map(|key| key.1).min();
+        // epoch 内已经按来源时刻排序；只读取每个尚未结束 epoch 的首项。
+        let mut pm_at = None;
+        let mut remaining = self.pending_pm.range(..);
+        while let Some((key, _)) = remaining.next() {
+            pm_at = pm_at.into_iter().chain(Some(key.1)).min();
+            remaining = self.pending_pm.range((
+                std::ops::Bound::Excluded((key.0, i64::MAX, u64::MAX, u64::MAX)),
+                std::ops::Bound::Unbounded,
+            ));
+        }
         let lower = unread_lower.into_iter().chain(pm_at).min();
         if !ended && lower.is_none_or(|lower| lower <= at) {
             return None;
@@ -220,8 +231,20 @@ impl StreamingHiddenStateV1 {
         }
         let next = self
             .pending_records
-            .keys()
-            .find(|key| key.0 > at)
+            .range((
+                std::ops::Bound::Excluded((
+                    at,
+                    u8::MAX,
+                    u64::MAX,
+                    i64::MAX,
+                    u64::MAX,
+                    u64::MAX,
+                    u32::MAX,
+                )),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(key, _)| key)
+            .next()
             .map(|key| key.0);
         // NextGlobalEventAt 必须指向真实下一项，不能把 Footer 下界伪装成事件。
         let closure = match next {

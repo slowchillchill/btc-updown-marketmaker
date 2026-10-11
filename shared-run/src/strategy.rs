@@ -4,10 +4,7 @@ use ::execution_normalization::MemoryLogicalIdentityV1;
 use contracts::{execution_normalization::SourceNeutralTradeLifecycleResultV2, *};
 use ledger::*;
 use sim_system::{execution::*, public_consumption::*};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrozenTradeEconomicsV1 {
@@ -108,7 +105,7 @@ pub trait StrategyV1 {
     /// 返回严格晚于当前时刻的必要期限；没有固定节拍或公共阈值。
     fn next_health_evaluation_at(
         &self,
-        _input: &StrategyCurrentReadV1<'_>,
+        _markets: &[PublicObservationFrameV1<'_>],
         _calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
         _at: i64,
     ) -> Option<i64> {
@@ -246,13 +243,21 @@ impl SharedExecutionV2 {
         &mut self,
         driver: &'a PublicConsumptionStateV1,
     ) -> Result<Option<StrategyCurrentReadV1<'a>>, LedgerErrorV1> {
-        self.apply_closed()?;
+        let frames = self.strategy_current_observations(driver)?;
         let Some(cutoff) = driver.observation_cutoff() else {
             return Ok(None);
         };
+        Ok(self.current_read_from_frames(cutoff, frames))
+    }
+    /// 同一真实观察保留领取及登记副作用；期限消费者不需要冻结账户历史。
+    pub fn strategy_current_observations<'a>(
+        &mut self,
+        driver: &'a PublicConsumptionStateV1,
+    ) -> Result<Vec<PublicObservationFrameV1<'a>>, LedgerErrorV1> {
+        self.apply_closed()?;
         let frames = driver.frames_at_observation();
         self.observe_group(&frames);
-        Ok(self.current_read_from_frames(cutoff, frames))
+        Ok(frames)
     }
     fn current_read_from_frames<'a>(
         &self,
@@ -324,10 +329,11 @@ impl SharedExecutionV2 {
         &self,
         strategy: &mut S,
         calculation: &StrategyCalculationV1<S::Diagnostics>,
-        input: &StrategyCurrentReadV1<'_>,
+        frames: &[PublicObservationFrameV1<'_>],
         at: i64,
     ) -> Result<(Option<InvalidatedBatchV1>, u64), S::Error> {
         let mut calls = 0;
+        let mut input = None;
         if let StrategyOutputV1::Continue { intents, .. } = &calculation.output {
             for (index, intent) in intents.iter().enumerate() {
                 if self
@@ -336,6 +342,13 @@ impl SharedExecutionV2 {
                 {
                     continue;
                 }
+                let input = input.get_or_insert_with(|| {
+                    self.current_read_from_frames(
+                        frames[0].decision_cutoff.clone(),
+                        frames.to_vec(),
+                    )
+                    .expect("原已开户观察")
+                });
                 calls += 1;
                 if let IntentQualificationV1::Invalidated(reason) =
                     strategy.qualify_intent(input, calculation, index, at)?
@@ -451,27 +464,24 @@ impl SharedExecutionV2 {
             i64,
         ) -> Result<IntentQualificationV1, E>,
     ) -> Result<QualifiedBatchResultV1, QualifiedBatchErrorV1<E>> {
-        let current: BTreeMap<_, _> = self
-            .ledger()
-            .funds_read_v1()
-            .requests()
-            .map(|r| (r.request_identity.clone(), r.reservation_state))
-            .collect();
+        let current = self.ledger().funds_read_v1();
+        let mut existing = BTreeSet::new();
         // 原Reserved结果是粘滞决定，不是当前资金承诺。全批检查先于任何新预留或发送。
         // 已发请求可凭原接收回执／NOE响应重读幂等结果，不要求其已转换的预留仍活动。
         for item in intents {
             for reserve in &item.reserves {
-                if current
-                    .get(&reserve.reserve.request_identity)
-                    .is_some_and(|state| {
-                        matches!(
-                            state,
-                            ReservationStatusV1::Released | ReservationStatusV1::Converted
-                        )
-                    })
-                    && !self
-                        .registry()
-                        .has_sim_submission_evidence(&item.context.global_request_id)
+                let request = current.request(&reserve.reserve.request_identity);
+                if request.is_some() {
+                    existing.insert(reserve.reserve.request_identity.clone());
+                }
+                if request.is_some_and(|state| {
+                    matches!(
+                        state.reservation_state,
+                        ReservationStatusV1::Released | ReservationStatusV1::Converted
+                    )
+                }) && !self
+                    .registry()
+                    .has_sim_submission_evidence(&item.context.global_request_id)
                 {
                     return Err(BatchExecutionErrorV1 {
                         error: SharedActionErrorV1::Sim(
@@ -492,7 +502,7 @@ impl SharedExecutionV2 {
             .iter()
             .flat_map(|i| i.reserves.iter())
             .map(|r| r.reserve.request_identity.clone())
-            .filter(|id| !current.contains_key(id))
+            .filter(|id| !existing.contains(id))
             .collect();
         let reserves: Vec<_> = intents
             .iter()
@@ -590,8 +600,7 @@ impl SharedExecutionV2 {
                 let id = &reserve.reserve.request_identity;
                 let funds = self.ledger().funds_read_v1();
                 if !batch_reserve_ids.insert(id.clone())
-                    || (current.contains_key(id)
-                        && funds.submission_request(&submission) != Some(id))
+                    || (existing.contains(id) && funds.submission_request(&submission) != Some(id))
                 {
                     return Err(BatchExecutionErrorV1 {
                         error: SharedActionErrorV1::Sim(
@@ -675,13 +684,12 @@ impl SharedExecutionV2 {
         for item in intents {
             for reserve in &item.reserves {
                 let id = &reserve.reserve.request_identity;
-                let active = self.ledger().funds_read_v1().requests().any(|r| {
-                    r.request_identity == id
-                        && matches!(
-                            r.reservation_state,
-                            ReservationStatusV1::ReservedBeforeSend
-                                | ReservationStatusV1::SubmittedUnknown
-                        )
+                let active = self.ledger().funds_read_v1().request(id).is_some_and(|r| {
+                    matches!(
+                        r.reservation_state,
+                        ReservationStatusV1::ReservedBeforeSend
+                            | ReservationStatusV1::SubmittedUnknown
+                    )
                 });
                 if active && owned.contains(id) {
                     let event = LedgerLocalEventIdentityV1(

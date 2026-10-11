@@ -95,7 +95,7 @@ impl ComplementaryPairV1 {
     }
     pub(super) fn urgency(
         &self,
-        o: &MarketBusinessObservationV1,
+        o: &PairObservation<'_>,
         now: i64,
         p: &ProbabilityEstimateV1,
         s: &MarketState,
@@ -153,6 +153,7 @@ impl ComplementaryPairV1 {
         &self,
         a: &AssetBusinessObservationV1,
         target: Decimal,
+        best_ask: impl FnOnce() -> Result<Option<Decimal>, StrategyErrorV1>,
     ) -> Result<Option<Decimal>, StrategyErrorV1> {
         let Some(tick) = value(&a.tick) else {
             return Ok(None);
@@ -162,14 +163,7 @@ impl ComplementaryPairV1 {
             return Err(StrategyErrorV1::Arithmetic("公共tick非正"));
         }
         let mut p = (target.min(Decimal::ONE - tick) / tick).floor() * tick;
-        if let Some(asks) = value(&a.asks)
-            && let Some(ask) = asks
-                .iter()
-                .map(|p| decimal(&p.price_pusd_per_share))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .min()
-        {
+        if let Some(ask) = best_ask()? {
             p = p.min(ask - tick);
         }
         if p <= Decimal::ZERO {
@@ -179,7 +173,7 @@ impl ComplementaryPairV1 {
     }
     pub(super) fn quotes(
         &self,
-        o: &MarketBusinessObservationV1,
+        o: &PairObservation<'_>,
         p: &ProbabilityEstimateV1,
         s: &MarketState,
     ) -> Result<Option<[Decimal; 2]>, StrategyErrorV1> {
@@ -212,8 +206,10 @@ impl ComplementaryPairV1 {
         let shift = self.config.quote.inventory_shift_per_pusd * difference;
         let up = fd(up)?;
         let (Some(a), Some(b)) = (
-            self.price(&o.assets[0], up - spread - shift)?,
-            self.price(&o.assets[1], Decimal::ONE - up - spread + shift)?,
+            self.price(o.assets[0], up - spread - shift, || o.top_ask(0))?,
+            self.price(o.assets[1], Decimal::ONE - up - spread + shift, || {
+                o.top_ask(1)
+            })?,
         ) else {
             return Ok(None);
         };

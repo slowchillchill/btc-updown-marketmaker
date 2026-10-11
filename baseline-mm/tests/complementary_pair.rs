@@ -1832,9 +1832,9 @@ async fn pending_twap_deadline_survives_spot_arrival() {
         s.qualify_intent(&current, &calculation, 0, 23000).unwrap(),
         IntentQualificationV1::Qualified
     );
-    let next = s.next_health_evaluation_at(&current, Some(&calculation), 23000);
+    let next = s.next_health_evaluation_at(&current.markets, Some(&calculation), 23000);
     assert_eq!(
-        s.next_health_evaluation_at(&current, None, 23000),
+        s.next_health_evaluation_at(&current.markets, None, 23000),
         Some(28000),
         "没有待发决定时仍按当前spot经营依赖排期限"
     );

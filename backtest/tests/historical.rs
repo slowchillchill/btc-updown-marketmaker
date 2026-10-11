@@ -1223,7 +1223,7 @@ impl StrategyV1 for HealthProbe {
     }
     fn next_health_evaluation_at(
         &self,
-        _: &StrategyCurrentReadV1<'_>,
+        _: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
         calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
         at: i64,
     ) -> Option<i64> {
@@ -1473,7 +1473,7 @@ impl StrategyV1 for QuietDeadlineProbe {
     }
     fn next_health_evaluation_at(
         &self,
-        _: &StrategyCurrentReadV1<'_>,
+        _: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
         _: Option<&StrategyCalculationV1>,
         at: i64,
     ) -> Option<i64> {
@@ -1544,7 +1544,7 @@ impl StrategyV1 for MeasurementProbe {
     }
     fn next_health_evaluation_at(
         &self,
-        _: &StrategyCurrentReadV1<'_>,
+        _: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
         _: Option<&StrategyCalculationV1>,
         at: i64,
     ) -> Option<i64> {
