@@ -590,6 +590,9 @@ where
     H: Iterator<Item = Result<AcceptedHiddenStepBucketV1, MaterialError>>,
     C: RuntimeCheckpointV1<S, I>,
 {
+    #[cfg(feature = "stage-timing")]
+    let mut stages =
+        crate::stage_timing::StageTimings::new(format!("candidate:{}", config.session.run_id));
     let health_enabled = strategy.uses_source_health();
     let resumed = checkpoint
         .restore(config, rules.clone(), strategy)
@@ -623,9 +626,11 @@ where
         }
     };
     let (mut driver, mut shared, observation) =
-        start().map_err(|cause| HistoricalRunFailureV1 {
-            cause: HistoricalFailureCauseV1::Material(cause),
-            report: None,
+        measure_stage!(stages, "runtime_open_and_account_assembly", start()).map_err(|cause| {
+            HistoricalRunFailureV1 {
+                cause: HistoricalFailureCauseV1::Material(cause),
+                report: None,
+            }
         })?;
     driver
         .enable_finite_recording_wait()
@@ -657,13 +662,16 @@ where
     let running = async {
         let mut next_hidden = checkpoint
             .restored_hidden()
-            .or_else(|| hidden.next())
+            .or_else(|| measure_stage!(stages, "hidden_source_wait_and_acquisition", hidden.next()))
             .transpose()
             .map_err(HistoricalFailureCauseV1::Material)?;
         loop {
-            let public_at = driver
-                .next_group_at()
-                .map_err(HistoricalFailureCauseV1::Sim)?;
+            let public_at = measure_stage!(
+                stages,
+                "sim_next_group_at_including_source_wait",
+                driver.next_group_at()
+            )
+            .map_err(HistoricalFailureCauseV1::Sim)?;
             let hidden_at = next_hidden
                 .as_ref()
                 .map(|bucket| bucket.reference().bucket_time_utc_ms());
@@ -730,15 +738,24 @@ where
                 dirty = true;
             }
             // 更早原义务先推进；本毫秒仍开放，全部真实公开组保持原序。
-            driver
-                .wait_for_recording_capacity()
-                .map_err(HistoricalFailureCauseV1::Sim)?;
-            driver
-                .advance_before(at)
-                .map_err(HistoricalFailureCauseV1::Sim)?;
-            while driver
-                .next_group_at()
-                .map_err(HistoricalFailureCauseV1::Sim)?
+            measure_stage!(
+                stages,
+                "recording_stabilization_wait",
+                driver.wait_for_recording_capacity()
+            )
+            .map_err(HistoricalFailureCauseV1::Sim)?;
+            measure_stage!(
+                stages,
+                "sim_advance_before_including_noe",
+                driver.advance_before(at)
+            )
+            .map_err(HistoricalFailureCauseV1::Sim)?;
+            while measure_stage!(
+                stages,
+                "sim_next_group_at_including_source_wait",
+                driver.next_group_at()
+            )
+            .map_err(HistoricalFailureCauseV1::Sim)?
                 == Some(at)
             {
                 let mut delivered_group = None;
@@ -764,9 +781,12 @@ where
                     }
                     for pm_context in &group.pm_contexts {
                         if !driver.has_enrolled_market(&pm_context.market.condition_id) {
-                            driver
-                                .wait_for_recording_capacity()
-                                .map_err(HistoricalFailureCauseV1::Sim)?;
+                            measure_stage!(
+                                stages,
+                                "recording_stabilization_wait",
+                                driver.wait_for_recording_capacity()
+                            )
+                            .map_err(HistoricalFailureCauseV1::Sim)?;
                             driver
                                 .enroll_market(MarketEnrollmentRequestV1 {
                                     enrollment_request_id: pm_context.market.condition_id.0.clone(),
@@ -787,10 +807,15 @@ where
                         }
                     }
                 }
-                driver
-                    .wait_for_recording_capacity()
-                    .map_err(HistoricalFailureCauseV1::Sim)?;
-                let applied = driver.next_group().map_err(HistoricalFailureCauseV1::Sim)?;
+                measure_stage!(
+                    stages,
+                    "recording_stabilization_wait",
+                    driver.wait_for_recording_capacity()
+                )
+                .map_err(HistoricalFailureCauseV1::Sim)?;
+                let applied =
+                    measure_stage!(stages, "sim_next_group_including_noe", driver.next_group())
+                        .map_err(HistoricalFailureCauseV1::Sim)?;
                 // 每个合法组都检查，包括发送恰好到期的同毫秒；恢复不能复活旧决定。
                 if health_enabled
                     && let Some(p) = pending.as_mut()
@@ -803,14 +828,17 @@ where
                     let detected_at = receipt.execution_time().logical_time_utc_ms();
                     for index in 0..intents.len() {
                         health_summary.qualification_calls += 1;
-                        if let IntentQualificationV1::Invalidated(reason) = strategy
-                            .qualify_intent_public(
+                        if let IntentQualificationV1::Invalidated(reason) = measure_stage!(
+                            stages,
+                            "public_qualification",
+                            strategy.qualify_intent_public(
                                 &group.group,
                                 &p.calculation.calculation,
                                 index,
                                 detected_at,
                             )
-                            .map_err(HistoricalFailureCauseV1::Strategy)?
+                        )
+                        .map_err(HistoricalFailureCauseV1::Strategy)?
                         {
                             let result = InvalidatedBatchV1 {
                                 sent: vec![],
@@ -846,9 +874,12 @@ where
                 driver
                     .observe_at(at)
                     .map_err(HistoricalFailureCauseV1::Sim)?;
-                shared
-                    .strategy_current_observations(&driver)
-                    .map_err(HistoricalFailureCauseV1::Ledger)?
+                measure_stage!(
+                    stages,
+                    "current_public_observation_assembly",
+                    shared.strategy_current_observations(&driver)
+                )
+                .map_err(HistoricalFailureCauseV1::Ledger)?
             } else {
                 Vec::new()
             };
@@ -857,14 +888,17 @@ where
                     && !p.health_invalidated
                     && pending_at != Some(at)
                 {
-                    let (invalidated, calls) = shared
-                        .revalidate_calculation(
+                    let (invalidated, calls) = measure_stage!(
+                        stages,
+                        "revalidation_including_current_read_and_full_qualification",
+                        shared.revalidate_calculation(
                             strategy,
                             &p.calculation.calculation,
                             &current_input,
                             at,
                         )
-                        .map_err(HistoricalFailureCauseV1::Strategy)?;
+                    )
+                    .map_err(HistoricalFailureCauseV1::Strategy)?;
                     health_summary.qualification_calls += calls;
                     if invalidated.is_some() {
                         p.health_invalidated = true;
@@ -874,8 +908,10 @@ where
                         dirty = true;
                     }
                 }
-                health_at = strategy
-                    .next_health_evaluation_at(
+                health_at = measure_stage!(
+                    stages,
+                    "next_health_evaluation_including_dependency_lookup",
+                    strategy.next_health_evaluation_at(
                         &current_input,
                         pending
                             .as_ref()
@@ -883,7 +919,8 @@ where
                             .map(|p| &p.calculation.calculation),
                         at,
                     )
-                    .filter(|next| *next > at);
+                )
+                .filter(|next| *next > at);
             }
             drop(current_input);
             // 公开组可令已算完的批次立即到期，不能沿用循环开头的旧发送时间。
@@ -906,16 +943,23 @@ where
                 if p.health_invalidated {
                     dirty = true;
                 } else {
-                    driver
-                        .wait_for_recording_capacity()
-                        .map_err(HistoricalFailureCauseV1::Sim)?;
+                    measure_stage!(
+                        stages,
+                        "recording_stabilization_wait",
+                        driver.wait_for_recording_capacity()
+                    )
+                    .map_err(HistoricalFailureCauseV1::Sim)?;
                     let mut decision = driver
                         .send_decision_at(p.calculation.calculation.input_cutoff.clone(), at)
                         .map_err(HistoricalFailureCauseV1::Sim)?;
                     let dispatched = if health_enabled {
-                        let result = shared
-                            .dispatch_strategy_qualified(&mut decision, strategy, p.calculation)
-                            .await;
+                        let result = measure_stage!(
+                            stages,
+                            "dispatch_including_reserve_full_qualification_bridge_sim",
+                            shared
+                                .dispatch_strategy_qualified(&mut decision, strategy, p.calculation)
+                                .await
+                        );
                         match result {
                             Ok(QualifiedStrategyDispatchV1::Dispatched {
                                 dispatch,
@@ -958,10 +1002,14 @@ where
                         }
                     } else {
                         Some(
-                            shared
-                                .dispatch_strategy(&mut decision, strategy, p.calculation)
-                                .await
-                                .map_err(HistoricalFailureCauseV1::Dispatch)?,
+                            measure_stage!(
+                                stages,
+                                "dispatch_including_reserve_bridge_sim",
+                                shared
+                                    .dispatch_strategy(&mut decision, strategy, p.calculation)
+                                    .await
+                            )
+                            .map_err(HistoricalFailureCauseV1::Dispatch)?,
                         )
                     };
                     if let Some(StrategyDispatchV1::Continue {
@@ -995,9 +1043,12 @@ where
                     if let Some(market) = market
                         && !driver.has_enrolled_market(&market.condition_id)
                     {
-                        driver
-                            .wait_for_recording_capacity()
-                            .map_err(HistoricalFailureCauseV1::Sim)?;
+                        measure_stage!(
+                            stages,
+                            "recording_stabilization_wait",
+                            driver.wait_for_recording_capacity()
+                        )
+                        .map_err(HistoricalFailureCauseV1::Sim)?;
                         driver
                             .enroll_market(MarketEnrollmentRequestV1 {
                                 enrollment_request_id: market.condition_id.0.clone(),
@@ -1017,28 +1068,40 @@ where
                             .map_err(HistoricalFailureCauseV1::Sim)?;
                     }
                 }
-                driver
-                    .wait_for_recording_capacity()
-                    .map_err(HistoricalFailureCauseV1::Sim)?;
-                driver
-                    .hidden_bucket(bucket)
-                    .map_err(HistoricalFailureCauseV1::Sim)?;
-                unconsumed_required_trigger_at = None;
-                next_hidden = hidden
-                    .next()
-                    .transpose()
-                    .map_err(HistoricalFailureCauseV1::Material)?;
-            }
-            driver
-                .wait_for_recording_capacity()
+                measure_stage!(
+                    stages,
+                    "recording_stabilization_wait",
+                    driver.wait_for_recording_capacity()
+                )
                 .map_err(HistoricalFailureCauseV1::Sim)?;
+                measure_stage!(
+                    stages,
+                    "sim_hidden_bucket_including_noe",
+                    driver.hidden_bucket(bucket)
+                )
+                .map_err(HistoricalFailureCauseV1::Sim)?;
+                unconsumed_required_trigger_at = None;
+                next_hidden =
+                    measure_stage!(stages, "hidden_source_wait_and_acquisition", hidden.next())
+                        .transpose()
+                        .map_err(HistoricalFailureCauseV1::Material)?;
+            }
+            measure_stage!(
+                stages,
+                "recording_stabilization_wait",
+                driver.wait_for_recording_capacity()
+            )
+            .map_err(HistoricalFailureCauseV1::Sim)?;
             driver
                 .observe_at(at)
                 .map_err(HistoricalFailureCauseV1::Sim)?;
             if operating {
-                shared
-                    .apply_closed()
-                    .map_err(HistoricalFailureCauseV1::Ledger)?;
+                measure_stage!(
+                    stages,
+                    "apply_closed_including_noe_claim_and_ledger",
+                    shared.apply_closed()
+                )
+                .map_err(HistoricalFailureCauseV1::Ledger)?;
             }
             if pending.is_none() && dirty && start_at.is_none() {
                 start_at = Some(
@@ -1056,21 +1119,32 @@ where
             if pending.is_none() && start_at == Some(at) {
                 start_at = None;
                 let input = if health_enabled {
-                    shared.strategy_observation_input_with_trade_details(
-                        &mut driver,
-                        strategy.requires_trade_economics_details(),
+                    measure_stage!(
+                        stages,
+                        "strategy_input_assembly",
+                        shared.strategy_observation_input_with_trade_details(
+                            &mut driver,
+                            strategy.requires_trade_economics_details(),
+                        )
                     )
                 } else {
-                    shared.strategy_input_with_trade_details(
-                        &mut driver,
-                        strategy.requires_trade_economics_details(),
+                    measure_stage!(
+                        stages,
+                        "strategy_input_assembly",
+                        shared.strategy_input_with_trade_details(
+                            &mut driver,
+                            strategy.requires_trade_economics_details(),
+                        )
                     )
                 }
                 .map_err(HistoricalFailureCauseV1::Ledger)?;
                 if let Some(input) = input {
-                    let calculation = input
-                        .calculate(strategy, at)
-                        .map_err(HistoricalFailureCauseV1::Strategy)?;
+                    let calculation = measure_stage!(
+                        stages,
+                        "calculation_including_cutoff_copy_and_decide",
+                        input.calculate(strategy, at)
+                    )
+                    .map_err(HistoricalFailureCauseV1::Strategy)?;
                     let observation_at = calculation
                         .input_cutoff
                         .decision_time()
@@ -1094,13 +1168,16 @@ where
                     )
                     .map_err(HistoricalFailureCauseV1::Sim)?;
                     if health_enabled {
-                        health_at = strategy
-                            .next_health_evaluation_at(
+                        health_at = measure_stage!(
+                            stages,
+                            "next_health_evaluation_including_dependency_lookup",
+                            strategy.next_health_evaluation_at(
                                 &driver.frames_at_observation(),
                                 Some(&calculation),
                                 at,
                             )
-                            .filter(|next| *next > at);
+                        )
+                        .filter(|next| *next > at);
                     }
                     pending = Some(Pending {
                         calculation: calculation.complete(completed_at),
@@ -1131,13 +1208,16 @@ where
             let immediate_start =
                 pending.is_none() && (start_at == Some(at) || evaluation_at == Some(at));
             if required == Some(at) && !immediate_pending && !immediate_start {
-                driver
-                    .advance_before(at.checked_add(1).ok_or_else(|| {
+                measure_stage!(
+                    stages,
+                    "sim_advance_before_including_noe",
+                    driver.advance_before(at.checked_add(1).ok_or_else(|| {
                         HistoricalFailureCauseV1::Sim(SimRunActorErrorV2::InvalidBusinessRequest(
                             "历史时序溢出",
                         ))
                     })?)
-                    .map_err(HistoricalFailureCauseV1::Sim)?;
+                )
+                .map_err(HistoricalFailureCauseV1::Sim)?;
                 unconsumed_required_trigger_at = None;
             }
             // 初始化及隐藏来源可早于经营范围；保留其业务时刻，不让统计前沿倒退。
@@ -1174,9 +1254,12 @@ where
         driver
             .finish_input_at(tail_at)
             .map_err(HistoricalFailureCauseV1::Sim)?;
-        shared
-            .apply_closed()
-            .map_err(HistoricalFailureCauseV1::Ledger)?;
+        measure_stage!(
+            stages,
+            "apply_closed_including_noe_claim_and_ledger",
+            shared.apply_closed()
+        )
+        .map_err(HistoricalFailureCauseV1::Ledger)?;
         // 原尾观察已领取经济反馈；在该观察时点更新统计，随后延续至范围结束。
         if tail_at >= economics_start {
             sample_day_economics(&driver, &shared, tail_at, &mut day_economics);
@@ -1201,8 +1284,7 @@ where
             result.day_economics = day_economics.summary();
             result.source_health = health_enabled.then_some(health_summary);
             if normal {
-                driver
-                    .stop_and_drain()
+                measure_stage!(stages, "recording_stop_and_drain", driver.stop_and_drain())
                     .map_err(|cause| HistoricalRunFailureV1 {
                         cause: HistoricalFailureCauseV1::Sim(cause),
                         report: None,

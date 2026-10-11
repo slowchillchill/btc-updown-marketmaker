@@ -698,6 +698,12 @@ impl SimEventLogRecoveryV2 {
             .write(true)
             .open(path)
             .map_err(|error| io_error("打开单一事件日志", error))?;
+        Self::from_file(file, max_group_bytes)
+    }
+    fn from_file(
+        file: File,
+        max_group_bytes: usize,
+    ) -> Result<(RunOpenedV2, Self), SimEventLogErrorV2> {
         let mut reader = BufReader::new(file);
         let is_day = reader
             .fill_buf()
@@ -1124,6 +1130,65 @@ mod tests {
             };
             groups.push(group);
         }
+    }
+
+    // #185 窄只读辅助：复用日布局解码器，只读取三笔成交所在的早期SIM前缀。
+    #[test]
+    #[ignore = "explicit old SIMDAY01 path, end time and new evidence path required"]
+    fn issue185_readonly_early_day_requests() {
+        let path = std::env::var("ISSUE185_OLD_SIM").unwrap();
+        let end: i64 = std::env::var("ISSUE185_TRACE_END_MS")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let output = std::env::var("ISSUE185_SIM_TRACE_OUTPUT").unwrap();
+        let (opened, mut reader) =
+            SimEventLogRecoveryV2::from_file(File::open(path).unwrap(), 16 << 20).unwrap();
+        assert!(reader.historical_day_binding_for_tests().is_some());
+        let mut requests = Vec::new();
+        let mut buckets = Vec::new();
+        let mut count = 0u64;
+        let mut last_at = None;
+        loop {
+            let (next, group) = reader.next_group().unwrap();
+            reader = next;
+            let Some(group) = group else {
+                break;
+            };
+            count += 1;
+            for input in group {
+                match input {
+                    LoggedBusinessInputV2::PublicRequest {
+                        send_time,
+                        cutoff,
+                        request,
+                    } => {
+                        requests.push(serde_json::json!({"send_time":send_time,"cutoff":cutoff.into_trusted(),"request":request}));
+                    }
+                    LoggedBusinessInputV2::DayHiddenStepBucket(bucket) => {
+                        last_at = Some(bucket.bucket_time_utc_ms);
+                        buckets.push(serde_json::json!({"applied_input_position":bucket.applied_input_position,"bucket_time_utc_ms":bucket.bucket_time_utc_ms,"index_start":bucket.index_start,"index_end":bucket.index_end,"closure":bucket.closure}));
+                    }
+                    LoggedBusinessInputV2::PublicObserveTime(at) => {
+                        last_at = Some(at.logical_time_utc_ms);
+                    }
+                    _ => (),
+                }
+            }
+            if last_at.is_some_and(|at| at > end) {
+                break;
+            }
+        }
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output)
+            .unwrap();
+        serde_json::to_writer_pretty(file, &serde_json::json!({"opened":opened,"groups_read":count,"last_at":last_at,"bytes_read_through":reader.last_complete_offset,"requests":requests,"hidden_buckets":buckets})).unwrap();
+        println!(
+            "readonly_sim_groups={count} bytes_through={} last_at={last_at:?}",
+            reader.last_complete_offset
+        );
     }
 
     fn day_binding() -> crate::public_consumption::HistoricalDayLogBindingV1 {

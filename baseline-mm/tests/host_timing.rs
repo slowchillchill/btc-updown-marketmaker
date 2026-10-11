@@ -424,7 +424,7 @@ async fn representative_host_calculation_timing() {
     let material = material(&dpt);
     let mut cells = Vec::new();
     for state in ["empty", "resting", "single_leg"] {
-        for candidate in candidates {
+        for candidate in candidates.iter().filter(|c| c["identifier"] == "center") {
             let id = candidate["identifier"].as_str().unwrap();
             println!("setup/mature: {state}/{id}, 301 source points");
             let root = temp.path().join(format!("{state}-{id}"));
@@ -474,7 +474,10 @@ async fn representative_host_calculation_timing() {
             for (n, &g) in material.history.iter().enumerate() {
                 advance(&mut driver, g);
                 let input = shared
-                    .strategy_observation_input(&mut driver)
+                    .strategy_observation_input_with_trade_details(
+                        &mut driver,
+                        strategy.requires_trade_economics_details(),
+                    )
                     .unwrap()
                     .unwrap();
                 let at = input
@@ -566,23 +569,30 @@ async fn representative_host_calculation_timing() {
                 .logical_time_utc_ms();
             let economics = format!("{:?}", before.action_before.economics());
             let trades = format!("{:?}", before.trade_economics);
-            let mut samples = Vec::new();
+            let mut assembly_samples = Vec::new();
+            let mut decide_samples = Vec::new();
             let mut last = None;
+            let requires_details = strategy.requires_trade_economics_details();
             for n in 0..=32 {
                 let start = Instant::now();
                 let input = shared
-                    .strategy_observation_input(&mut driver)
+                    .strategy_observation_input_with_trade_details(&mut driver, requires_details)
                     .unwrap()
                     .unwrap();
-                let calculation = input.calculate(&mut strategy, at).unwrap();
-                let elapsed = start.elapsed().as_nanos() as u64;
-                std::hint::black_box(&calculation);
+                let assembly_ns = start.elapsed().as_nanos() as u64;
+                let start = Instant::now();
+                let output = strategy.decide(&input, at).unwrap();
+                let decide_ns = start.elapsed().as_nanos() as u64;
+                std::hint::black_box(&output);
                 if n > 0 {
-                    samples.push(elapsed);
+                    assembly_samples.push(assembly_ns);
+                    decide_samples.push(decide_ns);
                 }
-                last = Some(calculation);
+                last = Some(output);
             }
-            println!("raw_samples_ns: {state}/{id} {samples:?}");
+            println!(
+                "raw_samples_ns: {state}/{id} assembly={assembly_samples:?} decide={decide_samples:?}"
+            );
             let after = shared
                 .strategy_observation_input(&mut driver)
                 .unwrap()
@@ -590,7 +600,7 @@ async fn representative_host_calculation_timing() {
             assert_eq!(format!("{:?}", after.action_before.economics()), economics);
             assert_eq!(format!("{:?}", after.trade_economics), trades);
             let last = last.unwrap();
-            let (d, intents) = diagnostics(&last.output);
+            let (d, intents) = diagnostics(&last);
             let current = d
                 .markets
                 .iter()
@@ -612,19 +622,23 @@ async fn representative_host_calculation_timing() {
                 (sigma_usd_per_sqrt_second - expected).abs() < 1e-10,
                 "real 300-pair variance: {sigma_usd_per_sqrt_second} vs {expected}"
             );
-            let mut sorted = samples.clone();
-            sorted.sort_unstable();
-            let summary = json!({"p50_ns":sorted[15],"p95_ns":sorted[30],"max_ns":sorted[31]});
+            let nearest_rank = |samples: &[u64]| {
+                let mut sorted = samples.to_vec();
+                sorted.sort_unstable();
+                json!({"p50_ns":sorted[15],"p95_ns":sorted[30],"max_ns":sorted[31]})
+            };
+            let assembly_summary = nearest_rank(&assembly_samples);
+            let decide_summary = nearest_rank(&decide_samples);
             println!(
-                "measured: {state}/{id}, {summary}, choice={:?}, intents={}",
+                "measured: {state}/{id}, assembly={assembly_summary}, decide={decide_summary}, choice={:?}, intents={}",
                 current.choice,
                 intents.len()
             );
-            cells.push(json!({"state":state,"candidate":id,"samples_ns":samples,"nearest_rank":summary,"current_diagnostic":current,"closed_diagnostics":d.markets.iter().filter(|m|m.condition_id==ConditionId(condition(0))||m.condition_id==ConditionId(condition(1))).collect::<Vec<_>>(),"intents":intents.iter().map(|i|format!("{:?}",i.intent)).collect::<Vec<_>>(),"account_economics_debug":economics,"trades_debug":trades}));
+            cells.push(json!({"state":state,"candidate":id,"requires_trade_economics_details":requires_details,"assembly_samples_ns":assembly_samples,"decide_samples_ns":decide_samples,"assembly_nearest_rank":assembly_summary,"decide_nearest_rank":decide_summary,"current_diagnostic":current,"closed_diagnostics":d.markets.iter().filter(|m|m.condition_id==ConditionId(condition(0))||m.condition_id==ConditionId(condition(1))).collect::<Vec<_>>(),"intents":intents.iter().map(|i|format!("{:?}",i.intent)).collect::<Vec<_>>(),"account_economics_debug":economics,"trades_debug":trades}));
         }
     }
-    assert_eq!(cells.len() * 32, 672);
-    let output = json!({"format":"issue185-host-calculation-timing-v1","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rules_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"candidates_sha256":hash(candidates_bytes),"markets":866,"history_points":301,"history_span_ms":300000,"warmup_per_cell":1,"samples_per_cell":32,"sample_count":672,"timed_path":"SharedExecutionV2::strategy_observation_input -> StrategyInputV1::calculate","cells":cells});
+    assert_eq!(cells.len() * 32, 96);
+    let output = json!({"format":"issue185-host-stage-timing-v2","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rules_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"candidates_sha256":hash(candidates_bytes),"markets":866,"history_points":301,"history_span_ms":300000,"warmup_per_cell":1,"samples_per_cell":32,"sample_count":96,"timed_path":"separate strategy_observation_input_with_trade_details and pure StrategyV1::decide","cells":cells});
     std::fs::write(
         std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(),
         serde_json::to_vec_pretty(&output).unwrap(),
