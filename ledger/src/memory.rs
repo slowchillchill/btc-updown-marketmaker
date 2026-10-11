@@ -231,6 +231,7 @@ impl LedgerWriterV1 {
                 source_reference,
                 ..
             } => {
+                let quantity = lifecycle_quantity(evidence);
                 let Some(evidence) = ledger_evidence(evidence) else {
                     if matches!(
                         evidence,
@@ -254,6 +255,7 @@ impl LedgerWriterV1 {
                     at,
                     &source_reference.record,
                     &evidence,
+                    quantity,
                 )?
             }
             NormalizationRecord::Pending { .. } if self.account.is_some() => {
@@ -323,6 +325,40 @@ fn ledger_control<R>(result: &MemoryControl<R>) -> Option<LedgerControl<MemoryId
         | SourceNeutralControlResult::TradesQuery { .. } => return None,
     })
 }
+fn lifecycle_quantity<R>(
+    evidence: &SourceNeutralEvidenceKind<
+        SourceNeutralTradeLifecycleResultV2<MemoryIdentity>,
+        MemoryControl<R>,
+        MemoryIdentity,
+    >,
+) -> Option<LifecycleQuantityV1> {
+    match evidence {
+        SourceNeutralEvidenceKind::Control {
+            result:
+                SourceNeutralControlResult::Submission {
+                    outcome: SourceNeutralSubmissionOutcomeV2::Accepted { measurement, .. },
+                },
+        } => match measurement {
+            SourceNeutralSubmissionMeasurementV1::Base {
+                open_base_quantity_shares,
+                ..
+            } => Some(LifecycleQuantityV1::SubmissionOpen(
+                open_base_quantity_shares.clone(),
+            )),
+            SourceNeutralSubmissionMeasurementV1::QuoteBudget { .. } => None,
+        },
+        SourceNeutralEvidenceKind::TradeLifecycle { result } => maker_quantity(result),
+        SourceNeutralEvidenceKind::TradeLifecycleV3 { result } => maker_quantity(&result.result),
+        _ => None,
+    }
+}
+fn maker_quantity(
+    result: &SourceNeutralTradeLifecycleResultV2<MemoryIdentity>,
+) -> Option<LifecycleQuantityV1> {
+    (result.liquidity_role == contracts::TradeLiquidityRoleV2::MakerInferred)
+        .then(|| LifecycleQuantityV1::MakerMatch(result.base_quantity_shares.clone()))
+}
+
 fn ledger_evidence<R>(
     e: &SourceNeutralEvidenceKind<
         SourceNeutralTradeLifecycleResultV2<MemoryIdentity>,
