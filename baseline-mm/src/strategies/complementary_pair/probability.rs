@@ -46,19 +46,19 @@ pub(super) fn window(rule: BtcSettlementReferenceV1) -> i64 {
     }
 }
 impl SignalMemory {
-    pub(super) fn estimate(
+    pub(super) fn maintain_history(
         &mut self,
         o: &MarketBusinessObservationV1,
         now: i64,
         c: &ProbabilityConfigV1,
-    ) -> Result<ProbabilityEstimateV1, StrategyErrorV1> {
-        use EstimateUnavailableV1 as U;
+        spot_healthy: bool,
+    ) -> Result<Option<(f64, i64)>, StrategyErrorV1> {
         let end = o.market.window.end_at_utc_ms;
         if now >= end {
-            return Ok(ProbabilityEstimateV1::Unavailable(U::MarketEnded));
+            return Ok(None);
         }
         let Some(rule) = value(&o.settlement_reference).copied() else {
-            return Ok(ProbabilityEstimateV1::Unavailable(U::MissingSettlementRule));
+            return Ok(None);
         };
         let w = window(rule);
         let twap = match rule {
@@ -92,13 +92,12 @@ impl SignalMemory {
                 })
             });
         let Some((price, time)) = price else {
-            return Ok(ProbabilityEstimateV1::Unavailable(
-                U::MissingSettlementPrice,
-            ));
+            return Ok(None);
         };
         let s = spot_price_number_v1(price)?;
         // 只有现价样本进入持价路径；rolling TWAP回退只参与未来水平估计。
-        if spot.is_some()
+        if spot_healthy
+            && spot.is_some()
             && spot_sample_acceptance_v1(time, now, self.chainlink.back().map(|(t, _)| *t))
                 == SpotSampleAcceptanceV1::Accepted
         {
@@ -112,6 +111,29 @@ impl SignalMemory {
         {
             self.chainlink.pop_front();
         }
+        Ok(Some((s, time)))
+    }
+    pub(super) fn estimate(
+        &mut self,
+        o: &MarketBusinessObservationV1,
+        now: i64,
+        c: &ProbabilityConfigV1,
+        price: Option<(f64, i64)>,
+    ) -> Result<ProbabilityEstimateV1, StrategyErrorV1> {
+        use EstimateUnavailableV1 as U;
+        let end = o.market.window.end_at_utc_ms;
+        if now >= end {
+            return Ok(ProbabilityEstimateV1::Unavailable(U::MarketEnded));
+        }
+        let Some(rule) = value(&o.settlement_reference).copied() else {
+            return Ok(ProbabilityEstimateV1::Unavailable(U::MissingSettlementRule));
+        };
+        let w = window(rule);
+        let Some((s, time)) = price else {
+            return Ok(ProbabilityEstimateV1::Unavailable(
+                U::MissingSettlementPrice,
+            ));
+        };
         let reference = match &o.effective_reference {
             EffectiveMarketReferenceV1::OfficialAnchor(f) => {
                 value(f).map(|a| (&a.price_usd_per_btc, false))

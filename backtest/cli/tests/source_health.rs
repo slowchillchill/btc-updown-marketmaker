@@ -51,6 +51,15 @@ impl StrategyV1 for Trace {
             .set(self.deadline_ns.get() + started.elapsed().as_nanos());
         result
     }
+    fn qualify_intent_public(
+        &self,
+        group: &ClosedBusinessGroupV1,
+        c: &StrategyCalculationV1<Self::Diagnostics>,
+        index: usize,
+        at: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        self.strategy.qualify_intent_public(group, c, index, at)
+    }
     fn qualify_intent(
         &mut self,
         input: &StrategyCurrentReadV1<'_>,
@@ -1227,4 +1236,64 @@ fn actual_baseline_day_restores_signal_memory_pending_calculation_and_execution_
         after[0].candidates[0].report
     );
     assert_eq!(std::fs::read(&config.sim_log).unwrap(), original);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn same_millisecond_epoch_failure_then_recovery_invalidates_due_frozen_pair_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = fixture(temp.path(), "100000", &[800]);
+    // 初始双腿asks均0.6满足原经营比较；健康配对在1301计算、1701发送到期。
+    // 新epoch的两条独立消息均公开于1701，先要求另一腿快照，后恢复。
+    config.preparation.scope.received_end_utc_ms = BASE + 2200;
+    replace_books(
+        &config,
+        &[
+            book("20", 1100, 1100, 1, "epoch-a", "0.6"),
+            book("3", 1100, 1100, 2, "epoch-a", "0.6"),
+            book("20", 1600, 1600, 1, "epoch-b", "0.6"),
+            book("3", 1600, 1600, 2, "epoch-b", "0.6"),
+        ],
+    );
+    let (report, trace) = run(&config, rules, strategy_config()).await;
+    println!(
+        "scenario_decisions={:?}",
+        trace
+            .decisions
+            .iter()
+            .map(|(at, d, intents)| (
+                at - BASE,
+                d.markets
+                    .iter()
+                    .map(|m| (&m.probability, &m.choice, &m.source_health))
+                    .collect::<Vec<_>>(),
+                intents
+            ))
+            .collect::<Vec<_>>()
+    );
+    let health = report.source_health.unwrap();
+    assert_eq!(trace.invalidated, 1);
+    assert_eq!(health.invalidated_batches, 1);
+    let invalidated = health.last_invalidated_calculation_timing.unwrap();
+    assert_eq!(invalidated.scheduled_send_at_utc_ms, BASE + 1701);
+    assert!(invalidated.actual_sent_at_utc_ms.is_none());
+    assert!(
+        !trace.sent.iter().any(|(at, _)| *at == BASE + 1701),
+        "旧冻结请求不发送"
+    );
+    assert!(
+        trace
+            .decisions
+            .iter()
+            .any(|(at, d, intents)| *at == BASE + 1701
+                && !intents.is_empty()
+                && d.markets.iter().all(|m| m.source_health.is_empty())),
+        "消费同毫秒恢复组后在最早合法时刻重算"
+    );
+    assert!(
+        trace
+            .sent
+            .iter()
+            .any(|(at, kind)| *at == BASE + 2101 && kind == "pair"),
+        "新计算继续支付原200ms计算和200ms发送等待"
+    );
 }

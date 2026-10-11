@@ -119,6 +119,16 @@ pub trait StrategyV1 {
     ) -> Option<i64> {
         None
     }
+    /// 每个成功消费的公开组只检查冻结动作的公开依赖；不读取账户或重算策略。
+    fn qualify_intent_public(
+        &self,
+        _group: &ClosedBusinessGroupV1,
+        _calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        _intent_index: usize,
+        _at: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        Ok(IntentQualificationV1::Qualified)
+    }
     /// 当前合法事实与原冻结决定分别提供，不能以新事实改写原业务值。
     fn qualify_intent(
         &mut self,

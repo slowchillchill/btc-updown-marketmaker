@@ -742,10 +742,10 @@ where
                 == Some(at)
             {
                 let mut delivered_group = None;
-                if let Some(group) = driver
+                let prepared_group = driver
                     .next_prepared_group()
-                    .map_err(HistoricalFailureCauseV1::Sim)?
-                {
+                    .map_err(HistoricalFailureCauseV1::Sim)?;
+                if let Some(group) = &prepared_group {
                     if operating_start.is_some() {
                         let catalog = context.catalog.read().unwrap();
                         let initial = catalog
@@ -790,7 +790,47 @@ where
                 driver
                     .wait_for_recording_capacity()
                     .map_err(HistoricalFailureCauseV1::Sim)?;
-                driver.next_group().map_err(HistoricalFailureCauseV1::Sim)?;
+                let applied = driver.next_group().map_err(HistoricalFailureCauseV1::Sim)?;
+                // 每个合法组都检查，包括发送恰好到期的同毫秒；恢复不能复活旧决定。
+                if health_enabled
+                    && let Some(p) = pending.as_mut()
+                    && !p.health_invalidated
+                    && let Some(group) = &prepared_group
+                    && let Some((receipt, cutoff)) = applied
+                    && let StrategyOutputV1::Continue { intents, .. } =
+                        &p.calculation.calculation.output
+                {
+                    let detected_at = receipt.execution_time().logical_time_utc_ms();
+                    for index in 0..intents.len() {
+                        health_summary.qualification_calls += 1;
+                        if let IntentQualificationV1::Invalidated(reason) = strategy
+                            .qualify_intent_public(
+                                &group.group,
+                                &p.calculation.calculation,
+                                index,
+                                detected_at,
+                            )
+                            .map_err(HistoricalFailureCauseV1::Strategy)?
+                        {
+                            let result = InvalidatedBatchV1 {
+                                sent: vec![],
+                                invalidated_intent_index: index,
+                                reason,
+                                observed_cutoff: cutoff,
+                                detected_at_utc_ms: detected_at,
+                                release_errors: vec![],
+                            };
+                            strategy.invalidated(&p.calculation.calculation, &result);
+                            p.health_invalidated = true;
+                            p.completed_at = p.completed_at.max(detected_at);
+                            health_summary.invalidated_batches += 1;
+                            health_summary.last_invalidated_calculation_timing =
+                                Some(p.record.clone());
+                            dirty = true;
+                            break;
+                        }
+                    }
+                }
                 if let Some((position, initial, dependency)) = delivered_group {
                     let phase = if operating {
                         &mut delivery_summary.within_operating_range
@@ -846,8 +886,16 @@ where
                     .filter(|next| *next > at);
             }
             drop(current_input);
+            // 公开组可令已算完的批次立即到期，不能沿用循环开头的旧发送时间。
+            let pending_due = pending.as_ref().is_some_and(|p| {
+                if p.health_invalidated {
+                    p.completed_at == at
+                } else {
+                    p.send_at == at
+                }
+            });
             // 已冻结发送先于本毫秒完整隐藏桶闭合，允许原 SIM 请求/行情竞速。
-            if pending_at == Some(at) {
+            if pending_due {
                 let p = pending.take().expect("待完成计算");
                 if matches!(
                     p.calculation.calculation.output,
