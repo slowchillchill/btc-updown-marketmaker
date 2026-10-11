@@ -80,6 +80,9 @@ def main():
     destination.parent.mkdir(parents=True, exist_ok=True)
     # 不覆盖前次准备或研究的配置。
     with destination.open('x') as output:
+        # 同一候选的run.json、SIM日志和结果共用此父目录；NOE/Ledger子目录由原owner创建。
+        for candidate in document['days'][0]['candidates']:
+            Path(candidate['run']['metadata_path']).parent.mkdir(parents=True, exist_ok=True)
         json.dump(document, output, ensure_ascii=False, indent=2)
         output.write('\n')
     print(destination)
