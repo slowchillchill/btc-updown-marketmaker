@@ -246,6 +246,15 @@ impl StrategyV1 for ComplementaryPairV1 {
     ) -> Option<i64> {
         self.health_deadline(input, calculation, at)
     }
+    fn qualify_intent_public(
+        &self,
+        group: &ClosedBusinessGroupV1,
+        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        index: usize,
+        at: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        Ok(self.qualify_public_group(group, calculation, index, at))
+    }
     fn qualify_intent(
         &mut self,
         input: &StrategyCurrentReadV1<'_>,
@@ -337,6 +346,11 @@ impl StrategyV1 for ComplementaryPairV1 {
         }
         let mut intents = Vec::new();
         let mut next = None;
+        let spot_scope = SourceStreamScopeV1 {
+            source: SourceStreamKindV1::ChainlinkSpot,
+            condition_id: None,
+            asset_or_symbol: "btc/usd".into(),
+        };
         for (f, s) in frames.iter().zip(&states) {
             let o = &f.observation;
             let probability_sources = self.probability_sources(o);
@@ -363,11 +377,23 @@ impl StrategyV1 for ComplementaryPairV1 {
                     })
                 })
                 .collect();
-            let p = if probability_healthy {
+            let spot_healthy = self
+                .source_health_state(o, &spot_scope, now)
+                .failure()
+                .is_none();
+            let price = if probability_healthy || spot_healthy {
                 self.signals
                     .entry(o.market.condition_id.0.clone())
                     .or_default()
-                    .estimate(o, now, &self.config.probability)?
+                    .maintain_history(o, now, &self.config.probability, spot_healthy)?
+            } else {
+                None
+            };
+            let p = if probability_healthy {
+                self.signals
+                    .get_mut(&o.market.condition_id.0)
+                    .expect("合格概率已维护信号记忆")
+                    .estimate(o, now, &self.config.probability, price)?
             } else {
                 ProbabilityEstimateV1::Unavailable(EstimateUnavailableV1::UnhealthySource)
             };

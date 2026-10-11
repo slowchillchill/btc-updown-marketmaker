@@ -127,6 +127,8 @@ DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完�
 
 `strategy_current_read` 先消费实际可见的 NOE/Ledger，再以 `observation_cutoff` 和 `frames_at_observation` 构造 `StrategyCurrentReadV1`。它借用原公开观察，复用原账户投影，不复制 L2 数量或改写 `Fresh/Stale`、NAV。`strategy_observation_input` 仅在实际计算时冻结当前观察；旧 `strategy_input` 保留原组快照语义。原 `StrategyCalculationV1` 的输入截止、意图和诊断继续冻结，复核的当前观察截止由结果单独关联。
 
+`qualify_intent_public` 默认返回 `Qualified`，供选用健康能力的宿主在每个成功消费的合法公开组之后检查冻结动作公开依赖。回调借用原 `ClosedBusinessGroupV1`，不要求账户读取或完整策略计算；当前组 cutoff 与消费时刻由宿主用于原 `InvalidatedBatchV1` 通知。未进入预留的 pending 失效没有已发前缀或资金释放。公开资格与完整资格共用原策略判断，公共层不解释诊断或扩大动作依赖。
+
 宿主在计算或等待期间调用 `revalidate_calculation`，发现第一项尚未尝试的资格失效时通过 `invalidated` 通知策略。历史宿主尚未进入整批预留，因此此处没有预留释放。最终发送走 `dispatch_strategy_qualified`，与旧 `execute_batch_reserved` 复用同一整批资金预留及逐项 Bridge 路径。每个尚未尝试项在记录 `submission-started` 之前复核；同批后项重新读取当时的本地资金与承诺，公共观察保持当前合法截止。已有真实提交证据的项只读原幂等结果，不按尚未发送处理。
 
 `QualifiedStrategyDispatchV1::Invalidated` 保留原完成计算及 `InvalidatedBatchV1`：已发回执前缀、第一失效序号、策略给定原因与来源作用域、当前观察截止、发现时刻和原 Ledger 释放错误。该序号之后的全部后缀只因停批未尝试；其中撤单不被冒称自身健康不合格。只释放本批拥有且明确无请求效果的未发送预留；已发或结果未知沿原义务保留。正常 NoTrade 仍为零请求；资格程序错误经 `QualifiedBatchErrorV1::Qualification` 返回，原提交错误经 `Execution` 返回，二者都不被改成资格失效或平台事实。
