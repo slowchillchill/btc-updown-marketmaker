@@ -1,6 +1,6 @@
 # 七候选连续六小时研究启动方案
 
-本轮代码交付完成最小汇总、预算保存和启动材料；正式研究尚未启动。
+本轮代码交付完成最小汇总、预算保存和启动材料；最初代码交付时，正式研究尚未启动。
 依据[#185当前授权D-0335](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6111218554)
 及[最小实施记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6111290180)。
 此代码PR不提供未运行的经营结果，也不关闭#185剩余研究任务。
@@ -26,6 +26,11 @@ RAYON_NUM_THREADS=16对应本轮主机16物理/32逻辑CPU，进度900s。不设
 获审提交后，将实际实现身份（三个原 `ImplementationIdentityV1` 字段）写入独立JSON，重新生成正式配置。
 代码审查期间的未提交配置只供核对，不代表已获审或可以启动。规则/finality复用原不可变材料；
 午夜初始化保留原metadata选择，范围结束和metadata初始化结束同时改为06:00。
+
+配置生成入口创建各候选 `run.json`、SIM日志和结果共用的产物父目录；NOE/Ledger子目录仍由原owner创建。
+首次正式启动因这些父目录缺失，在写 `run.json` 时返回ENOENT，尚未进入开户。修补用全新临时输出根执行
+真实helper命令，核对七个父目录及元数据文件可创建；不重跑Rust、研究或重新构建原二进制。
+修复后继续同一研究仍沿首次启动的绝对预算截止，不重新计七小时。
 
 以下变量由正式启动交接提供，公共文件不包含私有绝对路径。`SOURCE`是获审源码，`REQUEST_ROOT`是本轮独立产物根，
 `TARGET`是保留的共享Cargo缓存。`TEMPLATE`是旧已核定日配置，`BUSINESS`是上述七候选参数文件。
