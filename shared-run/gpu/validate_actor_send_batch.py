@@ -29,6 +29,7 @@ from input_frontier import InputCommitFrontier
 from latency import EmpiricalDelaySampler,byte_column
 from rules import PublicRuleGpu
 from actor_send import FrozenActorSend,ActorRequestSubmission,IntentRequestIdentities
+from task_requests import ActorRequestDirectory,ActorTaskRequests
 
 @dataclass(frozen=True)
 class SubmissionState:
@@ -57,7 +58,7 @@ class CompletedClock:
     def receive_first(self,enabled=None):return None
 
 
-def check(source,codec,*,two_buys=False):
+def check(source,codec,*,two_buys=False,task_owned=False):
     started=time.perf_counter();roots=3;yes=T([True]*roots,torch.bool);zero=T([0]*roots)
     balance=source['opening_ledger']['projection']['platform_confirmed_projection']
     spec=importlib.util.spec_from_file_location('actor_send_batch_platform',ROOT/'ledger/gpu/platform.py')
@@ -76,6 +77,11 @@ def check(source,codec,*,two_buys=False):
         return PublicSubmission(ledger,cancellations)
     public=run(opening)
     control=ActionControl(zero, T([0,0,2] if two_buys else [1,2,3]),T([[0,1]]*roots),T([source['sent_at'] if two_buys else 1414]*roots))
+    request_directory=None
+    if task_owned:
+        request_directory=ActorRequestDirectory(zero.device);request_directory.append('earlier-request')
+        task_requests=ActorTaskRequests(request_directory,tuple(source['run_id']+'/'+source['session_id']+'/root-'+str(root) for root in range(roots)))
+        task_binding=task_requests.bind(yes);control=task_binding.control(control.execute_at)
     original=source['posts'][0]['item']['order'];kind=original['kind']['FokMarket']
     spend=kind['spend_pusd'];price=kind['worst_price_pusd_per_share']
     from fractions import Fraction
@@ -95,7 +101,7 @@ def check(source,codec,*,two_buys=False):
     runtime=SubmissionState(run(lambda:MutationRequests.empty(integers([0]*roots),capacity=1,action_capacity=2)),frontier)
     sampler=EmpiricalDelaySampler.build((ROOT/'sim-system/config/latency-profiles'/source['profile_sha256']/'profile.json').read_bytes(),
         source['profile_sha256'],[source['session_seed'].encode('ascii')]*roots)
-    identity,offsets=byte_column([source['request_id'].encode(),b'earlier-request',b'batch-no-trade'] if two_buys else [b'earlier-request',b'batch-buy',b'batch-cancel',b'batch-no-trade'])
+    identity,offsets=request_directory.columns() if task_owned else byte_column([source['request_id'].encode(),b'earlier-request',b'batch-no-trade'] if two_buys else [b'earlier-request',b'batch-buy',b'batch-cancel',b'batch-no-trade'])
     # root1先前真实登记请求占满目录；此次Cancel只能续接，root0仍可完成Buy。
     requests,earlier=run(lambda:runtime.requests.register(sampler,identity,offsets,zero+int(two_buys),zero,
         runtime.input_frontier.next_sequence,T([1200]*roots),T([[0,-1]]*roots),T([[0,0]]*roots),
@@ -106,10 +112,11 @@ def check(source,codec,*,two_buys=False):
     condition=original['condition_id'];tokens=tuple(e['payload']['event']['asset']['token_id'] for e in source['initial'])
     ids=IntentRequestIdentities(tuple({'global_request_id':value,'caller_correlation_id':None} for value in
         ((source['request_id'],source['request_id'],'batch-no-trade') if two_buys else ('batch-buy','batch-cancel','batch-no-trade'))),((condition,),)*roots,(tokens,)*roots,({},)*roots)
+    if task_owned:ids=IntentRequestIdentities(task_binding.contexts,ids.conditions,ids.tokens,ids.orders)
     rule=PublicRuleGpu(source['rule'])
-    submission=ActorRequestSubmission(control,T([[0,1]]*roots),sampler,rule,identity,offsets,
+    submission=ActorRequestSubmission(control,T([[0,1]]*roots),sampler,rule,None if task_owned else identity,None if task_owned else offsets,
         ((condition,),)*roots,(tokens,)*roots,({(0,None):0,(1,None):1},)*roots,((source['market_end'],),)*roots,
-        codec,order_sequences=({},)*roots)
+        codec,order_sequences=({},)*roots,identity_directory=request_directory)
     publication=PublishedBody(action,reservation)
     clock=CompletedClock(runtime,public)
     sender=FrozenActorSend(publication,publication,control,ids,codec,submission,
@@ -121,6 +128,15 @@ def check(source,codec,*,two_buys=False):
     buy_sequence=values(first.receipt.input_sequence)[0];buy_arrival=first.receipt.arrived_at.cpu()[0].item()
     first_prefix=values(clock.public.ledger.current_local_prefix)
     bound_sequence=values(submission.submitted_legs.input_sequences)[:2]
+    if task_owned:
+        old_body=sender.requests;old_control=sender.control.global_requests.clone()
+        old_bytes=identity.clone();old_offsets=offsets.clone()
+        later_task=task_requests.bind(T([False,False,True],torch.bool))
+        assert later_task.contexts[:2]==(None,None) and later_task.slots.cpu().tolist()[:2]==[-1,-1]
+        current_bytes,current_offsets=request_directory.columns()
+        assert torch.equal(current_bytes[:len(old_bytes)],old_bytes) and torch.equal(current_offsets[:len(old_offsets)],old_offsets)
+        assert sender.requests is old_body and torch.equal(sender.control.global_requests,old_control)
+        assert submission.identity_bytes is None and submission.identity_offsets is None
     # 原root0已成功；另一根先遇推进未就绪，再遇公开Ledger扫描未就绪。
     original_advance=clock.advance_before
     clock.advance_before=lambda *args,**kwargs:SimpleNamespace(complete=T([True,False,True],torch.bool))
@@ -141,6 +157,10 @@ def check(source,codec,*,two_buys=False):
     assert values(clock.runtime.input_frontier.next_sequence)==[2,3,1]
     expected_prefix=[value+int(two_buys and root==1) for root,value in enumerate(first_prefix)]
     assert values(clock.public.ledger.current_local_prefix)==expected_prefix
+    if task_owned:
+        assert sender.requests is old_body and torch.equal(sender.control.global_requests,old_control)
+        for root,request in zip(*sender.requests,strict=True):
+            assert request['request']['context']==task_binding.contexts[root]
     assert clock.public.cancellations.registered.cpu().tolist()==[[False],[not two_buys],[False]]
     if two_buys:
         assert submission.submitted_legs.receipt_known.cpu().tolist()==[[True,False],[True,False],[False,False]]
@@ -193,11 +213,11 @@ def check(source,codec,*,two_buys=False):
     assert values(clock.runtime.input_frontier.next_sequence)==[2,3,1]
     assert values(clock.public.ledger.current_local_prefix)==expected_prefix
     return dict(passed=True,scope='published body / real batch dispatch / capacity continuation / per-root receipt and NoTrade completion; clock and Actor evaluation not run',
-        two_buys=two_buys,original_accepted_formation_read=two_buys,early_advance_preserves_receipt=True,early_ledger_preserves_receipt=True,first_sent=first.sent.cpu().tolist(),final_sent=third.sent.cpu().tolist(),next_input=values(clock.runtime.input_frontier.next_sequence),
+        two_buys=two_buys,task_owned=task_owned,original_accepted_formation_read=two_buys,early_advance_preserves_receipt=True,early_ledger_preserves_receipt=True,first_sent=first.sent.cpu().tolist(),final_sent=third.sent.cpu().tolist(),next_input=values(clock.runtime.input_frontier.next_sequence),
         elapsed_seconds=time.perf_counter()-started)
 
 if __name__=='__main__':
     source=json.loads(Path(sys.argv[1]).read_text())
     spec=importlib.util.spec_from_file_location('model_native_inputs',Path(os.environ['CARGO_TARGET_DIR'])/'debug/libmodel_native_inputs.so')
     codec=importlib.util.module_from_spec(spec);spec.loader.exec_module(codec)
-    print(json.dumps(check(source,codec,two_buys="--two-buys" in sys.argv)),flush=True)
+    print(json.dumps(check(source,codec,two_buys="--two-buys" in sys.argv,task_owned="--task-owned" in sys.argv)),flush=True)

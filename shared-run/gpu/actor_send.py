@@ -24,7 +24,7 @@ class IntentRequestIdentities:
     orders: tuple  # 原完整平台身份目录，键为原完整SIM u64，不能生成sim-N冒充。
 
     def __post_init__(self):
-        object.__setattr__(self,'contexts',tuple(dict(value) for value in self.contexts))
+        object.__setattr__(self,'contexts',tuple(None if value is None else dict(value) for value in self.contexts))
         object.__setattr__(self,'conditions',tuple(tuple(value) for value in self.conditions))
         object.__setattr__(self,'tokens',tuple(tuple(value) for value in self.tokens))
         object.__setattr__(self,'orders',tuple(dict(value) for value in self.orders))
@@ -45,7 +45,7 @@ def build_selected_requests(action,identities,codec):
     cancel_width=action.cancel_present.size(1);width=legs.present.size(1)
     encoded=[];selected=[]
     for root,family in enumerate(families):
-        if family<1:continue
+        if family<1 or identities.contexts[root] is None:continue
         if family in (1,2):
             body=[]
             for ordinal in range(1 if family==1 else 2):
@@ -193,12 +193,13 @@ class ActorRequestSubmission:
     所属pending列并调用原登记入口。条款仍由处理时SDK入口计算。
     """
     def __init__(self,control,send_events,sampler,rule,identity_bytes,identity_offsets,
-            conditions,tokens,bid_rows,market_end,codec,*,post_intents=None,order_sequences=None,population=None):
+            conditions,tokens,bid_rows,market_end,codec,*,post_intents=None,order_sequences=None,population=None,identity_directory=None):
         self.control=control;self.send_events=send_events
         self.sampler,self.rule,self.identity_bytes,self.identity_offsets=sampler,rule,identity_bytes,identity_offsets
         self.conditions,self.tokens,self.bid_rows,self.market_end=conditions,tokens,bid_rows,market_end
         self.population=population if population is not None else SubmittedActorRequests(post_intents)
         self.codec,self.post_intents,self.order_sequences=codec,self.population.post_intents,order_sequences
+        self.identity_directory=identity_directory
         self.prepared=None;self.submitted_legs=None;self.cancellation=None
         self.cancel_indices=None;self.legs_appended=False
 
@@ -208,7 +209,7 @@ class ActorRequestSubmission:
         roots=action.family.numel();device=action.family.device
         selected,original=requests
         directory={root:request for root,request in zip(selected,original,strict=True)}
-        families=action.family.cpu().tolist()
+        families=[family if root in directory else 0 for root,family in enumerate(action.family.cpu().tolist())]
         posts=[[] for _ in range(roots)];refs=[[] for _ in range(roots)];ordinals=[[] for _ in range(roots)]
         methods=[0]*roots;delayed=[[] for _ in range(roots)]
         population=[];assets=[];conditions=[];bids=[];ends=[]
@@ -290,9 +291,10 @@ class ActorRequestSubmission:
         buy=enabled & ((action.family==1)|(action.family==2))
         cancel=enabled & (action.family>=3)
         receipt=None;enough=torch.ones_like(enabled)
+        identity_bytes,identity_offsets=(self.identity_bytes,self.identity_offsets) if self.identity_directory is None else self.identity_directory.columns()
         if bool(buy.any().cpu()):
             runtime,ledger,receipt,buy_enough=Numbers.run_exact_batch(lambda:submit_post_orders(runtime,public.ledger,
-                self.sampler,self.identity_bytes,self.identity_offsets,self.control.global_requests,methods,
+                self.sampler,identity_bytes,identity_offsets,self.control.global_requests,methods,
                 input_sequences,self.control.execute_at,refs,ordinals,present,delayed,
                 torch.full_like(self.control.execute_at,self.rule.context['taker_delay_ms']),
                 self.control.leg_requests,self.send_events,buy,action.fault|input_fault))
@@ -313,7 +315,7 @@ class ActorRequestSubmission:
             methods,refs,ordinals,present=cancel_columns
             refs,ordinals,present=pad(refs,-1),pad(ordinals,0),pad(present,False)
             runtime,public,cancel_receipt,cancel_enough=Numbers.run_exact_batch(lambda:submit_cancellation(runtime,public,self.sampler,
-                self.identity_bytes,self.identity_offsets,self.control.global_requests,methods,input_sequences,
+                identity_bytes,identity_offsets,self.control.global_requests,methods,input_sequences,
                 self.control.execute_at,refs,ordinals,present,cancel,action.fault|input_fault))
             frontier,_=Numbers.run_exact_batch(lambda:runtime.input_frontier.commit(cancel&cancel_receipt.registered&cancel_enough&(cancel_receipt.fault==0)))
             runtime=replace(runtime,input_frontier=frontier)

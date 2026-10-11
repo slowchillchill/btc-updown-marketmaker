@@ -24,6 +24,7 @@ class FrozenActorTask:
     policy: object = None
     evaluation: object = None
     sender: object = None
+    request_identity: object = None  # 同一真实任务的RequestContext/稳定槽；started副本不再分配。
 
 
 class ActorModelQueue:
@@ -32,20 +33,23 @@ class ActorModelQueue:
     timing返回显式有限逻辑calculation/dispatch，不使用GPU墙钟。
     sender_factory将本任务已经绑定的评估/版本接原FrozenActorSend。
     """
-    def __init__(self,hidden,identities,initial_completed_at,policy_at_start,timing,sender_factory,*,row_roots=None,market_ends=None,release_markets=None):
+    def __init__(self,hidden,identities,initial_completed_at,policy_at_start,timing,sender_factory,*,row_roots=None,market_ends=None,release_markets=None,request_identities=None):
         self.hidden=hidden.clone();self.identities=identities.clone()
         self.last_completed_at=initial_completed_at.clone()
         self.policy_at_start=policy_at_start;self.timing=timing;self.sender_factory=sender_factory
         self.tasks=[]
         self.row_roots=torch.arange(len(identities),device=identities.device) if row_roots is None else row_roots
         self.market_ends=market_ends;self.release_markets=release_markets
+        self.request_identities=request_identities
 
     def enqueue(self,observation,active):
         calculation,dispatch=self.timing(observation)
         has_rows=torch.zeros_like(active,dtype=torch.int32).scatter_reduce(0,self.row_roots,
             (observation.frozen.role>=0).to(torch.int32),reduce='amax').bool()
-        self.tasks.append(FrozenActorTask(observation,(active&has_rows).clone(),torch.zeros_like(active,dtype=torch.int64),
-            calculation.clone(),dispatch.clone()))
+        accepted=active&has_rows
+        identity=None if self.request_identities is None else self.request_identities.bind(accepted)
+        self.tasks.append(FrozenActorTask(observation,accepted.clone(),torch.zeros_like(active,dtype=torch.int64),
+            calculation.clone(),dispatch.clone(),request_identity=identity))
 
     def next_event(self):
         at=torch.full_like(self.last_completed_at,torch.iinfo(torch.int64).max)
@@ -97,7 +101,8 @@ class ActorModelQueue:
             # 仅本次真实开始的根绑定这个版本，未开始根仍留原冻结队列。
             started=FrozenActorTask(task.observation,accepted,torch.ones_like(task.stage),
                 task.calculation_duration,task.dispatch_delay,event.at.clone(),event.at+task.calculation_duration,
-                event.at+task.calculation_duration+task.dispatch_delay,policy,evaluation)
+                event.at+task.calculation_duration+task.dispatch_delay,policy,evaluation,
+                request_identity=task.request_identity)
             self.tasks.append(started)
             task.stage=torch.where(accepted,3,task.stage)
         return ready,fault
