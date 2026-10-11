@@ -1109,14 +1109,20 @@ fn cancellation_scope(intent: &ModelIntentV1) -> Option<CancellationScopeV1<'_>>
 }
 impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
     fn condition_for_platform_id(&self, id: &str) -> Option<&ConditionId> {
+        let identity = Identity {
+            account: Arc::new(self.context.account_identity.clone()),
+            key: ::execution_normalization::MemoryIdentityKeyV1::Entity(
+                ::execution_normalization::SourceNeutralEntityKeyV1::Order {
+                    source_order_id: id.to_owned(),
+                },
+            ),
+        };
         self.orders
-            .iter()
-            .find(|(identity, _)| platform_id(identity) == id)
+            .get_key_value(&identity)
             .and_then(|(identity, state)| order_location(state, identity).map(|(c, _)| c))
             .or_else(|| {
                 self.cancel_locations
-                    .iter()
-                    .find(|(identity, _)| platform_id(identity) == id)
+                    .get_key_value(&identity)
                     .and_then(|(identity, r)| record_location(r, identity).map(|(c, _)| c))
             })
     }
