@@ -259,10 +259,10 @@ impl std::error::Error for TypedRawReadError {
 }
 
 #[derive(Clone, Copy)]
-struct DecodeContext<'a> {
-    source_kind: &'a str,
-    schema_version: &'a str,
-    first_row_index: u64,
+pub(crate) struct DecodeContext<'a> {
+    pub(crate) source_kind: &'a str,
+    pub(crate) schema_version: &'a str,
+    pub(crate) first_row_index: u64,
 }
 
 impl DecodeContext<'_> {
@@ -307,6 +307,7 @@ pub(crate) fn expected_schema(
     Ok(schema)
 }
 
+#[allow(dead_code)] // 独立 RecordBatch 的物理布局边界。
 fn validate_physical_schema(
     source_kind: &str,
     schema_version: &str,
@@ -782,6 +783,7 @@ fn validate_decoded_row(
     Ok(row)
 }
 
+#[allow(dead_code)] // 独立批次仍检查模式，文件 reader 使用已核布局。
 pub(crate) fn decode_typed_raw_record_batch(
     source_kind: &str,
     schema_version: &str,
@@ -790,6 +792,16 @@ pub(crate) fn decode_typed_raw_record_batch(
     scope: Option<&TypedRawReadScope>,
 ) -> Result<Vec<TypedRawRow>, TypedRawReadError> {
     validate_physical_schema(source_kind, schema_version, batch.schema().as_ref())?;
+    decode_typed_raw_batch_with_layout(source_kind, schema_version, batch, first_row_index, scope)
+}
+/// 文件读取器已经验证固定投影布局；仍逐行核对数据和位置。
+pub(crate) fn decode_typed_raw_batch_with_layout(
+    source_kind: &str,
+    schema_version: &str,
+    batch: &RecordBatch,
+    first_row_index: u64,
+    scope: Option<&TypedRawReadScope>,
+) -> Result<Vec<TypedRawRow>, TypedRawReadError> {
     let context = DecodeContext {
         source_kind,
         schema_version,
@@ -1082,7 +1094,7 @@ fn require_only_polymarket_payload_fields(
     Ok(())
 }
 
-fn required_string_column(
+pub(crate) fn required_string_column(
     batch: &RecordBatch,
     index: usize,
     row: usize,
@@ -1320,7 +1332,7 @@ fn optional_event_message(
     }))
 }
 
-fn required_timestamp_column(
+pub(crate) fn required_timestamp_column(
     batch: &RecordBatch,
     index: usize,
     row: usize,
@@ -1348,7 +1360,7 @@ fn optional_timestamp_column(
     ))
 }
 
-fn required_u64_column(
+pub(crate) fn required_u64_column(
     batch: &RecordBatch,
     index: usize,
     row: usize,
@@ -1405,451 +1417,394 @@ fn decode_polymarket_metadata(
         )? {
             continue;
         }
-        let raw_kind = required_string_column(batch, 0, row, "metadata_row_kind", context)?;
-        let schema_version = require_schema_version_value(
-            required_string_column(batch, 7, row, "schema_version", context)?,
-            row,
-            context,
-        )?;
-        let decoded = TypedRawRow::PolymarketMarketMetadata(Box::new(
-            PolymarketMarketMetadataRow {
-                metadata_row_kind: PolymarketMetadataRowKind::try_from(raw_kind.as_str())
-                    .map_err(|error| core_error(error, row, context))?,
-                timestamp_received: required_timestamp_column(
-                    batch,
-                    1,
-                    row,
-                    "timestamp_received",
-                    context,
-                )?,
-                collector_admission_sequence: required_u64_column(
-                    batch,
-                    2,
-                    row,
-                    "collector_admission_sequence",
-                    context,
-                )?,
-                collector_admission_time_utc_ms: required_timestamp_column(
-                    batch,
-                    3,
-                    row,
-                    "collector_admission_time_utc_ms",
-                    context,
-                )?,
-                metadata_origin: required_enum_column::<PolymarketMetadataOrigin>(
-                    batch,
-                    4,
-                    row,
-                    "metadata_origin",
-                    context,
-                )?,
-                collector_host_id: required_string_column(
-                    batch,
-                    5,
-                    row,
-                    "collector_host_id",
-                    context,
-                )?,
-                collector_region: required_string_column(
-                    batch,
-                    6,
-                    row,
-                    "collector_region",
-                    context,
-                )?,
-                schema_version,
-                slug: required_string_column(batch, 8, row, "slug", context)?,
-                condition_id: required_string_column(batch, 9, row, "condition_id", context)?,
-                clob_market_id: required_string_column(batch, 10, row, "clob_market_id", context)?,
-                asset_ids: required_string_column(batch, 11, row, "asset_ids", context)?,
-                market_start_utc: required_timestamp_column(
-                    batch,
-                    12,
-                    row,
-                    "market_start_utc",
-                    context,
-                )?,
-                market_end_utc: required_timestamp_column(
-                    batch,
-                    13,
-                    row,
-                    "market_end_utc",
-                    context,
-                )?,
-                fixed_identity_verified_at_utc: required_timestamp_column(
-                    batch,
-                    14,
-                    row,
-                    "fixed_identity_verified_at_utc",
-                    context,
-                )?,
-                market_lifecycle_state: required_enum_column::<MetadataMarketLifecycleState>(
-                    batch,
-                    15,
-                    row,
-                    "market_lifecycle_state",
-                    context,
-                )?,
-                market_runtime_role: required_enum_column::<MetadataMarketRuntimeRole>(
-                    batch,
-                    16,
-                    row,
-                    "market_runtime_role",
-                    context,
-                )?,
-                source_endpoint: optional_string_column(
-                    batch,
-                    17,
-                    row,
-                    "source_endpoint",
-                    context,
-                )?,
-                source_endpoint_unavailable_reason: optional_enum_column::<
-                    MetadataSourceEndpointUnavailableReason,
-                >(
-                    batch,
-                    18,
-                    row,
-                    "source_endpoint_unavailable_reason",
-                    context,
-                )?,
-                source_evidence_origin: optional_enum_column::<MetadataSourceEvidenceOrigin>(
-                    batch,
-                    19,
-                    row,
-                    "source_evidence_origin",
-                    context,
-                )?,
-                source_evidence_event_type: optional_enum_column::<MetadataSourceEvidenceEventType>(
-                    batch,
-                    20,
-                    row,
-                    "source_evidence_event_type",
-                    context,
-                )?,
-                source_evidence_channel: optional_enum_column::<MetadataSourceEvidenceChannel>(
-                    batch,
-                    21,
-                    row,
-                    "source_evidence_channel",
-                    context,
-                )?,
-                source_evidence_received_at_utc: optional_timestamp_column(
-                    batch,
-                    22,
-                    row,
-                    "source_evidence_received_at_utc",
-                    context,
-                )?,
-                row_evidence_validation_completed_at_utc: optional_timestamp_column(
-                    batch,
-                    23,
-                    row,
-                    "row_evidence_validation_completed_at_utc",
-                    context,
-                )?,
-                source_evidence_payload_json: optional_string_column(
-                    batch,
-                    24,
-                    row,
-                    "source_evidence_payload_json",
-                    context,
-                )?,
-                source_evidence_raw_sha256: optional_string_column(
-                    batch,
-                    25,
-                    row,
-                    "source_evidence_raw_sha256",
-                    context,
-                )?,
-                market_lifecycle_transition: optional_enum_column::<
-                    MetadataMarketLifecycleTransition,
-                >(
-                    batch,
-                    26,
-                    row,
-                    "market_lifecycle_transition",
-                    context,
-                )?,
-                lifecycle_scheduled_at_utc: optional_timestamp_column(
-                    batch,
-                    27,
-                    row,
-                    "lifecycle_scheduled_at_utc",
-                    context,
-                )?,
-                lifecycle_applied_at_utc: optional_timestamp_column(
-                    batch,
-                    28,
-                    row,
-                    "lifecycle_applied_at_utc",
-                    context,
-                )?,
-                market_runtime_role_transition: optional_enum_column::<
-                    MetadataMarketRuntimeRoleTransition,
-                >(
-                    batch,
-                    29,
-                    row,
-                    "market_runtime_role_transition",
-                    context,
-                )?,
-                runtime_role_scheduled_at_utc: optional_timestamp_column(
-                    batch,
-                    30,
-                    row,
-                    "runtime_role_scheduled_at_utc",
-                    context,
-                )?,
-                runtime_role_applied_at_utc: optional_timestamp_column(
-                    batch,
-                    31,
-                    row,
-                    "runtime_role_applied_at_utc",
-                    context,
-                )?,
-                metadata_fetch_start_utc: optional_timestamp_column(
-                    batch,
-                    32,
-                    row,
-                    "metadata_fetch_start_utc",
-                    context,
-                )?,
-                closed: optional_bool_column(batch, 33, row, "closed", context)?,
-                closed_time_raw: optional_string_column(
-                    batch,
-                    34,
-                    row,
-                    "closed_time_raw",
-                    context,
-                )?,
-                closed_time_utc: optional_timestamp_column(
-                    batch,
-                    35,
-                    row,
-                    "closed_time_utc",
-                    context,
-                )?,
-                closed_time_check_failure_reason: optional_enum_column::<
-                    MetadataClosedTimeCheckFailureReason,
-                >(
-                    batch,
-                    36,
-                    row,
-                    "closed_time_check_failure_reason",
-                    context,
-                )?,
-                automatically_resolved: optional_bool_column(
-                    batch,
-                    37,
-                    row,
-                    "automatically_resolved",
-                    context,
-                )?,
-                uma_resolution_status: optional_string_column(
-                    batch,
-                    38,
-                    row,
-                    "uma_resolution_status",
-                    context,
-                )?,
-                outcomes_raw: optional_string_column(batch, 39, row, "outcomes_raw", context)?,
-                outcome_prices_raw: optional_string_column(
-                    batch,
-                    40,
-                    row,
-                    "outcome_prices_raw",
-                    context,
-                )?,
-                active: optional_bool_column(batch, 41, row, "active", context)?,
-                active_unavailable_reason: optional_enum_column::<MetadataActiveUnavailableReason>(
-                    batch,
-                    42,
-                    row,
-                    "active_unavailable_reason",
-                    context,
-                )?,
-                accepting_orders: optional_bool_column(
-                    batch,
-                    43,
-                    row,
-                    "accepting_orders",
-                    context,
-                )?,
-                ws_platform_timestamp_raw: optional_string_column(
-                    batch,
-                    44,
-                    row,
-                    "ws_platform_timestamp_raw",
-                    context,
-                )?,
-                ws_platform_timestamp_utc: optional_timestamp_column(
-                    batch,
-                    45,
-                    row,
-                    "ws_platform_timestamp_utc",
-                    context,
-                )?,
-                winning_asset_id: optional_string_column(
-                    batch,
-                    46,
-                    row,
-                    "winning_asset_id",
-                    context,
-                )?,
-                winning_outcome: optional_string_column(
-                    batch,
-                    47,
-                    row,
-                    "winning_outcome",
-                    context,
-                )?,
-                resolution_evidence_source: optional_enum_column::<MetadataResolutionEvidenceSource>(
-                    batch,
-                    48,
-                    row,
-                    "resolution_evidence_source",
-                    context,
-                )?,
-                terminal_claim_owner: optional_enum_column::<MetadataTerminalClaimOwner>(
-                    batch,
-                    49,
-                    row,
-                    "terminal_claim_owner",
-                    context,
-                )?,
-                resolution_poll_attempt_ordinal: optional_u8_column(
-                    batch,
-                    50,
-                    row,
-                    "resolution_poll_attempt_ordinal",
-                    context,
-                )?,
-                resolution_poll_scheduled_utc: optional_timestamp_column(
-                    batch,
-                    51,
-                    row,
-                    "resolution_poll_scheduled_utc",
-                    context,
-                )?,
-                resolution_poll_result: optional_enum_column::<MetadataResolutionPollResult>(
-                    batch,
-                    52,
-                    row,
-                    "resolution_poll_result",
-                    context,
-                )?,
-                resolution_transport_error_class: optional_enum_column::<
-                    MetadataResolutionTransportErrorClass,
-                >(
-                    batch,
-                    53,
-                    row,
-                    "resolution_transport_error_class",
-                    context,
-                )?,
-                resolution_transport_http_status: optional_u16_column(
-                    batch,
-                    54,
-                    row,
-                    "resolution_transport_http_status",
-                    context,
-                )?,
-                resolution_integrity_error_class: optional_enum_column::<
-                    MetadataResolutionIntegrityErrorClass,
-                >(
-                    batch,
-                    55,
-                    row,
-                    "resolution_integrity_error_class",
-                    context,
-                )?,
-                resolution_budget_horizon_utc: optional_timestamp_column(
-                    batch,
-                    56,
-                    row,
-                    "resolution_budget_horizon_utc",
-                    context,
-                )?,
-                resolution_followup_status: optional_enum_column::<MetadataResolutionFollowupStatus>(
-                    batch,
-                    57,
-                    row,
-                    "resolution_followup_status",
-                    context,
-                )?,
-                resolution_poll_attempts_recorded: optional_u32_column(
-                    batch,
-                    58,
-                    row,
-                    "resolution_poll_attempts_recorded",
-                    context,
-                )?,
-                resolution_valid_response_count: optional_u32_column(
-                    batch,
-                    59,
-                    row,
-                    "resolution_valid_response_count",
-                    context,
-                )?,
-                resolution_transport_unavailable_count: optional_u32_column(
-                    batch,
-                    60,
-                    row,
-                    "resolution_transport_unavailable_count",
-                    context,
-                )?,
-                resolution_missed_slot_count: optional_u32_column(
-                    batch,
-                    61,
-                    row,
-                    "resolution_missed_slot_count",
-                    context,
-                )?,
-                last_valid_metadata_received_utc: optional_timestamp_column(
-                    batch,
-                    62,
-                    row,
-                    "last_valid_metadata_received_utc",
-                    context,
-                )?,
-                terminal_predicate_failure_reason: optional_enum_column::<
-                    MetadataTerminalPredicateFailureReason,
-                >(
-                    batch,
-                    63,
-                    row,
-                    "terminal_predicate_failure_reason",
-                    context,
-                )?,
-                response_fields_unavailable_reason: optional_enum_column::<
-                    MetadataResponseFieldsUnavailableReason,
-                >(
-                    batch,
-                    64,
-                    row,
-                    "response_fields_unavailable_reason",
-                    context,
-                )?,
-                ws_claimant_source_sequence_epoch_id: optional_string_column(
-                    batch,
-                    65,
-                    row,
-                    "ws_claimant_source_sequence_epoch_id",
-                    context,
-                )?,
-                ws_claimant_collector_admission_sequence: optional_u64_column(
-                    batch,
-                    66,
-                    row,
-                    "ws_claimant_collector_admission_sequence",
-                    context,
-                )?,
-            },
-        ));
-        rows.push(validate_decoded_row(decoded, row, context)?);
+        rows.push(TypedRawRow::PolymarketMarketMetadata(Box::new(
+            decode_metadata_existing_row(batch, row, context)?,
+        )));
     }
     Ok(rows)
+}
+
+pub(crate) fn decode_metadata_existing_row(
+    batch: &RecordBatch,
+    row: usize,
+    context: DecodeContext<'_>,
+) -> Result<PolymarketMarketMetadataRow, TypedRawReadError> {
+    let raw_kind = required_string_column(batch, 0, row, "metadata_row_kind", context)?;
+    require_schema_version_value(
+        required_string_column(batch, 7, row, "schema_version", context)?,
+        row,
+        context,
+    )?;
+    let decoded = TypedRawRow::PolymarketMarketMetadata(Box::new(PolymarketMarketMetadataRow {
+        metadata_row_kind: PolymarketMetadataRowKind::try_from(raw_kind.as_str())
+            .map_err(|error| core_error(error, row, context))?,
+        timestamp_received: required_timestamp_column(
+            batch,
+            1,
+            row,
+            "timestamp_received",
+            context,
+        )?,
+        collector_admission_sequence: required_u64_column(
+            batch,
+            2,
+            row,
+            "collector_admission_sequence",
+            context,
+        )?,
+        collector_admission_time_utc_ms: required_timestamp_column(
+            batch,
+            3,
+            row,
+            "collector_admission_time_utc_ms",
+            context,
+        )?,
+        metadata_origin: required_enum_column::<PolymarketMetadataOrigin>(
+            batch,
+            4,
+            row,
+            "metadata_origin",
+            context,
+        )?,
+        collector_host_id: required_string_column(batch, 5, row, "collector_host_id", context)?,
+        collector_region: required_string_column(batch, 6, row, "collector_region", context)?,
+        schema_version: POLYMARKET_METADATA_SCHEMA.to_owned(),
+        slug: required_string_column(batch, 8, row, "slug", context)?,
+        condition_id: required_string_column(batch, 9, row, "condition_id", context)?,
+        clob_market_id: required_string_column(batch, 10, row, "clob_market_id", context)?,
+        asset_ids: required_string_column(batch, 11, row, "asset_ids", context)?,
+        market_start_utc: required_timestamp_column(batch, 12, row, "market_start_utc", context)?,
+        market_end_utc: required_timestamp_column(batch, 13, row, "market_end_utc", context)?,
+        fixed_identity_verified_at_utc: required_timestamp_column(
+            batch,
+            14,
+            row,
+            "fixed_identity_verified_at_utc",
+            context,
+        )?,
+        market_lifecycle_state: required_enum_column::<MetadataMarketLifecycleState>(
+            batch,
+            15,
+            row,
+            "market_lifecycle_state",
+            context,
+        )?,
+        market_runtime_role: required_enum_column::<MetadataMarketRuntimeRole>(
+            batch,
+            16,
+            row,
+            "market_runtime_role",
+            context,
+        )?,
+        source_endpoint: optional_string_column(batch, 17, row, "source_endpoint", context)?,
+        source_endpoint_unavailable_reason: optional_enum_column::<
+            MetadataSourceEndpointUnavailableReason,
+        >(
+            batch,
+            18,
+            row,
+            "source_endpoint_unavailable_reason",
+            context,
+        )?,
+        source_evidence_origin: optional_enum_column::<MetadataSourceEvidenceOrigin>(
+            batch,
+            19,
+            row,
+            "source_evidence_origin",
+            context,
+        )?,
+        source_evidence_event_type: optional_enum_column::<MetadataSourceEvidenceEventType>(
+            batch,
+            20,
+            row,
+            "source_evidence_event_type",
+            context,
+        )?,
+        source_evidence_channel: optional_enum_column::<MetadataSourceEvidenceChannel>(
+            batch,
+            21,
+            row,
+            "source_evidence_channel",
+            context,
+        )?,
+        source_evidence_received_at_utc: optional_timestamp_column(
+            batch,
+            22,
+            row,
+            "source_evidence_received_at_utc",
+            context,
+        )?,
+        row_evidence_validation_completed_at_utc: optional_timestamp_column(
+            batch,
+            23,
+            row,
+            "row_evidence_validation_completed_at_utc",
+            context,
+        )?,
+        source_evidence_payload_json: optional_string_column(
+            batch,
+            24,
+            row,
+            "source_evidence_payload_json",
+            context,
+        )?,
+        source_evidence_raw_sha256: optional_string_column(
+            batch,
+            25,
+            row,
+            "source_evidence_raw_sha256",
+            context,
+        )?,
+        market_lifecycle_transition: optional_enum_column::<MetadataMarketLifecycleTransition>(
+            batch,
+            26,
+            row,
+            "market_lifecycle_transition",
+            context,
+        )?,
+        lifecycle_scheduled_at_utc: optional_timestamp_column(
+            batch,
+            27,
+            row,
+            "lifecycle_scheduled_at_utc",
+            context,
+        )?,
+        lifecycle_applied_at_utc: optional_timestamp_column(
+            batch,
+            28,
+            row,
+            "lifecycle_applied_at_utc",
+            context,
+        )?,
+        market_runtime_role_transition: optional_enum_column::<MetadataMarketRuntimeRoleTransition>(
+            batch,
+            29,
+            row,
+            "market_runtime_role_transition",
+            context,
+        )?,
+        runtime_role_scheduled_at_utc: optional_timestamp_column(
+            batch,
+            30,
+            row,
+            "runtime_role_scheduled_at_utc",
+            context,
+        )?,
+        runtime_role_applied_at_utc: optional_timestamp_column(
+            batch,
+            31,
+            row,
+            "runtime_role_applied_at_utc",
+            context,
+        )?,
+        metadata_fetch_start_utc: optional_timestamp_column(
+            batch,
+            32,
+            row,
+            "metadata_fetch_start_utc",
+            context,
+        )?,
+        closed: optional_bool_column(batch, 33, row, "closed", context)?,
+        closed_time_raw: optional_string_column(batch, 34, row, "closed_time_raw", context)?,
+        closed_time_utc: optional_timestamp_column(batch, 35, row, "closed_time_utc", context)?,
+        closed_time_check_failure_reason: optional_enum_column::<
+            MetadataClosedTimeCheckFailureReason,
+        >(
+            batch,
+            36,
+            row,
+            "closed_time_check_failure_reason",
+            context,
+        )?,
+        automatically_resolved: optional_bool_column(
+            batch,
+            37,
+            row,
+            "automatically_resolved",
+            context,
+        )?,
+        uma_resolution_status: optional_string_column(
+            batch,
+            38,
+            row,
+            "uma_resolution_status",
+            context,
+        )?,
+        outcomes_raw: optional_string_column(batch, 39, row, "outcomes_raw", context)?,
+        outcome_prices_raw: optional_string_column(batch, 40, row, "outcome_prices_raw", context)?,
+        active: optional_bool_column(batch, 41, row, "active", context)?,
+        active_unavailable_reason: optional_enum_column::<MetadataActiveUnavailableReason>(
+            batch,
+            42,
+            row,
+            "active_unavailable_reason",
+            context,
+        )?,
+        accepting_orders: optional_bool_column(batch, 43, row, "accepting_orders", context)?,
+        ws_platform_timestamp_raw: optional_string_column(
+            batch,
+            44,
+            row,
+            "ws_platform_timestamp_raw",
+            context,
+        )?,
+        ws_platform_timestamp_utc: optional_timestamp_column(
+            batch,
+            45,
+            row,
+            "ws_platform_timestamp_utc",
+            context,
+        )?,
+        winning_asset_id: optional_string_column(batch, 46, row, "winning_asset_id", context)?,
+        winning_outcome: optional_string_column(batch, 47, row, "winning_outcome", context)?,
+        resolution_evidence_source: optional_enum_column::<MetadataResolutionEvidenceSource>(
+            batch,
+            48,
+            row,
+            "resolution_evidence_source",
+            context,
+        )?,
+        terminal_claim_owner: optional_enum_column::<MetadataTerminalClaimOwner>(
+            batch,
+            49,
+            row,
+            "terminal_claim_owner",
+            context,
+        )?,
+        resolution_poll_attempt_ordinal: optional_u8_column(
+            batch,
+            50,
+            row,
+            "resolution_poll_attempt_ordinal",
+            context,
+        )?,
+        resolution_poll_scheduled_utc: optional_timestamp_column(
+            batch,
+            51,
+            row,
+            "resolution_poll_scheduled_utc",
+            context,
+        )?,
+        resolution_poll_result: optional_enum_column::<MetadataResolutionPollResult>(
+            batch,
+            52,
+            row,
+            "resolution_poll_result",
+            context,
+        )?,
+        resolution_transport_error_class: optional_enum_column::<
+            MetadataResolutionTransportErrorClass,
+        >(
+            batch,
+            53,
+            row,
+            "resolution_transport_error_class",
+            context,
+        )?,
+        resolution_transport_http_status: optional_u16_column(
+            batch,
+            54,
+            row,
+            "resolution_transport_http_status",
+            context,
+        )?,
+        resolution_integrity_error_class: optional_enum_column::<
+            MetadataResolutionIntegrityErrorClass,
+        >(
+            batch,
+            55,
+            row,
+            "resolution_integrity_error_class",
+            context,
+        )?,
+        resolution_budget_horizon_utc: optional_timestamp_column(
+            batch,
+            56,
+            row,
+            "resolution_budget_horizon_utc",
+            context,
+        )?,
+        resolution_followup_status: optional_enum_column::<MetadataResolutionFollowupStatus>(
+            batch,
+            57,
+            row,
+            "resolution_followup_status",
+            context,
+        )?,
+        resolution_poll_attempts_recorded: optional_u32_column(
+            batch,
+            58,
+            row,
+            "resolution_poll_attempts_recorded",
+            context,
+        )?,
+        resolution_valid_response_count: optional_u32_column(
+            batch,
+            59,
+            row,
+            "resolution_valid_response_count",
+            context,
+        )?,
+        resolution_transport_unavailable_count: optional_u32_column(
+            batch,
+            60,
+            row,
+            "resolution_transport_unavailable_count",
+            context,
+        )?,
+        resolution_missed_slot_count: optional_u32_column(
+            batch,
+            61,
+            row,
+            "resolution_missed_slot_count",
+            context,
+        )?,
+        last_valid_metadata_received_utc: optional_timestamp_column(
+            batch,
+            62,
+            row,
+            "last_valid_metadata_received_utc",
+            context,
+        )?,
+        terminal_predicate_failure_reason: optional_enum_column::<
+            MetadataTerminalPredicateFailureReason,
+        >(
+            batch,
+            63,
+            row,
+            "terminal_predicate_failure_reason",
+            context,
+        )?,
+        response_fields_unavailable_reason: optional_enum_column::<
+            MetadataResponseFieldsUnavailableReason,
+        >(
+            batch,
+            64,
+            row,
+            "response_fields_unavailable_reason",
+            context,
+        )?,
+        ws_claimant_source_sequence_epoch_id: optional_string_column(
+            batch,
+            65,
+            row,
+            "ws_claimant_source_sequence_epoch_id",
+            context,
+        )?,
+        ws_claimant_collector_admission_sequence: optional_u64_column(
+            batch,
+            66,
+            row,
+            "ws_claimant_collector_admission_sequence",
+            context,
+        )?,
+    }));
+    let TypedRawRow::PolymarketMarketMetadata(decoded) =
+        validate_decoded_row(decoded, row, context)?
+    else {
+        unreachable!()
+    };
+    Ok(*decoded)
 }
 
 fn decode_polymarket_rtds(
@@ -2509,7 +2464,7 @@ fn open_validated_typed_raw_parquet_inner(
         scope,
         max_physical_batch_bytes,
         expected_schema,
-        decode_typed_raw_record_batch,
+        decode_typed_raw_batch_with_layout,
     )
 }
 

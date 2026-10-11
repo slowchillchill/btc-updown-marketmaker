@@ -5,7 +5,7 @@ impl ComplementaryPairV1 {
     pub(super) fn new_pair(
         &mut self,
         input: &StrategyInputV1,
-        f: &FrozenMarketReadV1,
+        f: &PairMarketRead<'_>,
         now: i64,
         s: &MarketState,
         p: &ProbabilityEstimateV1,
@@ -58,14 +58,7 @@ impl ComplementaryPairV1 {
             let retain = fair[held] - float(&prices[held])?;
             // 可见卖价作为未来Maker修复价格情景；不保证成交，post_only费用为零。
             // FAK不在该乐观情景中获准，实际主动修复另用公共全域费/份额界。
-            let ask = value(&o.assets[other].asks)
-                .and_then(|ls| {
-                    ls.iter()
-                        .map(|p| decimal(&p.price_pusd_per_share))
-                        .collect::<Result<Vec<_>, _>>()
-                        .ok()
-                })
-                .and_then(|ls| ls.into_iter().min());
+            let ask = o.top_ask(other).ok().flatten();
             let repair =
                 ask.map(|a| 1.0 - float(&prices[held]).unwrap_or(0.0) - float(&a).unwrap_or(0.0));
             single[held] = repair
@@ -135,12 +128,12 @@ impl ComplementaryPairV1 {
             if self.limit_budget(*cash, s, &cost) {
                 let legs = vec![
                     (
-                        self.maker_leg(&o.assets[0], q, prices[0]),
+                        self.maker_leg(o.assets[0], q, prices[0]),
                         costs[0].clone(),
                         R::zero(),
                     ),
                     (
-                        self.maker_leg(&o.assets[1], q, prices[1]),
+                        self.maker_leg(o.assets[1], q, prices[1]),
                         costs[1].clone(),
                         R::zero(),
                     ),

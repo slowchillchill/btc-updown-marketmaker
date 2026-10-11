@@ -29,7 +29,7 @@ impl ComplementaryPairV1 {
     pub(super) fn state(
         &self,
         input: &StrategyInputV1,
-        f: &FrozenMarketReadV1,
+        f: &PairMarketRead<'_>,
     ) -> Result<MarketState, StrategyErrorV1> {
         let o = &f.observation;
         let condition = &o.market.condition_id;

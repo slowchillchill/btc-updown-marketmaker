@@ -445,15 +445,16 @@ where
                 }
                 let Some(mut next)=producer.next_applied()? else {ended=true;let mut buffer=hub.0.0.lock().unwrap();buffer.production=ProductionV1::Ended;hub.0.1.notify_all();continue;};
                 count+=1;
-                {
+                let new_markets = next.applied.closed_groups.iter().flat_map(|g|g.records.iter()).filter_map(|fact| {
+                    if let contracts::PublicBusinessPayloadV1::MarketFact { market, payload: contracts::CanonicalMarketFactPayloadV1::FixedIdentity { assets } } = &fact.payload {
+                        Some((market, assets))
+                    } else { None }
+                }).collect::<Vec<_>>();
+                if next.initialization_binding.is_some() || !new_markets.is_empty() {
                     let mut catalog=catalog.write().unwrap();
                     if let Some(binding)=&next.initialization_binding {catalog.initialization.input_positions.insert(next.input.input_position);catalog.initialization.source_message_ids.insert(binding.source_message_id.0.clone());}
-                    for market in producer.core.fixed_markets() {
-                        if !catalog.markets.contains_key(&market.condition_id.0) {
-                            let context=producer.core.pm_context(&market.condition_id.0).ok_or("原登记市场缺少 PM 上下文")?;
-                            let assets=context.assets.into_iter().map(|a|a.asset).collect::<Vec<_>>().try_into().map_err(|_|"原登记市场不是二元市场")?;
-                            catalog.markets.insert(market.condition_id.0.clone(),PlatformMarketV1::try_new(market.clone(),assets)?);
-                        }
+                    for (market, assets) in new_markets {
+                        catalog.markets.entry(market.condition_id.0.clone()).or_insert(PlatformMarketV1::try_new(market.clone(), assets.clone().try_into().map_err(|_|"原登记市场不是二元市场")?)?);
                     }
                 }
                 let groups=PreparedPublicGroupV1::from_day(&mut next);

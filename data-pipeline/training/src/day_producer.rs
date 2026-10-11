@@ -96,10 +96,10 @@ impl<'a> DayProducerV1<'a> {
                     }
                 }
                 match &fact.payload {
-                    PublicBusinessPayloadV1::PolymarketMessage(pm) => self.hidden.push(
+                    PublicBusinessPayloadV1::PolymarketMessage(_) => self.hidden.push_prepared_pm(
                         canonical,
-                        CanonicalEventRecordV2::PolymarketMessage(pm.clone()),
-                    )?,
+                        prepared_pm.as_ref().expect("同次公共 PM 准备").clone(),
+                    ),
                     _ => match materials
                         .remove(&fact.position)
                         .expect("同次归约对应原关闭事实")

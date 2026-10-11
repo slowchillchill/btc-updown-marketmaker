@@ -186,7 +186,7 @@ impl ComplementaryPairV1 {
     }
     pub(super) fn health_deadline(
         &self,
-        input: &StrategyCurrentReadV1<'_>,
+        input: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
         calculation: Option<&StrategyCalculationV1<ComplementaryPairDiagnosticV1>>,
         at: i64,
     ) -> Option<i64> {
@@ -199,7 +199,6 @@ impl ComplementaryPairV1 {
             })
             .unwrap_or(&[]);
         input
-            .markets
             .iter()
             .filter(|f| f.observation.market.window.end_at_utc_ms > at)
             .flat_map(|f| {

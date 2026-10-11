@@ -5,7 +5,7 @@ impl ComplementaryPairV1 {
     pub(super) fn repair(
         &mut self,
         input: &StrategyInputV1,
-        f: &FrozenMarketReadV1,
+        f: &PairMarketRead<'_>,
         now: i64,
         s: &MarketState,
         p: &ProbabilityEstimateV1,
@@ -115,6 +115,7 @@ impl ComplementaryPairV1 {
                 own_quote
                     .unwrap_or(visible_bid.map(|b| b + tick).unwrap_or(cap_price))
                     .min(cap_price),
+                || o.top_ask(side),
             )?
             .filter(|mp| {
                 (q * Decimal::from(100)).floor() / Decimal::from(100) >= min

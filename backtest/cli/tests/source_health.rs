@@ -41,7 +41,7 @@ impl StrategyV1 for Trace {
     }
     fn next_health_evaluation_at(
         &self,
-        input: &StrategyCurrentReadV1<'_>,
+        input: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
         c: Option<&StrategyCalculationV1<Self::Diagnostics>>,
         at: i64,
     ) -> Option<i64> {

@@ -283,10 +283,9 @@ impl<'a> DayIngressV1<'a> {
     /// 全部未消费的原行都在最小顺序索引中；批次预读不推进消费位置。
     pub fn unread_source_lower_bound(&self) -> RecordingResult<Option<i64>> {
         let mut minimum = self
-            .files
-            .iter()
-            .enumerate()
-            .filter_map(|(i, f)| self.source_minima[i][f.saved.order_position])
+            .heads
+            .keys()
+            .filter_map(|key| self.source_minima[key.4][self.files[key.4].saved.order_position])
             .min();
         for (row, _) in &self.saved.initial {
             minimum = minimum
@@ -297,10 +296,9 @@ impl<'a> DayIngressV1<'a> {
         Ok(minimum)
     }
     pub fn unread_pm_lower_bound(&self) -> Option<(u64, i64, u64, u64)> {
-        self.files
-            .iter()
-            .enumerate()
-            .filter_map(|(i, f)| self.pm_minima[i][f.saved.order_position])
+        self.heads
+            .keys()
+            .filter_map(|key| self.pm_minima[key.4][self.files[key.4].saved.order_position])
             .min()
     }
     pub fn epochs(&self) -> &BTreeMap<(u8, String), u64> {
@@ -417,12 +415,14 @@ impl<'a> DayIngressV1<'a> {
             &[],
             &market,
             |cursor| {
-                let values: Vec<_> = self
+                let start = self
                     .saved
                     .twap
+                    .partition_point(|(position, _, _)| *position < cursor.next_input_position);
+                let page = &self.saved.twap
+                    [start..self.saved.twap.len().min(start.saturating_add(self.rows))];
+                let values: Vec<_> = page
                     .iter()
-                    .filter(|(position, _, _)| *position >= cursor.next_input_position)
-                    .take(self.rows)
                     .map(|(position, row, source)| {
                         let event = canonicalize_chainlink_twap_v1(
                             row,
@@ -459,11 +459,7 @@ impl<'a> DayIngressV1<'a> {
                     .last()
                     .map(|v| v.record_ref.input_position + 1)
                     .unwrap_or(cursor.next_input_position);
-                let exhausted = self
-                    .saved
-                    .twap
-                    .iter()
-                    .all(|(position, _, _)| *position < next_input_position);
+                let exhausted = start + page.len() == self.saved.twap.len();
                 Ok((
                     values,
                     TemporaryReferenceCursorV1 {

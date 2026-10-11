@@ -15,9 +15,7 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use contracts::{Sha256Hex, SourceEvidenceRefV3};
 use data_pipeline_core::public_input::*;
 use data_pipeline_core::public_reference::source_evidence_v3_from_existing;
-use data_pipeline_core::typed_raw::{
-    PolymarketRtdsChainlinkBtcUsdRow, RtdsFreshnessStatus, TypedRawRow,
-};
+use data_pipeline_core::typed_raw::{PolymarketRtdsChainlinkBtcUsdRow, RtdsFreshnessStatus};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
@@ -26,8 +24,8 @@ use sha2::{Digest, Sha256};
 use crate::ValidatedDirectSourceParquetFileV3;
 use crate::typed_raw::{
     self, ParquetInputFacts, TypedRawParquetStream, TypedRawReadError, TypedRawReadScope,
-    decode_typed_raw_record_batch, open_parquet_with_decoder, open_validated_parquet_with_decoder,
-    validate_physical_schema_against,
+    decode_typed_raw_batch_with_layout, open_parquet_with_decoder,
+    open_validated_parquet_with_decoder, validate_physical_schema_against,
 };
 
 #[cfg(test)]
@@ -196,7 +194,19 @@ fn deserialize_row<T: DeserializeOwned>(
         .map_err(|error| decode_error(source, version, row, error))
 }
 
+#[allow(dead_code)] // 独立外部批次保留模式边界。
 fn decode_public_batch(
+    source: &str,
+    version: &str,
+    batch: &RecordBatch,
+    offset: u64,
+    scope: Option<&TypedRawReadScope>,
+) -> Result<Vec<TypedRawRowV2>, TypedRawReadError> {
+    let expected = expected_public_schema(source, version)?;
+    validate_physical_schema_against(source, version, &expected, batch.schema().as_ref())?;
+    decode_public_batch_with_layout(source, version, batch, offset, scope)
+}
+fn decode_public_batch_with_layout(
     source: &str,
     version: &str,
     batch: &RecordBatch,
@@ -208,17 +218,49 @@ fn decode_public_batch(
         (METADATA_SOURCE, POLYMARKET_MARKET_METADATA_SCHEMA_V6)
             | (TWAP_SOURCE, POLYMARKET_RTDS_CHAINLINK_TWAP_SCHEMA_V1)
     ) {
-        return decode_typed_raw_record_batch(source, version, batch, offset, scope)
+        return decode_typed_raw_batch_with_layout(source, version, batch, offset, scope)
             .map(|rows| rows.into_iter().map(TypedRawRowV2::Existing).collect());
     }
-    let expected = expected_public_schema(source, version)?;
-    validate_physical_schema_against(source, version, &expected, batch.schema().as_ref())?;
     let mut rows = Vec::with_capacity(batch.num_rows());
     for index in 0..batch.num_rows() {
         let row_index = offset + index as u64;
-        let mut values = primitive_row(batch, index);
         if source == METADATA_SOURCE {
-            if values.get("schema_version").and_then(Value::as_str) != Some(version) {
+            let context = typed_raw::DecodeContext {
+                source_kind: source,
+                schema_version: version,
+                first_row_index: offset,
+            };
+            let kind =
+                typed_raw::required_string_column(batch, 0, index, "metadata_row_kind", context)?;
+            let value = if kind == "market_anchor_rule_update" {
+                PolymarketMarketMetadataV6Input::AnchorRule(deserialize_row(
+                    source,
+                    version,
+                    row_index,
+                    primitive_row(batch, index),
+                )?)
+            } else {
+                PolymarketMarketMetadataV6Input::Existing(typed_raw::decode_metadata_existing_row(
+                    batch, index, context,
+                )?)
+            };
+            rows.push(TypedRawRowV2::PolymarketMarketMetadataV6(Box::new(value)));
+        } else {
+            let context = typed_raw::DecodeContext {
+                source_kind: source,
+                schema_version: version,
+                first_row_index: offset,
+            };
+            let string = |column, name| {
+                typed_raw::required_string_column(batch, column, index, name, context)
+            };
+            let time = |column, name| {
+                typed_raw::required_timestamp_column(batch, column, index, name, context)
+            };
+            let u64_value =
+                |column, name| typed_raw::required_u64_column(batch, column, index, name, context);
+            let schema_version = string(14, "schema_version")?;
+            if schema_version != version {
                 return Err(decode_error(
                     source,
                     version,
@@ -226,63 +268,39 @@ fn decode_public_batch(
                     "行 schema_version 与物理格式不一致",
                 ));
             }
-            let value = if values.get("metadata_row_kind").and_then(Value::as_str)
-                == Some("market_anchor_rule_update")
-            {
-                PolymarketMarketMetadataV6Input::AnchorRule(deserialize_row(
-                    source, version, row_index, values,
-                )?)
-            } else {
-                let old_schema = typed_raw::expected_schema(METADATA_SOURCE, METADATA_V5)?;
-                let mut columns =
-                    batch.slice(index, 1).columns()[..old_schema.fields().len()].to_vec();
-                let schema_index = old_schema.index_of("schema_version").unwrap();
-                columns[schema_index] = Arc::new(StringArray::from(vec![METADATA_V5]));
-                let old_batch = RecordBatch::try_new(old_schema, columns)
-                    .map_err(|error| decode_error(source, version, row_index, error))?;
-                let mut decoded = decode_typed_raw_record_batch(
-                    METADATA_SOURCE,
-                    METADATA_V5,
-                    &old_batch,
-                    row_index,
-                    None,
-                )?;
-                let TypedRawRow::PolymarketMarketMetadata(row) = decoded.remove(0) else {
-                    unreachable!()
-                };
-                PolymarketMarketMetadataV6Input::Existing(*row)
+            let age = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let common = PolymarketRtdsChainlinkBtcUsdRow {
+                timestamp_received: time(0, "timestamp_received")?,
+                message_timestamp: time(1, "message_timestamp")?,
+                payload_timestamp: time(2, "payload_timestamp")?,
+                age_ms: (!age.is_null(index)).then(|| age.value(index)),
+                symbol: string(4, "symbol")?,
+                value: string(5, "value")?,
+                topic: string(6, "topic")?,
+                message_type: string(7, "message_type")?,
+                freshness_status: RtdsFreshnessStatus::try_from(
+                    string(8, "freshness_status")?.as_str(),
+                )
+                .map_err(|e| decode_error(source, version, row_index, e))?,
+                subscription_filter: string(9, "subscription_filter")?,
+                source_native_payload_json: string(10, "source_native_payload_json")?,
+                collector_host_id: string(11, "collector_host_id")?,
+                collector_region: string(12, "collector_region")?,
+                source_endpoint: string(13, "source_endpoint")?,
+                schema_version,
             };
-            rows.push(TypedRawRowV2::PolymarketMarketMetadataV6(Box::new(value)));
-        } else {
-            let freshness = values
-                .get("freshness_status")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let freshness = RtdsFreshnessStatus::try_from(freshness)
-                .map_err(|error| decode_error(source, version, row_index, error))?;
-            values.insert(
-                "freshness_status".to_owned(),
-                serde_json::to_value(freshness).unwrap(),
-            );
-            #[derive(Deserialize)]
-            struct Extras {
-                full_accuracy_value: String,
-                window_s: u64,
-                source_sequence_epoch_id: String,
-                collector_admission_sequence: u64,
-                collector_admission_time_utc_ms: i64,
-            }
-            let extras: Extras = deserialize_row(source, version, row_index, values.clone())?;
-            let common: PolymarketRtdsChainlinkBtcUsdRow =
-                deserialize_row(source, version, row_index, values)?;
             rows.push(TypedRawRowV2::PolymarketRtdsChainlinkTwap(
                 PolymarketRtdsChainlinkTwapInput {
                     common,
-                    full_accuracy_value: extras.full_accuracy_value,
-                    window_s: extras.window_s,
-                    source_sequence_epoch_id: extras.source_sequence_epoch_id,
-                    collector_admission_sequence: extras.collector_admission_sequence,
-                    collector_admission_time_utc_ms: extras.collector_admission_time_utc_ms,
+                    full_accuracy_value: string(15, "full_accuracy_value")?,
+                    window_s: u64_value(16, "window_s")?,
+                    source_sequence_epoch_id: string(17, "source_sequence_epoch_id")?,
+                    collector_admission_sequence: u64_value(18, "collector_admission_sequence")?,
+                    collector_admission_time_utc_ms: time(19, "collector_admission_time_utc_ms")?,
                 },
             ));
         }
@@ -319,7 +337,7 @@ pub fn open_finite_public_input_v1(
         None,
         Some(max_batch_bytes),
         expected_public_schema,
-        decode_public_batch,
+        decode_public_batch_with_layout,
     )
 }
 
@@ -334,7 +352,7 @@ pub fn open_validated_public_input_parquet_v1(
         None,
         None,
         expected_public_schema,
-        decode_public_batch,
+        decode_public_batch_with_layout,
     )
 }
 
@@ -358,7 +376,7 @@ pub fn open_validated_public_input_at_v1(
         None,
         Some(max_batch_bytes),
         expected_public_schema,
-        decode_public_batch,
+        decode_public_batch_with_layout,
         cursor.physical_row,
     )
 }
@@ -375,7 +393,7 @@ pub(crate) fn open_public_input_bounded_v1(
         None,
         Some(max_batch_bytes),
         expected_public_schema,
-        decode_public_batch,
+        decode_public_batch_with_layout,
     )
 }
 
@@ -642,7 +660,7 @@ fn read_identity_sources(
             None,
             None,
             typed_raw::expected_schema,
-            decode_typed_raw_record_batch,
+            decode_typed_raw_batch_with_layout,
         )?;
         let mut index = 0_u64;
         for rows in stream {

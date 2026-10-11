@@ -807,18 +807,23 @@ where
                     .observe_at(at)
                     .map_err(HistoricalFailureCauseV1::Sim)?;
                 shared
-                    .strategy_current_read(&driver)
+                    .strategy_current_observations(&driver)
                     .map_err(HistoricalFailureCauseV1::Ledger)?
             } else {
-                None
+                Vec::new()
             };
-            if health_enabled && let Some(input) = &current_input {
+            if health_enabled && !current_input.is_empty() {
                 if let Some(p) = pending.as_mut()
                     && !p.health_invalidated
                     && pending_at != Some(at)
                 {
                     let (invalidated, calls) = shared
-                        .revalidate_calculation(strategy, &p.calculation.calculation, input, at)
+                        .revalidate_calculation(
+                            strategy,
+                            &p.calculation.calculation,
+                            &current_input,
+                            at,
+                        )
                         .map_err(HistoricalFailureCauseV1::Strategy)?;
                     health_summary.qualification_calls += calls;
                     if invalidated.is_some() {
@@ -831,7 +836,7 @@ where
                 }
                 health_at = strategy
                     .next_health_evaluation_at(
-                        input,
+                        &current_input,
                         pending
                             .as_ref()
                             .filter(|p| !p.health_invalidated)
@@ -1034,13 +1039,13 @@ where
                             .map_err(HistoricalFailureCauseV1::Sim)?,
                     )
                     .map_err(HistoricalFailureCauseV1::Sim)?;
-                    if health_enabled
-                        && let Some(current) = shared
-                            .strategy_current_read(&driver)
-                            .map_err(HistoricalFailureCauseV1::Ledger)?
-                    {
+                    if health_enabled {
                         health_at = strategy
-                            .next_health_evaluation_at(&current, Some(&calculation), at)
+                            .next_health_evaluation_at(
+                                &driver.frames_at_observation(),
+                                Some(&calculation),
+                                at,
+                            )
                             .filter(|next| *next > at);
                     }
                     pending = Some(Pending {

@@ -2139,9 +2139,21 @@ impl<E: PmEvidenceV1> PmEvidenceV1 for PreparedPmEvidenceV1<E> {
     }
 }
 
+#[derive(Clone)]
 pub struct PreparedPmMessageV1 {
     message: CanonicalPmMessageV1,
     evidence: PreparedPmEvidenceV1<SourceEvidenceRefV3>,
+}
+impl serde::Serialize for PreparedPmMessageV1 {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.message.serialize(serializer)
+    }
+}
+impl<'de> serde::Deserialize<'de> for PreparedPmMessageV1 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let message = CanonicalPmMessageV1::deserialize(deserializer)?;
+        Self::prepare(message).map_err(serde::de::Error::custom)
+    }
 }
 impl PreparedPmMessageV1 {
     pub fn prepare(message: CanonicalPmMessageV1) -> Result<Self, ContractError> {
