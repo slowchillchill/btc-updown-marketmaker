@@ -439,6 +439,8 @@ struct MarketState {
     assets: BTreeMap<String, AssetProjection>,
     #[serde(with = "checkpoint_level_anchors")]
     level_anchors: BTreeMap<LevelKey, ObservedFactV1<()>>,
+    #[serde(skip)]
+    book_projection: BTreeMap<String, [Arc<ObservedFactV1<Vec<PriceLevelV1>>>; 2]>,
     seen_epochs: BTreeSet<String>,
     seen_messages: BTreeSet<u64>,
     last_message: Option<(u64, Sha256Hex, E)>,
@@ -516,8 +518,9 @@ pub struct PublicObservationCoreV1 {
     binance_depth: BinanceDepthReducer<E>,
     // 只读派生的当前值；唯一数量归约器及事实仍是权威。旧组自行持有旧 Arc。
     #[serde(skip)]
-    current_depth_projection: Option<Arc<ObservedFactV1<BinanceDepthStateReferenceV1>>>,
+    current_depth_projection: Option<Arc<ObservedFactV1<BinanceDepthObservationV1>>>,
     binance_trade: BinanceAggTradeReducer<E>,
+    observation_requirements: PublicObservationRequirementsV1,
     pending: BTreeMap<(String, u64), PendingTerminal>,
     source_progress_enabled: bool,
     source_progress: BTreeMap<SourceStreamScopeV1, SourceStreamProgressV1>,
@@ -652,6 +655,7 @@ impl PublicObservationCoreV1 {
         Ok(Self {
             binance_depth: BinanceDepthReducer::new(&header.canonical_rule_version)?,
             current_depth_projection: None,
+            observation_requirements: PublicObservationRequirementsV1::FULL,
             binance_trade: BinanceAggTradeReducer::new(&header.canonical_rule_version)?,
             header,
             next_input_position: 0,
@@ -1039,6 +1043,7 @@ impl PublicObservationCoreV1 {
                             pm,
                             assets,
                             level_anchors: BTreeMap::new(),
+                            book_projection: BTreeMap::new(),
                             seen_epochs: BTreeSet::new(),
                             seen_messages: BTreeSet::new(),
                             last_message: None,
@@ -1580,7 +1585,11 @@ impl PublicObservationCoreV1 {
         let progress_changed =
             self.update_source_progress(input, &batch, &mut output.changed_scopes);
         for fact in batch.facts.iter() {
-            self.apply_fact(fact, &group);
+            self.apply_fact(
+                fact,
+                &group,
+                output.compact_groups.is_none() && output.recording_groups.is_none(),
+            );
         }
         self.commit_selection(input);
         if !batch.facts.is_empty() || progress_changed {
@@ -1593,6 +1602,16 @@ impl PublicObservationCoreV1 {
             );
         }
         output.reductions.push(batch);
+    }
+    pub fn observation_requirements(&self) -> PublicObservationRequirementsV1 {
+        self.observation_requirements
+    }
+    /// 日入口在首次消费前设置实际候选需求并集；恢复沿原保存的选择继续。
+    pub fn set_observation_requirements(&mut self, requirements: PublicObservationRequirementsV1) {
+        if self.observation_requirements != requirements {
+            self.observation_requirements = requirements;
+            self.current_depth_projection = None;
+        }
     }
     fn commit_selection(&mut self, input: &PreparedIngressV1<'_>) {
         if let (Some(market), Some(selection)) = (
@@ -1671,7 +1690,15 @@ impl PublicObservationCoreV1 {
         let depth = Arc::clone(self.current_depth_projection.get_or_insert_with(|| {
             Arc::new(ObservedFactV1 {
                 value: if self.global.depth.value.is_some() {
-                    self.binance_depth.current_depth_value()
+                    if self.observation_requirements.binance_depth_quantities {
+                        self.binance_depth
+                            .current_depth_value()
+                            .map(|value| BinanceDepthObservationV1::Full(Arc::new(value)))
+                    } else {
+                        self.binance_depth
+                            .has_current_depth_value()
+                            .then_some(BinanceDepthObservationV1::NotMaterialized)
+                    }
                 } else {
                     None
                 },
@@ -1682,6 +1709,9 @@ impl PublicObservationCoreV1 {
         }));
         let progress: Arc<[SourceStreamProgressV1]> =
             self.source_progress.values().cloned().collect();
+        for state in self.markets.values_mut() {
+            state.prepare_book_projection();
+        }
         let markets = self.markets.iter().collect::<Vec<_>>();
         let observations = markets
             .par_iter()
@@ -1716,9 +1746,15 @@ impl PublicObservationCoreV1 {
             }));
         self.next_group_position += 1;
     }
-    fn apply_fact(&mut self, fact: &PublicBusinessFactV1, group: &Sha256Hex) {
+    fn apply_fact(
+        &mut self,
+        fact: &PublicBusinessFactV1,
+        group: &Sha256Hex,
+        with_observations: bool,
+    ) {
         match &fact.payload {
-            PublicBusinessPayloadV1::PolymarketMessage(_) => {}
+            PublicBusinessPayloadV1::PolymarketMessage(_)
+            | PublicBusinessPayloadV1::BinanceDepthReference(_) => {}
             PublicBusinessPayloadV1::ReferenceFact(payload) => match payload {
                 CanonicalReferenceEventPayloadV2::ChainlinkBtcUsd(value) => {
                     self.global.spot = observed(value.clone(), fact, group, "chainlink_spot")
@@ -1736,8 +1772,17 @@ impl PublicObservationCoreV1 {
                         _ => unreachable!("来源准备已保留有效 TWAP 窗口"),
                     }
                 }
-                CanonicalReferenceEventPayloadV2::BinanceDepthState(_) => {
-                    self.current_depth_projection = None;
+                CanonicalReferenceEventPayloadV2::BinanceDepthState(value) => {
+                    self.current_depth_projection = (with_observations
+                        && self.observation_requirements.binance_depth_quantities)
+                        .then(|| {
+                            Arc::new(observed(
+                                BinanceDepthObservationV1::Full(value.clone()),
+                                fact,
+                                group,
+                                "binance_depth",
+                            ))
+                        });
                     self.global.depth = observed((), fact, group, "binance_depth")
                 }
                 CanonicalReferenceEventPayloadV2::BinanceAggregateTrade(value) => {
@@ -1816,6 +1861,21 @@ impl MarketState {
         payload: &CanonicalPmPayloadV1,
     ) {
         for step in &reduction.steps {
+            let affected = match &step.change {
+                PmStepChangeV1::ResetAsset { asset, .. }
+                | PmStepChangeV1::InitialSnapshot { asset, .. }
+                | PmStepChangeV1::Selection { asset, .. }
+                | PmStepChangeV1::AbsenceBaseline { asset, .. }
+                | PmStepChangeV1::BookReady { asset } => Some(asset),
+                PmStepChangeV1::Quality { boundary } => match &boundary.scope {
+                    QualityScopeV1::Asset(asset) => Some(asset),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(asset) = affected {
+                self.book_projection.remove(&asset.token_id.0);
+            }
             match &step.change {
                 PmStepChangeV1::ResetAsset { asset, .. } => {
                     self.level_anchors
@@ -2029,6 +2089,68 @@ impl MarketState {
             dependency_frontier: bids.dependency_frontier.clone(),
         }
     }
+    fn prepare_book_projection(&mut self) {
+        for context in &self.pm.context.assets {
+            let token = &context.asset.token_id.0;
+            if self.book_projection.contains_key(token) {
+                continue;
+            }
+            let state = &self.assets[token];
+            let side = |side: BookSide| {
+                if !self.pm.assets[token].book_ready {
+                    return ObservedFactV1 {
+                        quality: state.book.quality,
+                        ..ObservedFactV1::default()
+                    };
+                }
+                let mut levels: Vec<_> = self
+                    .pm
+                    .quantities
+                    .iter()
+                    .flat_map(|quantities| quantities.iter())
+                    .filter(|((id, ask, _), _)| id == token && *ask == (side == BookSide::Ask))
+                    .map(|((_, _, price), quantity)| PriceLevelV1 {
+                        price_pusd_per_share: ExactDecimal(price.normalize().to_string()),
+                        quantity_shares: ExactDecimal(quantity.normalize().to_string()),
+                    })
+                    .collect();
+                if side == BookSide::Bid {
+                    levels.reverse();
+                }
+                let mut anchors = Vec::new();
+                let mut frontier = state.book.dependency_frontier.clone();
+                for ((id, ask, _), evidence) in &self.level_anchors {
+                    if id == token && *ask == (side == BookSide::Ask) {
+                        for anchor in &evidence.direct_anchors {
+                            if !anchors.contains(anchor) {
+                                anchors.push(anchor.clone());
+                            }
+                        }
+                        if evidence.dependency_frontier.as_ref().is_some_and(|value| {
+                            frontier.as_ref().is_none_or(|old| {
+                                value.next_input_position > old.next_input_position
+                            })
+                        }) {
+                            frontier = evidence.dependency_frontier.clone();
+                        }
+                    }
+                }
+                if anchors.is_empty() {
+                    anchors = state.book.direct_anchors.clone();
+                }
+                ObservedFactV1 {
+                    value: Some(levels),
+                    quality: state.book.quality,
+                    direct_anchors: anchors,
+                    dependency_frontier: frontier,
+                }
+            };
+            self.book_projection.insert(
+                token.clone(),
+                [Arc::new(side(BookSide::Bid)), Arc::new(side(BookSide::Ask))],
+            );
+        }
+    }
     fn observation(
         &self,
         group: &Sha256Hex,
@@ -2037,7 +2159,7 @@ impl MarketState {
         events: &Arc<[PublicBusinessFactV1]>,
         reference: Option<&PublicMarketReferenceStateV1>,
         global: &GlobalReferences,
-        depth: &Arc<ObservedFactV1<BinanceDepthStateReferenceV1>>,
+        depth: &Arc<ObservedFactV1<BinanceDepthObservationV1>>,
         version: &str,
     ) -> MarketBusinessObservationV1 {
         let unknown = PublicMarketReferenceStateV1::default();
@@ -2050,61 +2172,13 @@ impl MarketState {
             .map(|context| {
                 let token = &context.asset.token_id.0;
                 let state = &self.assets[token];
-                let side = |side: BookSide| {
-                    if !self.pm.assets[token].book_ready {
-                        return ObservedFactV1 {
-                            quality: state.book.quality,
-                            ..ObservedFactV1::default()
-                        };
-                    }
-                    let mut levels: Vec<_> = self
-                        .pm
-                        .quantities
-                        .iter()
-                        .flat_map(|quantities| quantities.iter())
-                        .filter(|((id, ask, _), _)| id == token && *ask == (side == BookSide::Ask))
-                        .map(|((_, _, price), quantity)| PriceLevelV1 {
-                            price_pusd_per_share: ExactDecimal(price.normalize().to_string()),
-                            quantity_shares: ExactDecimal(quantity.normalize().to_string()),
-                        })
-                        .collect();
-                    if side == BookSide::Bid {
-                        levels.reverse();
-                    }
-                    let mut anchors = Vec::new();
-                    let mut frontier = state.book.dependency_frontier.clone();
-                    for ((id, ask, _), evidence) in &self.level_anchors {
-                        if id == token && *ask == (side == BookSide::Ask) {
-                            for anchor in &evidence.direct_anchors {
-                                if !anchors.contains(anchor) {
-                                    anchors.push(anchor.clone());
-                                }
-                            }
-                            if evidence.dependency_frontier.as_ref().is_some_and(|value| {
-                                frontier.as_ref().is_none_or(|old| {
-                                    value.next_input_position > old.next_input_position
-                                })
-                            }) {
-                                frontier = evidence.dependency_frontier.clone();
-                            }
-                        }
-                    }
-                    if anchors.is_empty() {
-                        anchors = state.book.direct_anchors.clone();
-                    }
-                    ObservedFactV1 {
-                        value: Some(levels),
-                        quality: state.book.quality,
-                        direct_anchors: anchors,
-                        dependency_frontier: frontier,
-                    }
-                };
-                let bids = side(BookSide::Bid);
+                let [bids, asks] = &self.book_projection[token];
+                let bids = Arc::clone(bids);
                 let valuation_best_bid = self.valuation_bid(token, &bids);
                 AssetBusinessObservationV1 {
                     asset: context.asset.clone(),
                     bids,
-                    asks: side(BookSide::Ask),
+                    asks: Arc::clone(asks),
                     best_bid_ask: state.bba.clone(),
                     valuation_best_bid,
                     tick: state.tick.clone(),

@@ -1234,8 +1234,10 @@ fn historical_depth_description_preserves_complete_input_and_replay_through_gap_
                 for observation in &group.observations {
                     states.push(observation.binance_depth.value.as_ref().map(|depth| {
                         (
-                            depth.last_update_id,
+                            depth.full().unwrap().last_update_id,
                             depth
+                                .full()
+                                .unwrap()
                                 .bids
                                 .iter()
                                 .map(|l| (l.price_usdt_per_btc.0.clone(), l.quantity_btc.0.clone()))

@@ -526,6 +526,12 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
             .map(binance_depth_payload)
     }
 
+    pub(crate) fn has_current_depth_value(&self) -> bool {
+        self.current_epoch
+            .as_ref()
+            .and_then(|epoch| self.epochs.get(epoch))
+            .is_some_and(|state| state.book.is_some())
+    }
     /// 返回会随输入增长、并由生产编排层实施硬上限的保留集合条目数。
     pub fn retained_state_entries(&self) -> usize {
         self.epochs.values().fold(

@@ -10,6 +10,9 @@ use sim_system::{execution::*, platform_rules::*};
 use std::sync::Arc;
 #[derive(Default)]
 struct Probe {
+    quantity_demand: Option<bool>,
+    expected_quantity_projection: Option<bool>,
+    saw_depth: Option<Arc<std::sync::atomic::AtomicBool>>,
     checkpoint_capture: Option<(std::path::PathBuf, std::path::PathBuf)>,
     checkpoint_publication_interrupt: Option<std::path::PathBuf>,
     rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
@@ -54,11 +57,27 @@ fn sim_log_values(path: &std::path::Path) -> Vec<serde_json::Value> {
 impl StrategyV1 for Probe {
     type Error = &'static str;
     type Diagnostics = ();
+    fn observation_requirements(&self) -> contracts::PublicObservationRequirementsV1 {
+        contracts::PublicObservationRequirementsV1 {
+            binance_depth_quantities: self.quantity_demand.unwrap_or(true),
+        }
+    }
     fn decide(
         &mut self,
         input: &StrategyInputV1,
         at: i64,
     ) -> Result<StrategyOutputV1, Self::Error> {
+        if let Some(full) = self.expected_quantity_projection {
+            for market in &input.markets {
+                if let Some(depth) = &market.observation.binance_depth.value {
+                    assert_eq!(depth.full().is_some(), full, "共享日采用全部候选需求并集");
+                    self.saw_depth
+                        .as_ref()
+                        .unwrap()
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
         // 仅测试的有界失败探针：旧实现重复即时计算时直接失败，避免挂住回归。
         if self
             .calculation_budget
@@ -988,6 +1007,7 @@ async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_
     )
     .unwrap();
     let depth = last_depth.unwrap();
+    let depth = depth.full().unwrap();
     assert_eq!(depth.last_update_id, 102);
     assert!(
         depth
@@ -1678,6 +1698,22 @@ fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
         std::fs::File::open(day.checkpoint_root.join("checkpoint.json")).unwrap(),
     )
     .unwrap();
+    let completed_day = day.checkpoint_root.join(format!(
+        "checkpoint-{:020}/day.cbor",
+        latest["generation"].as_u64().unwrap()
+    ));
+    let completed: serde_json::Value =
+        ciborium::from_reader(std::fs::File::open(&completed_day).unwrap()).unwrap();
+    assert_eq!(completed["state"], "Complete");
+    assert!(completed.get("core").is_none());
+    assert!(completed.get("producer").is_none());
+    assert!(
+        latest["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["path"] == "day.cbor")
+    );
     let latest_generation = latest["generation"].as_u64().unwrap();
     assert!(latest_generation > 1);
     let mut target = None;
@@ -2063,4 +2099,57 @@ fn two_original_dates_keep_two_thousand_and_same_day_cross_market_continuity() {
             .public()
         )
     );
+}
+
+#[test]
+fn original_day_quantity_demand_union_preserves_complete_and_quantity_free_candidates() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for any_full in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, rules) = setup(tmp.path());
+        add_binance_depth_to_reuse_material(&config);
+        let first = HistoricalPreparedRunConfigV1::from(&config);
+        let mut second = first.clone();
+        second.session.run_id = "quantity-second".into();
+        second.session.account_id = "quantity-second-account".into();
+        second.sim_log = tmp.path().join("second-sim.jsonl");
+        second.noe_root = tmp.path().join("second-noe");
+        second.ledger_root = tmp.path().join("second-ledger");
+        second.metadata_path = tmp.path().join("second-metadata.json");
+        second.result_path = tmp.path().join("second-result.json");
+        second.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(300);
+        let day = HistoricalDayConfigV1 {
+            preparation: config.preparation.clone(),
+            candidates: vec![first, second],
+            checkpoint_root: tmp.path().join("day-state"),
+            checkpoint_interval_seconds: 0,
+            progress_interval_seconds: 0,
+            checkpoint_every_applied_inputs: None,
+            checkpoint_every_candidate_events: None,
+            producer_lead_groups: Some(1),
+        };
+        let seen = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        let results = run_historical_days_v1(&[day], rules.clone(), &|candidate| {
+            let index = usize::from(candidate.session.run_id == "quantity-second");
+            Ok(Probe {
+                quantity_demand: Some(any_full && index == 0),
+                expected_quantity_projection: Some(any_full),
+                saw_depth: Some(seen[index].clone()),
+                rules: Some(rules.clone()),
+                ..Default::default()
+            })
+        })
+        .unwrap();
+        assert_eq!(results[0].candidates.len(), 2);
+        assert!(
+            seen.iter().all(|seen| seen.load(Ordering::Relaxed)),
+            "两种独立交付前沿均实际读到深度描述"
+        );
+        for candidate in &results[0].candidates {
+            assert_eq!(candidate.report["end_reason"], "RangeEnd");
+        }
+    }
 }

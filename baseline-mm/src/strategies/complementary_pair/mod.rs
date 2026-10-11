@@ -226,6 +226,12 @@ impl<'a> PairMarketRead<'a> {
 impl StrategyV1 for ComplementaryPairV1 {
     type Error = StrategyErrorV1;
     type Diagnostics = ComplementaryPairDiagnosticV1;
+    fn observation_requirements(&self) -> contracts::PublicObservationRequirementsV1 {
+        contracts::PublicObservationRequirementsV1 {
+            binance_depth_quantities: self.config.probability.binance_pressure_weight_usd != 0.0
+                || self.config.probability.binance_trade_pressure_weight_usd != 0.0,
+        }
+    }
     fn uses_source_health(&self) -> bool {
         true
     }

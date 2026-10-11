@@ -6752,7 +6752,7 @@ fn validate_public_group_membership_v1(
                     P::NewMarket { .. } => {}
                 }
             }
-            F::ReferenceFact(_) => {}
+            F::ReferenceFact(_) | F::BinanceDepthReference(_) => {}
         }
     }
     Ok(())
@@ -19557,7 +19557,8 @@ fn reduce_public_group_v1(
                     effects.execution.extend(applied.execution);
                 }
             }
-            contracts::PublicBusinessPayloadV1::ReferenceFact(_) => {}
+            contracts::PublicBusinessPayloadV1::ReferenceFact(_)
+            | contracts::PublicBusinessPayloadV1::BinanceDepthReference(_) => {}
         }
     }
     Ok((state, effects))

@@ -161,7 +161,7 @@ pub struct RtdsObservedAnomalyV1 {
 )]
 pub enum CanonicalReferenceEventPayloadV2 {
     ChainlinkBtcUsd(ChainlinkBtcUsdReferenceV1),
-    BinanceDepthState(BinanceDepthStateReferenceV1),
+    BinanceDepthState(std::sync::Arc<BinanceDepthStateReferenceV1>),
     BinanceAggregateTrade(BinanceAggregateTradeReferenceV1),
     MarketPriceAnchorUpdate(MarketPriceAnchorUpdateV1),
     MarketSettlementReferenceUpdate(MarketSettlementReferenceUpdateV1),
@@ -209,6 +209,8 @@ pub enum PublicBusinessPayloadV1 {
         payload: CanonicalMarketFactPayloadV1,
     },
     ReferenceFact(CanonicalReferenceEventPayloadV2),
+    /// 深度正文由原输入重建；位置、身份和事实时间仍在原组内。
+    BinanceDepthReference(PublicFactBindingV1),
 }
 
 /// 实际归约结果，不需要耐久身份即可消费。
@@ -331,8 +333,8 @@ pub enum EffectiveMarketReferenceV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetBusinessObservationV1 {
     pub asset: crate::AssetIdentityV1,
-    pub bids: ObservedFactV1<Vec<crate::PriceLevelV1>>,
-    pub asks: ObservedFactV1<Vec<crate::PriceLevelV1>>,
+    pub bids: std::sync::Arc<ObservedFactV1<Vec<crate::PriceLevelV1>>>,
+    pub asks: std::sync::Arc<ObservedFactV1<Vec<crate::PriceLevelV1>>>,
     pub best_bid_ask: ObservedFactV1<crate::CanonicalBbaFactV1>,
     /// 同来源版本选择的最佳买价；Some(None) 是有效空买盘。直接 BBA 保持独立语义。
     #[serde(default)]
@@ -413,7 +415,7 @@ pub struct MarketBusinessObservationV1 {
     pub chainlink_twap_thirty: ObservedFactV1<ChainlinkBtcUsdTwapReferenceV1>,
     pub chainlink_twap_sixty: ObservedFactV1<ChainlinkBtcUsdTwapReferenceV1>,
     /// 同一关闭组的市场共享一次完整投影；后续组独立生成快照。
-    pub binance_depth: std::sync::Arc<ObservedFactV1<BinanceDepthStateReferenceV1>>,
+    pub binance_depth: std::sync::Arc<ObservedFactV1<BinanceDepthObservationV1>>,
     pub binance_trade: ObservedFactV1<BinanceAggregateTradeReferenceV1>,
     /// 与关闭组共享全部事实；跨市场事件仍参与组统计与时序。
     pub group_events: std::sync::Arc<[PublicBusinessFactV1]>,
@@ -584,4 +586,79 @@ pub struct PublicRuleSourceV1 {
 
 fn source_progress_is_empty(v: &std::sync::Arc<[SourceStreamProgressV1]>) -> bool {
     v.is_empty()
+}
+
+/// 消费者需求只选择数量正文，不改变来源、质量或可见前沿。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicObservationRequirementsV1 {
+    pub binance_depth_quantities: bool,
+}
+impl PublicObservationRequirementsV1 {
+    pub const FULL: Self = Self {
+        binance_depth_quantities: true,
+    };
+}
+
+/// None 仍表示尚未观察；NotMaterialized 表示已知深度但本次消费者不需要数量。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BinanceDepthObservationV1 {
+    Full(std::sync::Arc<BinanceDepthStateReferenceV1>),
+    NotMaterialized,
+}
+impl BinanceDepthObservationV1 {
+    pub fn full(&self) -> Option<&BinanceDepthStateReferenceV1> {
+        match self {
+            Self::Full(value) => Some(value),
+            Self::NotMaterialized => None,
+        }
+    }
+}
+
+// 默认完整观察沿原 JSON/CBOR 对象编码；省略正文显式编码为描述对象。
+mod depth_observation_encoding {
+    use super::*;
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum QuantityDisposition {
+        NotMaterialized,
+    }
+    #[derive(Serialize, Deserialize)]
+    #[serde(untagged, deny_unknown_fields)]
+    enum Representation<T> {
+        Full(T),
+        Description {
+            binance_depth_quantities: QuantityDisposition,
+        },
+    }
+    impl Serialize for BinanceDepthObservationV1 {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            match self {
+                Self::Full(value) => Representation::Full(value),
+                Self::NotMaterialized => {
+                    Representation::<&std::sync::Arc<BinanceDepthStateReferenceV1>>::Description {
+                        binance_depth_quantities: QuantityDisposition::NotMaterialized,
+                    }
+                }
+            }
+            .serialize(serializer)
+        }
+    }
+    impl<'de> Deserialize<'de> for BinanceDepthObservationV1 {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            Ok(
+                match Representation::<std::sync::Arc<BinanceDepthStateReferenceV1>>::deserialize(
+                    deserializer,
+                )? {
+                    Representation::Full(value) => Self::Full(value),
+                    Representation::Description { .. } => Self::NotMaterialized,
+                },
+            )
+        }
+    }
+}
+
+impl Default for PublicObservationRequirementsV1 {
+    fn default() -> Self {
+        Self::FULL
+    }
 }

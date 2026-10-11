@@ -511,3 +511,184 @@ fn day_initialization_and_prior_twap_follow_original_visible_reference_selection
         .unwrap()
     );
 }
+
+#[test]
+fn day_quantity_projection_keeps_original_binding_hidden_buckets_and_pm_asks() {
+    use data_collect::source_hourly_layout::{
+        BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION, BinanceDepthSnapshotHourlyRow,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let mut row = common_metadata();
+    row.condition_id = ID.into();
+    row.clob_market_id = "3195576".into();
+    let metadata = polymarket_market_metadata_v6_rows_to_batch(
+        polymarket_market_metadata_v6_schema(),
+        &[PolymarketMarketMetadataV6Row::Existing(
+            PolymarketMarketMetadataV5Row::from_common(row, None, None),
+        )],
+    )
+    .unwrap();
+    let depth_root = tmp.path().join("depth");
+    let depth_day = depth_root.join("2026-07-30/typed_raw/utc_day=2026-07-30");
+    let mut writer = TypedParquetSegmentWriter::create_for_current_source(
+        &depth_day,
+        "binance_depth_snapshot_00",
+        "binance_depth_snapshot",
+    )
+    .unwrap();
+    writer
+        .write_binance_depth_snapshot_rows(&[BinanceDepthSnapshotHourlyRow {
+            timestamp_received: RECEIVED + 10,
+            snapshot_fetch_start_utc: RECEIVED + 9,
+            last_update_id: 100,
+            bids: r#"[["64100","0.7"]]"#.into(),
+            asks: r#"[["64200","0.4"]]"#.into(),
+            symbol: "BTCUSDT".into(),
+            source_endpoint: "https://api.binance.com/api/v3/depth".into(),
+            snapshot_status: "complete".into(),
+            source_sequence_epoch_id: Some("depth-a".into()),
+            connection_generation: Some(1),
+            depth_ingress_sequence: Some(1),
+            collector_admission_sequence: Some(1),
+            collector_admission_time_utc_ms: Some(RECEIVED + 11),
+            collector_host_id: "collector-1".into(),
+            collector_region: "hk".into(),
+            schema_version: BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION.into(),
+        }])
+        .unwrap();
+    let segment = finalize_with_fact(
+        writer,
+        "binance_depth_snapshot",
+        BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+        1,
+    );
+    let manifests = [
+        write(
+            &tmp.path().join("meta"),
+            METADATA_SOURCE,
+            POLYMARKET_MARKET_METADATA_SCHEMA_V6,
+            vec![metadata],
+            0,
+        ),
+        manifest_for(
+            &depth_root,
+            &segment,
+            "binance_depth_snapshot",
+            BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+            true,
+        ),
+        write(
+            &tmp.path().join("pm"),
+            "polymarket_market",
+            POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+            vec![
+                polymarket_orderbook_v3_messages_to_batch(&[pm(1, RECEIVED + 100, book("100"))])
+                    .unwrap(),
+            ],
+            0,
+        ),
+    ];
+    let admissions = manifests
+        .iter()
+        .map(|m| crate::validate_public_source_daily_manifest_admission_v1(m).unwrap())
+        .collect::<Vec<_>>();
+    let files = admissions
+        .iter()
+        .flat_map(|a| a.files())
+        .collect::<Vec<_>>();
+    let run = |requirements| {
+        let ingress = DayIngressV1::open(
+            &files,
+            "day-test".into(),
+            1,
+            1 << 20,
+            RECEIVED - 1..RECEIVED + 1000,
+            vec![],
+            crate::gate_a_formal_canonical_config().max_epoch_count_per_source,
+        )
+        .unwrap();
+        let mut producer = DayProducerV1::new(
+            ingress,
+            header(),
+            Sha256Hex("a".repeat(64)),
+            "hidden-test".into(),
+        )
+        .unwrap();
+        producer.core.set_observation_requirements(requirements);
+        let mut groups = Vec::new();
+        let mut buckets = Vec::new();
+        while let Some(next) = producer.next_applied().unwrap() {
+            groups.extend(next.applied.closed_groups);
+            buckets.extend(next.hidden);
+        }
+        (groups, serde_json::to_value(buckets).unwrap())
+    };
+    let (full, full_hidden) = run(PublicObservationRequirementsV1::FULL);
+    let (compact, compact_hidden) = run(PublicObservationRequirementsV1 {
+        binance_depth_quantities: false,
+    });
+    assert_eq!(
+        full_hidden, compact_hidden,
+        "私有数量与桶来源绑定不受观察投影影响"
+    );
+    assert!(!full_hidden.as_array().unwrap().is_empty());
+    assert_eq!(full.len(), compact.len());
+    let mut depth_facts = 0;
+    for (a, b) in full.iter().zip(&compact) {
+        assert_eq!(
+            (
+                a.group_id.clone(),
+                a.group_position,
+                a.closed_at_input_position
+            ),
+            (
+                b.group_id.clone(),
+                b.group_position,
+                b.closed_at_input_position
+            )
+        );
+        assert_eq!(a.records.len(), b.records.len());
+        for (old, new) in a.records.iter().zip(b.records.iter()) {
+            if matches!(
+                old.payload,
+                PublicBusinessPayloadV1::ReferenceFact(
+                    CanonicalReferenceEventPayloadV2::BinanceDepthState(_)
+                )
+            ) {
+                depth_facts += 1;
+                let PublicBusinessPayloadV1::BinanceDepthReference(binding) = &new.payload else {
+                    panic!("完整事实改为同来源引用")
+                };
+                assert_eq!(binding.position, new.position);
+                let mut expected = old.clone();
+                expected.payload = new.payload.clone();
+                assert_eq!(expected, *new);
+            } else {
+                assert_eq!(old, new);
+            }
+        }
+        for (old, new) in a.observations.iter().zip(&b.observations) {
+            let mut expected = old.clone();
+            if expected.binance_depth.value.is_some() {
+                assert!(old.binance_depth.value.as_ref().unwrap().full().is_some());
+                let mut depth = (*expected.binance_depth).clone();
+                depth.value = Some(BinanceDepthObservationV1::NotMaterialized);
+                expected.binance_depth = std::sync::Arc::new(depth);
+            }
+            expected.group_events = new.group_events.clone();
+            assert_eq!(expected, *new, "质量/锚点/依赖/PM逐档数量保持");
+            assert!(std::sync::Arc::ptr_eq(&b.records, &new.group_events));
+        }
+    }
+    assert_eq!(depth_facts, 1);
+    let last = compact.last().unwrap();
+    let up = last.observations[0]
+        .assets
+        .iter()
+        .find(|a| a.asset.token_id.0 == "1")
+        .unwrap();
+    assert_eq!(
+        up.asks.value.as_ref().unwrap()[0].quantity_shares,
+        ExactDecimal("80".into())
+    );
+}

@@ -98,6 +98,10 @@ pub enum QualifiedBatchResultV1 {
 pub trait StrategyV1 {
     type Error;
     type Diagnostics;
+    /// 默认完整投影；日生产者取所有实际候选的需求并集。
+    fn observation_requirements(&self) -> contracts::PublicObservationRequirementsV1 {
+        contracts::PublicObservationRequirementsV1::FULL
+    }
     /// 默认不选用；旧调用方继续使用原回调、时序与组节奏。
     fn uses_source_health(&self) -> bool {
         false

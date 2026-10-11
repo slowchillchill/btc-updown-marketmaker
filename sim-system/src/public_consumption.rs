@@ -1013,57 +1013,20 @@ pub mod checkpoint {
         pm_inputs: Vec<(u64, CanonicalPmMessageV1)>,
         pm_contexts: Vec<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>,
     }
-    // 私有恢复所需的一位存在信息。正式观察的 null 表示不改写；只记录
-    // 已观察但没有买价的位置，避免 CBOR 将其合并为尚未观察。
-    mod group_observation {
-        use super::*;
-        #[derive(Serialize)]
-        struct SavedRef<'a> {
-            group: &'a ClosedBusinessGroupV1,
-            empty_valuation_bids: Vec<(usize, usize)>,
+    include!("public_consumption_checkpoint.rs");
+    use observation_pool::group as group_observation;
+
+    /// 同一日待消费批次只保存每个实际共享值一次；不同前缀仍保留各自值。
+    #[derive(Serialize, Deserialize)]
+    pub struct DeliveryBatch(#[serde(with = "observation_pool::deliveries")] Vec<Delivery>);
+    impl DeliveryBatch {
+        pub fn capture<'a>(values: impl Iterator<Item = &'a PublicGroupDeliveryV1>) -> Self {
+            Self(values.map(Delivery::capture).collect())
         }
-        #[derive(Deserialize)]
-        struct Saved {
-            group: ClosedBusinessGroupV1,
-            empty_valuation_bids: Vec<(usize, usize)>,
-        }
-        pub fn serialize<S: serde::Serializer>(
-            group: &Arc<ClosedBusinessGroupV1>,
-            serializer: S,
-        ) -> Result<S::Ok, S::Error> {
-            let empty_valuation_bids = group
-                .observations
-                .iter()
-                .enumerate()
-                .flat_map(|(market, observation)| {
-                    observation
-                        .assets
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, asset)| asset.valuation_best_bid.value == Some(None))
-                        .map(move |(asset, _)| (market, asset))
-                })
-                .collect();
-            SavedRef {
-                group,
-                empty_valuation_bids,
-            }
-            .serialize(serializer)
-        }
-        pub fn deserialize<'de, D: serde::Deserializer<'de>>(
-            deserializer: D,
-        ) -> Result<Arc<ClosedBusinessGroupV1>, D::Error> {
-            let mut saved = Saved::deserialize(deserializer)?;
-            for (market, asset) in saved.empty_valuation_bids {
-                let asset = saved
-                    .group
-                    .observations
-                    .get_mut(market)
-                    .and_then(|market| market.assets.get_mut(asset))
-                    .ok_or_else(|| serde::de::Error::custom("恢复空买价位置不存在"))?;
-                asset.valuation_best_bid.value = Some(None);
-            }
-            Ok(Arc::new(saved.group))
+        pub fn restore(
+            self,
+        ) -> Result<Vec<PublicGroupDeliveryV1>, data_pipeline_core::ContractError> {
+            self.0.into_iter().map(Delivery::restore).collect()
         }
     }
     impl PreparedGroup {
