@@ -41,6 +41,11 @@ use crate::reservation::{
     ReservationStatusV1, ReserveIntentV1,
 };
 
+pub(super) enum LifecycleQuantityV1 {
+    SubmissionOpen(ExactDecimal),
+    MakerMatch(ExactDecimal),
+}
+
 type LedgerControl<I = contracts::execution_normalization::StableLogicalIdentityV1> =
     contracts::execution_normalization::SourceNeutralControlResult<
         SourceNeutralSubmissionOutcomeV1<I>,
@@ -1181,6 +1186,7 @@ impl LedgerWriterV1 {
                 Some(resolved.boundary.durable_available_at_utc_ms),
                 &source_reference.record,
                 evidence,
+                None,
             ),
             NormalizationRecordV1::Pending { .. } if self.account.is_some() => self
                 .apply_pending_result(
@@ -1199,6 +1205,7 @@ impl LedgerWriterV1 {
         available_through_utc_ms: Option<i64>,
         source_record: &SimV2SourceRecordReferenceV1,
         evidence: &LedgerEvidence<I>,
+        quantity: Option<LifecycleQuantityV1>,
     ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
         self.ensure_noe_account(account_instance_key)?;
         let ledger_entry_seq = self.next_ledger_entry_seq()?;
@@ -1224,6 +1231,10 @@ impl LedgerWriterV1 {
             }
             LedgerEvidence::SettlementLifecycle { .. } => {}
             _ => return Err(LedgerErrorV1::NonEconomicRecord),
+        }
+
+        if let Some(quantity) = quantity {
+            apply_lifecycle_quantity(&mut lifecycle, evidence, quantity, ledger_entry_seq)?;
         }
 
         let entries = lifecycle_change_entries(
@@ -2552,6 +2563,7 @@ fn lifecycle_evidence_keys<I: LedgerIdentity>(
         }
         LedgerEvidence::TradeLifecycle { result } => {
             keys.add_trade(lifecycle, &result.trade_identity.ledger_key());
+            keys.add_order(lifecycle, &result.order_identity.ledger_key());
             keys.add_condition(&result.condition_id);
         }
         _ => {}
@@ -2779,6 +2791,12 @@ fn set_order_open(
 ) -> Result<(), LedgerErrorV1> {
     let mut order = lifecycle.orders.remove(order_identity).unwrap_or_default();
     let next_condition = condition_id.cloned().or_else(|| order.condition_id.clone());
+    let open = open
+        && !order.closed
+        && order
+            .submission_open_base_quantity_shares
+            .is_none_or(|initial| initial > order.maker_matched_base_quantity_shares);
+    order.closed |= !open;
     if order.open && (!open || order.condition_id != next_condition) {
         lifecycle.totals.open_order_count = checked_sub_u64(
             lifecycle.totals.open_order_count,
@@ -2841,6 +2859,73 @@ fn apply_order_lifecycle<I: LedgerIdentity>(
             ledger_entry_seq,
         ),
     }
+}
+
+fn apply_lifecycle_quantity<I: LedgerIdentity>(
+    lifecycle: &mut LifecycleStateV1,
+    evidence: &LedgerEvidence<I>,
+    quantity: LifecycleQuantityV1,
+    ledger_entry_seq: u64,
+) -> Result<(), LedgerErrorV1> {
+    let (order_identity, condition_id, open) = match (evidence, quantity) {
+        (
+            LedgerEvidence::Control {
+                result:
+                    LedgerControl::Submission {
+                        outcome: SourceNeutralSubmissionOutcomeV1::Accepted { order },
+                    },
+            },
+            LifecycleQuantityV1::SubmissionOpen(open),
+        ) => {
+            let initial = parse_decimal(&open, "lifecycle.submission_open_quantity")?;
+            let index = lifecycle
+                .orders
+                .entry(order.order_identity.ledger_key())
+                .or_default();
+            // 原提交计量固定不变，后续查询快照不替代此数量基点。
+            index
+                .submission_open_base_quantity_shares
+                .get_or_insert(initial);
+            (
+                &order.order_identity,
+                &order.condition_id,
+                matches!(order.state, SourceNeutralOrderStateV1::Open),
+            )
+        }
+        (LedgerEvidence::TradeLifecycle { result }, LifecycleQuantityV1::MakerMatch(quantity)) => {
+            let trade = lifecycle
+                .trades
+                .get_mut(&result.trade_identity.ledger_key())
+                .expect("同一候选已归约成交生命周期");
+            if trade.open_quantity_counted {
+                return Ok(());
+            }
+            let quantity = parse_decimal(&quantity, "lifecycle.maker_match_quantity")?;
+            trade.open_quantity_counted = true;
+            let order = lifecycle
+                .orders
+                .entry(result.order_identity.ledger_key())
+                .or_default();
+            order.maker_matched_base_quantity_shares = checked_add(
+                order.maker_matched_base_quantity_shares,
+                quantity,
+                "lifecycle.maker_match_quantity",
+            )?;
+            // 提交响应到达前只保留已耗减数量，不制造初始余量或关闭未知订单。
+            if order.submission_open_base_quantity_shares.is_none() {
+                return Ok(());
+            }
+            (&result.order_identity, &result.condition_id, order.open)
+        }
+        _ => unreachable!("数量适配与原生命周期种类一致"),
+    };
+    set_order_open(
+        lifecycle,
+        &order_identity.ledger_key(),
+        Some(condition_id),
+        open,
+        ledger_entry_seq,
+    )
 }
 
 fn apply_trade_lifecycle<I: LedgerIdentity>(
@@ -2910,6 +2995,9 @@ fn set_trade_pending(
         TradeLifecycleIndexV1 {
             condition_id: condition_id.clone(),
             pending,
+            open_quantity_counted: previous
+                .as_ref()
+                .is_some_and(|index| index.open_quantity_counted),
             _last_ledger_entry_seq: ledger_entry_seq,
         },
     );

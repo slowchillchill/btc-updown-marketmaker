@@ -46,6 +46,14 @@ pub(crate) struct OrderLifecycleIndexV1 {
     pub(crate) economic_applied: bool,
     pub(crate) accepted_principal_counted: bool,
     pub(crate) open: bool,
+    // 提交计量已包含初始 Taker 成交；各唯一 Maker 成交只消耗一次开放余量，
+    // 反馈先后不改变数量归属。
+    #[serde(default)]
+    pub(crate) submission_open_base_quantity_shares: Option<Decimal>,
+    #[serde(default)]
+    pub(crate) maker_matched_base_quantity_shares: Decimal,
+    #[serde(default)]
+    pub(crate) closed: bool,
     pub(crate) last_ledger_entry_seq: u64,
 }
 
@@ -53,6 +61,8 @@ pub(crate) struct OrderLifecycleIndexV1 {
 pub(crate) struct TradeLifecycleIndexV1 {
     pub(crate) condition_id: ConditionId,
     pub(crate) pending: bool,
+    #[serde(default)]
+    pub(crate) open_quantity_counted: bool,
     pub(crate) _last_ledger_entry_seq: u64,
 }
 
