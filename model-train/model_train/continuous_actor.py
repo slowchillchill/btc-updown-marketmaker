@@ -42,10 +42,35 @@ class ActorModelQueue:
         self.market_ends=market_ends;self.release_markets=release_markets
         self.request_identities=request_identities
         self.on_started=on_started;self.on_completed=on_completed
+        self.input_owner=None
+
+    def bind_inputs(self, owner):
+        self.input_owner=owner
+        self.sync_inputs()
+
+    def sync_inputs(self):
+        """稳定业务身份到当前热行的机械选择；新市场只建立空GRU。"""
+        owner=self.input_owner
+        if owner is None:return
+        identities=owner.identities
+        hidden=self.hidden.new_zeros((self.hidden.size(0),len(identities),self.hidden.size(2)))
+        if len(self.identities) and len(identities):
+            matches=(identities[:,None]==self.identities[None]).all(2)
+            selected=torch.nonzero(matches.any(1)).flatten()
+            hidden[:,selected]=self.hidden[:,matches[selected].to(torch.int64).argmax(1)]
+        self.hidden=hidden;self.identities=identities.clone();self.row_roots=owner.row_roots.clone()
+        self.market_ends=owner.encoder.market.times[owner.market_indices,1]
+
+    def _task_rows(self, observation):
+        return self.row_roots if observation.row_roots is None else observation.row_roots
+
+    def _hot_rows(self, observation):
+        return (observation.frozen.identities[:,None]==self.identities[None]).all(2).to(torch.int64).argmax(1)
 
     def enqueue(self,observation,active):
+        if observation is None:return
         calculation,dispatch=self.timing(observation)
-        has_rows=torch.zeros_like(active,dtype=torch.int32).scatter_reduce(0,self.row_roots,
+        has_rows=torch.zeros_like(active,dtype=torch.int32).scatter_reduce(0,self._task_rows(observation),
             (observation.frozen.role>=0).to(torch.int32),reduce='amax').bool()
         accepted=active&has_rows
         if not bool(accepted.any().cpu()):return
@@ -63,7 +88,8 @@ class ActorModelQueue:
             waiting=task.active&(task.stage==0)&~running
             completing=task.active&(task.stage==1)
             sending=task.active&(task.stage==2)
-            candidate=torch.maximum(row.cutoff,self.last_completed_at)
+            cutoff=row.cutoff if task.observation.root_cutoffs is None else task.observation.root_cutoffs
+            candidate=torch.maximum(cutoff,self.last_completed_at)
             if task.completed_at is not None:candidate=torch.where(completing,task.completed_at,candidate)
             if task.send_at is not None:candidate=torch.where(sending,task.send_at,candidate)
             k=torch.where(completing,2,torch.where(sending,3,1))
@@ -82,17 +108,17 @@ class ActorModelQueue:
             if not bool(active.any().cpu()):continue
             policy,version=self.policy_at_start(task.observation,active)
             from .frozen_inputs import FrozenPolicyEvaluation
-            frozen=task.observation.frozen;rows=self.row_roots
+            frozen=task.observation.frozen;rows=self._task_rows(task.observation);positions=self._hot_rows(task.observation)
             state=torch.zeros((len(rows),self.hidden.size(2)),device=self.hidden.device)
             value=torch.zeros(len(rows),device=self.hidden.device)
-            next_hidden=self.hidden.clone();row_fault=torch.zeros_like(rows,dtype=torch.int32)
+            next_hidden=self.hidden[:,positions].clone();row_fault=torch.zeros_like(rows,dtype=torch.int32)
             row_ready=torch.ones_like(rows,dtype=torch.bool)
             # 独立市场批量递推；ContextOnly批先于DecisionRequired批。
             for role in (0,1):
                 indices=torch.nonzero(active[rows]&(frozen.role==role)).flatten()
                 if not indices.numel():continue
                 with torch.no_grad():part=policy.frozen_state_and_value(frozen.rows(indices),
-                    self.hidden[:,indices],self.identities[indices],version[rows[indices]])
+                    self.hidden[:,positions[indices]],frozen.identities[indices],version[rows[indices]])
                 state[indices]=part.state;value[indices]=part.value;next_hidden[:,indices]=part.hidden
                 row_fault[indices]=part.fault;row_ready[indices]=part.ready
             evaluation=FrozenPolicyEvaluation(state,value,next_hidden,version[rows].clone(),row_ready,row_fault)
@@ -118,7 +144,9 @@ class ActorModelQueue:
         for index,task in enumerate(self.tasks):
             active=enabled&(event.task==index)&(event.kind==2)
             if not bool(active.any().cpu()):continue
-            actionable=task.observation.frozen.role[task.observation.decision_rows]==1
+            observation=task.observation;rows=self._task_rows(observation)
+            actionable=torch.zeros_like(active).scatter(0,rows[observation.decision_rows],
+                observation.frozen.role[observation.decision_rows]==1)
             accepted=active&~actionable
             if bool((active&actionable).any().cpu()):
                 if task.sender is None:task.sender=self.make_sender(task)
@@ -128,7 +156,9 @@ class ActorModelQueue:
                     inactive=publication.action.family<1
                     task.sender.complete |= accepted&inactive
                     actionable &= ~inactive
-            self.hidden=torch.where(accepted[self.row_roots][None,:,None],task.evaluation.hidden,self.hidden)
+            positions=self._hot_rows(observation)
+            selected=torch.nonzero(accepted[rows]).flatten()
+            self.hidden[:,positions[selected]]=task.evaluation.hidden[:,selected]
             self.last_completed_at=torch.where(accepted,event.at,self.last_completed_at)
             task.stage=torch.where(accepted,torch.where(actionable,2,3),task.stage)
             self._release_completed_capture(task)
@@ -179,11 +209,16 @@ class ActorModelQueue:
 
     def retire_consumed_markets(self,observed_at):
         if self.market_ends is None:return
-        ended=(self.market_ends<=observed_at[self.row_roots])&(self.identities[:,2]>=0)
+        ended=self.market_ends<=observed_at[self.row_roots]
         pending=torch.zeros_like(ended)
         for task in self.tasks:
-            pending |= (task.active&(task.stage<2))[self.row_roots]&(task.observation.frozen.role>=0)
+            rows=self._task_rows(task.observation)
+            needed=(task.active&(task.stage<2))[rows]&(task.observation.frozen.role>=0)
+            identities=task.observation.frozen.identities[needed]
+            pending |= (self.identities[:,None]==identities[None]).all(2).any(1)
         released=ended&~pending
-        self.hidden=torch.where(released[None,:,None],0.,self.hidden)
-        self.identities[:,2]=torch.where(released,-1,self.identities[:,2])
-        if self.release_markets is not None and bool(released.any().cpu()):self.release_markets(released)
+        if not bool(released.any().cpu()):return
+        keep=torch.nonzero(~released).flatten()
+        if self.release_markets is not None:self.release_markets(released)
+        self.hidden=self.hidden[:,keep];self.identities=self.identities[keep]
+        self.row_roots=self.row_roots[keep];self.market_ends=self.market_ends[keep]

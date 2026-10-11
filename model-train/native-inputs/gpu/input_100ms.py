@@ -22,6 +22,9 @@ class MarketFreezeMemory:
     pm_sides: object
     binance_sides: object
 
+    def rows(self, indices):
+        return _memory_rows(self,indices,self.previous_prefix.numel())
+
 
 @dataclass(frozen=True)
 class FrozenMarket100ms:
@@ -39,19 +42,21 @@ class FrozenMarket100ms:
 
     def rows(self, indices):
         """从同一冻结选择市场行；精确历史/端点沿原行坐标选择，不改身份。"""
-        rows=self.role.numel()
-        def take(value):
-            if value is None:return None
-            if hasattr(value,'words') and hasattr(value,'sign'):
-                width=value.sign.numel()//rows
-                return _take(value,(indices[:,None]*width+torch.arange(width,device=indices.device)).flatten())
-            if isinstance(value,torch.Tensor):return value[indices]
-            return replace(value,**{field.name:take(getattr(value,field.name)) for field in fields(value)})
-        return take(self)
+        return _memory_rows(self,indices,self.role.numel())
 
     def snapshot(self):
         """图外成功发布时拥有全部冻结值/记忆；共享只读DPT列不在本对象中。"""
         return _snapshot_owned(self)
+
+
+def _memory_rows(value,indices,rows):
+    """同一市场物理行选择，保精确值/fault与全部记忆字段。"""
+    if value is None:return None
+    if hasattr(value,'words') and hasattr(value,'sign'):
+        width=value.sign.numel()//rows if rows else 0
+        return _take(value,(indices[:,None]*width+torch.arange(width,device=indices.device)).flatten())
+    if isinstance(value,torch.Tensor):return value[indices]
+    return replace(value,**{field.name:_memory_rows(getattr(value,field.name),indices,rows) for field in fields(value)})
 
 
 def _snapshot_owned(value):
@@ -110,6 +115,22 @@ class MarketInputs100ms:
     def prefix_at(self, observation_ms):
         return torch.searchsorted(self.delivered_cutoffs,observation_ms,right=True)-1+self.shared.group_base
 
+    def roles(self, observation_ms, market_indices, root_started_at, prefixes, row_roots=None):
+        """原公开资格的只读选择；物理行装配与freeze共用同一判断。"""
+        numbers = _numbers()
+        valid = (market_indices>=0)&(market_indices<self.market.market_count)
+        safe = market_indices.clamp(0,self.market.market_count-1)
+        frame = self.market.frame(prefixes)
+        now = numbers.ExactInt.from_i64_tensor(observation_ms)
+        start = numbers.ExactInt.from_i64_tensor(self.market.times[safe,0])
+        end = numbers.ExactInt.from_i64_tensor(self.market.times[safe,1])
+        qualified = numbers.ExactInt.from_i64_tensor(root_started_at).compare(start-start.constant(30000))
+        entered = now.compare(start-start.constant(30000));opened = now.compare(start);ended = now.compare(end)
+        owners=torch.arange(len(safe),device=safe.device) if row_roots is None else row_roots
+        active = (valid & frame.admitted[owners,safe]
+                  & (qualified.order<=0) & (entered.order>=0) & (ended.order<0))
+        return torch.where(active,(opened.order>=0).to(torch.int64),-1),qualified.fault|entered.fault|opened.fault|ended.fault
+
     def freeze(self, observation_ms, market_indices, root_started_at, source_memory, endpoint_memory, *, applied_prefix=None, events=None):
         """观察时刻固定在UTC100ms；调用方先接纳截至C的全部完整组，再冻结。
 
@@ -144,14 +165,9 @@ class MarketInputs100ms:
         arrived = now.compare(numbers.ExactInt.from_i64_tensor(source_memory.last_cutoff))
         fault |= began.fault | arrived.fault | ((began.order<0)|(arrived.order<0)).to(torch.int32)
         fault |= ((endpoint_memory.previous_prefix < -1) | (endpoint_memory.previous_prefix > prefixes)).to(torch.int32)
-        start = numbers.ExactInt.from_i64_tensor(self.market.times[safe,0])
-        end = numbers.ExactInt.from_i64_tensor(self.market.times[safe,1])
-        qualified = numbers.ExactInt.from_i64_tensor(root_started_at).compare(start-start.constant(30000))
-        entered = now.compare(start-start.constant(30000));opened = now.compare(start);ended = now.compare(end)
-        active = (valid_market & market_frame.admitted[torch.arange(roots,device=device),safe]
-                  & (qualified.order<=0) & (entered.order>=0) & (ended.order<0))
-        fault |= qualified.fault | entered.fault | opened.fault | ended.fault
-        role = torch.where(active,(opened.order>=0).to(torch.int64),-1)
+        role,role_fault = self.roles(observation_ms,market_indices,root_started_at,prefixes)
+        active = role>=0
+        fault |= role_fault
         pm = self.sides.encode(frame,assets,observation_ms,endpoint_memory.pm_sides)
         pm_books = self.packer.pack(frame,assets,observation_ms)
         fields = pm_fields(self.shared,observed,assets,observation_ms)

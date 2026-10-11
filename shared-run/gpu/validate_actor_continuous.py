@@ -78,6 +78,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             evidence.append(dict(stage=name,**row))
         original_stage(name,**row)
     two=source.get('continuous_two_markets',False);offset=source.get('continuous_observation_offset',0)
+    gap=source.get('continuous_market_gap',False)
     full_warmup=source.get('continuous_full_warmup',False)
     first_observation=offset-28000 if full_warmup else 1300+offset
     started=time.perf_counter();zero=T([0]);yes=T([True],torch.bool);empty=T([[]]);start=zero-29000
@@ -128,7 +129,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     initial_columns=(clock.source.initial_input_pages[0].columns if clock.source.initial_input_pages else clock.source.prepared.columns)
     history=SourceHistoryInputs(pm,market,reference,initial_columns)
     encoder=MarketInputs100ms(pm,market,reference,binance,history,rule,initial_columns,pm.causal_visible_at)
-    memory=history.empty(len(market_indices),start[row_roots]);endpoints=MarketFreezeMemory(clock.source.initial_prefix_at(pm,T([first_observation-100]))[row_roots],T([first_observation-100])[row_roots],None,None)
+    initial_prefix=clock.source.initial_prefix_at(pm,T([first_observation-100]))
     valuation=PortfolioValuation(pm,tokens,clock.public.ledger.success_pools.asset_roots)
     known={name:yes for name in ('executed_prefix_known','success_prefix_known','rebate_prefix_known','settlement_prefix_known',
         'ledger_prefix_known','economic_liability_prefix_known','economic_prefix_known')}
@@ -188,7 +189,8 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         # 原PublicFactWindow允许正初始容量；两条真实1413/1414事实形成已知窄窗需求。
         from fact_window import PublicFactWindow
         encoder.events.window=PublicFactWindow(initial_columns,initial_capacity=1)
-    material=ContinuousActorInputs(encoder,history,memory,endpoints,market_indices,start,identities,account_builder,word_capacity=16,row_roots=row_roots)
+    material=ContinuousActorInputs(encoder,history,market_indices,start,identities,account_builder,
+        word_capacity=16,row_roots=row_roots,root_prefix=initial_prefix,root_previous_at=T([first_observation-100]))
     torch.manual_seed(181606)
     template=Policy100ms(ModelShape100ms(2,64)).cuda().eval();policies={}
     for at,family in [(1300,2),(1400,2 if second_buy else 0),(1500,0),(1600,0),(1700,4),(1800,0)]:
@@ -237,16 +239,25 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     if full_warmup:
         for at in range(first_observation,1300+offset,100):policies[at]=policies[1800+offset]
         policies[2800+offset]=policies[1800+offset]
+    if gap:
+        for at in (302000,302100,302200):policies[at]=policies[1800+offset]
     random=ActionRandom(zero+181606,T([[0,0,0,0]]));observations=[];senders=[];bound=[]
     model_records=[];completed_records=[];retired_observations=[];retired_senders=[]
     expected_hidden=torch.zeros((2,len(market_indices),64),device=zero.device)
     warm_steps=0;opened=False
-    history_checks=[];history_retry=False;resource_candidate=None;end_retry=False;release_calls=[]
+    empty_rows=[];history_checks=[];history_retry=False;resource_candidate=None;end_retry=False;release_calls=[]
     def freeze(world,at,enabled):
         nonlocal history_retry,resource_candidate
-        now=int(at.cpu()[0]);previous=int(material.endpoints.previous_observation_ms.cpu()[0])
+        now=int(at.cpu()[0]);previous=int(material.previous_observation_ms.cpu()[0])
         before=stored_actual(material.memory);endpoint=stored_actual(material.endpoints)
+        random_before=random.counter.clone()
         observed,accepted=material.freeze(world,at,enabled)
+        if observed is None:
+            assert accepted.cpu().tolist()==[True] and torch.equal(random.counter,random_before)
+            empty_rows.append(dict(at=now,hot_rows=len(material.market_indices),prefix=material.previous_prefix.cpu().tolist(),random=random.counter.cpu().tolist()))
+            stage('no_active_market_observation',at=at.cpu().tolist(),hot_rows=len(material.market_indices),
+                previous_prefix=material.previous_prefix.cpu().tolist(),random=random.counter.cpu().tolist())
+            return observed,accepted
         required=observed.market.required.max(0).values.cpu().tolist()
         shortfall=required[2]>material.encoder.events.window.fact_capacity
         if source.get('nonzero_history_samples') and not two and now==1500 and not history_retry:
@@ -282,18 +293,19 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             history_checks.append(dict(at=now,retained=len(samples),window_samples=len(window),history=expected_history,path=expected_path))
         if two and accepted.any().cpu().item():
             shared_slow=observed.frozen.slow[:,[i for i in range(433) if i not in (93,94)]]
-            assert torch.equal(shared_slow[0],shared_slow[1])
+            if len(shared_slow)==2:assert torch.equal(shared_slow[0],shared_slow[1])
             assert observed.account.cutoff.numel()==1 and world.public.ledger.fault.numel()==1
-            expected_roles=[1,0] if now<2000+offset else [-1,1]
+            expected_roles=([1] if now<301000 else [0]) if gap else ([1,0] if now<2000+offset else [1])
             assert observed.frozen.role.cpu().tolist()==expected_roles
-            assert observed.native.scopes.current_market.cpu().tolist()==[0 if now<2000+offset else 1]
-            if now<2000+offset:
+            assert observed.native.scopes.current_market.cpu().tolist()==[0 if now<2000+offset else (-1 if gap else 1)]
+            if now<2000+offset and not gap:
                 assert observed.frozen.slow[:,93:95].cpu().tolist()==[[1.,0.],[0.,1.]]
-            else:
+            elif not gap:
                 assert observed.native.scopes.present[0,1,0].cpu().item()
             import math
-            for row,samples in enumerate(source['two_market_history_samples']):
-                if observed.frozen.role[row].cpu().item()<0:continue
+            for row,identity in enumerate(observed.frozen.identities.cpu().tolist()):
+                market_row=identity[2]
+                samples=source['two_market_history_samples'][market_row]
                 samples=[(Fraction(value),time) for value,time in samples if time<now]
                 window=[value for value,time in samples if previous<=time<now]
                 signed=lambda value:math.copysign(math.log1p(abs(float(value))),float(value)) if value else 0.
@@ -309,9 +321,9 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                         expected_path[5]=math.log1p(math.sqrt(float(square)))
                 torch.testing.assert_close(observed.frozen.fast[row,542:566],T(expected_history+[0.]*20,torch.float32),rtol=0,atol=0)
                 torch.testing.assert_close(observed.frozen.fast[row,596:626],T(expected_path+[0.]*24,torch.float32),rtol=0,atol=0)
-                assert observed.frozen.fast[row,440].cpu().item()==torch.tensor(math.log1p((market.times[row,1].cpu().item()-now)/1000),dtype=torch.float32).item()
-            assert torch.equal(observed.frozen.fast[0,335:439],observed.frozen.fast[1,335:439]) if now<2000+offset else True
-            assert material.endpoints.pm_sides.best_present.size(0)==2
+                assert observed.frozen.fast[row,440].cpu().item()==torch.tensor(math.log1p((market.times[market_row,1].cpu().item()-now)/1000),dtype=torch.float32).item()
+            assert torch.equal(observed.frozen.fast[0,335:439],observed.frozen.fast[1,335:439]) if now<2000+offset and not gap else True
+            assert material.endpoints.pm_sides.best_present.size(0)==len(material.market_indices)
         stage('continuous_freeze',at=at.cpu().tolist(),accepted=accepted.cpu().tolist(),fault=observed.frozen.fault.cpu().tolist(),
             required=observed.market.required.cpu().tolist(),provided=observed.frozen.provided.all(1).cpu().tolist(),
             order_count=int(observed.account.orders.present.sum().cpu()),cancel_count=int(observed.actor.cancels.present.sum().cpu()))
@@ -366,21 +378,22 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         original=next(value for value in observations if int(value.account.cutoff.cpu()[0])==at)
         assert observation is original
         assert task.policy is policies[at]
-        assert task.evaluation.policy_version.cpu().tolist()==[at]*len(market_indices)
+        assert task.evaluation.policy_version.cpu().tolist()==[at]*len(observation.frozen.role)
         if two:
             # 独立逐市场前向在真实开始点比较，不存历史task/策略/冻结。
             for role in (0,1):
-                for row in range(2):
+                for row,identity in enumerate(observation.frozen.identities.cpu().tolist()):
+                    market_row=identity[2]
                     if observation.frozen.role[row].cpu().item()!=role:continue
                     selected=observation.frozen.rows(T([row]))
-                    with torch.no_grad():state,hidden,value=task.policy.state_and_value(*selected.model_inputs(),expected_hidden[:,row:row+1])
+                    with torch.no_grad():state,hidden,value=task.policy.state_and_value(*selected.model_inputs(),expected_hidden[:,market_row:market_row+1])
                     torch.testing.assert_close(task.evaluation.hidden[:,row:row+1],hidden)
                     torch.testing.assert_close(task.evaluation.state[row:row+1],state)
-                    if row==1 and role==0:warm_steps+=1
-                    if row==1 and role==1 and not opened:
-                        assert warm_steps==(300 if full_warmup else 7) and expected_hidden[:,row:row+1].abs().sum().cpu().item()>0
+                    if market_row==1 and role==0:warm_steps+=1
+                    if market_row==1 and role==1 and not opened:
+                        assert warm_steps==(300 if full_warmup else 7) and expected_hidden[:,market_row:market_row+1].abs().sum().cpu().item()>0
                         opened=True
-                    expected_hidden[:,row:row+1]=hidden
+                    expected_hidden[:,market_row:market_row+1]=hidden
         else:
             with torch.no_grad():expected=task.policy.frozen_state_and_value(observation.frozen,expected_hidden,identities,task.evaluation.policy_version)
             torch.testing.assert_close(task.evaluation.hidden,expected.hidden)
@@ -420,8 +433,8 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         return zero+duration,zero+120 if at==1300+offset else zero
     models=ActorModelQueue(torch.zeros((2,len(market_indices),64),device='cuda'),identities,T([first_observation]),policy_start,
         timing,sender_factory,
-        row_roots=row_roots,market_ends=market.times[market_indices,1] if two else None,
-        release_markets=release_markets if two else None,request_identities=task_requests,on_started=model_started,on_completed=model_completed)
+        row_roots=row_roots,market_ends=market.times[market_indices,1],
+        release_markets=release_markets,request_identities=task_requests,on_started=model_started,on_completed=model_completed)
     def receive_observation(public,delivery,enabled):
         at=clock.gates.public_visible_at.cpu().tolist()
         if at[0] in (1600,1700):
@@ -453,7 +466,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         return False
     continuations=0
     while True:
-        result=shared.advance_before(T([2801+offset if two else 1901]),yes,progress=stage)
+        result=shared.advance_before(T([302201 if gap else (2801+offset if two else 1901)]),yes,progress=stage)
         if result.fault.any().cpu().item():
             advance=result.stage_result;effect=None if advance is None else advance.stage_result
             stage('actual_continuous_fault',fault=result.fault.cpu().tolist(),
@@ -473,11 +486,11 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             assert torch.equal(models.hidden,hidden_before) and torch.equal(models.identities,identity_before)
             assert torch.equal(random.counter,random_before)
             assert all(task.observation is not failed for task in models.tasks)
-            if two and int(failed.account.cutoff.cpu()[0])==2000+offset:
+            if two and not gap and int(failed.account.cutoff.cpu()[0])==2000+offset:
                 # 无积压的原队列代表：失败的新截止不能替代已接纳观察前沿。
                 released=[]
                 probe=ActorModelQueue(hidden_before,identity_before,models.last_completed_at,policy_start,
-                    models.timing,sender_factory,row_roots=row_roots,market_ends=models.market_ends,
+                    models.timing,sender_factory,row_roots=models.row_roots,market_ends=models.market_ends,
                     release_markets=lambda mask:released.append(mask.cpu().tolist()))
                 probe.enqueue(failed,torch.zeros_like(yes))
                 probe.retire_consumed_markets(shared.next_observation-100)
@@ -485,9 +498,9 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                 assert torch.equal(probe.identities,identity_before)
                 probe.retire_consumed_markets(failed.account.cutoff)
                 probe.retire_consumed_markets(failed.account.cutoff+100)
-                assert released==[[True,False]] and probe.identities.cpu().tolist()==[[0,0,-1],[0,0,1]]
-                assert probe.hidden[:,0].abs().sum().cpu().item()==0
-                assert torch.equal(probe.hidden[:,1],hidden_before[:,1])
+                assert released==[[True,False]] and probe.identities.cpu().tolist()==[[0,0,1]]
+                assert probe.hidden.shape==(2,1,64)
+                assert torch.equal(probe.hidden[:,0],hidden_before[:,1])
                 end_retry=True
             material.encoder.grow_resources(required);history_retry=True;resource_candidate=None
             stage('whole_root_input_growth',at=shared.next_observation.cpu().tolist(),required=required,end_retry=end_retry)
@@ -536,8 +549,23 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         pm,market,reference,binance=epm,emarket,ereference,ebinance
     if two:
         assert page_changes and hidden_pages
-        result=verify_two_market_continuous(source,clock,material,models,observations,senders,history_retry,
-            history,encoder,random,evidence,started,artifact,stage,end_retry,release_calls,model_records,warm_steps,opened)
+        if gap:
+            assert len(empty_rows)==10 and [row['at'] for row in empty_rows]==list(range(301000,302000,100))
+            assert any(row['hot_rows']==0 for row in empty_rows)
+            assert all(left['prefix'][0]<=right['prefix'][0] for left,right in zip(empty_rows,empty_rows[1:]))
+            assert material.identities.cpu().tolist()==[[0,0,1]] and models.hidden.shape==(2,1,64)
+            assert len(observations)==10 and warm_steps==2 and not opened
+            old=next(row for row in model_records if row['cutoff']==300900)
+            assert old['completed']==[301350] and 300900 in completed_records
+            assert material.memory.counts.cpu().tolist()==[[1,0,0,0,0,0]]
+            assert not clock.public.ledger.fault.any().cpu().item()
+            result=dict(empty_market_interval=empty_rows,actual_observations=len(observations),
+                current_hot_rows=len(material.market_indices),stable_market_identity=material.identities.cpu().tolist(),
+                old_compute_crossed_end=True,new_market_context_steps=warm_steps,
+                history_counts=material.memory.counts.cpu().tolist(),one_account=True,no_new_gap_observation_or_rng=True)
+        else:
+            result=verify_two_market_continuous(source,clock,material,models,observations,senders,history_retry,
+                history,encoder,random,evidence,started,artifact,stage,end_retry,release_calls,model_records,warm_steps,opened)
         import shutil
         registry=material.history.registry
         result['source_identity_index']={'entries':registry.identity_count,'disk_bytes':registry.path.stat().st_size,
@@ -567,11 +595,12 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             assert balance['open_order_count']==0 and balance['pending_fill_count']==0 and not balance['outcome_balances']
             actual_tokens=list(tokens);public_tokens=[a['token_id'] for a in clock.source.prepared.columns['assets']]
             assert actual_tokens!=public_tokens
-            assert clock.runtime.fills.occupied.any().cpu().item()
-            assert any(value>0 for value in amounts(clock.public.ledger.success_pools.quantity))
+            if not gap:
+                assert clock.runtime.fills.occupied.any().cpu().item()
+                assert any(value>0 for value in amounts(clock.public.ledger.success_pools.quantity))
             # 这些时刻属于本次150ms模型延迟的短代表，不要求完整热身的20ms配置相同。
             late_predecessor=[]
-            if not full_warmup:
+            if not full_warmup and not gap:
                 early=next(row for row in received_checks if row['at']==[301600])
                 later=next(row for row in received_checks if row['at']==[301700])
                 assert early['ready']==[True] and early['resources_fit'] and early['platform_prefix']==[6]
@@ -758,10 +787,13 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         assert tail.complete.cpu().tolist()==[True] and tail.fault.cpu().tolist()==[0]
         assert shared.next_observation.cpu().tolist()==[2000]
         assert [int(o.frozen.cutoff.cpu()[0]) for o in observations]==original_observations
-        torch.testing.assert_close(models.hidden,expected_hidden)
+        assert models.hidden.shape==(2,0,64) and not len(models.identities)
+        assert material.memory.counts.shape==(0,6) and not len(material.market_indices)
+        assert material.endpoints.previous_prefix.numel()==0
         assert not models.tasks
         result['window_stops_at']=2000;result['tail_checked_through_open_endpoint']=2300
-        result['accepted_models_finish_after_window']=2084
+        result['first_accepted_model_finish_after_window']=2084
+        result['last_accepted_model_finish_after_window']=max(row['completed'][0] for row in model_records)
         # 原CPU FOK参考给应收，原日规则给付款；金额不从GPU付款后态生成。
         cpu_accrued=Fraction(source['received_ledger']['projection']['platform_confirmed_projection']['taker_rebate_receivable_pusd'])
         assert cpu_accrued==Fraction('1.4000016')
@@ -807,10 +839,10 @@ def verify_two_market_continuous(source,clock,material,models,observations,sende
     assert all(sender.driver.inputs.actor.cutoff.numel()==1 for sender in senders)
     old_completed=(2050 if full_warmup else 2350)+offset
     assert any(row['cutoff']==1900+offset and row['completed']==[old_completed] for row in model_records)
-    assert models.hidden[:,0].abs().sum().cpu().item()==0 and models.hidden[:,1].abs().sum().cpu().item()>0
-    assert material.memory.counts.cpu().tolist()==[[0]*6,[7,0,0,0,0,0]]
-    assert not material.endpoints.pm_sides.known[0].any().cpu().item()
-    assert material.endpoints.pm_sides.known[1].any().cpu().item()
+    assert models.identities.cpu().tolist()==material.identities.cpu().tolist()==[[0,0,1]]
+    assert models.hidden.shape==(2,1,64) and models.hidden.abs().sum().cpu().item()>0
+    assert material.memory.counts.cpu().tolist()==[[7,0,0,0,0,0]]
+    assert material.endpoints.pm_sides.known[0].any().cpu().item()
     first_nonzero=next(observation for observation in observations if int(observation.account.cutoff.cpu()[0])==1300+offset)
     assert first_nonzero.frozen.fast[0,542].cpu().item()==first_nonzero.frozen.fast[1,542].cpu().item()==1/16
     assert first_nonzero.frozen.fast[0,597].cpu().item()!=first_nonzero.frozen.fast[1,597].cpu().item()
@@ -823,10 +855,10 @@ def verify_two_market_continuous(source,clock,material,models,observations,sende
     once=run(lambda:history.freeze(once)).memory
     for field in fields(once):
         left,right=getattr(material.memory,field.name),getattr(once,field.name)
-        if isinstance(left,torch.Tensor):assert torch.equal(left[1],right[1]),field.name
+        if isinstance(left,torch.Tensor):assert torch.equal(left[0],right[1]),field.name
         else:
-            width=left.sign.numel()//2;indices=torch.arange(width,2*width,device='cuda')
-            assert stored_actual(_take(left,indices))==stored_actual(_take(right,indices)),field.name
+            width=left.sign.numel();indices=torch.arange(width,2*width,device='cuda')
+            assert stored_actual(left)==stored_actual(_take(right,indices)),field.name
     # 原资格边界在同一真实公共材料上核验；仅输入组件，不倒退活动SIM/账户时钟。
     indices=T([0,1]);starts=T([-29000,-29000]);memory=history.empty(2,starts)
     endpoint=MarketFreezeMemory(encoder.prefix_at(T([offset-28200,offset-28200])),T([offset-28200,offset-28200]),None,None)
@@ -873,8 +905,9 @@ def verify_partial_queue_retirement(original,policy):
     from types import SimpleNamespace
     from actor_send import ActorSendResult
     indices=T([0,0,0]);frozen=original.frozen.rows(indices)
+    frozen=replace(frozen,identities=T([[0,0,0],[0,1,0],[0,2,0]]))
     observation=replace(original,frozen=frozen,market=original.market.rows(indices),
-        account=SimpleNamespace(cutoff=frozen.cutoff),decision_rows=T([0,1,2]))
+        account=SimpleNamespace(cutoff=frozen.cutoff),decision_rows=T([0,1,2]),row_roots=T([0,1,2]),root_cutoffs=frozen.cutoff)
     yes=T([True]*3,torch.bool);zero=T([0]*3)
     class Sender:
         def __init__(self,task):
@@ -891,7 +924,7 @@ def verify_partial_queue_retirement(original,policy):
         identities=ActorTaskRequests(ActorRequestDirectory(zero.device),('partial/root0','partial/root1','partial/root2'))
         return ActorModelQueue(torch.zeros((2,3,64),device=zero.device),frozen.identities,frozen.cutoff,
             lambda observation,active:(policy,zero+1300),lambda observation:(zero+10,zero),Sender,
-            request_identities=identities)
+            request_identities=identities,market_ends=frozen.cutoff+5)
     queue=make_queue();queue.enqueue(observation,yes);queued=queue.tasks[0];binding=queued.request_identity
     for root in range(3):
         active=T([i==root for i in range(3)],torch.bool)
@@ -909,6 +942,8 @@ def verify_partial_queue_retirement(original,policy):
     complete,fault,blocked=queue.send(None,first)
     assert torch.equal(complete,first) and not fault.any().cpu().item() and blocked is None
     assert queue.tasks==[task] and not task.sender.released
+    queue.retire_consumed_markets(frozen.cutoff+20)
+    assert queue.identities.cpu().tolist()==[[0,1,0],[0,2,0]] and queue.hidden.shape==(2,2,64)
     rest=T([False,True,True],torch.bool);assert torch.equal(queue.finish(rest),rest)
     task.sender.allowed=T([True,True,False],torch.bool)
     complete,fault,blocked=queue.send(None,rest)

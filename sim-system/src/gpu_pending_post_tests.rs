@@ -438,6 +438,30 @@ async fn pending_actor_send_original_source_with_history(nonzero_history:bool,tw
             [["0.35",300251],["0.37",300351],["0.39",300451],["0.40",300991],["0.41",300992],["0.42",300993],["0.43",300994]] ]);
         source["continuous_two_markets"]=serde_json::json!(true);source["continuous_observation_offset"]=serde_json::json!(299000);source["market_end"]=serde_json::json!(301000);
     }
+    if two_markets && std::env::var_os("B_GPU_ACTIVE_ROW_GAP").is_some() {
+        // 人为有限间隔只验证零活动行；两个窗口仍各长5min，不代表连续BTC系列。
+        for event in &mut initial {
+            if event.market.clob_market_id.0=="124" {
+                event.market.window.start_at_utc_ms=332000;event.market.window.end_at_utc_ms=632000;
+                event.event_id=data_pipeline_core::derive_execution_market_event_v3_id(event).unwrap();
+            }
+        }
+        for event in &mut events {
+            if event.market.clob_market_id.0=="124" {
+                event.market=initial[2].market.clone();
+                event.event_id=data_pipeline_core::derive_execution_market_event_v3_id(event).unwrap();
+            }
+        }
+        let mut event=crate::task21_tests::sealed_event(ExecutionMarketEventPayloadV3::BestBidAsk(contracts::BestBidAskV2 {
+            asset:crate::task21_tests::asset("3",0,"Up"),best_bid_pusd_per_share:Some(ExactDecimal("0.38".into())),
+            best_ask_pusd_per_share:Some(ExactDecimal("0.5".into()))}),
+            crate::task21_tests::orderbook_evidence(302050,302050,45),crate::task21_tests::fresh_quality());
+        event.market=initial[2].market.clone();event.event_id=data_pipeline_core::derive_execution_market_event_v3_id(&event).unwrap();
+        events.push(data_pipeline_core::decode_execution_market_event_v3(&data_pipeline_core::encode_execution_market_event_v3(&event).unwrap()).unwrap());
+        source["initial"]=serde_json::json!(initial);
+        source["continuous_market_gap"]=serde_json::json!(true);
+        source["two_market_history_samples"][1]=serde_json::json!([["0.44",302051]]);
+    }
     let (directory,mut hidden)=public_consumption_tests::gpu_compact_hidden_for_order_fixture(&initial,&events,false);
     let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
     std::fs::create_dir_all(&artifact).unwrap();

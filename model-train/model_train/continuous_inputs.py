@@ -15,11 +15,14 @@ class FrozenActorObservation:
     cutoff: object
     source_snapshot: object
     decision_rows: torch.Tensor
+    row_roots: torch.Tensor | None = None
+    root_cutoffs: torch.Tensor | None = None
 
     def actor_view(self):
         """只给原Actor根级当前市场；ContextOnly不建立第二动作人口。"""
         return replace(self,frozen=self.frozen.rows(self.decision_rows),
-            market=self.market.rows(self.decision_rows))
+            market=self.market.rows(self.decision_rows),
+            row_roots=None if self.row_roots is None else self.row_roots[self.decision_rows])
 
 
 class ContinuousActorInputs:
@@ -28,13 +31,59 @@ class ContinuousActorInputs:
     account_builder沿公共Registry/Bindings读取同Ck完整账户/Actor/184。
     不读取SIM未来订单，也不在这里提前绑定权重或计算模型。
     """
-    def __init__(self,encoder,history,memory,endpoints,market_indices,root_started_at,identities,account_builder,*,word_capacity,row_roots=None):
-        self.encoder=encoder;self.history=history;self.memory=memory;self.endpoints=endpoints
-        self.market_indices=market_indices;self.root_started_at=root_started_at;self.identities=identities
+    def __init__(self,encoder,history,market_indices,root_started_at,identities,account_builder,*,word_capacity,root_prefix,root_previous_at,row_roots=None):
+        self.encoder=encoder;self.history=history
+        self.root_started_at=root_started_at
         self.account_builder=account_builder;self.word_capacity=word_capacity
-        self.row_roots=torch.arange(len(market_indices),device=market_indices.device) if row_roots is None else row_roots
-        self.root_rows=torch.stack([torch.nonzero(self.row_roots==root).flatten()[0]
-            for root in range(len(root_started_at))])
+        self.directory_markets=market_indices;self.directory_identities=identities
+        self.directory_roots=torch.arange(len(market_indices),device=market_indices.device) if row_roots is None else row_roots
+        # 根窗口属于公共流，不能由一个市场端点代持。
+        self.previous_prefix=root_prefix.clone();self.previous_observation_ms=root_previous_at.clone()
+        self.hot_directory=market_indices.new_empty(0)
+        self.market_indices=market_indices[:0];self.identities=identities[:0];self.row_roots=self.directory_roots[:0]
+        self.memory=history.empty(0,root_started_at[:0])
+        from input_100ms import MarketFreezeMemory
+        self.endpoints=MarketFreezeMemory(root_prefix[:0],root_previous_at[:0],None,None)
+
+    def prepare_rows(self,clock,at):
+        """只配置本次原资格要求的物理行；旧计算所需行由模型完成后释放。"""
+        from queues import Numbers
+        prefix=clock.source.prefix_at(self.encoder.shared,at)
+        roots=self.directory_roots
+        roles,_=Numbers.run_exact_batch(lambda:self.encoder.roles(at[roots],self.directory_markets,
+            self.root_started_at[roots],prefix,row_roots=roots))
+        candidates=torch.nonzero(roles>=0).flatten()
+        present=(candidates[:,None]==self.hot_directory[None]).any(1)
+        new=candidates[~present]
+        if new.numel():
+            owners=roots[new]
+            fresh=self.history.empty(len(new),self.root_started_at[owners])
+            fresh=replace(fresh,last_prefix=self.previous_prefix[owners],last_cutoff=self.previous_observation_ms[owners])
+            self.memory=self.memory.append(fresh)
+            def extend(side):
+                if side is None:return None
+                from input_sides import PmSideMemory
+                sides=side.known.size(1)
+                zero=Numbers.ExactInt.from_i64_tensor(torch.zeros(len(new)*sides,dtype=torch.int64,device=at.device))
+                def join(left):
+                    width=max(left.words.size(1),zero.words.size(1))
+                    return Numbers.ExactInt(torch.cat((torch.nn.functional.pad(left.words,(0,width-left.words.size(1))),
+                        torch.nn.functional.pad(zero.words,(0,width-zero.words.size(1))))),torch.cat((left.sign,zero.sign)),torch.cat((left.fault,zero.fault)))
+                return PmSideMemory(join(side.total),join(side.best),
+                    torch.cat((side.known,torch.zeros((len(new),sides),dtype=torch.bool,device=at.device))),
+                    torch.cat((side.best_present,torch.zeros((len(new),sides),dtype=torch.bool,device=at.device))),
+                    torch.cat((side.asset_indices,torch.zeros((len(new),side.asset_indices.size(1)),dtype=torch.int64,device=at.device))))
+            self.endpoints=replace(self.endpoints,
+                previous_prefix=torch.cat((self.endpoints.previous_prefix,self.previous_prefix[owners])),
+                previous_observation_ms=torch.cat((self.endpoints.previous_observation_ms,self.previous_observation_ms[owners])),
+                pm_sides=extend(self.endpoints.pm_sides),binance_sides=extend(self.endpoints.binance_sides))
+            self.hot_directory=torch.cat((self.hot_directory,new));self._set_rows()
+        return roles[self.hot_directory]
+
+    def _set_rows(self):
+        self.market_indices=self.directory_markets[self.hot_directory]
+        self.identities=self.directory_identities[self.hot_directory]
+        self.row_roots=self.directory_roots[self.hot_directory]
 
     def bind_source(self,source):
         if not hasattr(source.prepared,'parts'):return
@@ -103,17 +152,25 @@ class ContinuousActorInputs:
         from input_account import model_account_rows
         from input_events import NativeEvents
         prefix=clock.source.prefix_at(self.encoder.shared,at)
-        rows=self.row_roots;row_prefix=prefix[rows];row_at=at[rows];row_enabled=enabled[rows]
+        roles=self.prepare_rows(clock,at)
+        selected=torch.nonzero((roles>=0)&enabled[self.row_roots]).flatten()
+        rows=self.row_roots[selected];indices=self.market_indices[selected];identities=self.identities[selected]
+        source_memory=self.memory.rows(selected);endpoint_memory=self.endpoints.rows(selected)
+        begin=int((self.previous_prefix[enabled]+1).min().cpu());end=int(prefix[enabled].max().cpu())+1
+        if not selected.numel():
+            # 公共观察截止仍接纳，无状态行/Actor/随机数/伪NoTrade。
+            self._commit_root_window(prefix,at,enabled)
+            return None,enabled.clone()
+        row_prefix=prefix[rows];row_at=at[rows];row_enabled=enabled[rows]
         started=self.root_started_at[rows]
-        begin=int((self.memory.last_prefix+1).min().cpu());end=int(prefix[enabled].max().cpu())+1
         pieces=getattr(self,'pending_inputs',[self.encoder])
         def consume():
-            memory=self.memory;error=torch.zeros_like(row_prefix,dtype=torch.int32)
+            memory=source_memory;error=torch.zeros_like(row_prefix,dtype=torch.int32)
             for encoder in pieces:
                 first=max(begin,encoder.shared.group_base);last=min(end,encoder.shared.group_count)
                 groups=torch.arange(first,max(first,last),device=at.device)
                 memory,part_error=encoder.source_history.consume(groups,
-                    encoder.delivered_cutoffs[groups-encoder.shared.group_base],self.market_indices,started,memory,
+                    encoder.delivered_cutoffs[groups-encoder.shared.group_base],indices,started,memory,
                     applied_prefix=row_prefix,enabled=row_enabled)
                 error |= part_error
             return memory,error
@@ -121,58 +178,73 @@ class ContinuousActorInputs:
         events_encoder,trades_encoder=Numbers.run_exact_batch(self._window_inputs)
         def encode():
             # 完整组统计按根/窗口只编码一次，市场行只读同一结果。
-            events=events_encoder.encode(self.endpoints.previous_prefix[self.root_rows],prefix,at)
+            events=events_encoder.encode(self.previous_prefix,prefix,at)
             row_events=NativeEvents(events.values[rows],events.fault[rows],events.required[rows],events.enough[rows])
             original_trades=self.encoder.trades
             self.encoder.trades=trades_encoder
             try:
-                market=self.encoder.freeze(row_at,self.market_indices,started,memory,self.endpoints,
+                market=self.encoder.freeze(row_at,indices,started,memory,endpoint_memory,
                 applied_prefix=row_prefix,events=row_events)
             finally:self.encoder.trades=original_trades
             decisions=[]
-            for root in range(len(at)):
+            account_roots=torch.unique(rows,sorted=True)
+            for root in account_roots:
                 members=torch.nonzero(rows==root).flatten()
                 order=torch.argsort(market.role[members],descending=True,stable=True)
                 decisions.append(members[order[0]])
             decision_rows=torch.stack(decisions)
-            account,native,actor,cancels=self.account_builder(self.encoder,clock.public,market.rows(decision_rows),clock.bank(clock.projection),
-                self.market_indices[decision_rows],self.identities[decision_rows])
-            return market,account,native,actor,cancels,decision_rows
+            arguments=(self.encoder,clock.public,market.rows(decision_rows),clock.bank(clock.projection),
+                indices[decision_rows],identities[decision_rows])
+            account,native,actor,cancels=self.account_builder(*arguments)
+            return market,account,native,actor,cancels,decision_rows,account_roots
         candidate=Numbers.device_exact_batch(encode,word_capacity=self.word_capacity,device=at.device)
-        market,account,native,actor,cancels,decision_rows=candidate.value
-        account_rows=model_account_rows(native.inputs,rows,market.role)
-        frozen=FrozenPolicyInputs100ms.publish(market,account_rows,self.identities,candidate.fits)
+        market,account,native,actor,cancels,decision_rows,account_roots=candidate.value
+        account_rows=model_account_rows(native.inputs,torch.searchsorted(account_roots,rows),market.role)
+        frozen=FrozenPolicyInputs100ms.publish(market,account_rows,identities,candidate.fits)
         legal=market.role>=0
         row_fit=market.resources_fit&(error==0)&(frozen.fault==0)&frozen.provided.all(1)
         failures=torch.zeros_like(enabled,dtype=torch.int32).scatter_reduce(0,rows,
             (legal&~row_fit).to(torch.int32),reduce='amax')
-        accepted=enabled&candidate.fits&(account.fault==0)&(failures==0)
-        self.memory=Numbers.run_exact_batch(lambda:coordinate(market.history_memory,self.memory,accepted[rows]))
-        self.endpoints=MarketFreezeMemory(torch.where(accepted[rows],market.endpoint_memory.previous_prefix,self.endpoints.previous_prefix),
-            torch.where(accepted[rows],market.endpoint_memory.previous_observation_ms,self.endpoints.previous_observation_ms),
-            _endpoint_commit(market.endpoint_memory.pm_sides,self.endpoints.pm_sides,accepted[rows]),
-            _endpoint_commit(market.endpoint_memory.binance_sides,self.endpoints.binance_sides,accepted[rows]))
+        account_fault=torch.zeros_like(failures).scatter(0,account_roots,account.fault)
+        accepted=enabled&candidate.fits&(account_fault==0)&(failures==0)
+        committed=Numbers.run_exact_batch(lambda:coordinate(market.history_memory,source_memory,accepted[rows]))
+        endpoint=MarketFreezeMemory(torch.where(accepted[rows],market.endpoint_memory.previous_prefix,endpoint_memory.previous_prefix),
+            torch.where(accepted[rows],market.endpoint_memory.previous_observation_ms,endpoint_memory.previous_observation_ms),
+            _endpoint_commit(market.endpoint_memory.pm_sides,endpoint_memory.pm_sides,accepted[rows]),
+            _endpoint_commit(market.endpoint_memory.binance_sides,endpoint_memory.binance_sides,accepted[rows]))
+        # 按物理行回写本次子批；旧计算保有的闭市记忆不参与新freeze。
+        def merge(previous,current,total):
+            from dataclasses import fields
+            from public_state import _take
+            if previous is None:
+                if current is None:return None
+                from input_sides import PmSideMemory
+                sides=current.known.size(1);zero=Numbers.ExactInt.from_i64_tensor(torch.zeros(total*sides,dtype=torch.int64,device=at.device))
+                previous=PmSideMemory(zero,zero,torch.zeros((total,sides),dtype=torch.bool,device=at.device),
+                    torch.zeros((total,sides),dtype=torch.bool,device=at.device),torch.zeros((total,current.asset_indices.size(1)),dtype=torch.int64,device=at.device))
+            if isinstance(previous,torch.Tensor):return previous.index_copy(0,selected,current)
+            if hasattr(previous,'words'):
+                width=max(previous.words.size(1),current.words.size(1));units=previous.sign.numel()//total
+                positions=(selected[:,None]*units+torch.arange(units,device=at.device)).flatten()
+                return Numbers.ExactInt(torch.nn.functional.pad(previous.words,(0,width-previous.words.size(1))).index_copy(0,positions,torch.nn.functional.pad(current.words,(0,width-current.words.size(1)))),
+                    previous.sign.index_copy(0,positions,current.sign),previous.fault.index_copy(0,positions,current.fault))
+            return replace(previous,**{f.name:merge(getattr(previous,f.name),getattr(current,f.name),total) for f in fields(previous)})
+        self.memory=merge(self.memory,committed,len(self.hot_directory))
+        self.endpoints=merge(self.endpoints,endpoint,len(self.hot_directory))
+        self._commit_root_window(prefix,at,accepted)
+        return FrozenActorObservation(frozen,market,account,native,actor,cancels,clock.last_observation,
+            clock.source.snapshot(),decision_rows,rows.clone(),at.clone()),accepted
+
+    def _commit_root_window(self,prefix,at,accepted):
+        self.previous_prefix=torch.where(accepted,prefix,self.previous_prefix)
+        self.previous_observation_ms=torch.where(accepted,at,self.previous_observation_ms)
         if hasattr(self,'pending_inputs'):
-            consumed=int((self.memory.last_prefix+1).min().cpu())
+            consumed=int((self.previous_prefix+1).min().cpu())
             self.pending_inputs=[encoder for encoder in self.pending_inputs
                 if encoder is self.encoder or encoder.shared.group_count>consumed]
-        return FrozenActorObservation(frozen,market,account,native,actor,cancels,clock.last_observation,
-            clock.source.snapshot(),decision_rows),accepted
 
     def release_markets(self, ended):
-        """模型确认旧观察已消费后释放市场缓存；公共账户与源前沿保持。"""
-        from queues import Numbers
-        from admission import coordinate
-        empty=self.history.empty(len(self.market_indices),self.root_started_at[self.row_roots])
-        empty=replace(empty,last_prefix=self.memory.last_prefix,last_cutoff=self.memory.last_cutoff,
-            market_ids=self.memory.market_ids)
-        self.memory=Numbers.run_exact_batch(lambda:coordinate(empty,self.memory,ended))
-        # select保留未退役值，退役值归零；不改根窗口的prefix/time。
-        def clear(side):
-            if side is None:return None
-            selected=ended[:,None].expand_as(side.known).flatten()
-            return replace(side,total=side.total.constant(0).select(selected,side.total),
-                best=side.best.constant(0).select(selected,side.best),
-                known=side.known&~ended[:,None],best_present=side.best_present&~ended[:,None])
-        self.endpoints=replace(self.endpoints,pm_sides=Numbers.run_exact_batch(lambda:clear(self.endpoints.pm_sides)),
-            binance_sides=Numbers.run_exact_batch(lambda:clear(self.endpoints.binance_sides)))
+        """只移除无需旧模型计算的物理行，根公共窗口及经济事实保持。"""
+        keep=torch.nonzero(~ended).flatten()
+        self.memory=self.memory.rows(keep);self.endpoints=self.endpoints.rows(keep)
+        self.hot_directory=self.hot_directory[keep];self._set_rows()

@@ -95,6 +95,22 @@ class SourceHistoryMemory:
     market_ids: torch.Tensor
     root_started_at: torch.Tensor
 
+    def rows(self, indices):
+        from input_100ms import _memory_rows
+        return _memory_rows(self,indices,self.counts.size(0))
+
+    def append(self, other):
+        """物理新增空行；精确值按原字宽合并，不重建已有历史。"""
+        from dataclasses import fields
+        numbers=_numbers()
+        def join(left,right):
+            if isinstance(left,torch.Tensor):return torch.cat((left,right))
+            width=max(left.words.size(1),right.words.size(1))
+            return numbers.ExactInt(torch.cat((torch.nn.functional.pad(left.words,(0,width-left.words.size(1))),
+                torch.nn.functional.pad(right.words,(0,width-right.words.size(1))))),
+                torch.cat((left.sign,right.sign)),torch.cat((left.fault,right.fault)))
+        return type(self)(**{f.name:join(getattr(self,f.name),getattr(other,f.name)) for f in fields(self)})
+
 
 @dataclass(frozen=True)
 class NativeSourceHistory:

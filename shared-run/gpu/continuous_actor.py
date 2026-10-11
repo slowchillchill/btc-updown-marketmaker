@@ -26,6 +26,7 @@ class ContinuousActorRun:
         owner=inputs if inputs is not None else getattr(freeze,'__self__',None)
         self.input_owner=owner if hasattr(owner,'bind_source') else None
         if self.input_owner is not None:self.input_owner.bind_source(clock.source)
+        if self.input_owner is not None:self.models.bind_inputs(self.input_owner)
 
     def advance_before(self,horizon,enabled,*,progress=None):
         blocked=torch.zeros_like(enabled);fault=torch.zeros_like(horizon,dtype=torch.int32)
@@ -52,6 +53,7 @@ class ContinuousActorRun:
                 stage=self.clock.advance_before(horizon,boundary,progress=progress)
                 fault |= stage.fault
                 complete=boundary&stage.complete&(fault==0)
+                self.models.retire_consumed_markets(torch.where(observing,self.next_observation-100,self.clock.gates.public_visible_at))
                 return ContinuousAdvance(complete,blocked| (boundary&~complete),fault,count,blocked_stage if blocked_stage is not None else stage)
             # 与原SIM调用相同，只冷读实际已选处理器类别；根/时间选择留在设备。
             selected_kind=int(kind[due].min().cpu())
@@ -76,7 +78,10 @@ class ContinuousActorRun:
                         complete,error=self.settlement.advance(self.clock,ready)
                         fault |= error;blocked |= ready&~complete;ready &= complete
                     if bool(ready.any().cpu()):
+                        if self.input_owner is not None:
+                            self.input_owner.prepare_rows(self.clock,at);self.models.sync_inputs()
                         frozen,accepted=self.freeze(self.clock,at,ready)
+                        if self.input_owner is not None:self.models.sync_inputs()
                         self.models.enqueue(frozen,accepted)
                         self.next_observation += (accepted.to(torch.int64)*100)
                         blocked |= ready&~accepted
@@ -95,7 +100,7 @@ class ContinuousActorRun:
                     if self.settlement is not None and bool(received.any().cpu()):
                         complete,error=self.settlement.advance(self.clock,received)
                         fault |= error;blocked |= received&~complete
-            self.models.retire_consumed_markets(self.next_observation-100)
+            self.models.retire_consumed_markets(torch.where(observing,self.next_observation-100,self.clock.gates.public_visible_at))
             count+=1
             if progress:progress('continuous_event',events=count,kind=selected_kind,
                 at=at.detach().cpu().tolist(),active=active.detach().cpu().tolist(),blocked=blocked.detach().cpu().tolist())
