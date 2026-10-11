@@ -233,3 +233,34 @@ A的36份策略配置分布在对应五折（7/8/7/7/7），每份只含原43策
 日入口在同一次窄列遍历中定位原行坐标和来源epoch，先利用可信行组范围排除窗口外内容；统计缺失时读取真实行。只有失序内容才整理，六来源合流及隐藏源时刻下界保持。深度输入一次准备原精确数值，归约仍保留代际、stitch、质量及前量检查；外部raw入口继续验证。
 
 恢复公共日状态和来源顺序索引时，缓冲解码与完整文件摘要同次读取，解码后的剩余字节同样计入摘要。候选文件同次缓冲读入并核验，再由原候选worker解码。全部发布文件验证成功后才挂接可能截尾的持久writer；不跨实现身份恢复旧研究点。下一研究包准备可复用已算的小文件摘要，此项不属于运行稳态提速。
+
+### 显式连续窗口研究汇总及预算保存
+
+旧 `run_historical_days_v1` 与默认CLI日入口保持原行为和输出。调用
+`run_historical_days_with_options_v1` 或在day命令增加 `--research-summary` 才启用紧凑窗口汇总。
+成功的 `calculate` 只分类一次：Continue空intents为NoTrade，Continue非空为动作，Exit单列。
+三类之和是成功决定总数；健康失效、发送失败、期末pending不撤销原决定。计算报错不计NoTrade。
+分类、小时游标和快照随原 `RuntimeLoopCheckpointV1` 保存；旧检查点缺少分类时保持未知。
+
+小时边界只读此前已完成事实，在下一小时第一项真实事件前采样。边界不进入事件队列，
+边界同毫秒多组不提前计入上一小时，无事件小时不造行情或决定。每张快照保留边界与真实
+`observation_cutoff`；NAV变化、确认净结果、未到账返佣分别列示。金额差额用原精确有理数相减，
+原资金积分和累计回撤复用 `HistoricalDayEconomicsSummaryV1`。没有区间内极值记录，不能把累计最大回撤
+相减称为小时最大回撤。跨小时保持原账户、策略记忆与高水位，不重新开账户。
+
+Maker/Taker份数、金额、费读取原executed；笔数按Ledger原trade身份的经济应用/成功状态读取，
+生命周期不重复计数。有SIM回执的提交请求、其声明订单腿和撤单请求分列；回执不等于平台接受。
+无回执注册单列，是否已提交保持未知；未发送的冻结pending独立保留。撤单累计遍历registry原请求与完成事实，
+不把 `cancellation_requests(None).response_counts` 的最近一次响应当全窗累计。
+
+`--wall-budget-seconds 25200 --checkpoint-reserve-seconds 900` 从CLI输入准备前开始计时，
+到6h45m请求最后完整检查点。原requested→ready→publish成功后，活动候选在原save边界返回
+`BudgetStop`。该检查点保留Running、源游标和pending；不执行RangeEnd尾部推进、不补发、不清仓。
+部分报告仅在本次返回，不放completed。发布失败保留此前成功发布代并报错，不能虚报预算保存完成。
+`published_checkpoint` 是最后成功发布引用。返回报告中最后读取的投影不因此变成独立持久事实；
+分类/小时仅以该引用包含的原候选检查点为准。
+
+原策略Exit仍立即结束，报告终止时点与未闭合状态；退出后的小时不补零。RangeEnd、StrategyExit、
+BudgetStop、Failure沿原report终止原因区分。CLI硬截止仅覆盖CLI自身；若随后运行机器汇总，必须放在
+同一个外层7h期限内。硬截止只承认最后成功发布代，未输出的stage-timing值为未知。
+本轮具体准备、启动及证据边界见[六小时研究方案](../baseline-mm/docs/research/complementary-pair-six-hour-plan-20261012.md)。

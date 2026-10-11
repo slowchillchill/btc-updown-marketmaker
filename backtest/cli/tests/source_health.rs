@@ -254,6 +254,15 @@ fn run_day_trace(
     c: ComplementaryPairConfigV1,
     root: &Path,
 ) -> (serde_json::Value, TraceSummary) {
+    run_day_trace_with_research(config, rules, c, root, false)
+}
+fn run_day_trace_with_research(
+    config: &HistoricalRunConfigV1,
+    rules: Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
+    c: ComplementaryPairConfigV1,
+    root: &Path,
+    research: bool,
+) -> (serde_json::Value, TraceSummary) {
     let mut candidate = HistoricalPreparedRunConfigV1::from(config);
     candidate.strategy.effective_parameters = serde_json::to_value(&c).unwrap();
     candidate.strategy_request_namespace = Some("health-history".into());
@@ -296,7 +305,17 @@ fn run_day_trace(
         assert!(!trace.requires_trade_economics_details());
         Ok(trace)
     };
-    let results = run_historical_days_v1(&[day], rules.clone(), &factory).unwrap();
+    let results = run_historical_days_with_options_v1(
+        &[day],
+        rules.clone(),
+        &factory,
+        1,
+        &HistoricalDayRunOptionsV1 {
+            research_summary: research,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(results[0].public_applied_inputs > 0);
     let report = results[0].candidates[0].report.clone();
     let trace = sink.lock().unwrap().take().unwrap();
@@ -1480,4 +1499,24 @@ fn same_millisecond_day_stage_measurement() {
     )
     .unwrap();
     println!("{measurement}");
+}
+
+#[test]
+fn research_counts_successful_decisions_even_when_frozen_batch_is_invalidated() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, rules) = same_millisecond_fixture(temp.path());
+    let (report, trace) =
+        run_day_trace_with_research(&config, rules, strategy_config(), temp.path(), true);
+    assert_eq!(trace.invalidated, 1);
+    let counts = &report["research"]["decisions"];
+    let no_trade = trace
+        .decisions
+        .iter()
+        .filter(|(_, _, intents)| intents.is_empty())
+        .count();
+    assert_eq!(counts["successful"], trace.decisions.len());
+    assert_eq!(counts["no_trade"], no_trade);
+    assert_eq!(counts["actions"], trace.decisions.len() - no_trade);
+    assert_eq!(counts["exits"], 0);
+    assert_eq!(counts["successful"], report["calculation_count"]);
 }

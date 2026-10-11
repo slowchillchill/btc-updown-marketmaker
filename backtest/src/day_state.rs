@@ -44,6 +44,9 @@ pub(crate) struct DayBufferV1 {
     pub candidates: Vec<CandidateProgressV1>,
     pub production: ProductionV1,
     pub requested: Option<u64>,
+    pub research_summary: bool,
+    pub budget_stop_requested: bool,
+    pub budget_stopped: bool,
     pub generation: u64,
     pub failure: Option<String>,
 }
@@ -79,6 +82,9 @@ impl DayHubV1 {
                     .collect(),
                 production: ProductionV1::Running,
                 requested: None,
+                research_summary: false,
+                budget_stop_requested: false,
+                budget_stopped: false,
                 generation: 0,
                 failure: None,
             }),
@@ -117,7 +123,9 @@ impl DayHubV1 {
         let (mut buffer, cv) = (self.0.0.lock().unwrap(), &self.0.1);
         buffer.candidates[index].active = false;
         if let Ok(result) = result {
-            buffer.candidates[index].complete = Some(result.report.clone());
+            if result.report["end_reason"] != "BudgetStop" {
+                buffer.candidates[index].complete = Some(result.report.clone());
+            }
         } else if let Err(error) = result {
             buffer.failure = Some(error.to_string());
         }
@@ -283,6 +291,12 @@ where
     S: CheckpointStrategyV1,
     S::Diagnostics: Serialize + serde::de::DeserializeOwned,
 {
+    fn research_enabled(&self) -> bool {
+        self.hub.0.0.lock().unwrap().research_summary
+    }
+    fn budget_stopped(&self) -> bool {
+        self.hub.0.0.lock().unwrap().budget_stopped
+    }
     fn started(&mut self) {
         let mut buffer = self.hub.0.0.lock().unwrap();
         buffer.candidates[self.index].runtime_started = true;

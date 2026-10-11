@@ -2945,6 +2945,20 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             }
         }
         assert!(closed && completed);
+        let totals = shared.registry().cumulative_request_totals();
+        assert_eq!(totals.registered_requests_without_receipt, 0);
+        assert_eq!(totals.receipted_submission_requests, 1);
+        assert_eq!(totals.receipted_submission_requested_legs, 2);
+        assert_eq!(
+            totals.receipted_cancellation_requests, 5,
+            "重复提交同身份不增加请求数"
+        );
+        assert_eq!(totals.completed_receipted_cancellation_requests, 5);
+        assert!(totals.receipted_cancellation_response_counts[0] >= 1);
+        assert!(
+            totals.receipted_cancellation_response_counts[1] > 1,
+            "累计原响应，不以最近一次的1份替代全窗"
+        );
 
         let before_reopen = shared.ledger().projection_v2();
         let cash_before_reopen = shared.ledger().economic_read().unwrap().cash().clone();

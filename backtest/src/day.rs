@@ -45,9 +45,29 @@ pub struct HistoricalDayCandidateResultV1 {
 }
 #[derive(Debug, Serialize)]
 pub struct HistoricalDayResultV1 {
+    /// 仅显式研究返回最后成功发布代；返回的部分报告不写入completed。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published_checkpoint: Option<serde_json::Value>,
     pub input_set_identity_sha256: Sha256Hex,
     pub public_applied_inputs: u64,
     pub candidates: Vec<HistoricalDayCandidateResultV1>,
+}
+/// 显式研究运行选项，不进入业务身份或原配置合同。
+#[derive(Clone, Debug)]
+pub struct HistoricalDayRunOptionsV1 {
+    pub research_summary: bool,
+    /// 正式预算从输入准备之前开始；发布成功后在原候选save边界退出。
+    pub started: Instant,
+    pub budget_save_after: Option<Duration>,
+}
+impl Default for HistoricalDayRunOptionsV1 {
+    fn default() -> Self {
+        Self {
+            research_summary: false,
+            started: Instant::now(),
+            budget_save_after: None,
+        }
+    }
 }
 /// 每个日期、每个候选在自己的线程内创建原策略和原运行对象。
 /// 同日候选只共享不可变公共组和隐藏桶，不共享账户、时钟或反馈。
@@ -83,6 +103,28 @@ where
     S::Error: std::fmt::Debug,
     F: Fn(&HistoricalPreparedRunConfigV1) -> Result<S, MaterialError> + Sync,
 {
+    run_historical_days_with_options_v1(
+        days,
+        rules,
+        factory,
+        parallel_dates,
+        &HistoricalDayRunOptionsV1::default(),
+    )
+}
+/// 原入口默认关闭研究功能；此入口显式启用小时汇总及预算保存。
+pub fn run_historical_days_with_options_v1<S, F>(
+    days: &[HistoricalDayConfigV1],
+    rules: Arc<SealedProcessRuleSnapshotV3>,
+    factory: &F,
+    parallel_dates: usize,
+    options: &HistoricalDayRunOptionsV1,
+) -> Result<Vec<HistoricalDayResultV1>, MaterialError>
+where
+    S: CheckpointStrategyV1,
+    S::Diagnostics: Serialize + serde::de::DeserializeOwned,
+    S::Error: std::fmt::Debug,
+    F: Fn(&HistoricalPreparedRunConfigV1) -> Result<S, MaterialError> + Sync,
+{
     let mut results = Vec::new();
     for batch in days.chunks(parallel_dates.max(1)) {
         let values = std::thread::scope(|scope| {
@@ -90,7 +132,7 @@ where
                 .iter()
                 .map(|day| {
                     let rules = rules.clone();
-                    scope.spawn(move || run_day::<S, F>(day, rules, factory))
+                    scope.spawn(move || run_day::<S, F>(day, rules, factory, options))
                 })
                 .collect::<Vec<_>>();
             handles
@@ -110,6 +152,7 @@ fn run_day<S, F>(
     day: &HistoricalDayConfigV1,
     rules: Arc<SealedProcessRuleSnapshotV3>,
     factory: &F,
+    options: &HistoricalDayRunOptionsV1,
 ) -> Result<HistoricalDayResultV1, MaterialError>
 where
     S: CheckpointStrategyV1,
@@ -182,11 +225,15 @@ where
     }
     let identity = format!("{:x}", identity.finalize());
     let restored = read_publication(&day.checkpoint_root, &identity)?;
-    if let Some((_, saved, _)) = &restored {
+    if let Some((published, saved, _)) = &restored {
         if saved.completed.iter().all(Option::is_some)
             && saved.completed.len() == day.candidates.len()
         {
             return Ok(HistoricalDayResultV1 {
+                published_checkpoint: options
+                    .research_summary
+                    .then(|| serde_json::to_value(published))
+                    .transpose()?,
                 input_set_identity_sha256: input_identity,
                 public_applied_inputs: saved.applied,
                 candidates: day
@@ -209,6 +256,7 @@ where
         }
     }
     let hub = DayHubV1::new(&day.candidates);
+    hub.0.0.lock().unwrap().research_summary = options.research_summary;
     let mut candidates = Vec::new();
     let mut count = 0;
     let mut generation = restored.as_ref().map_or(0, |(p, _, _)| p.generation + 1);
@@ -437,9 +485,11 @@ where
                         });
                     }
                     let complete=buffer.candidates.iter().all(|c|!c.active);
+                    let budget_due=options.budget_save_after.is_some_and(|after| options.started.elapsed()>=after);
+                    if budget_due && !complete { buffer.budget_stop_requested=true; }
                     let due=(day.checkpoint_interval_seconds>0 && last_checkpoint.elapsed()>=Duration::from_secs(day.checkpoint_interval_seconds))
                         ||day.checkpoint_every_applied_inputs.is_some_and(|n|n>0 && count-last_count>=n);
-                    if buffer.requested.is_none() && (due||complete) {buffer.requested=Some(generation);hub.0.1.notify_all();}
+                    if buffer.requested.is_none() && (due||complete||buffer.budget_stop_requested) {buffer.requested=Some(generation);hub.0.1.notify_all();}
                     let ready=buffer.requested.is_some() && buffer.candidates.iter().all(|c|!c.active||c.ready.as_ref().map(|(g,_)|*g)==buffer.requested);
                     if ready {
                         #[cfg(feature = "stage-timing")]
@@ -468,8 +518,9 @@ where
                         publish(&day.checkpoint_root,&identity,generation,files)?;
                         #[cfg(feature = "stage-timing")]
                         stages.record("checkpoint_capture_write_and_publish", checkpoint_started.elapsed());
+                        buffer.budget_stopped=buffer.budget_stop_requested && !complete;
                         buffer.requested=None;generation+=1;buffer.generation=generation;hub.0.1.notify_all();last_checkpoint=Instant::now();last_count=count;
-                        if complete {return Ok(());}
+                        if complete || buffer.budget_stopped {return Ok(());}
                     }
                     if ended {let _=measure_stage!(stages, "producer_wait_startup_checkpoint_or_completion", hub.0.1.wait_timeout(buffer,Duration::from_millis(20))).unwrap();continue;}
                     // 已有可消费材料时让慢候选追上；等待必要完整隐藏桶时继续供料，避免互等。
@@ -544,6 +595,13 @@ where
         candidates.sort_by_key(|(index, _)| *index);
         let candidates = candidates.into_iter().map(|(_, value)| value).collect();
         Ok(HistoricalDayResultV1 {
+            published_checkpoint: if options.research_summary {
+                Some(serde_json::from_reader(std::fs::File::open(
+                    day.checkpoint_root.join("checkpoint.json"),
+                )?)?)
+            } else {
+                None
+            },
             input_set_identity_sha256: input_identity,
             public_applied_inputs: count,
             candidates,

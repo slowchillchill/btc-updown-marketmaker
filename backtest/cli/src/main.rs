@@ -300,11 +300,42 @@ fn mode_args(
     }
     Ok((mode, interval, description, remaining))
 }
+#[derive(Default)]
+struct ResearchOptions {
+    summary: bool,
+    budget_seconds: Option<u64>,
+    reserve_seconds: Option<u64>,
+}
+fn research_args(
+    args: impl IntoIterator<Item = String>,
+) -> Result<(ResearchOptions, Vec<String>), CommandError> {
+    let mut result = ResearchOptions::default();
+    let mut remaining = vec![];
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--research-summary" => result.summary = true,
+            "--wall-budget-seconds" => {
+                result.budget_seconds = Some(args.next().ok_or("墙钟预算缺值")?.parse()?)
+            }
+            "--checkpoint-reserve-seconds" => {
+                result.reserve_seconds = Some(args.next().ok_or("保存预留缺值")?.parse()?)
+            }
+            _ => remaining.push(arg),
+        }
+    }
+    if let Some(budget) = result.budget_seconds {
+        if budget <= result.reserve_seconds.unwrap_or(900) {
+            return Err("墙钟预算须大于保存/汇总预留".into());
+        }
+    }
+    Ok((result, remaining))
+}
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     if std::env::args().any(|arg| arg == "--help") {
         println!(
-            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，checkpoint_root存在时恢复，完成点复用\n--progress-interval-seconds <秒>（默认30，0关闭）\n全部策略字段可覆盖（day对各候选显式覆盖）：\n{}",
+            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，checkpoint_root存在时恢复，完成点复用\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--checkpoint-reserve-seconds <秒>（默认900）\n全部策略字段可覆盖（day对各候选显式覆盖）：\n{}",
             PARAMETERS
                 .iter()
                 .map(|(field, _)| *field)
@@ -314,7 +345,24 @@ async fn main() {
         return;
     }
     let outcome = async {
-        let (mode, interval, description, args) = mode_args(std::env::args().skip(1))?;
+        let started = std::time::Instant::now();
+        let (research, args) = research_args(std::env::args().skip(1))?;
+        let (mode, interval, description, args) = mode_args(args)?;
+        if mode != Mode::Day && (research.summary || research.budget_seconds.is_some() || research.reserve_seconds.is_some()) {
+            return Err("研究汇总及预算选项仅适用于day入口".into());
+        }
+        // 外层硬截止覆盖输入准备、运行及最后输出；只保留最后成功发布点。
+        let _budget_guard = research.budget_seconds.map(|budget| {
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            std::thread::spawn(move || {
+                let remaining=std::time::Duration::from_secs(budget).saturating_sub(started.elapsed());
+                if matches!(rx.recv_timeout(remaining), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                    eprintln!("正式研究墙钟预算硬截止；仅承认最后成功发布检查点，未输出阶段计时为未知");
+                    std::process::exit(124);
+                }
+            });
+            tx
+        });
         if mode==Mode::Day {
             let command=load_days_command(load_value(args)?)?;
             let rules=load_rules(command.rules)?;
@@ -337,8 +385,16 @@ async fn main() {
                 let namespace=run.strategy_request_namespace.as_ref().ok_or("候选请求命名空间缺失")?.clone();
                 Ok(ComplementaryPairV1::new(strategy,rules.clone(),namespace,StrategyContinuityV1::new_account())?)
             };
-            let results=if let Some(parallel)=command.parallel_dates {run_historical_days_with_parallelism_v1(&days,rules.clone(),&factory,parallel)?}
+            let options=HistoricalDayRunOptionsV1 { research_summary:research.summary, started,
+                budget_save_after:research.budget_seconds.map(|budget| std::time::Duration::from_secs(budget-research.reserve_seconds.unwrap_or(900))) };
+            let results=if research.summary || research.budget_seconds.is_some() {
+                run_historical_days_with_options_v1(&days,rules.clone(),&factory,command.parallel_dates.unwrap_or(1),&options)?
+            } else if let Some(parallel)=command.parallel_dates {run_historical_days_with_parallelism_v1(&days,rules.clone(),&factory,parallel)?}
                 else {run_historical_days_v1(&days,rules.clone(),&factory)?};
+            // 连续六小时研究不日化；保留整段和小时原结果，旧默认日汇总仍保持。
+            if research.summary {
+                println!("{}",serde_json::json!({"days":results,"window_summary":"各候选research.final_snapshot及hours；非完整账户日，不日化"})); return Ok(());
+            }
             let summaries=summarize_independent_historical_days_v1(&results)?;
             println!("{}",serde_json::json!({"days":results,"summaries":summaries}));return Ok(());
         }
@@ -440,5 +496,36 @@ mod tests {
                 "{name} 类型应沿原策略序列化"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod research_option_tests {
+    use super::*;
+    #[test]
+    fn explicit_budget_preserves_original_args_and_requires_save_reserve() {
+        let (r, args) = research_args(
+            [
+                "--research-summary",
+                "--wall-budget-seconds",
+                "25200",
+                "--checkpoint-reserve-seconds",
+                "900",
+                "--mode",
+                "day",
+                "--config",
+                "fixture.json",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert!(r.summary);
+        assert_eq!(r.budget_seconds, Some(25200));
+        assert_eq!(r.reserve_seconds, Some(900));
+        assert_eq!(args, ["--mode", "day", "--config", "fixture.json"]);
+        assert!(research_args(["--wall-budget-seconds", "900"].map(str::to_owned)).is_err());
+        let (r, args) = research_args(["--mode", "day"].map(str::to_owned)).unwrap();
+        assert!(!r.summary && r.budget_seconds.is_none());
+        assert_eq!(args, ["--mode", "day"]);
     }
 }
