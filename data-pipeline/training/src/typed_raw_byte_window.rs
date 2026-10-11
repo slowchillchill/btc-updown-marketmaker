@@ -61,7 +61,7 @@ impl Shared {
 
 /// 同一文件共享一个窗口，返回对象不持有窗口切片。
 #[derive(Clone)]
-pub(super) struct WindowedFile(Arc<Shared>);
+pub(crate) struct WindowedFile(Arc<Shared>);
 
 impl WindowedFile {
     pub(super) fn new(file: File) -> Self {
@@ -95,7 +95,7 @@ impl Length for WindowedFile {
     }
 }
 
-pub(super) struct WindowRead {
+pub(crate) struct WindowRead {
     shared: Arc<Shared>,
     position: u64,
 }

@@ -182,7 +182,7 @@ where
     }
     let identity = format!("{:x}", identity.finalize());
     let restored = read_publication(&day.checkpoint_root, &identity)?;
-    if let Some((_, saved)) = &restored {
+    if let Some((_, saved, _)) = &restored {
         if saved.completed.iter().all(Option::is_some)
             && saved.completed.len() == day.candidates.len()
         {
@@ -211,7 +211,7 @@ where
     let hub = DayHubV1::new(&day.candidates);
     let mut candidates = Vec::new();
     let mut count = 0;
-    let mut generation = restored.as_ref().map_or(0, |(p, _)| p.generation + 1);
+    let mut generation = restored.as_ref().map_or(0, |(p, _, _)| p.generation + 1);
     if day.checkpoint_root.is_dir() {
         for entry in std::fs::read_dir(&day.checkpoint_root)? {
             let entry = entry?;
@@ -226,7 +226,8 @@ where
             }
         }
     }
-    let (mut producer, catalog) = if let Some((published, saved)) = restored {
+    let (mut producer, catalog) = if let Some((_published, saved, mut saved_candidates)) = restored
+    {
         count = saved.applied;
         let mut buffer = hub.0.0.lock().unwrap();
         let DayCheckpointStateV2::Running {
@@ -254,11 +255,11 @@ where
             buffer.candidates[i].active = complete.is_none();
             buffer.candidates[i].complete = complete;
             if buffer.candidates[i].active {
-                let path = day
-                    .checkpoint_root
-                    .join(format!("checkpoint-{:020}", published.generation))
-                    .join(format!("candidate-{i:06}.cbor"));
-                candidates.push(Some(std::fs::read(path)?));
+                candidates.push(Some(
+                    saved_candidates
+                        .remove(&format!("candidate-{i:06}.cbor"))
+                        .ok_or("完整日检查点缺少活动候选")?,
+                ));
             } else {
                 candidates.push(None);
             }

@@ -196,6 +196,7 @@ pub struct ValidatedDirectSourceParquetFileV3 {
     bytes: u64,
     rows: u64,
     sha256: String,
+    opened: std::sync::Mutex<Option<typed_raw::OpenedParquetV1>>,
 }
 
 impl ValidatedDirectSourceParquetFileV3 {
@@ -832,6 +833,7 @@ fn validate_daily_manifest_admission_with_public_inputs(
             bytes: manifest_file.bytes,
             rows: manifest_file.rows,
             sha256: manifest_file.sha256,
+            opened: std::sync::Mutex::new(Some(inspection.opened)),
         });
     }
     Ok(ValidatedDirectSourceDailyInputV3 {
@@ -860,47 +862,43 @@ struct ParquetInspection {
     sha256: String,
     footer_rows: u64,
     footer_metadata: Vec<parquet::file::metadata::KeyValue>,
+    opened: typed_raw::OpenedParquetV1,
 }
 
 fn inspect_verified_parquet(
     path: &Path,
 ) -> Result<ParquetInspection, ManifestAdmissionValidationError> {
     let mut file = File::open(path).map_err(ManifestAdmissionValidationError::Io)?;
-    let inspection = (|| {
-        let file_bytes = file
-            .metadata()
-            .map_err(ManifestAdmissionValidationError::Io)?
-            .len();
-        let sha256 = sha256_open_file(&mut file)?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(ManifestAdmissionValidationError::Io)?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(
-            file.try_clone()
-                .map_err(ManifestAdmissionValidationError::Io)?,
-        )
-        .map_err(ManifestAdmissionValidationError::Parquet)?;
-        let footer_rows =
-            u64::try_from(builder.metadata().file_metadata().num_rows()).map_err(|_| {
-                ManifestAdmissionValidationError::Parquet(ParquetError::General(
-                    "Parquet footer 行数不能转换为 u64".to_owned(),
-                ))
-            })?;
-        let footer_metadata = builder
-            .metadata()
-            .file_metadata()
-            .key_value_metadata()
-            .cloned()
-            .unwrap_or_default();
-        Ok(ParquetInspection {
-            file_bytes,
-            sha256,
-            footer_rows,
-            footer_metadata,
-        })
-    })();
-
+    let file_bytes = file
+        .metadata()
+        .map_err(ManifestAdmissionValidationError::Io)?
+        .len();
+    let sha256 = sha256_open_file(&mut file)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(ManifestAdmissionValidationError::Io)?;
     let _ = fadvise(&file, 0, None, Advice::DontNeed);
-    inspection
+    let opened =
+        typed_raw::OpenedParquetV1::new(file).map_err(ManifestAdmissionValidationError::Parquet)?;
+    let footer_rows = u64::try_from(opened.metadata.metadata().file_metadata().num_rows())
+        .map_err(|_| {
+            ManifestAdmissionValidationError::Parquet(ParquetError::General(
+                "Parquet footer 行数不能转换为 u64".to_owned(),
+            ))
+        })?;
+    let footer_metadata = opened
+        .metadata
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .cloned()
+        .unwrap_or_default();
+    Ok(ParquetInspection {
+        file_bytes,
+        sha256,
+        footer_rows,
+        footer_metadata,
+        opened,
+    })
 }
 
 fn validate_parquet_footer_metadata(

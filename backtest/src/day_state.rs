@@ -9,7 +9,7 @@ use sim_system::{
 };
 use std::{
     collections::VecDeque,
-    io::{BufWriter, Write},
+    io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
 };
@@ -516,10 +516,44 @@ pub(crate) fn hash_file(path: &Path) -> Result<String, MaterialError> {
     }
     Ok(format!("{:x}", digest.finalize()))
 }
+/// 摘要只累计实际读入字节。解码后继续读至EOF，再允许恢复任何写入owner。
+struct DigestReader<R> {
+    inner: R,
+    digest: Sha256,
+}
+impl<R: Read> Read for DigestReader<R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(bytes)?;
+        self.digest.update(&bytes[..n]);
+        Ok(n)
+    }
+}
+fn read_verified_cbor<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    expected: &str,
+) -> Result<T, MaterialError> {
+    let mut reader = BufReader::new(DigestReader {
+        inner: std::fs::File::open(path)?,
+        digest: Sha256::new(),
+    });
+    let value = ciborium::de::from_reader(&mut reader)?;
+    std::io::copy(&mut reader, &mut std::io::sink())?;
+    if format!("{:x}", reader.get_ref().digest.clone().finalize()) != expected {
+        return Err("完整日检查点文件身份不符".into());
+    }
+    Ok(value)
+}
 pub(crate) fn read_publication(
     root: &Path,
     identity: &str,
-) -> Result<Option<(CheckpointPublicationV1, DayCheckpointV1)>, MaterialError> {
+) -> Result<
+    Option<(
+        CheckpointPublicationV1,
+        DayCheckpointV1,
+        std::collections::BTreeMap<String, Vec<u8>>,
+    )>,
+    MaterialError,
+> {
     let pointer = root.join("checkpoint.json");
     if !pointer.exists() {
         return Ok(None);
@@ -530,21 +564,38 @@ pub(crate) fn read_publication(
         return Err("日检查点与输入、配置或版本不符".into());
     }
     let directory = root.join(format!("checkpoint-{:020}", published.generation));
+    let mut saved = None;
+    let mut candidates = std::collections::BTreeMap::new();
     for file in &published.files {
         let path = directory.join(&file.path);
-        if path.parent() != Some(directory.as_path()) || hash_file(&path)? != file.sha256 {
+        if path.parent() != Some(directory.as_path()) {
+            return Err("完整日检查点文件身份不符".into());
+        }
+        if file.path == "day.cbor" {
+            saved = Some(read_verified_cbor::<DayCheckpointV1>(&path, &file.sha256)?);
+        } else if file.path.starts_with("candidate-") && file.path.ends_with(".cbor") {
+            let mut reader = BufReader::new(DigestReader {
+                inner: std::fs::File::open(&path)?,
+                digest: Sha256::new(),
+            });
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            if format!("{:x}", reader.get_ref().digest.clone().finalize()) != file.sha256 {
+                return Err("完整日检查点文件身份不符".into());
+            }
+            candidates.insert(file.path.clone(), bytes);
+        } else if hash_file(&path)? != file.sha256 {
             return Err("完整日检查点文件身份不符".into());
         }
     }
-    let saved: DayCheckpointV1 =
-        ciborium::de::from_reader(std::fs::File::open(directory.join("day.cbor"))?)?;
+    let saved = saved.ok_or("完整日检查点缺少day.cbor")?;
     if saved.format != DAY_CHECKPOINT_FORMAT
         || saved.identity != identity
         || saved.generation != published.generation
     {
         return Err("日检查点发布引用不符".into());
     }
-    Ok(Some((published, saved)))
+    Ok(Some((published, saved, candidates)))
 }
 pub(crate) fn publish(
     root: &Path,
@@ -608,6 +659,25 @@ pub(crate) fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn checkpoint_read_digest_includes_the_complete_decode_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("value.cbor");
+        let digest = write_cbor(&path, &42u64).unwrap();
+        assert_eq!(read_verified_cbor::<u64>(&path, &digest).unwrap(), 42);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"remaining-content")
+            .unwrap();
+        assert!(read_verified_cbor::<u64>(&path, &digest).is_err());
+        // 原格式允许解码后剩余字节；它们必须同样参与整个文件摘要。
+        assert_eq!(
+            read_verified_cbor::<u64>(&path, &hash_file(&path).unwrap()).unwrap(),
+            42
+        );
+    }
     #[test]
     fn checkpoint_digest_counts_partial_writes_and_propagates_failures() {
         struct Partial {

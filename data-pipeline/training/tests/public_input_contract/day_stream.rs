@@ -220,6 +220,8 @@ fn original_parquet_day_keeps_head_order_private_quantities_and_complete_buckets
     let second = producer.next_applied().unwrap().unwrap();
     assert_eq!(second.input.input_position, 1);
     assert!(second.hidden.is_empty());
+    let order_path = tmp.path().join("source-order.cbor");
+    producer.ingress.persist_order_index(&order_path).unwrap();
     let mut core_state = Vec::new();
     producer.core.write_checkpoint(&mut core_state).unwrap();
     let mut source_state = Vec::new();
@@ -256,6 +258,25 @@ fn original_parquet_day_keeps_head_order_private_quantities_and_complete_buckets
         ));
     }
     assert_eq!(resumed, remainder);
+    // 解码后的尾部也属于发布摘要；损坏索引必须在恢复供料前拒绝。
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&order_path)
+        .unwrap()
+        .write_all(b"tail")
+        .unwrap();
+    assert!(
+        DayProducerV1::restore(
+            PublicObservationCoreV1::read_checkpoint(core_state.as_slice()).unwrap(),
+            &files,
+            source_state.as_slice(),
+            1,
+            1 << 20,
+            RECEIVED - 1..RECEIVED + 1000,
+        )
+        .is_err()
+    );
 
     assert_eq!(applied, 5);
     assert!(
@@ -415,6 +436,49 @@ fn day_initialization_and_prior_twap_follow_original_visible_reference_selection
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(selected.len(), 1);
+    // 两份正式清单定位同一canonical文件；相同事实保留首次来源绑定。
+    let first_manifest = &initial.files[0].manifest_path;
+    let duplicate_manifest = first_manifest
+        .parent()
+        .unwrap()
+        .join("duplicate-manifest.json");
+    let raw = fs::read(first_manifest).unwrap();
+    let mut duplicate_raw = raw.clone();
+    duplicate_raw.push(b'\n');
+    fs::write(&duplicate_manifest, duplicate_raw).unwrap();
+    let mut overlapping = initial.clone();
+    overlapping
+        .files
+        .push(MetadataInitializationFileSelectionV1 {
+            manifest_path: duplicate_manifest.clone(),
+            relative_paths: initial.files[0].relative_paths.clone(),
+        });
+    let reused = MetadataInitializationSelectionV1::open(&overlapping, 1, 1 << 20).unwrap();
+    assert_eq!(reused.files.len(), 1);
+    let duplicate_selected = reused
+        .read(1, 1 << 20)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&duplicate_selected).unwrap(),
+        serde_json::to_value(&selected).unwrap()
+    );
+    assert_eq!(
+        reused.files[0].manifest_sha256,
+        selection.files[0].manifest_sha256
+    );
+    // 矛盾SHA仍来自同一有效清单schema，不能因为路径重复而跳过声明核对。
+    let mut conflicting: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    conflicting["files"][0]["sha256"] = json!("0".repeat(64));
+    fs::write(
+        &duplicate_manifest,
+        serde_json::to_vec(&conflicting).unwrap(),
+    )
+    .unwrap();
+    let error = MetadataInitializationSelectionV1::open(&overlapping, 1, 1 << 20)
+        .err()
+        .expect("矛盾清单必须拒绝");
+    assert!(error.to_string().contains("清单事实互相矛盾"), "{error}");
     let limits = crate::gate_a_formal_canonical_config();
     let mut merge = prepare_historical_files_with_initialization_and_progress_v1(
         &tmp.path().join("old"),

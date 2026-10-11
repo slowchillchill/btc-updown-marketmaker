@@ -940,20 +940,22 @@ impl PublicObservationCoreV1 {
                     reason: (*reason).to_owned(),
                 });
             }
-            PreparedCanonicalInputV1::BinanceDepthSnapshot { row, source } => {
+            PreparedCanonicalInputV1::BinanceDepthSnapshot { row, source, depth } => {
                 // compute 可改状态后返回无事件或错误，不能仅按 Produced 失效。
                 self.current_depth_projection = None;
                 let batch = bind_reference_reduction_v1(
-                    self.binance_depth.compute_snapshot(row, source.clone())?,
+                    self.binance_depth
+                        .compute_prepared_snapshot(row, source.clone(), depth)?,
                     context.unwrap(),
                 );
                 self.close_batch(batch, vec![self.next_input_position], input, &mut result);
             }
-            PreparedCanonicalInputV1::BinanceDepthUpdate { row, source } => {
+            PreparedCanonicalInputV1::BinanceDepthUpdate { row, source, depth } => {
                 // compute 可改状态后返回无事件或错误，不能仅按 Produced 失效。
                 self.current_depth_projection = None;
                 let batch = bind_reference_reduction_v1(
-                    self.binance_depth.compute_update(row, source.clone())?,
+                    self.binance_depth
+                        .compute_prepared_update(row, source.clone(), depth)?,
                     context.unwrap(),
                 );
                 self.close_batch(batch, vec![self.next_input_position], input, &mut result);
@@ -1409,7 +1411,7 @@ impl PublicObservationCoreV1 {
         };
         let quality = batch.facts.last().map_or(fresh, |f| f.quality.clone());
         let (kind, symbol, evidence, generation, valid, snapshot) = match &input.current {
-            PreparedCanonicalInputV1::BinanceDepthSnapshot { row, source } => (
+            PreparedCanonicalInputV1::BinanceDepthSnapshot { row, source, .. } => (
                 SourceStreamKindV1::BinanceDepth,
                 row.symbol.clone(),
                 source.source(),
@@ -1417,7 +1419,7 @@ impl PublicObservationCoreV1 {
                 produced_or_confirmed,
                 true,
             ),
-            PreparedCanonicalInputV1::BinanceDepthUpdate { row, source } => {
+            PreparedCanonicalInputV1::BinanceDepthUpdate { row, source, .. } => {
                 let quality = if row.stitch_verdict
                     == BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable
                 {

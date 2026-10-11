@@ -5,7 +5,7 @@
 
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -17,8 +17,9 @@ use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef, TimeUnit};
 use data_pipeline_core::typed_raw::{
     BinanceAggTradeCaptureStatus, BinanceAggTradeInvalidReason, BinanceAggTradePayloadEncoding,
     BinanceAggTradeRecord, BinanceAggTradeRow, BinanceDepthSnapshotRow, BinanceDepthStitchVerdict,
-    BinanceDepthUpdateRow, MetadataActiveUnavailableReason, MetadataClosedTimeCheckFailureReason,
-    MetadataMarketLifecycleState, MetadataMarketLifecycleTransition, MetadataMarketRuntimeRole,
+    BinanceDepthUpdateRow, DepthLevel, MetadataActiveUnavailableReason,
+    MetadataClosedTimeCheckFailureReason, MetadataMarketLifecycleState,
+    MetadataMarketLifecycleTransition, MetadataMarketRuntimeRole,
     MetadataMarketRuntimeRoleTransition, MetadataResolutionEvidenceSource,
     MetadataResolutionFollowupStatus, MetadataResolutionIntegrityErrorClass,
     MetadataResolutionPollResult, MetadataResolutionTransportErrorClass,
@@ -28,7 +29,7 @@ use data_pipeline_core::typed_raw::{
     PolymarketMarketMetadataRow, PolymarketMetadataOrigin, PolymarketMetadataRowKind,
     PolymarketOrderbookEvent, PolymarketOrderbookRow, PolymarketPriceChangeEntry,
     PolymarketPriceLevel, PolymarketRtdsChainlinkBtcUsdRow, PolymarketSide, RtdsFreshnessStatus,
-    TypedRawError, TypedRawRow, parse_depth_levels_json,
+    TypedRawError, TypedRawRow,
 };
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
@@ -1877,6 +1878,17 @@ fn decode_polymarket_rtds(
     Ok(rows)
 }
 
+fn decode_depth_levels(raw: &str, field: &str) -> Result<Vec<DepthLevel>, TypedRawError> {
+    let values: Vec<[String; 2]> = serde_json::from_str(raw).map_err(|e| TypedRawError::Json {
+        field: field.into(),
+        message: e.to_string(),
+    })?;
+    Ok(values
+        .into_iter()
+        .map(|[price, quantity]| DepthLevel { price, quantity })
+        .collect())
+}
+
 fn decode_binance_depth_snapshot(
     batch: &RecordBatch,
     context: DecodeContext<'_>,
@@ -1928,9 +1940,9 @@ fn decode_binance_depth_snapshot(
                 context,
             )?,
             last_update_id: required_u64(update_ids, row, "last_update_id", context)?,
-            bids: parse_depth_levels_json(&bids_raw, "bids", false)
+            bids: decode_depth_levels(&bids_raw, "bids")
                 .map_err(|error| core_error(error, row, context))?,
-            asks: parse_depth_levels_json(&asks_raw, "asks", false)
+            asks: decode_depth_levels(&asks_raw, "asks")
                 .map_err(|error| core_error(error, row, context))?,
             symbol: required_string(symbols, row, "symbol", context)?,
             source_endpoint: required_string(endpoints, row, "source_endpoint", context)?,
@@ -2025,9 +2037,9 @@ fn decode_binance_depth_update(
             symbol: required_string(symbols, row, "symbol", context)?,
             first_update_id: required_u64(first_ids, row, "first_update_id", context)?,
             final_update_id: required_u64(final_ids, row, "final_update_id", context)?,
-            bids: parse_depth_levels_json(&bids_raw, "bids", true)
+            bids: decode_depth_levels(&bids_raw, "bids")
                 .map_err(|error| core_error(error, row, context))?,
-            asks: parse_depth_levels_json(&asks_raw, "asks", true)
+            asks: decode_depth_levels(&asks_raw, "asks")
                 .map_err(|error| core_error(error, row, context))?,
             stream: required_string(streams, row, "stream", context)?,
             snapshot_last_update_id: optional_u64(snapshot_ids, row),
@@ -2476,20 +2488,15 @@ pub(crate) fn open_validated_parquet_with_decoder<Row>(
     schema: fn(&str, &str) -> Result<SchemaRef, TypedRawReadError>,
     decode: DecodeBatch<Row>,
 ) -> Result<TypedRawParquetStream<Row>, TypedRawReadError> {
-    open_parquet_with_decoder(
-        ParquetInputFacts {
-            path: file.file_path(),
-            source_kind: file.source_kind(),
-            schema_version: file.schema_version(),
-            bytes: file.bytes(),
-            rows: file.rows(),
-            sha256: file.sha256(),
-        },
+    stream_with_opened(
+        file.input_facts(),
         batch_size,
         scope,
         max_physical_batch_bytes,
         schema,
         decode,
+        file.take_opened()?,
+        0,
     )
 }
 
@@ -2534,7 +2541,58 @@ pub(crate) fn open_parquet_at_with_decoder<Row>(
     if batch_size == 0 {
         return Err(TypedRawReadError::InvalidBatchSize);
     }
-    let path = file.path.to_path_buf();
+    let opened = verify_opened(ParquetInputFacts { ..file })?;
+    stream_with_opened(
+        file,
+        batch_size,
+        scope,
+        max_physical_batch_bytes,
+        schema,
+        decode,
+        opened,
+        physical_row,
+    )
+}
+
+/// 同一次已验证打开的文件与页脚；只在该读取生命周期内共享。
+#[derive(Clone)]
+pub(crate) struct OpenedParquetV1 {
+    pub reader: byte_window::WindowedFile,
+    pub metadata: parquet::arrow::arrow_reader::ArrowReaderMetadata,
+}
+impl fmt::Debug for OpenedParquetV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenedParquetV1").finish_non_exhaustive()
+    }
+}
+impl OpenedParquetV1 {
+    pub(crate) fn new(file: File) -> parquet::errors::Result<Self> {
+        let reader = byte_window::WindowedFile::new(file);
+        let metadata =
+            parquet::arrow::arrow_reader::ArrowReaderMetadata::load(&reader, Default::default())?;
+        Ok(Self { reader, metadata })
+    }
+}
+impl ValidatedDirectSourceParquetFileV3 {
+    pub(crate) fn input_facts(&self) -> ParquetInputFacts<'_> {
+        ParquetInputFacts {
+            path: self.file_path(),
+            source_kind: self.source_kind(),
+            schema_version: self.schema_version(),
+            bytes: self.bytes(),
+            rows: self.rows(),
+            sha256: self.sha256(),
+        }
+    }
+    pub(crate) fn take_opened(&self) -> Result<OpenedParquetV1, TypedRawReadError> {
+        if let Some(opened) = self.opened.lock().unwrap().take() {
+            return Ok(opened);
+        }
+        verify_opened(self.input_facts())
+    }
+}
+fn verify_opened(file: ParquetInputFacts<'_>) -> Result<OpenedParquetV1, TypedRawReadError> {
+    let path = file.path.to_owned();
     let mut opened = File::open(&path).map_err(|source| TypedRawReadError::Io {
         path: path.clone(),
         source,
@@ -2554,24 +2612,17 @@ pub(crate) fn open_parquet_at_with_decoder<Row>(
         });
     }
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = opened
-            .read(&mut buffer)
-            .map_err(|source| TypedRawReadError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        if read == 0 {
-            break;
+    io::copy(&mut opened, &mut DigestSink(&mut hasher)).map_err(|source| {
+        TypedRawReadError::Io {
+            path: path.clone(),
+            source,
         }
-        hasher.update(&buffer[..read]);
-    }
+    })?;
     let actual_sha256 = format!("{:x}", hasher.finalize());
     if actual_sha256 != file.sha256 {
         return Err(TypedRawReadError::AdmittedFileDigestMismatch {
             path,
-            expected_sha256: file.sha256.to_owned(),
+            expected_sha256: file.sha256.into(),
             actual_sha256,
         });
     }
@@ -2581,15 +2632,42 @@ pub(crate) fn open_parquet_at_with_decoder<Row>(
             path: path.clone(),
             source,
         })?;
+    OpenedParquetV1::new(opened).map_err(|error| TypedRawReadError::Parquet {
+        path,
+        batch_index: None,
+        detail: error.to_string(),
+    })
+}
+struct DigestSink<'a>(&'a mut Sha256);
+impl io::Write for DigestSink<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
-    stream_with_chunk_reader(
+pub(crate) fn stream_with_opened<Row>(
+    file: ParquetInputFacts<'_>,
+    batch_size: usize,
+    scope: Option<TypedRawReadScope>,
+    max_physical_batch_bytes: Option<usize>,
+    schema: fn(&str, &str) -> Result<SchemaRef, TypedRawReadError>,
+    decode: DecodeBatch<Row>,
+    opened: OpenedParquetV1,
+    physical_row: u64,
+) -> Result<TypedRawParquetStream<Row>, TypedRawReadError> {
+    stream_with_metadata(
         file,
         batch_size,
         scope,
         max_physical_batch_bytes,
         schema,
         decode,
-        byte_window::WindowedFile::new(opened),
+        opened.reader,
+        opened.metadata,
         physical_row,
     )
 }
@@ -2617,6 +2695,7 @@ impl<R: parquet::file::reader::ChunkReader> parquet::file::reader::ChunkReader
     }
 }
 
+#[cfg(test)]
 fn stream_with_chunk_reader<Row, R: parquet::file::reader::ChunkReader + 'static>(
     file: ParquetInputFacts<'_>,
     batch_size: usize,
@@ -2636,6 +2715,34 @@ fn stream_with_chunk_reader<Row, R: parquet::file::reader::ChunkReader + 'static
                 batch_index: None,
                 detail: error.to_string(),
             })?;
+    stream_with_metadata(
+        file,
+        batch_size,
+        scope,
+        max_physical_batch_bytes,
+        schema,
+        decode,
+        retained,
+        arrow_metadata,
+        physical_row,
+    )
+}
+fn stream_with_metadata<Row, R: parquet::file::reader::ChunkReader + 'static>(
+    file: ParquetInputFacts<'_>,
+    batch_size: usize,
+    scope: Option<TypedRawReadScope>,
+    max_physical_batch_bytes: Option<usize>,
+    schema: fn(&str, &str) -> Result<SchemaRef, TypedRawReadError>,
+    decode: DecodeBatch<Row>,
+    reader: R,
+    arrow_metadata: parquet::arrow::arrow_reader::ArrowReaderMetadata,
+    physical_row: u64,
+) -> Result<TypedRawParquetStream<Row>, TypedRawReadError> {
+    if batch_size == 0 {
+        return Err(TypedRawReadError::InvalidBatchSize);
+    }
+    let path = file.path.to_owned();
+    let retained = SharedChunkReader(Arc::new(reader));
     let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
         retained.clone(),
         arrow_metadata.clone(),
@@ -2827,7 +2934,7 @@ mod tests {
     }
 
     #[test]
-    fn admitted_file_same_size_replacement_fails_on_content_identity() {
+    fn admission_transfers_same_open_file_and_independent_reopen_checks_content() {
         let temp = TempDir::new().expect("创建准入后替换回归临时目录");
         let day_directory = temp.path().join("2026-07-30/typed_raw/utc_day=2026-07-30");
         let source_directory = day_directory.join("source_kind=binance_aggtrade");
@@ -2918,7 +3025,12 @@ mod tests {
         let mut replacement = original_bytes;
         let replacement_index = replacement.len() / 2;
         replacement[replacement_index] ^= 1;
-        std::fs::write(&parquet_path, &replacement).expect("同字节数替换已准入 Parquet");
+        std::fs::rename(&parquet_path, parquet_path.with_extension("original")).unwrap();
+        std::fs::write(&parquet_path, &replacement).expect("同字节数替换原路径");
+        // 同次准入移交真实原File和footer，不重新打开路径；独立重开仍验内容。
+        let mut original = open_validated_typed_raw_parquet(admitted_file, 1).unwrap();
+        assert!(original.next().is_none());
+        drop(original);
         assert_eq!(replacement.len() as u64, admitted_file.bytes());
 
         let error = open_validated_typed_raw_parquet(admitted_file, 1)
