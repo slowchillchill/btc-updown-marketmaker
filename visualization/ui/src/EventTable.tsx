@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useMemo, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -18,31 +19,43 @@ export function EventTable({
   selectedPath?: string;
   playbackPath?: string;
 }) {
+  const { t: tr } = useTranslation();
   const columns = useMemo<ColumnDef<Row>[]>(
     () => [
-      { accessorKey: "kind", header: "事实类型" },
+      {
+        accessorKey: "kind",
+        header: tr("事实类型"),
+        cell: ({ row }) =>
+          row.original.kind === "未知记录" ? tr("未知记录") : row.original.kind,
+      },
       {
         id: "clock",
-        header: "时钟 / 原 UTC ms",
-        accessorFn: (r) =>
-          r.points
-            .map((p) => p.clock + " · " + (p.originalUtcText ?? p.utcMs))
-            .join("；") || "未接入时间映射",
+        header: tr("时钟 / 原 UTC ms"),
+        cell: ({ row }) =>
+          row.original.points
+            .map((p) => tr(p.clock) + " · " + (p.originalUtcText ?? p.utcMs))
+            .join("；") || tr("未接入时间映射"),
       },
       {
         id: "identity",
-        header: "原身份 / 市场",
-        accessorFn: (r) =>
-          r.identity +
-          (r.markets?.length
-            ? " · " + [...new Set(r.markets.map((m) => m.condition))].join("；")
-            : r.condition
-              ? " · " + r.condition
-              : " · 无明确市场关联"),
+        header: tr("原身份 / 市场"),
+        cell: ({ row }) =>
+          (row.original.identity === "未交接 input_stream_id" &&
+          row.original.inputStreamId === undefined
+            ? tr("未交接 input_stream_id")
+            : row.original.identity) +
+          (row.original.markets?.length
+            ? " · " +
+              [...new Set(row.original.markets.map((m) => m.condition))].join(
+                "；",
+              )
+            : row.original.condition
+              ? " · " + row.original.condition
+              : tr(" · 无明确市场关联")),
       },
       {
         id: "reference",
-        header: "原引用",
+        header: tr("原引用"),
         cell: ({ row }) => (
           <button
             className="text-button"
@@ -53,7 +66,7 @@ export function EventTable({
         ),
       },
     ],
-    [onSelect],
+    [onSelect, tr],
   );
   const table = useReactTable({
     data: rows,
@@ -73,8 +86,11 @@ export function EventTable({
   return (
     <div>
       <small className="virtual-summary">
-        当前保留显示集合 {rows.length} 条 · DOM 行 {items.length} ·
-        虚拟列表不减少底层读取 / 原批保留量
+        {tr("当前保留显示集合 ")}
+        {rows.length}
+        {tr(" 条 · DOM 行 ")}
+        {items.length}
+        {tr(" · 虚拟列表不减少底层读取 / 原批保留量")}
       </small>
       <div
         className="table-scroll"
@@ -132,7 +148,9 @@ export function EventTable({
           </tbody>
         </table>
         {!rows.length && (
-          <p className="empty">当前来源 / 范围没有可显示事实；不补零事件。</p>
+          <p className="empty">
+            {tr("当前来源 / 范围没有可显示事实；不补零事件。")}
+          </p>
         )}
       </div>
     </div>
