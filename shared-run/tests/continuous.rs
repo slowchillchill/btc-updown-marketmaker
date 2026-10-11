@@ -3000,6 +3000,163 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
     }
 }
 
+// 使用原 V4 提交、撤单反馈与动作快照，不构造内部登记状态。
+#[tokio::test(flavor = "current_thread")]
+async fn v4_cancel_market_relation_keeps_known_unknown_and_closed_order_locations() {
+    use contracts::ExecutionReadValueV1::{Known, Unavailable};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let (core, times) = recorded_trading_window(&root, "100", None, 60_000, true);
+    let (mut execution, observation, _) = execution_with_rules_v4(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SUCCESS_POLICY,
+        None,
+        "e".repeat(64),
+        "100",
+    );
+    let mut ledger =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    let ledger_root = temp.path().join("ledger");
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &ledger_root)
+        .unwrap();
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation.clone())
+        .unwrap()
+        .unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "lookup-v4".into());
+    for _ in 0..2 {
+        driver.next_group().unwrap().unwrap();
+    }
+    shared.action_before(&mut driver).unwrap().unwrap();
+    shared
+        .execute(
+            &mut driver.decision().unwrap(),
+            context("lookup-pair"),
+            Some(Arc::new(ModelIntentV1::SubmitPairedBuy {
+                condition_id: ConditionId(CONDITION_ID.into()),
+                orders: [leg(UP_TOKEN_ID, 5), leg(DOWN_TOKEN_ID, 5)],
+            })),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for _ in 2..7 {
+        driver.next_group().unwrap().unwrap();
+    }
+    shared.action_before(&mut driver).unwrap().unwrap();
+    let ids: Vec<_> = shared
+        .registry()
+        .orders()
+        .map(|o| {
+            assert_eq!(
+                o.order_identity.account.as_ref(),
+                &observation
+                    .opening_record()
+                    .unwrap()
+                    .context()
+                    .account_identity
+            );
+            platform_id(o.order_identity)
+        })
+        .collect();
+    assert_eq!(ids, ["sim-1", "sim-2"]);
+    let market = ConditionId(CONDITION_ID.into());
+    let other = ConditionId(OTHER_CONDITION_ID.into());
+    for (request, targets, matching, nonmatching) in [
+        ("lookup-known", ids.clone(), true, true),
+        // 未知在前，已知匹配仍优先；另一市场不得把未知解释成不匹配。
+        (
+            "lookup-mixed",
+            vec!["sim-999".into(), ids[0].clone()],
+            true,
+            false,
+        ),
+        ("lookup-unknown", vec!["sim-999".into()], false, false),
+    ] {
+        shared
+            .execute(
+                &mut driver.decision().unwrap(),
+                context(request),
+                Some(Arc::new(ModelIntentV1::CancelOrders {
+                    platform_order_ids: targets,
+                })),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        loop {
+            assert!(
+                driver.next_group().unwrap().is_some(),
+                "{request} 必须实际收到响应"
+            );
+            let view = shared.action_before(&mut driver).unwrap().unwrap();
+            if view.cancellation_requests(None).pending_count != Known(0) {
+                continue;
+            }
+            let all = view.cancellation_requests(None);
+            assert!(matches!(all.latest_response, Known(Some(_))));
+            let hit = view.cancellation_requests(Some(&CancellationScopeV1::Market(&market)));
+            let miss = view.cancellation_requests(Some(&CancellationScopeV1::Market(&other)));
+            if matching {
+                assert!(matches!(hit.latest_response, Known(Some(_))));
+            } else {
+                assert!(matches!(hit.latest_response, Unavailable));
+            }
+            if nonmatching {
+                assert!(matches!(miss.latest_response, Known(None)));
+            } else {
+                assert!(matches!(miss.latest_response, Unavailable));
+            }
+            if request == "lookup-known" {
+                assert_eq!(hit.response_counts, [Known(2), Known(0), Known(0)]);
+                assert_eq!(
+                    view.orders().count(),
+                    0,
+                    "闭合订单不进入动作人口，响应仍由原取消位置归属市场"
+                );
+            }
+            // 冷恢复原登记与反馈引用，读取结果和实际已交付响应保持不变。
+            let mut state = Vec::new();
+            shared.write_checkpoint(&mut state).unwrap();
+            let mut ledger_state = Vec::new();
+            shared.ledger().write_checkpoint(&mut ledger_state).unwrap();
+            let restored = SharedExecutionV2::restore_checkpoint(
+                LedgerWriterV1::restore_checkpoint(ledger_state.as_slice()).unwrap(),
+                observation.clone(),
+                state.as_slice(),
+            )
+            .unwrap();
+            for condition in [&market, &other] {
+                let expected = shared
+                    .registry()
+                    .cancellation_requests(Some(&CancellationScopeV1::Market(condition)));
+                let actual = restored
+                    .registry()
+                    .cancellation_requests(Some(&CancellationScopeV1::Market(condition)));
+                assert_eq!(actual.pending_count, expected.pending_count);
+                assert_eq!(actual.response_counts, expected.response_counts);
+                match (actual.latest_response, expected.latest_response) {
+                    (Known(Some(actual)), Known(Some(expected))) => {
+                        assert_eq!(actual.position(), expected.position());
+                        assert_eq!(actual.record(), expected.record());
+                        assert_eq!(actual.visibility(), expected.visibility());
+                    }
+                    (Known(None), Known(None)) | (Unavailable, Unavailable) => {}
+                    _ => panic!("恢复改变了最新响应的已知/未知或存在状态"),
+                }
+            }
+            break;
+        }
+    }
+    while driver.next_group().unwrap().is_some() {
+        shared.action_before(&mut driver).unwrap();
+    }
+    assert!(shared.apply_closed().unwrap());
+    driver.complete().unwrap();
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn real_terminal_query_then_late_open_precede_lifecycle() {
     use ::execution_normalization::{NormalizationRecord, SourceNeutralEvidenceKind};
