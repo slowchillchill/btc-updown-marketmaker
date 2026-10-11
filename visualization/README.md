@@ -22,6 +22,8 @@ cargo run -p visualization --locked --offline -- sources.json 127.0.0.1:4317 vis
 
 本地服务只展示配置文件中本次有权读取的来源，没有目录发现、路径选择 API 或评价目录搜索。报告、元数据、研究 JSON 和公共根目录分别显式填写；元数据内的生产路径不会被自动打开。相对路径相对于服务进程工作目录解析，配置文件本身应保存在仓库外或被忽略的本地产物目录。前端开发可用 `npm --prefix visualization/ui run dev`，Vite 将 `/api` 代理到本地 Rust 服务。
 
+页面顶部的“界面语言”可即时切换中文与英语，默认中文。浏览器使用 `localStorage` 记住选择；存储被禁用时仍可切换当前页面。切换保留当前来源、筛选、已读页和选中证据，不额外请求来源数据。导航、控件、说明、表头和图表标签使用所选语言；配置的来源名称、原始值、字段名、标识、引用和导出数据保持原样。前端文案通过 `i18next` 与 `react-i18next` 管理，中文原文为键，英语译文位于 `ui/src/locales/en.json`。
+
 最小来源配置：
 
 ```json
@@ -114,6 +116,9 @@ cargo clippy -p visualization --all-targets --no-deps --locked --offline -- -D w
 npm --prefix visualization/ui run build
 npm --prefix visualization/ui run test:browser -- .local-artifacts/visualization/synthetic-example/sources.json
 ```
+
+该浏览器回归也检查七个视图的中英文切换、筛选与证据保留、切换期间无额外来源请求、刷新后的语言记忆、存储禁用和英文窄屏布局。传入截图目录时保存两种语言的页面截图。
+`npm --prefix visualization/ui run test:i18n` 单独回归 NOE 动态标签，以及与界面词条同名的原始值和精确金额。
 
 浏览器验证使用已有 Chrome，默认可执行文件 `/usr/bin/google-chrome`，可通过 `CHROME_EXECUTABLE` 指定。它启动临时本地 Rust 服务、关闭服务/浏览器并清理所建临时测试输入；可在命令最后提供截图目录。脚本验证实际合成 RangeEnd 报告、八模块/七导航与静态关系、跨视图及跨页身份、UP/DOWN 非对称映射、精确现金加法、零与 Unavailable、负调度差与缺端点、成功范围下载、未知/损坏证据、切换/刷新及窄屏。非对称数据是脚本临时创建的独立展示边界夹具，明确标为“非生产研究”，不冒充原生产报告。截图和工程检查不代替用户人工视觉验收。
 

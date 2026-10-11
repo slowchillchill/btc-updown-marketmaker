@@ -1,4 +1,6 @@
+import { useTranslation } from "react-i18next";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { displayError } from "./i18n";
 import { type Evidence, type Row } from "./browse";
 import type { Page } from "./evidence";
 import {
@@ -47,10 +49,11 @@ export function usePublicBrowse({
   ready: boolean;
   onSelect: (e: Evidence) => void;
 }) {
+  const { t: tr } = useTranslation();
   const [fields, setFields] = useState(emptyQuery),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
-    [notice, setNotice] = useState(""),
+    [notice, setNotice] = useState<string | null>(null),
     [echo, setEcho] = useState<Result | null>(null),
     [retry, setRetry] = useState<Expected | null>(null),
     [progress, setProgress] = useState({
@@ -77,7 +80,7 @@ export function usePublicBrowse({
     setFields(emptyQuery);
     setBusy(inFlight.current);
     setError("");
-    setNotice("");
+    setNotice(null);
     setRetry(null);
     setEcho(null);
     setProgress({
@@ -140,7 +143,7 @@ export function usePublicBrowse({
     started.current = performance.now();
     setBusy(true);
     setError("");
-    setNotice("");
+    setNotice(null);
     setPlaying(false);
     let scanned = 0n,
       matched = 0n,
@@ -180,9 +183,7 @@ export function usePublicBrowse({
             BigInt(batch.page) !== BigInt(previous.page) + 1n) ||
             (!previous && batch.page !== "0"))
         )
-          setNotice(
-            `服务端覆盖已改变：取回页 ${batch.page}；此前中间页未在此窗口保留。`,
-          );
+          setNotice(batch.page);
         onPage(batch);
         previous = batch;
         setRetry(null);
@@ -267,13 +268,13 @@ export function usePublicBrowse({
     <div className="public-browse">
       <div className="range-controls public-query-fields">
         <label>
-          原记录类型
+          {tr("原记录类型")}
           <select
-            aria-label="公共记录类型"
+            aria-label={tr("公共记录类型")}
             value={fields.kind}
             onChange={(e) => field("kind", e.target.value)}
           >
-            <option value="">全部原类型</option>
+            <option value="">{tr("全部原类型")}</option>
             {[
               "Input",
               "Canonical",
@@ -289,97 +290,104 @@ export function usePublicBrowse({
           </select>
         </label>
         <label>
-          位置域
+          {tr("位置域")}
           <select
-            aria-label="公共位置域"
+            aria-label={tr("公共位置域")}
             value={fields.position_domain}
             onChange={(e) => field("position_domain", e.target.value)}
           >
             {positionDomains.map(([v, t]) => (
               <option key={v} value={v}>
-                {t}
+                {tr(t)}
               </option>
             ))}
           </select>
         </label>
         <label>
-          位置起点（含）
+          {tr("位置起点（含）")}
           <input
-            aria-label="位置起点"
+            aria-label={tr("位置起点")}
             value={fields.position_start}
             onChange={(e) => field("position_start", e.target.value)}
-            placeholder="不限"
+            placeholder={tr("不限")}
           />
         </label>
         <label>
-          位置终点（含）
+          {tr("位置终点（含）")}
           <input
-            aria-label="位置终点"
+            aria-label={tr("位置终点")}
             value={fields.position_end}
             onChange={(e) => field("position_end", e.target.value)}
-            placeholder="不限"
+            placeholder={tr("不限")}
           />
         </label>
         <label>
-          原时钟
+          {tr("原时钟")}
           <select
-            aria-label="公共原时钟"
+            aria-label={tr("公共原时钟")}
             value={fields.clock}
             onChange={(e) => field("clock", e.target.value)}
           >
-            <option value="">不限定时钟</option>
+            <option value="">{tr("不限定时钟")}</option>
             {clocks.map((c) => (
-              <option key={c}>{c}</option>
+              <option key={c} value={c}>
+                {tr(c)}
+              </option>
             ))}
           </select>
         </label>
         <label>
-          原 UTC ms 起点（含）
+          {tr("原 UTC ms 起点（含）")}
           <input
-            aria-label="公共时间起点"
+            aria-label={tr("公共时间起点")}
             value={fields.time_start}
             onChange={(e) => field("time_start", e.target.value)}
-            placeholder="不限"
+            placeholder={tr("不限")}
           />
         </label>
         <label>
-          原 UTC ms 终点（含）
+          {tr("原 UTC ms 终点（含）")}
           <input
-            aria-label="公共时间终点"
+            aria-label={tr("公共时间终点")}
             value={fields.time_end}
             onChange={(e) => field("time_end", e.target.value)}
-            placeholder="不限"
+            placeholder={tr("不限")}
           />
         </label>
-        <button onClick={() => setFields(emptyQuery)}>清除公共条件</button>
+        <button onClick={() => setFields(emptyQuery)}>
+          {tr("清除公共条件")}
+        </button>
       </div>
       {!valid && (
         <p role="alert">
-          范围需为整数、起点不大于终点；设置端点时须选择对应位置域或原时钟。
+          {tr(
+            "范围需为整数、起点不大于终点；设置端点时须选择对应位置域或原时钟。",
+          )}
         </p>
       )}
       <p className="muted">
-        当前保留批客户端筛选；下一匹配由服务器判断 · 市场 {condition || "不限"}{" "}
-        · 原序保留 · 不减少原批 HTTP 响应量 · 端点均包含。
+        {tr("当前保留批客户端筛选；下一匹配由服务器判断 · 市场 ")}
+        {condition || tr("不限")}{" "}
+        {tr("· 原序保留 · 不减少原批 HTTP 响应量 · 端点均包含。")}
       </p>
       <div className="page-controls">
         <button
           disabled={busy || !ready || !!page?.at_end || cursorFailed || !valid}
           onClick={() => read(next(), false)}
         >
-          {busy ? "读取中…" : page ? "下一页" : "读取当前页"}
+          {busy ? tr("读取中…") : page ? tr("下一页") : tr("读取当前页")}
         </button>
         <button
           disabled={busy || !ready || !!page?.at_end || cursorFailed || !valid}
           onClick={() => read(next(), true)}
         >
-          从当前游标查找下一批匹配
+          {tr("从当前游标查找下一批匹配")}
         </button>
         <button
           disabled={busy || !ready || !valid}
           onClick={() => read({ run, query }, false)}
         >
-          取回服务端当前页
+          {tr("取回服务端当前页")}
         </button>
         {busy && (
           <button
@@ -391,40 +399,67 @@ export function usePublicBrowse({
               }));
             }}
           >
-            取消后续查找
+            {tr("取消后续查找")}
           </button>
         )}
         {retry && !busy && (
-          <button onClick={() => read(retry, false)}>重试最近期望批</button>
+          <button onClick={() => read(retry, false)}>
+            {tr("重试最近期望批")}
+          </button>
         )}
         <span>
           {page
-            ? `页 ${page.page} · 本页 ${page.returned_rows} 条 · 已顺序读至 ${page.total_returned_rows}${page.at_end ? " · 稳定前缀末端" : ""}`
-            : "公共记录尚未读取"}
+            ? tr("页 {{v0}} · 本页 {{v1}} 条 · 已顺序读至 {{v2}}{{v3}}", {
+                v0: page.page,
+                v1: page.returned_rows,
+                v2: page.total_returned_rows,
+                v3: page.at_end ? tr(" · 稳定前缀末端") : "",
+              })
+            : tr("公共记录尚未读取")}
         </span>
       </div>
       <p role="status" className="query-progress">
-        {progress.stage} · 本次扫描 {progress.scanned.toString()} · 匹配{" "}
-        {progress.matched.toString()} · 无法判断 {progress.unknown.toString()} ·
-        耗时 {progress.elapsed.toFixed(0)} ms · 查找总量未知
+        {tr(progress.stage)}
+        {tr(" · 本次扫描 ")}
+        {progress.scanned.toString()}
+        {tr(" · 匹配")} {progress.matched.toString()}
+        {tr(" · 无法判断 ")}
+        {progress.unknown.toString()}
+        {tr(" · 耗时 ")}
+        {progress.elapsed.toFixed(0)}
+        {tr(" ms · 查找总量未知")}
       </p>
       {cursorFailed && (
         <p role="alert">
-          所属读取接口已失败并停止游标；可取回最近成功批，不能继续推进。
+          {tr("所属读取接口已失败并停止游标；可取回最近成功批，不能继续推进。")}
         </p>
       )}
       <p className="batch-summary">
-        当前保留原批 {allRows.length} 条 · 当前条件匹配 {filtered.rows.length} ·
-        已知不匹配 {filtered.mismatch} · 缺字段无法判断 {filtered.unknown}
+        {tr("当前保留原批 ")}
+        {allRows.length}
+        {tr(" 条 · 当前条件匹配 ")}
+        {filtered.rows.length}
+        {tr(" · 已知不匹配 ")}
+        {filtered.mismatch}
+        {tr(" · 缺字段无法判断 ")}
+        {filtered.unknown}
       </p>
-      {notice && <p role="alert">{notice}</p>}
-      {error && <p role="alert">{error}</p>}
+      {notice !== null && (
+        <p role="alert">
+          {tr("服务端覆盖已改变：取回页 {{v0}}；此前中间页未在此窗口保留。", {
+            v0: notice,
+          })}
+        </p>
+      )}
+      {error && <p role="alert">{displayError(error)}</p>}
       <p className="muted">
-        取消不撤销同步底层读取；网络中断不证明已取消。在途批完成后保留，恢复仅取回最近批。修改条件或切换视图不自动扫描。
+        {tr(
+          "取消不撤销同步底层读取；网络中断不证明已取消。在途批完成后保留，恢复仅取回最近批。修改条件或切换视图不自动扫描。",
+        )}
       </p>
       {echo && (
         <details>
-          <summary>服务器回显 · 条件 / 固定前缀 / 当前游标</summary>
+          <summary>{tr("服务器回显 · 条件 / 固定前缀 / 当前游标")}</summary>
           <pre>
             {JSON.stringify(
               {
@@ -440,17 +475,18 @@ export function usePublicBrowse({
         </details>
       )}
       <div className="page-controls history-playback">
-        <b>历史浏览 · 当前匹配事实</b>
+        <b>{tr("历史浏览 · 当前匹配事实")}</b>
         <label>
-          浏览速度
+          {tr("浏览速度")}
           <select
-            aria-label="浏览记录每秒"
+            aria-label={tr("浏览记录每秒")}
             value={speed}
             onChange={(e) => setSpeed(e.target.value)}
           >
             {["1", "2", "5", "10"].map((s) => (
               <option key={s} value={s}>
-                {s} 记录/秒
+                {s}
+                {tr(" 记录/秒")}
               </option>
             ))}
           </select>
@@ -462,19 +498,19 @@ export function usePublicBrowse({
             setPlaying(true);
           }}
         >
-          播放已读事实
+          {tr("播放已读事实")}
         </button>
         <button disabled={!playing} onClick={() => setPlaying(false)}>
-          暂停浏览
+          {tr("暂停浏览")}
         </button>
         <span>
           {playing
-            ? "播放中"
+            ? tr("播放中")
             : playIndex === filtered.rows.length - 1 && playIndex >= 0
-              ? "已到本范围末尾"
-              : "已暂停"}{" "}
-          · {Math.max(0, playIndex + 1)}/{filtered.rows.length} ·
-          不取页、不驱动业务
+              ? tr("已到本范围末尾")
+              : tr("已暂停")}{" "}
+          · {Math.max(0, playIndex + 1)}/{filtered.rows.length}
+          {tr(" · 不取页、不驱动业务")}
         </span>
         {playFact && (
           <code data-playback-path={playFact.path}>{playFact.path}</code>

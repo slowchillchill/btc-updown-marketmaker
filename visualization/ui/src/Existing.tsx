@@ -1,5 +1,8 @@
+import { displayError } from "./i18n";
+import { displayFact as fact } from "./i18n";
+import { useTranslation } from "react-i18next";
 import { useEffect, useRef, useState } from "react";
-import { at, fact, type Json } from "./facts";
+import { at, type Json } from "./facts";
 import { get, Tree } from "./evidence";
 import { list, text, type Evidence, type Point } from "./browse";
 import { ExecutionProjection } from "./ExecutionProjection";
@@ -265,6 +268,7 @@ export function ExistingPanel({
   condition: string;
   onSelect: (e: Evidence) => void;
 }) {
+  const { t: tr } = useTranslation();
   const [document, setDocument] = useState(
       status.documents?.find((d) => d.status === "ready")?.document ?? "",
     ),
@@ -298,7 +302,10 @@ export function ExistingPanel({
       }}
     >
       {role}
-      {a.path || "/"} · 原数组 {a.length} 条
+      {a.path || "/"}
+      {tr(" · 原数组 ")}
+      {a.length}
+      {tr(" 条")}
     </button>
   );
   const original = status.documents?.find(
@@ -321,7 +328,7 @@ export function ExistingPanel({
           value !== undefined && select("measurement", path, value)
         }
       >
-        {value === undefined ? "未保存" : fact(value)}
+        {value === undefined ? tr("未保存") : fact(value)}
       </button>
     );
   };
@@ -370,41 +377,44 @@ export function ExistingPanel({
   };
   return (
     <section className="existing-panel" data-existing-kind={status.kind}>
-      <h2>{existingLabel(status.kind)}</h2>
+      <h2>{tr(existingLabel(status.kind))}</h2>
       <p className="muted">
-        独立显式来源 · {status.status}
-        。仅载入以下摘要文件；下钻沿原字段和原行序，最近相同请求复用响应，不驱动业务或打开源端声明的数据文件。
+        {tr("独立显式来源 · ")}
+        {status.status}
+        {tr(
+          "。仅载入以下摘要文件；下钻沿原字段和原行序，最近相同请求复用响应，不驱动业务或打开源端声明的数据文件。",
+        )}
       </p>
       <div className="fact-grid">
         {(status.kind === "collection_manifest"
           ? [
-              ["原采集日期", "/utc_day"],
-              ["原结束状态", "/state"],
-              ["原结束原因", "/closure_reason"],
-              ["原构建提交", "/build_commit"],
-              ["原覆盖状态", "/collection_day_coverage/state"],
+              [tr("原采集日期"), "/utc_day"],
+              [tr("原结束状态"), "/state"],
+              [tr("原结束原因"), "/closure_reason"],
+              [tr("原构建提交"), "/build_commit"],
+              [tr("原覆盖状态"), "/collection_day_coverage/state"],
               [
-                "首次开始 · UTC ms",
+                tr("首次开始 · UTC ms"),
                 "/collection_day_coverage/first_started_utc_ms",
               ],
               [
-                "最近开始 · UTC ms",
+                tr("最近开始 · UTC ms"),
                 "/collection_day_coverage/last_started_utc_ms",
               ],
-              ["原结束 · UTC ms", "/collection_day_coverage/ended_utc_ms"],
+              [tr("原结束 · UTC ms"), "/collection_day_coverage/ended_utc_ms"],
               [
-                "日内重新激活",
+                tr("日内重新激活"),
                 "/collection_day_coverage/reactivated_within_day",
               ],
             ]
           : completion
             ? [
-                ["原窗口完成", "/complete"],
-                ["工程组数", "/groups"],
-                ["原排空秒", "/drain_seconds"],
-                ["原业务服务累计 ns", "/service_total_ns"],
-                ["原证据累计 ns", "/evidence_total_ns"],
-                ["原装配提交", "/online/dpt/session/git_commit"],
+                [tr("原窗口完成"), "/complete"],
+                [tr("工程组数"), "/groups"],
+                [tr("原排空秒"), "/drain_seconds"],
+                [tr("原业务服务累计 ns"), "/service_total_ns"],
+                [tr("原证据累计 ns"), "/evidence_total_ns"],
+                [tr("原装配提交"), "/online/dpt/session/git_commit"],
               ]
             : []
         ).map(([label, p]) => {
@@ -422,53 +432,46 @@ export function ExistingPanel({
           );
         })}
       </div>
-      {status.detail && <p role="alert">{status.detail}</p>}
+      {status.detail && <p role="alert">{displayError(status.detail)}</p>}
       {completion ? (
         <p className="gap">
-          complete / online 是工程窗口与排空诊断，非经济闭合；caller_role=PAPER
-          不证明联网 PAPER。平台确认现金 / 可用额不是策略统一最终资金、NAV
-          或收益验收。缺 outcome 映射，不猜 UP/DOWN；不同容量运行不连成曲线。
+          {tr(
+            "complete / online 是工程窗口与排空诊断，非经济闭合；caller_role=PAPER 不证明联网 PAPER。平台确认现金 / 可用额不是策略统一最终资金、NAV 或收益验收。缺 outcome 映射，不猜 UP/DOWN；不同容量运行不连成曲线。",
+          )}
         </p>
       ) : status.kind === "continuous" ? (
         <p className="gap">
-          all / entry / continuation 是同一 run 的重叠视图，count 不能相加。
-          pooled
-          的两轮合并分位数不能平均；各原摘要与明细的实际条数见原数组及区段。
-          service 从 native.consume 至 Actor 执行结束；CPU 可超过墙钟，进程 RSS
-          / user / system 包含图加载与前史，嵌套探针不能相加当总墙钟。Debug
-          动作保留原文，不是权威 ModelDecision / NoTrade
-          历史。工程图与初始权重不表示训练完成，源端成本不是 C 服务成本。
+          {tr(
+            "all / entry / continuation 是同一 run 的重叠视图，count 不能相加。 pooled 的两轮合并分位数不能平均；各原摘要与明细的实际条数见原数组及区段。 service 从 native.consume 至 Actor 执行结束；CPU 可超过墙钟，进程 RSS / user / system 包含图加载与前史，嵌套探针不能相加当总墙钟。Debug 动作保留原文，不是权威 ModelDecision / NoTrade 历史。工程图与初始权重不表示训练完成，源端成本不是 C 服务成本。",
+          )}
         </p>
       ) : status.kind === "model_timing" ? (
         <p className="gap">
-          工程逻辑毫秒不绑定研究日期；50/250
-          ms为预声明经济计算延迟，compute_wall_ns为实测时长。原Debug反馈、intent、receipt不解析为NOE或权威决定。exit0
-          / CLEAN_RUN /
-          stopped_without_future不证明经济闭合；下一必需PublicVisibility
-          86401011仍未知。SIM内aaaa/bbbb身份与冻结生产修订分别保留。
+          {tr(
+            "工程逻辑毫秒不绑定研究日期；50/250 ms为预声明经济计算延迟，compute_wall_ns为实测时长。原Debug反馈、intent、receipt不解析为NOE或权威决定。exit0 / CLEAN_RUN / stopped_without_future不证明经济闭合；下一必需PublicVisibility 86401011仍未知。SIM内aaaa/bbbb身份与冻结生产修订分别保留。",
+          )}
         </p>
       ) : status.kind === "remeasurement_12m" ? (
         <p className="gap">
-          一次跨版本历史观察，未控制共享主机/缓存，不归因单项优化或保证稳定加速。阶段秒/CPU/proc_io与GNU整进程RSS
-          KiB、512B计数分开；研究独占CPU/RSS
-          null不填整进程值。材料范围与启动器/完成文件mtime不同；原微秒文本与导出精确保留，页面范围输入为毫秒。内部phase没有UTC端点，不用wall拼区间；公开省略数组不补算，不拼接首小时或账户收益。
+          {tr(
+            "一次跨版本历史观察，未控制共享主机/缓存，不归因单项优化或保证稳定加速。阶段秒/CPU/proc_io与GNU整进程RSS KiB、512B计数分开；研究独占CPU/RSS null不填整进程值。材料范围与启动器/完成文件mtime不同；原微秒文本与导出精确保留，页面范围输入为毫秒。内部phase没有UTC端点，不用wall拼区间；公开省略数组不补算，不拼接首小时或账户收益。",
+          )}
         </p>
       ) : (
         <p className="gap">
-          只读原 manifest，不打开所列 Parquet 或复验文件哈希。空 gaps
-          不证明无遗漏，snapshot 一次不判23小时缺口；source_timestamp
-          没有统一单位，不猜
-          UTC。历史摘要不代表实时在线、稳定公共前缀或账户经营。
+          {tr(
+            "只读原 manifest，不打开所列 Parquet 或复验文件哈希。空 gaps 不证明无遗漏，snapshot 一次不判23小时缺口；source_timestamp 没有统一单位，不猜 UTC。历史摘要不代表实时在线、稳定公共前缀或账户经营。",
+          )}
         </p>
       )}
       {status.kind === "model_timing" && (
         <>
           <div className="fact-grid">
             {[
-              ["生产修订", "/production_revision"],
-              ["工程诊断修订", "/diagnostic_revision"],
-              ["下一必需工程逻辑 ms · 未知未来", "/stop/next_required/at"],
-              ["下一必需位置", "/stop/next_required/path"],
+              [tr("生产修订"), "/production_revision"],
+              [tr("工程诊断修订"), "/diagnostic_revision"],
+              [tr("下一必需工程逻辑 ms · 未知未来"), "/stop/next_required/at"],
+              [tr("下一必需位置"), "/stop/next_required/path"],
             ].map(([label, p]) => (
               <Field
                 key={p}
@@ -480,8 +483,8 @@ export function ExistingPanel({
               />
             ))}
             {[
-              ["原进程退出码", "/exit_code"],
-              ["原进程墙钟 ns", "/wall_ns"],
+              [tr("原进程退出码"), "/exit_code"],
+              [tr("原进程墙钟 ns"), "/wall_ns"],
             ].map(([label, p]) => (
               <Field
                 key={p}
@@ -504,7 +507,7 @@ export function ExistingPanel({
                   void state.load(role, "", "0", count);
                 }}
               >
-                浏览{role}原序记录
+                {tr("浏览 {{role}} 原序记录", { role })}
               </button>
             ))}
           </div>
@@ -514,12 +517,12 @@ export function ExistingPanel({
         <>
           <div className="fact-grid">
             {[
-              ["原报告版本", "/schema"],
-              ["原状态", "/status"],
-              ["实际测量源码", "/measurement_source_commit"],
-              ["历史基准源码", "/historical_baseline_source_commit"],
-              ["旧阶段合计 · 秒", "/execution/phase_wall_seconds_sum/old"],
-              ["新阶段合计 · 秒", "/execution/phase_wall_seconds_sum/new"],
+              [tr("原报告版本"), "/schema"],
+              [tr("原状态"), "/status"],
+              [tr("实际测量源码"), "/measurement_source_commit"],
+              [tr("历史基准源码"), "/historical_baseline_source_commit"],
+              [tr("旧阶段合计 · 秒"), "/execution/phase_wall_seconds_sum/old"],
+              [tr("新阶段合计 · 秒"), "/execution/phase_wall_seconds_sum/new"],
             ].map(([label, p]) => (
               <Field
                 key={p}
@@ -531,13 +534,13 @@ export function ExistingPanel({
               />
             ))}
           </div>
-          <h3>原阶段对照 · 秒 / proc_io原计数（非GNU整进程）</h3>
+          <h3>{tr("原阶段对照 · 秒 / proc_io原计数（非GNU整进程）")}</h3>
           <div className="source-table">
             <table>
               <thead>
                 <tr>
-                  <th>原阶段</th>
-                  <th>旧/新</th>
+                  <th>{tr("原阶段")}</th>
+                  <th>{tr("旧/新")}</th>
                   {[
                     "wall_seconds",
                     "user_seconds",
@@ -582,13 +585,13 @@ export function ExistingPanel({
               </tbody>
             </table>
           </div>
-          <h3>原阶段 proc_io · 原字节 / 系统调用次数（不互相加总）</h3>
+          <h3>{tr("原阶段 proc_io · 原字节 / 系统调用次数（不互相加总）")}</h3>
           <div className="source-table">
             <table>
               <thead>
                 <tr>
-                  <th>原阶段</th>
-                  <th>旧/新</th>
+                  <th>{tr("原阶段")}</th>
+                  <th>{tr("旧/新")}</th>
                   {[
                     "rchar",
                     "wchar",
@@ -638,13 +641,13 @@ export function ExistingPanel({
               </tbody>
             </table>
           </div>
-          <h3>GNU原整进程统计 · 秒 / RSS KiB / 512B输入输出计数</h3>
+          <h3>{tr("GNU原整进程统计 · 秒 / RSS KiB / 512B输入输出计数")}</h3>
           <div className="source-table">
             <table>
               <thead>
                 <tr>
-                  <th>原进程</th>
-                  <th>旧/新</th>
+                  <th>{tr("原进程")}</th>
+                  <th>{tr("旧/新")}</th>
                   {[
                     "wall_seconds",
                     "user_seconds",
@@ -706,7 +709,8 @@ export function ExistingPanel({
                   void state.load("measurement", p, "0", count);
                 }}
               >
-                读取{p}
+                {tr("读取")}
+                {p}
               </button>
             ))}
             <button
@@ -721,7 +725,7 @@ export function ExistingPanel({
                 );
               }}
             >
-              浏览完整比较与排除规则
+              {tr("浏览完整比较与排除规则")}
             </button>
           </div>
         </>
@@ -729,13 +733,15 @@ export function ExistingPanel({
       {status.kind === "collection_manifest" && (
         <>
           <h3>
-            来源原统计 · {counterEntries.length} 类（已读 source_counters）
+            {tr("来源原统计 · ")}
+            {counterEntries.length}
+            {tr(" 类（已读 source_counters）")}
           </h3>
           <div className="source-table">
             <table>
               <thead>
                 <tr>
-                  <th>原来源</th>
+                  <th>{tr("原来源")}</th>
                   {[
                     "files",
                     "rows",
@@ -749,7 +755,7 @@ export function ExistingPanel({
                   ].map((k) => (
                     <th key={k}>{k}</th>
                   ))}
-                  <th>原详情</th>
+                  <th>{tr("原详情")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -775,7 +781,7 @@ export function ExistingPanel({
                           select("manifest", `/source_counters/${source}`, v)
                         }
                       >
-                        查原值
+                        {tr("查原值")}
                       </button>
                     </td>
                   </tr>
@@ -789,7 +795,7 @@ export function ExistingPanel({
         <>
           <div className="fact-grid">
             <Field
-              label="原工程基线提交"
+              label={tr("原工程基线提交")}
               source="existing"
               path="/baseline"
               report={
@@ -799,19 +805,21 @@ export function ExistingPanel({
               onSelect={(e) => select("provenance", e.path, e.value)}
             />
           </div>
-          <h3>原摘要对照 · ms / 原样本数</h3>
+          <h3>{tr("原摘要对照 · ms / 原样本数")}</h3>
           <div className="research-controls">
-            <button onClick={() => loadSummary("summary")}>浏览单轮摘要</button>
+            <button onClick={() => loadSummary("summary")}>
+              {tr("浏览单轮摘要")}
+            </button>
             <button onClick={() => loadSummary("pooled")}>
-              浏览两轮合并摘要
+              {tr("浏览两轮合并摘要")}
             </button>
           </div>
           {currentSummary && (
             <>
               <label>
-                原摘要记录
+                {tr("原摘要记录")}
                 <select
-                  aria-label="原摘要记录"
+                  aria-label={tr("原摘要记录")}
                   value={currentSummary.path}
                   onChange={(e) => setSummaryPath(e.target.value)}
                 >
@@ -833,21 +841,24 @@ export function ExistingPanel({
                         )
                         .filter(Boolean)
                         .join(" · ")}{" "}
-                      · 原{r.path}
+                      {tr("· 原")}
+                      {r.path}
                     </option>
                   ))}
                 </select>
               </label>
               <p>
-                {pooled ? "两轮合并原统计" : "单轮原统计"} ·{" "}
-                {state.loaded?.source} · 原{currentSummary.path}
-                ；所有量均来自该原记录，不计算或平均分位数。
+                {pooled ? tr("两轮合并原统计") : tr("单轮原统计")} ·{" "}
+                {state.loaded?.source}
+                {tr(" · 原")}
+                {currentSummary.path}
+                {tr("；所有量均来自该原记录，不计算或平均分位数。")}
               </p>
               <div className="source-table">
                 <table>
                   <thead>
                     <tr>
-                      <th>原指标 · ms</th>
+                      <th>{tr("原指标 · ms")}</th>
                       {["count", "mean", "p50", "p90", "p95", "p99", "max"].map(
                         (k) => (
                           <th key={k}>{k}</th>
@@ -905,7 +916,10 @@ export function ExistingPanel({
                       )
                     }
                   >
-                    <span>{k} · 原值</span>
+                    <span>
+                      {k}
+                      {tr(" · 原值")}
+                    </span>
                     <strong>{fact(at(summaryValue, k))}</strong>
                   </button>
                 ))}
@@ -919,7 +933,7 @@ export function ExistingPanel({
                   )
                 }
               >
-                选择此原摘要
+                {tr("选择此原摘要")}
               </button>
             </>
           )}
@@ -929,10 +943,10 @@ export function ExistingPanel({
         <>
           <div className="fact-grid">
             {[
-              ["平台确认现金 · pUSD", "cash_pusd"],
-              ["平台确认可用额 · pUSD", "available_pusd"],
-              ["平台确认费用 · pUSD", "fees_pusd"],
-              ["平台确认已实现 PnL · pUSD", "realized_pnl_pusd"],
+              [tr("平台确认现金 · pUSD"), "cash_pusd"],
+              [tr("平台确认可用额 · pUSD"), "available_pusd"],
+              [tr("平台确认费用 · pUSD"), "fees_pusd"],
+              [tr("平台确认已实现 PnL · pUSD"), "realized_pnl_pusd"],
             ].map(([label, key]) => (
               <Field
                 key={key}
@@ -947,7 +961,7 @@ export function ExistingPanel({
             ))}
           </div>
           <details className="projection-details">
-            <summary>展开最终 Ledger 执行与预留投影</summary>
+            <summary>{tr("展开最终 Ledger 执行与预留投影")}</summary>
             <ExecutionProjection
               report={original}
               engineering
@@ -968,21 +982,26 @@ export function ExistingPanel({
           open={d.document === "manifest"}
         >
           <summary>
-            {d.document} · {d.source ?? "未指定"} · {d.status}
+            {d.document} · {d.source ?? tr("未指定")} · {d.status}
           </summary>
-          {d.detail && <p role="alert">{d.detail}</p>}
+          {d.detail && <p role="alert">{displayError(d.detail)}</p>}
           <p className="muted">
-            读取 {d.read_attempts ?? "未测"} 次 / 解码{" "}
-            {d.decode_attempts ?? "未测"} 次 ·{" "}
+            {tr("读取 ")}
+            {d.read_attempts ?? tr("未测")}
+            {tr(" 次 / 解码")} {d.decode_attempts ?? tr("未测")}
+            {tr(" 次 ·")}{" "}
             {d.bytes_read === null
-              ? "原入口未返回读取字节"
-              : `${d.bytes_read ?? "未测"} B`}{" "}
-            {d.file_bytes ? `· 文件长度 ${d.file_bytes} B（非 I/O）` : ""} ·
-            原加载+解释 {d.load_elapsed_us ?? "未测"} μs
+              ? tr("原入口未返回读取字节")
+              : `${d.bytes_read ?? tr("未测")} B`}{" "}
+            {d.file_bytes
+              ? tr("· 文件长度 {{v0}} B（非 I/O）", { v0: d.file_bytes })
+              : ""}
+            {tr(" · 原加载+解释 ")}
+            {d.load_elapsed_us ?? tr("未测")} μs
           </p>
           {d.summary !== undefined && (
             <Tree
-              name="原摘要字段"
+              name={tr("原摘要字段")}
               value={d.summary}
               onSelect={(p, v) => select(d.document, p, v)}
             />
@@ -994,9 +1013,9 @@ export function ExistingPanel({
       ))}
       <div className="research-controls">
         <label>
-          原文档
+          {tr("原文档")}
           <select
-            aria-label="工程历史文档"
+            aria-label={tr("工程历史文档")}
             value={document}
             onChange={(e) => {
               setDocument(e.target.value);
@@ -1011,26 +1030,26 @@ export function ExistingPanel({
           </select>
         </label>
         <label>
-          原字段路径
+          {tr("原字段路径")}
           <input
-            aria-label="工程历史路径"
+            aria-label={tr("工程历史路径")}
             value={path}
             onChange={(e) => setPath(e.target.value)}
-            placeholder="例如 /files；根数组留空"
+            placeholder={tr("例如 /files；根数组留空")}
           />
         </label>
         <label>
-          原数组起点
+          {tr("原数组起点")}
           <input
-            aria-label="工程历史起点"
+            aria-label={tr("工程历史起点")}
             value={start}
             onChange={(e) => setStart(e.target.value)}
           />
         </label>
         <label>
-          区段条数
+          {tr("区段条数")}
           <input
-            aria-label="工程历史条数"
+            aria-label={tr("工程历史条数")}
             value={count}
             onChange={(e) => setCount(e.target.value)}
           />
@@ -1039,22 +1058,26 @@ export function ExistingPanel({
           disabled={state.loading || !document}
           onClick={() => void state.load(document, path, start, count)}
         >
-          读取原区段
+          {tr("读取原区段")}
         </button>
       </div>
-      {state.loading && <p role="status">从已载入文档选择原区段…</p>}
-      {state.error && <p role="alert">{state.error}</p>}
+      {state.loading && <p role="status">{tr("从已载入文档选择原区段…")}</p>}
+      {state.error && <p role="alert">{displayError(state.error)}</p>}
       {state.loaded && (
         <div data-existing-loaded={state.loaded.document}>
           <h3>
             {state.loaded.source} · {state.loaded.path || "/"}{" "}
             {state.loaded.total !== undefined
-              ? `原区段 [${state.loaded.start}, ${state.loaded.end}) / ${state.loaded.total}`
-              : "原字段"}
+              ? tr("原区段 [{{v0}}, {{v1}}) / {{v2}}", {
+                  v0: state.loaded.start,
+                  v1: state.loaded.end,
+                  v2: state.loaded.total,
+                })
+              : tr("原字段")}
           </h3>
           {state.loaded.exact !== undefined && (
             <Tree
-              name="原字段详情"
+              name={tr("原字段详情")}
               path={state.loaded.path}
               value={state.loaded.exact}
               onSelect={(p, v) => select(state.loaded!.document, p, v)}
@@ -1068,10 +1091,12 @@ export function ExistingPanel({
                     select(state.loaded!.document, r.path, r.exact)
                   }
                 >
-                  选择原记录 {r.path} {r.csv_line ? `· CSV行${r.csv_line}` : ""}
+                  {tr("选择原记录 ")}
+                  {r.path}{" "}
+                  {r.csv_line ? tr("· CSV行{{v0}}", { v0: r.csv_line }) : ""}
                 </button>
                 <Tree
-                  name="原记录字段"
+                  name={tr("原记录字段")}
                   path={r.path}
                   value={r.exact}
                   onSelect={(p, v) => select(state.loaded!.document, p, v)}
