@@ -1,3 +1,5 @@
+import { displayFact as fact } from "./i18n";
+import { useTranslation } from "react-i18next";
 import { useMemo, useState } from "react";
 import {
   Background,
@@ -12,7 +14,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { cashTotal, relatedTargets, type Row } from "./browse";
-import { at, fact, type Json } from "./facts";
+import { at, type Json } from "./facts";
 import type { Evidence } from "./browse";
 const modules = [
   ["data-collect", "外部事实采集", 0, 0],
@@ -141,6 +143,7 @@ type ModuleData = {
 } & Record<string, unknown>;
 type ModuleNode = Node<ModuleData, "module">;
 function ModuleCard({ data }: NodeProps<ModuleNode>) {
+  const { t: tr } = useTranslation();
   return (
     <div
       className={`module-card ${data.moduleId} ${data.selected ? "selected" : ""}`}
@@ -169,19 +172,19 @@ function ModuleCard({ data }: NodeProps<ModuleNode>) {
       ))}
       <div className="module-head">
         <strong>{data.title}</strong>
-        <span>架构职责</span>
+        <span>{tr("架构职责")}</span>
       </div>
-      <p>{data.subtitle}</p>
+      <p>{tr(data.subtitle)}</p>
       <div className="module-fact">{data.summary}</div>
       <button
         className="nodrag"
         disabled={!data.evidence}
         onClick={() => data.evidence && data.onSelect(data.evidence)}
       >
-        查看已有证据
+        {tr("查看已有证据")}
       </button>
       {data.title === "sim-system" && (
-        <small>公共观察消费　│　隐藏撮合状态</small>
+        <small>{tr("公共观察消费　│　隐藏撮合状态")}</small>
       )}
     </div>
   );
@@ -214,6 +217,7 @@ export function Topology({
   noeCount?: number;
   publicReady?: boolean;
 }) {
+  const { t: tr } = useTranslation();
   const [relation, setRelation] = useState<(typeof relations)[number] | null>(
     null,
   );
@@ -235,18 +239,20 @@ export function Topology({
   const facts: Record<string, { summary: string; evidence?: Evidence }> = {
     "data-collect": {
       summary: publicReady
-        ? "原消息在公共记录按需浏览；采集运行历史未接入"
-        : "采集 / 原消息来源未接入",
+        ? tr("原消息在公共记录按需浏览；采集运行历史未接入")
+        : tr("采集 / 原消息来源未接入"),
     },
     "data-pipeline": {
-      summary: publicReady ? "指定公共稳定前缀 · 顺序读取" : "公共记录未接入",
+      summary: publicReady
+        ? tr("指定公共稳定前缀 · 顺序读取")
+        : tr("公共记录未接入"),
     },
     ledger: {
       summary: engineering
-        ? "原 Ledger 工程投影 · 非宿主 / 经济报告"
+        ? tr("原 Ledger 工程投影 · 非宿主 / 经济报告")
         : !report
-          ? "账户经济未接入"
-          : "实际总现金 " +
+          ? tr("账户经济未接入")
+          : tr("实际总现金 ") +
             (cashTotal(
               at(
                 report,
@@ -260,8 +266,8 @@ export function Topology({
                 "cash",
                 "actual_reserved_pusd",
               ),
-            ) ?? "未接入") +
-            " pUSD · 终态；成本 / 应收见市场详情",
+            ) ?? tr("未接入")) +
+            tr(" pUSD · 终态；成本 / 应收见市场详情"),
       evidence: evidence(
         "report",
         engineering ? "/ledger_consumed_memory" : "/account_economics_memory",
@@ -273,10 +279,10 @@ export function Topology({
     "shared-run": {
       summary:
         !report || engineering
-          ? "宿主运行证据未接入"
-          : "待 NOE " +
+          ? tr("宿主运行证据未接入")
+          : tr("待 NOE ") +
             fact(at(report, "pending_noe_records")) +
-            " · 待计算 " +
+            tr(" · 待计算 ") +
             fact(at(report, "pending_calculation")),
       evidence: evidence(
         "report",
@@ -284,16 +290,19 @@ export function Topology({
         at(report, "observation_cutoff"),
       ),
     },
-    "intent-bridge": { summary: "逐次分派回执未接入" },
+    "intent-bridge": { summary: tr("逐次分派回执未接入") },
     "execution-normalization": {
       summary:
         (!report
-          ? "报告耐久 NOE 前缀未接入 · "
+          ? tr("报告耐久 NOE 前缀未接入 · ")
           : engineering
-            ? "宿主耐久 NOE 前缀 "
-            : "报告耐久前缀 ") +
+            ? tr("宿主耐久 NOE 前缀 ")
+            : tr("报告耐久前缀 ")) +
         fact(at(report, "durable_noe_prefix")) +
-        `；显式引用 ${noeCount} 条${noeSelection ? " · 单引用已加载" : " · 尚未读取"}；无消费关联`,
+        tr("；显式引用 {{v0}} 条{{v1}}；无消费关联", {
+          v0: noeCount,
+          v1: noeSelection ? tr(" · 单引用已加载") : tr(" · 尚未读取"),
+        }),
       evidence:
         noeSelection ??
         evidence(
@@ -304,20 +313,20 @@ export function Topology({
     },
     "sim-system": {
       summary: metadata
-        ? "装配参数可查；隐藏状态不作策略输入"
-        : "SIM 装配 / 运行证据未接入",
+        ? tr("装配参数可查；隐藏状态不作策略输入")
+        : tr("SIM 装配 / 运行证据未接入"),
       evidence: evidence("metadata", "/config", at(metadata, "config")),
     },
   };
   facts.strategy = {
     summary: research
-      ? "baseline-mm 描述研究已交接 · 非策略决定 / 账户运行"
+      ? tr("baseline-mm 描述研究已交接 · 非策略决定 / 账户运行")
       : !metadata && (!report || engineering)
-        ? "策略 / 运行计算证据未接入"
+        ? tr("策略 / 运行计算证据未接入")
         : strategy +
-          " · 计算累计 " +
+          tr(" · 计算累计 ") +
           fact(at(report, "calculation_count")) +
-          "（本运行）",
+          tr("（本运行）"),
     evidence:
       research ??
       evidence(
@@ -328,27 +337,27 @@ export function Topology({
   };
   if (existing?.kind === "completion")
     facts.ledger = {
-      summary: "已停止工程最终 Ledger 投影 · 非 NAV / 经营验收",
+      summary: tr("已停止工程最终 Ledger 投影 · 非 NAV / 经营验收"),
       evidence: existing.evidence,
     };
   if (existing?.kind === "collection_manifest")
     facts["data-collect"] = {
-      summary: "历史采集清单已交接 · 非实时 / 公共前缀",
+      summary: tr("历史采集清单已交接 · 非实时 / 公共前缀"),
       evidence: existing.evidence,
     };
   if (existing?.kind === "model_timing")
     facts.strategy = {
-      summary: "有限模型宿主工程时序 · 非正式训练 / 联网PAPER",
+      summary: tr("有限模型宿主工程时序 · 非正式训练 / 联网PAPER"),
       evidence: existing.evidence,
     };
   if (existing?.kind === "remeasurement_12m")
     facts.strategy = {
-      summary: "十二分钟历史描述与测量 · 非账户经营",
+      summary: tr("十二分钟历史描述与测量 · 非账户经营"),
       evidence: existing.evidence,
     };
   if (existing?.kind === "continuous")
     facts.strategy = {
-      summary: "原生调用工程成本已交接 · 非训练 / 策略决定",
+      summary: tr("原生调用工程成本已交接 · 非训练 / 策略决定"),
       evidence: existing.evidence,
     };
   const nodes: ModuleNode[] = modules.map(([id, subtitle, x, y]) => ({
@@ -359,12 +368,14 @@ export function Topology({
       moduleId: id,
       title:
         id === "strategy"
-          ? strategy === "未接入"
-            ? "策略 / 模型"
+          ? strategy === tr("未接入")
+            ? tr("策略 / 模型")
             : strategy
           : id,
       subtitle:
-        id === "strategy" ? "baseline-mm / model-train 公共位置" : subtitle,
+        id === "strategy"
+          ? tr("baseline-mm / model-train 公共位置")
+          : tr(subtitle),
       ...facts[id],
       selected:
         (id === "data-pipeline" && playback?.source === "public") ||
@@ -382,7 +393,7 @@ export function Topology({
         id: String(i),
         source: r[0],
         target: r[1],
-        label: r[2],
+        label: tr(r[2]),
         sourceHandle: r[4] + "-out",
         targetHandle: r[5],
         type: "smoothstep",
@@ -404,23 +415,29 @@ export function Topology({
         labelBgStyle: { fill: "#0e1724" },
         labelBgPadding: [5, 4],
       })),
-    [sourceAssociation],
+    [sourceAssociation, tr],
   );
   return (
     <div>
       <div className="canvas-title">
-        <h2>模块合同与实际路径</h2>
-        <span>实线：公共关系　虚线：隐藏撮合输入　箭头：消费者方向</span>
+        <h2>{tr("模块合同与实际路径")}</h2>
+        <span>
+          {tr("实线：公共关系　虚线：隐藏撮合输入　箭头：消费者方向")}
+        </span>
       </div>
       <p className="muted">
-        架构关系层 ·
-        所有边静态。卡片显示本次可读快照；累计数不代表当前流量。策略位置复用公共合同，本次策略：
+        {tr(
+          "架构关系层 · 所有边静态。卡片显示本次可读快照；累计数不代表当前流量。策略位置复用公共合同，本次策略：",
+        )}
         <b>{strategy}</b>。
       </p>
       {playback && (
         <p className="history-path">
-          历史浏览原引用 {playback.path} ·
-          仅突出原身份支持的公共关联，静态架构方向不代表实时消费或业务执行。
+          {tr("历史浏览原引用 ")}
+          {playback.path}
+          {tr(
+            " · 仅突出原身份支持的公共关联，静态架构方向不代表实时消费或业务执行。",
+          )}
         </p>
       )}
       <div className="topology">
@@ -433,6 +450,12 @@ export function Topology({
           maxZoom={1.5}
           nodesConnectable={false}
           nodesDraggable={false}
+          ariaLabelConfig={{
+            "controls.zoomIn.ariaLabel": tr("放大"),
+            "controls.zoomOut.ariaLabel": tr("缩小"),
+            "controls.fitView.ariaLabel": tr("适应视图"),
+            "controls.interactive.ariaLabel": tr("交互开关"),
+          }}
           onEdgeClick={(_, edge) => setRelation(relations[Number(edge.id)])}
         >
           <Background color="#28384b" gap={22} />
@@ -444,17 +467,18 @@ export function Topology({
           <b>
             {relation[0]} → {relation[1]}
           </b>
-          <p>{relation[3]}</p>
+          <p>{tr(relation[3])}</p>
           <small>
-            合同关系说明 ·
-            当前运行逐次路径证据不足，未宣布检查通过或违约。来源：Issue #215
-            第一部分及相关公共合同。
+            {tr(
+              "合同关系说明 · 当前运行逐次路径证据不足，未宣布检查通过或违约。来源：Issue #215 第一部分及相关公共合同。",
+            )}
           </small>
         </div>
       )}
       <p className="muted">
-        PAPER / LIVE
-        完整宿主、模型训练与独立评价未接入；复用位置不代表本运行已调用这些模块。
+        {tr(
+          "PAPER / LIVE 完整宿主、模型训练与独立评价未接入；复用位置不代表本运行已调用这些模块。",
+        )}
       </p>
     </div>
   );

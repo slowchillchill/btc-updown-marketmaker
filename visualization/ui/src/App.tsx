@@ -1,5 +1,7 @@
+import { displayFact as fact } from "./i18n";
+import { useTranslation } from "react-i18next";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { at, fact, statusLabel } from "./facts";
+import { at, statusLabel } from "./facts";
 import {
   get,
   Raw,
@@ -36,6 +38,8 @@ import {
   existingLabel,
   existingSourceIdentity,
 } from "./Existing";
+import { LanguageSwitch } from "./LanguageSwitch";
+import { displayLabel, displayError } from "./i18n";
 import { SourceIdentity } from "./SourceIdentity";
 import { usePublicBrowse } from "./PublicBrowse";
 const views = [
@@ -49,6 +53,7 @@ const views = [
 ] as const;
 type View = (typeof views)[number][0];
 export default function App() {
+  const { t: tr } = useTranslation();
   const [runs, setRuns] = useState<Run[]>([]),
     [run, setRun] = useState(""),
     [snapshot, setSnapshot] = useState<Snapshot | null>(null),
@@ -291,55 +296,61 @@ export default function App() {
       : points;
   const sourceName = (source: Evidence["source"]) =>
     source === "existing"
-      ? existingLabel(existingStatus?.kind)
+      ? tr(existingLabel(existingStatus?.kind))
       : source === "report"
         ? engineeringProjection
-          ? "Ledger 工程投影"
-          : "历史报告"
+          ? tr("Ledger 工程投影")
+          : tr("历史报告")
         : source === "metadata"
-          ? "启动元数据"
+          ? tr("启动元数据")
           : source === "research"
-            ? "真实历史描述研究"
+            ? tr("真实历史描述研究")
             : source === "noe"
-              ? "NOE 解码记录"
-              : "公共稳定记录";
+              ? tr("NOE 解码记录")
+              : tr("公共稳定记录");
   const evidencePanel = (
     <section className="evidence-panel">
-      <h2>所选事实</h2>
+      <h2>{tr("所选事实")}</h2>
       {selection ? (
         <>
           <p>
-            {sourceName(selection.source)} · 配置来源 {run}
+            {sourceName(selection.source)}
+            {tr(" · 配置来源 ")}
+            {run}
           </p>
           <code>{selection.path || "/"}</code>
           {condition &&
             selection.condition !== condition &&
             !selection.markets?.some((m) => m.condition === condition) && (
               <p className="gap">
-                无法将此事实直接关联所选市场。保留原证据，不替换身份。
+                {tr("无法将此事实直接关联所选市场。保留原证据，不替换身份。")}
               </p>
             )}
           {selection.existing && (
             <p>
-              原文档 <code>{fact(at(selection.existing, "document"))}</code> ·
-              文件 <code>{fact(at(selection.existing, "source"))}</code> ·
-              原引用 <code>{fact(at(selection.existing, "reference"))}</code>
+              {tr("原文档 ")}
+              <code>{fact(at(selection.existing, "document"))}</code>
+              {tr(" · 文件 ")}
+              <code>{fact(at(selection.existing, "source"))}</code>
+              {tr(" · 原引用 ")}
+              <code>{fact(at(selection.existing, "reference"))}</code>
             </p>
           )}
           {selection.inputStreamId && (
             <p>
-              公共流 <code>{selection.inputStreamId}</code>
+              {tr("公共流 ")}
+              <code>{selection.inputStreamId}</code>
             </p>
           )}
           {!!selection.references?.length && (
             <div className="native-links">
-              <h3>原引用关联 · 当前页 / 保留选择</h3>
+              <h3>{tr("原引用关联 · 当前页 / 保留选择")}</h3>
               {selection.references.map((ref, i) => {
                 const targets = relatedTargets(ref, allRows, selection);
                 return (
                   <div key={i}>
                     <small>
-                      {ref.label} · {ref.path}
+                      {displayLabel(ref.label)} · {ref.path}
                     </small>
                     <code>{JSON.stringify(ref.value)}</code>
                     {targets.length ? (
@@ -353,7 +364,9 @@ export default function App() {
                       ))
                     ) : (
                       <p className="gap">
-                        目标未在当前页或保留选择中读取；未跳转或替换邻近记录。
+                        {tr(
+                          "目标未在当前页或保留选择中读取；未跳转或替换邻近记录。",
+                        )}
                       </p>
                     )}
                   </div>
@@ -364,11 +377,12 @@ export default function App() {
           <pre>{JSON.stringify(selection.value, null, 2)}</pre>
         </>
       ) : (
-        <p className="empty">点击卡片、字段或事件引用查原值。</p>
+        <p className="empty">{tr("点击卡片、字段或事件引用查原值。")}</p>
       )}
       <small>
-        查看市场：{condition || "全部已读市场"}
-        ；字段选择跨视图保留。公共证据绑定原稳定前缀。
+        {tr("查看市场：")}
+        {condition || tr("全部已读市场")}
+        {tr("；字段选择跨视图保留。公共证据绑定原稳定前缀。")}
       </small>
     </section>
   );
@@ -426,21 +440,21 @@ export default function App() {
   const rangeControls = (
     <div className="range-controls">
       <label>
-        区间起点 UTC ms
+        {tr("区间起点 UTC ms")}
         <input
-          aria-label="区间起点 UTC ms"
+          aria-label={tr("区间起点 UTC ms")}
           value={start}
           onChange={(e) => setStart(e.target.value)}
-          placeholder="不限"
+          placeholder={tr("不限")}
         />
       </label>
       <label>
-        区间终点 UTC ms
+        {tr("区间终点 UTC ms")}
         <input
-          aria-label="区间终点 UTC ms"
+          aria-label={tr("区间终点 UTC ms")}
           value={end}
           onChange={(e) => setEnd(e.target.value)}
-          placeholder="不限"
+          placeholder={tr("不限")}
         />
       </label>
       <button
@@ -449,33 +463,36 @@ export default function App() {
           setEnd("");
         }}
       >
-        清除时间范围
+        {tr("清除时间范围")}
       </button>
       <select
-        aria-label="导出范围"
+        aria-label={tr("导出范围")}
         value={exportScope}
         onChange={(e) => setExportScope(e.target.value)}
       >
-        <option value="range">当前范围可证时间点</option>
-        <option value="selection">所选事实可证时间点</option>
+        <option value="range">{tr("当前范围可证时间点")}</option>
+        <option value="selection">{tr("所选事实可证时间点")}</option>
       </select>
       <button disabled={!rangeValid || !exportPoints.length} onClick={download}>
-        导出 Perfetto
+        {tr("导出 Perfetto")}
       </button>
-      <span>{points.length} 个可证时间点</span>
+      <span>
+        {points.length}
+        {tr(" 个可证时间点")}
+      </span>
       {!rangeValid && (
-        <span role="alert">请输入整数 UTC ms，起点不得晚于终点。</span>
+        <span role="alert">{tr("请输入整数 UTC ms，起点不得晚于终点。")}</span>
       )}
     </div>
   );
   function timing() {
     return (
       <section>
-        <h2>有限计算时序 · 历史宿主调度</h2>
+        <h2>{tr("有限计算时序 · 历史宿主调度")}</h2>
         <p className="muted">
-          起止来自历史宿主显式调度，区间差值为派生调度时间，不是本机 CPU
-          或网络实测耗时。配置来源：启动元数据 config；实际处理 /
-          网络测量未接入。
+          {tr(
+            "起止来自历史宿主显式调度，区间差值为派生调度时间，不是本机 CPU 或网络实测耗时。配置来源：启动元数据 config；实际处理 / 网络测量未接入。",
+          )}
         </p>
         {[
           "last_dispatched_calculation_timing",
@@ -500,17 +517,17 @@ export default function App() {
                   <div className="timing-deltas">
                     {[
                       [
-                        "计算区间",
+                        tr("计算区间"),
                         "calculation_started_at_utc_ms",
                         "calculation_completed_at_utc_ms",
                       ],
                       [
-                        "完成至实际发送",
+                        tr("完成至实际发送"),
                         "calculation_completed_at_utc_ms",
                         "actual_sent_at_utc_ms",
                       ],
                       [
-                        "实际减计划发送",
+                        tr("实际减计划发送"),
                         "scheduled_send_at_utc_ms",
                         "actual_sent_at_utc_ms",
                       ],
@@ -518,14 +535,16 @@ export default function App() {
                       const av = text(at(t, a)),
                         bv = text(at(t, b));
                       return (
-                        <p key={label}>
-                          {label} · 派生：
+                        <p key={a + b}>
+                          {label}
+                          {tr(" · 派生：")}
                           {av && bv && /^-?\d+$/.test(av) && /^-?\d+$/.test(bv)
                             ? `${(BigInt(bv) - BigInt(av)).toString()} ms = ${bv} − ${av}`
-                            : "无完整端点，仅显示已知点"}
+                            : tr("无完整端点，仅显示已知点")}
                           <small>
                             {" "}
-                            来源 /{group}/{b} − /{group}/{a}
+                            {tr("来源 /")}
+                            {group}/{b} − /{group}/{a}
                           </small>
                         </p>
                       );
@@ -545,54 +564,54 @@ export default function App() {
         <div className="brand">
           ◈{" "}
           <span>
-            公共事实
+            {tr("公共事实")}
             <br />
-            <b>浏览器</b>
+            <b>{tr("浏览器")}</b>
           </span>
         </div>
-        <div className="nav-label">只读 · 历史快照</div>
+        <div className="nav-label">{tr("只读 · 历史快照")}</div>
         {views.map(([id, label]) => (
           <button
             key={id}
             className={view === id ? "active" : ""}
             onClick={() => setView(id)}
           >
-            {label}
+            {tr(label)}
           </button>
         ))}
         <div className="aside-foot">
-          显式来源 / 精确原值
+          {tr("显式来源 / 精确原值")}
           <br />
-          静态架构 + 已保存事实
+          {tr("静态架构 + 已保存事实")}
           <br />
-          <span>没有实时业务心跳</span>
+          <span>{tr("没有实时业务心跳")}</span>
         </div>
       </aside>
       <main>
         <header>
           <div>
-            <p className="eyebrow">公共业务事实浏览器</p>
+            <p className="eyebrow">{tr("公共业务事实浏览器")}</p>
             <h1>
               {view === "overview"
                 ? existingReady
-                  ? existingLabel(existingStatus?.kind)
+                  ? tr(existingLabel(existingStatus?.kind))
                   : researchReady
-                    ? "描述研究总览"
+                    ? tr("描述研究总览")
                     : publicOnly
                       ? noeOnly
-                        ? "NOE 来源总览"
-                        : "公共流总览"
+                        ? tr("NOE 来源总览")
+                        : tr("公共流总览")
                       : engineeringProjection
-                        ? "Ledger 工程投影总览"
-                        : "运行总览"
-                : views.find(([id]) => id === view)?.[1]}{" "}
-              <span>原事实 · 可回查</span>
+                        ? tr("Ledger 工程投影总览")
+                        : tr("运行总览")
+                : tr(views.find(([id]) => id === view)?.[1] ?? "")}{" "}
+              <span>{tr("原事实 · 可回查")}</span>
             </h1>
           </div>
           <label>
-            显式来源
+            {tr("显式来源")}
             <select
-              aria-label="运行选择"
+              aria-label={tr("运行选择")}
               value={run}
               onChange={(e) => setRun(e.target.value)}
             >
@@ -603,53 +622,68 @@ export default function App() {
               ))}
             </select>
           </label>
+          <LanguageSwitch />
         </header>
-        {loading && <p role="status">读取配置的来源快照…</p>}
-        {error && <p role="alert">{error}</p>}
+        {loading && <p role="status">{tr("读取配置的来源快照…")}</p>}
+        {error && <p role="alert">{displayError(error)}</p>}
         {snapshot && (
           <>
             <div className="run-strip">
               <b>
                 {existingReady
-                  ? existingLabel(existingStatus?.kind)
+                  ? tr(existingLabel(existingStatus?.kind))
                   : report
                     ? engineeringProjection
-                      ? "Ledger 工程投影"
+                      ? tr("Ledger 工程投影")
                       : "backtest"
                     : researchReady
-                      ? "真实历史描述研究"
+                      ? tr("真实历史描述研究")
                       : noeOnly
-                        ? "显式 NOE 引用"
-                        : "公共历史材料"}
+                        ? tr("显式 NOE 引用")
+                        : tr("公共历史材料")}
               </b>
               <span>{snapshot.label}</span>
               {existingReady ? (
-                <span>原工程 / 历史摘要 · 非回测宿主 / 正式训练</span>
+                <span>{tr("原工程 / 历史摘要 · 非回测宿主 / 正式训练")}</span>
               ) : researchReady ? (
-                <span>原研究范围 · 未运行账户 / 策略决定</span>
+                <span>{tr("原研究范围 · 未运行账户 / 策略决定")}</span>
               ) : engineeringProjection ? (
-                <span>原 Ledger 投影 · 非宿主报告 / 策略研究</span>
+                <span>{tr("原 Ledger 投影 · 非宿主报告 / 策略研究")}</span>
               ) : publicOnly ? (
                 <span>
                   {noeOnly
-                    ? "NOE 单引用 · 报告/公共流未接入"
-                    : `公共流 · ${stream ?? "未交接 input_stream_id"}`}
+                    ? tr("NOE 单引用 · 报告/公共流未接入")
+                    : tr("公共流 · {{v0}}", {
+                        v0: stream ?? tr("未交接 input_stream_id"),
+                      })}
                 </span>
               ) : (
                 <>
-                  <span>历史入口 · {fact(at(report, "end_reason"))}</span>
+                  <span>
+                    {tr("历史入口 · ")}
+                    {fact(at(report, "end_reason"))}
+                  </span>
                   <span>{fact(at(report, "economics_version"))}</span>
-                  <span>计算累计 {fact(at(report, "calculation_count"))}</span>
-                  <span>未闭合 {fact(at(report, "unclosed_commitments"))}</span>
-                  <span>待 NOE {fact(at(report, "pending_noe_records"))}</span>
+                  <span>
+                    {tr("计算累计 ")}
+                    {fact(at(report, "calculation_count"))}
+                  </span>
+                  <span>
+                    {tr("未闭合 ")}
+                    {fact(at(report, "unclosed_commitments"))}
+                  </span>
+                  <span>
+                    {tr("待 NOE ")}
+                    {fact(at(report, "pending_noe_records"))}
+                  </span>
                 </>
               )}
               <span>
                 {researchReady
-                  ? "研究目标数"
+                  ? tr("研究目标数")
                   : noeOnly
-                    ? "显式引用数"
-                    : "稳定公共组边界"}{" "}
+                    ? tr("显式引用数")
+                    : tr("稳定公共组边界")}{" "}
                 {fact(
                   researchReady
                     ? snapshot.research.targets?.length.toString()
@@ -666,14 +700,15 @@ export default function App() {
               {existingReady ? (
                 <>
                   <span>
-                    来源类别 <code>{existingStatus?.kind}</code>
+                    {tr("来源类别 ")}
+                    <code>{existingStatus?.kind}</code>
                   </span>
-                  <span>已交接摘要 / 明确原文件实例</span>
+                  <span>{tr("已交接摘要 / 明确原文件实例")}</span>
                 </>
               ) : researchReady ? (
                 <>
                   <span>
-                    研究原代码{" "}
+                    {tr("研究原代码")}{" "}
                     <code>
                       {fact(
                         snapshot.research.summary?.find(
@@ -683,7 +718,7 @@ export default function App() {
                     </code>
                   </span>
                   <span>
-                    研究账户运行{" "}
+                    {tr("研究账户运行")}{" "}
                     <code>
                       {fact(
                         at(
@@ -693,41 +728,47 @@ export default function App() {
                           "accounts_run",
                         ),
                       )}
-                      （原 /execution/accounts_run）
+                      {tr("（原 /execution/accounts_run）")}
                     </code>
                   </span>
                 </>
               ) : publicOnly ? (
                 <>
                   <span>
-                    {noeOnly ? "NOE 来源" : "公共流"}{" "}
+                    {noeOnly ? tr("NOE 来源") : tr("公共流")}{" "}
                     <code>
                       {noeOnly
-                        ? `${snapshot.noe_results.length} 个显式引用`
-                        : (stream ?? "未交接")}
+                        ? tr("{{v0}} 个显式引用", {
+                            v0: snapshot.noe_results.length,
+                          })
+                        : (stream ?? tr("未交接"))}
                     </code>
                   </span>
                   <span>
-                    {noeOnly ? "单引用读取" : "已读范围"}{" "}
+                    {noeOnly ? tr("单引用读取") : tr("已读范围")}{" "}
                     <code>
                       {noeOnly
                         ? noe.loaded
-                          ? `配置索引 ${noe.loaded.index} · ${noe.loaded.status}`
-                          : "尚未加载"
+                          ? tr("配置索引 {{v0}} · {{v1}}", {
+                              v0: noe.loaded.index,
+                              v1: noe.loaded.status,
+                            })
+                          : tr("尚未加载")
                         : page
                           ? `[${page.row_start}, ${page.total_returned_rows})`
-                          : "尚未读页"}
+                          : tr("尚未读页")}
                     </code>
                   </span>
                   <span>
-                    报告 / 元数据 {statusLabel[snapshot.report.status]} /{" "}
-                    {statusLabel[snapshot.metadata.status]}
+                    {tr("报告 / 元数据 ")}
+                    {tr(statusLabel[snapshot.report.status] ?? "")} /{" "}
+                    {tr(statusLabel[snapshot.metadata.status] ?? "")}
                   </span>
                 </>
               ) : (
                 <>
                   <span>
-                    运行{" "}
+                    {tr("运行")}{" "}
                     <code>
                       {fact(
                         at(account, "run_id") ??
@@ -736,7 +777,7 @@ export default function App() {
                     </code>
                   </span>
                   <span>
-                    账户{" "}
+                    {tr("账户")}{" "}
                     <code>
                       {fact(
                         at(account, "account_id") ??
@@ -745,25 +786,25 @@ export default function App() {
                     </code>
                   </span>
                   <span>
-                    策略{" "}
+                    {tr("策略")}{" "}
                     <code>
                       {fact(at(metadata, "config", "strategy", "strategy_id"))}
                     </code>
                   </span>
                   <span>
-                    观察截止 UTC ms{" "}
+                    {tr("观察截止 UTC ms")}{" "}
                     <code>{fact(at(report, "last_observed_at_utc_ms"))}</code>
                   </span>
                 </>
               )}
               <label>
-                查看市场
+                {tr("查看市场")}
                 <select
-                  aria-label="市场选择"
+                  aria-label={tr("市场选择")}
                   value={condition}
                   onChange={(e) => setCondition(e.target.value)}
                 >
-                  <option value="">全部已读市场</option>
+                  <option value="">{tr("全部已读市场")}</option>
                   {marketIds.map((id) => (
                     <option key={id} value={id}>
                       {id}
@@ -771,7 +812,8 @@ export default function App() {
                   ))}
                   {selectedOutsidePage && (
                     <option value={condition}>
-                      {condition} · 当前页无来源
+                      {condition}
+                      {tr(" · 当前页无来源")}
                     </option>
                   )}
                 </select>
@@ -793,28 +835,29 @@ export default function App() {
             />
             <div className="notice">
               {existingReady
-                ? "独立工程 / 历史来源；原字段与口径保留"
+                ? tr("独立工程 / 历史来源；原字段与口径保留")
                 : researchReady
-                  ? "真实首小时描述研究 · 事后标签不回填冻结输入"
+                  ? tr("真实首小时描述研究 · 事后标签不回填冻结输入")
                   : engineeringProjection
-                    ? "原 Ledger 工程投影；非宿主报告 / 策略研究"
+                    ? tr("原 Ledger 工程投影；非宿主报告 / 策略研究")
                     : noeOnly
-                      ? "显式 NOE 单引用；报告和公共流未接入"
+                      ? tr("显式 NOE 单引用；报告和公共流未接入")
                       : publicOnly
-                        ? "固定公共前缀与有限已读范围"
-                        : "终态快照与有限时序"}{" "}
-              ·
-              公共输入按固定前缀和已读范围浏览；报告不代表完整逐次诊断、执行或经济历史。查看市场是浏览选择，不代表策略当前活跃市场。
+                        ? tr("固定公共前缀与有限已读范围")
+                        : tr("终态快照与有限时序")}{" "}
+              {tr(
+                "· 公共输入按固定前缀和已读范围浏览；报告不代表完整逐次诊断、执行或经济历史。查看市场是浏览选择，不代表策略当前活跃市场。",
+              )}
             </div>
             {engineeringProjection && (
-              <Source title="Ledger 工程投影来源" doc={snapshot.report} />
+              <Source title={tr("Ledger 工程投影来源")} doc={snapshot.report} />
             )}
             {!engineeringProjection && snapshot.report.status !== "ready" && (
               <Source
                 title={
                   researchReady || existingReady
-                    ? "账户回测报告状态（独立可选来源）"
-                    : "报告状态"
+                    ? tr("账户回测报告状态（独立可选来源）")
+                    : tr("报告状态")
                 }
                 doc={snapshot.report}
               />
@@ -938,32 +981,32 @@ export default function App() {
                     <section>
                       <h2>
                         {researchReady
-                          ? "账户事实 · 未产生"
-                          : "运行事实 · 终态"}
+                          ? tr("账户事实 · 未产生")
+                          : tr("运行事实 · 终态")}
                       </h2>
                       {[
-                        ["保守 NAV", "conservative_nav_pusd"],
-                        ["Maker 最坏情形 NAV", "worst_case_maker_nav_pusd"],
-                        ["未闭合承诺", "unclosed_commitments"],
-                        ["待账本应用 NOE", "pending_noe_records"],
+                        [tr("保守 NAV"), "conservative_nav_pusd"],
+                        [tr("Maker 最坏情形 NAV"), "worst_case_maker_nav_pusd"],
+                        [tr("未闭合承诺"), "unclosed_commitments"],
+                        [tr("待账本应用 NOE"), "pending_noe_records"],
                       ].map(([label, key]) => (
                         <Field
                           key={key}
-                          label={label}
+                          label={tr(label)}
                           path={"/" + key}
                           report={report}
                           onSelect={select}
                         />
                       ))}
                       <p className="gap">
-                        当前挂单本金 / 策略等待次数：未接入。
+                        {tr("当前挂单本金 / 策略等待次数：未接入。")}
                       </p>
                     </section>
                     {evidencePanel}
                   </div>
                 </div>
                 <section>
-                  <h2>公共记录 · 当前已读页</h2>
+                  <h2>{tr("公共记录 · 当前已读页")}</h2>
                   {controls}
                   <EventTable
                     rows={publicBrowse.rows}
@@ -978,34 +1021,37 @@ export default function App() {
               <>
                 {rangeControls}
                 <section>
-                  <h2>多时钟 · 有限可证事实</h2>
+                  <h2>{tr("多时钟 · 有限可证事实")}</h2>
                   <Timeline points={points} onSelect={select} />
                   {condition && (
                     <p className="gap">
-                      仅包含有明确 condition 关联的时间点；账户 /
-                      容器级时间点不能凭时间猜测市场。
+                      {tr(
+                        "仅包含有明确 condition 关联的时间点；账户 / 容器级时间点不能凭时间猜测市场。",
+                      )}
                     </p>
                   )}
                   <EventTable
                     rows={points.map((p) => ({
                       ...p,
-                      kind: p.name,
-                      identity: p.clock,
+                      kind: displayLabel(p.name),
+                      identity: tr(p.clock),
                       points: [p],
                     }))}
                     onSelect={select}
                   />
                 </section>
                 <section>
-                  <h2>公共交付范围 · 原宿主汇总</h2>
+                  <h2>{tr("公共交付范围 · 原宿主汇总")}</h2>
                   <Field
-                    label="经营前 / 经营范围内已交付公共组"
+                    label={tr("经营前 / 经营范围内已交付公共组")}
                     path="/delivery_summary"
                     report={report}
                     onSelect={select}
                   />
                   <p className="muted">
-                    缺汇总不从稳定组边界反推已交付数量；未从累计值生成子区间历史。
+                    {tr(
+                      "缺汇总不从稳定组边界反推已交付数量；未从累计值生成子区间历史。",
+                    )}
                   </p>
                 </section>
                 {timing()}
@@ -1015,20 +1061,20 @@ export default function App() {
             {view === "decisions" && (
               <>
                 <section>
-                  <h2>输入与决定 · 来源覆盖</h2>
+                  <h2>{tr("输入与决定 · 来源覆盖")}</h2>
                   <p className="gap">
-                    完整 StrategyInputV1 / StrategyOutputV1 /
-                    人工策略诊断未接入。公共持久记录是上游证据，不等于策略当时冻结输入；空列表不能证明等待或
-                    NoTrade。
+                    {tr(
+                      "完整 StrategyInputV1 / StrategyOutputV1 / 人工策略诊断未接入。公共持久记录是上游证据，不等于策略当时冻结输入；空列表不能证明等待或 NoTrade。",
+                    )}
                   </p>
                   <Field
-                    label="报告保存的观察截止与原组身份"
+                    label={tr("报告保存的观察截止与原组身份")}
                     path="/observation_cutoff"
                     report={report}
                     onSelect={select}
                   />
                   <Field
-                    label="真实计算累计 · 不能拆成子区间次数"
+                    label={tr("真实计算累计 · 不能拆成子区间次数")}
                     path="/calculation_count"
                     report={report}
                     onSelect={select}
@@ -1072,19 +1118,22 @@ export default function App() {
             {view === "training" && (
               <>
                 <section>
-                  <h2>业务模型训练 · 来源未接入</h2>
+                  <h2>{tr("业务模型训练 · 来源未接入")}</h2>
                   <p>
-                    人工策略与模型复用观察、执行和账户读取位置；本次策略身份：
+                    {tr(
+                      "人工策略与模型复用观察、执行和账户读取位置；本次策略身份：",
+                    )}
                     {fact(at(metadata, "config", "strategy", "strategy_id"))}。
                   </p>
                   <p className="gap">
-                    模型决定、训练账户根 / 转移 / Reward / 批次 / 检查点及真实
-                    MLflow
-                    实验来源未接入。没有实验链接可展示；本运行不能解释为模型训练。
+                    {tr(
+                      "模型决定、训练账户根 / 转移 / Reward / 批次 / 检查点及真实 MLflow 实验来源未接入。没有实验链接可展示；本运行不能解释为模型训练。",
+                    )}
                   </p>
                   <p className="muted">
-                    model-train / offline-evaluation / PAPER / LIVE
-                    的完整宿主事实仍由所属模块交付。
+                    {tr(
+                      "model-train / offline-evaluation / PAPER / LIVE 的完整宿主事实仍由所属模块交付。",
+                    )}
                   </p>
                 </section>
                 {evidencePanel}
@@ -1095,18 +1144,21 @@ export default function App() {
               <>
                 {rangeControls}
                 <section>
-                  <h2>证据范围 · 原稳定前缀</h2>
+                  <h2>{tr("证据范围 · 原稳定前缀")}</h2>
                   <p className="muted">
-                    原顺序游标只保留最近一页。刷新、切回运行或其他窗口推进后取回服务端当前页，不从头扫描。只在当前页按明确字段筛选；本页外历史未定位，不冒充全历史查询。无时间记录不会进入时间范围导出。
+                    {tr(
+                      "原顺序游标只保留最近一页。刷新、切回运行或其他窗口推进后取回服务端当前页，不从头扫描。只在当前页按明确字段筛选；本页外历史未定位，不冒充全历史查询。无时间记录不会进入时间范围导出。",
+                    )}
                   </p>
                   {controls}
                   {page && (
                     <p>
-                      当前可浏览行 [{page.row_start},{" "}
+                      {tr("当前可浏览行 [")}
+                      {page.row_start},{" "}
                       {(
                         BigInt(page.row_start) + BigInt(page.returned_rows)
                       ).toString()}
-                      ) · 稳定前缀{" "}
+                      {tr(") · 稳定前缀")}{" "}
                       {fact(
                         at(
                           snapshot.public_recording.prefix,
@@ -1123,12 +1175,12 @@ export default function App() {
                   />
                   {page && (
                     <details>
-                      <summary>本页读取成本</summary>
+                      <summary>{tr("本页读取成本")}</summary>
                       <pre>{JSON.stringify(page.cost, null, 2)}</pre>
                     </details>
                   )}
                   <Tree
-                    name="公共来源 / 版本 / 稳定前缀"
+                    name={tr("公共来源 / 版本 / 稳定前缀")}
                     value={snapshot.public_recording}
                     onSelect={(path, value) =>
                       select({ source: "public", path, value })
@@ -1139,15 +1191,19 @@ export default function App() {
                 <div className="columns">
                   <Source
                     title={
-                      engineeringProjection ? "Ledger 工程投影" : "历史报告"
+                      engineeringProjection
+                        ? tr("Ledger 工程投影")
+                        : tr("历史报告")
                     }
                     doc={snapshot.report}
                   />
-                  <Source title="启动元数据" doc={snapshot.metadata} />
+                  <Source title={tr("启动元数据")} doc={snapshot.metadata} />
                 </div>
                 <section>
                   <h2>
-                    {engineeringProjection ? "完整原工程投影" : "完整原报告"}
+                    {engineeringProjection
+                      ? tr("完整原工程投影")
+                      : tr("完整原报告")}
                   </h2>
                   {snapshot.report.exact !== null && (
                     <Tree
@@ -1159,10 +1215,10 @@ export default function App() {
                     />
                   )}
                   <Raw
-                    title={engineeringProjection ? "工程投影" : "报告"}
+                    title={engineeringProjection ? tr("工程投影") : tr("报告")}
                     doc={snapshot.report}
                   />
-                  <h2>启动元数据</h2>
+                  <h2>{tr("启动元数据")}</h2>
                   {snapshot.metadata.exact !== null && (
                     <Tree
                       name="metadata"
@@ -1172,22 +1228,25 @@ export default function App() {
                       }
                     />
                   )}
-                  <Raw title="元数据" doc={snapshot.metadata} />
-                  <h2>覆盖与缺口</h2>
+                  <Raw title={tr("元数据")} doc={snapshot.metadata} />
+                  <h2>{tr("覆盖与缺口")}</h2>
                   {snapshot.gaps.map((g) => (
                     <p className="gap" key={g}>
-                      {g}
+                      {tr(g)}
                     </p>
                   ))}
                 </section>
               </>
             )}
             <footer>
-              来源状态：{engineeringProjection ? "工程投影" : "报告"}{" "}
-              {statusLabel[snapshot.report.status]} · 元数据{" "}
-              {statusLabel[snapshot.metadata.status]} · 公共记录{" "}
-              {statusLabel[String(snapshot.public_recording.status)]} /
-              派生追踪可重建，不参加恢复或归约。
+              {tr("来源状态：")}
+              {engineeringProjection ? tr("工程投影") : tr("报告")}{" "}
+              {tr(statusLabel[snapshot.report.status] ?? "")}
+              {tr(" · 元数据")}{" "}
+              {tr(statusLabel[snapshot.metadata.status] ?? "")}
+              {tr(" · 公共记录")}{" "}
+              {tr(statusLabel[String(snapshot.public_recording.status)] ?? "")}
+              {tr(" / 派生追踪可重建，不参加恢复或归约。")}
             </footer>
           </>
         )}

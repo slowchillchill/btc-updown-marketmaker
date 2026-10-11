@@ -156,6 +156,120 @@ try {
   const chosen = await page.locator(".evidence-panel pre").textContent();
   const nav = async (name) =>
     page.getByRole("button", { name, exact: true }).click();
+  // 语言只改变界面；原时钟查询值、选中证据和已读页不受影响。
+  assert.equal(await page.locator("html").getAttribute("lang"), "zh-CN");
+  const chineseNavigation = await page
+    .locator("aside > button")
+    .allTextContents();
+  await page
+    .getByLabel("公共原时钟", { exact: true })
+    .selectOption("源消息 · 接收");
+  await page.getByLabel("公共时间起点", { exact: true }).fill("1787529600000");
+  const retainedRows = await page
+    .locator(".table-scroll")
+    .first()
+    .getAttribute("data-retained-count");
+  assert.ok(Number(retainedRows) > 0);
+  const languageRequests = [];
+  const observeLanguageRequest = (request) => {
+    if (new URL(request.url()).pathname.startsWith("/api/"))
+      languageRequests.push(request.url());
+  };
+  page.on("request", observeLanguageRequest);
+  await page.getByLabel("界面语言", { exact: true }).selectOption("en");
+  await page.getByLabel("Interface language", { exact: true }).waitFor();
+  assert.equal(await page.locator("html").getAttribute("lang"), "en");
+  assert.equal(await page.title(), "Public Business Facts Browser");
+  const englishNavigation = [
+    "Module overview",
+    "Multi-clock timeline",
+    "Inputs and decisions",
+    "Intents and execution feedback",
+    "Account economics and lifecycle",
+    "Training and experiments",
+    "Evidence replay",
+  ];
+  assert.deepEqual(
+    await page.locator("aside > button").allTextContents(),
+    englishNavigation,
+  );
+  assert.equal(
+    await page
+      .getByLabel("Original public clock", { exact: true })
+      .inputValue(),
+    "源消息 · 接收",
+  );
+  assert.equal(
+    await page.getByLabel("Public time start", { exact: true }).inputValue(),
+    "1787529600000",
+  );
+  assert.equal(
+    await page
+      .locator(".table-scroll")
+      .first()
+      .getAttribute("data-retained-count"),
+    retainedRows,
+  );
+  assert.match(
+    await page.locator("tbody").first().textContent(),
+    /Source message · Receipt/,
+  );
+  assert.doesNotMatch(
+    await page.locator("tbody").first().textContent(),
+    /源消息 · 接收/,
+  );
+  assert.equal(await page.locator(".evidence-panel pre").textContent(), chosen);
+  assert.ok(
+    await page
+      .getByRole("button", { name: "Zoom in", exact: true })
+      .isVisible(),
+  );
+  for (const name of englishNavigation) {
+    await nav(name);
+    assert.equal(
+      await page.locator(".evidence-panel pre").textContent(),
+      chosen,
+    );
+    if (name !== "Module overview")
+      assert.ok((await page.locator("h1").textContent()).includes(name));
+  }
+  await nav("Module overview");
+  if (output)
+    await page.screenshot({
+      path: path.join(output, "overview-english-desktop.png"),
+      fullPage: true,
+    });
+  await nav("Multi-clock timeline");
+  await page
+    .getByRole("columnheader", { name: "Clock / original UTC ms", exact: true })
+    .first()
+    .waitFor();
+  if (output)
+    await page.screenshot({
+      path: path.join(output, "timeline-english-desktop.png"),
+      fullPage: true,
+    });
+  await page
+    .getByLabel("Interface language", { exact: true })
+    .selectOption("zh-CN");
+  await page.getByLabel("界面语言", { exact: true }).waitFor();
+  assert.deepEqual(
+    await page.locator("aside > button").allTextContents(),
+    chineseNavigation,
+  );
+  await nav("模块总览");
+  assert.equal(
+    await page.getByLabel("公共原时钟", { exact: true }).inputValue(),
+    "源消息 · 接收",
+  );
+  assert.match(
+    await page.locator("tbody").first().textContent(),
+    /源消息 · 接收/,
+  );
+  assert.equal(await page.locator(".evidence-panel pre").textContent(), chosen);
+  assert.deepEqual(languageRequests, [], "切换语言或浏览视图不能额外读取来源");
+  page.off("request", observeLanguageRequest);
+  await page.getByRole("button", { name: "清除公共条件", exact: true }).click();
   await nav("输入与决定");
   assert.equal(await page.locator(".evidence-panel pre").textContent(), chosen);
   await nav("证据重放");
@@ -462,6 +576,45 @@ try {
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   );
+  await page.getByLabel("界面语言", { exact: true }).selectOption("en");
+  await page.getByLabel("Interface language", { exact: true }).waitFor();
+  if (output)
+    await page.screenshot({
+      path: path.join(output, "overview-english-mobile.png"),
+      fullPage: true,
+    });
+  assert.ok(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  );
+  await page.reload();
+  await page.getByLabel("Interface language", { exact: true }).waitFor();
+  assert.equal(await page.locator("html").getAttribute("lang"), "en");
+  assert.equal(
+    await page.getByLabel("Interface language", { exact: true }).inputValue(),
+    "en",
+  );
+  await page
+    .getByLabel("Interface language", { exact: true })
+    .selectOption("zh-CN");
+  await page.reload();
+  await page.getByLabel("界面语言", { exact: true }).waitFor();
+  // 禁用持久存储时仍能切换当前页面，不把浏览器设置变成访问前置。
+  const restricted = await browser.newPage();
+  restricted.on("pageerror", (error) => errors.push(error.message));
+  await restricted.addInitScript(() => {
+    Object.defineProperty(window, "localStorage", {
+      get() {
+        throw new DOMException("Storage disabled", "SecurityError");
+      },
+    });
+  });
+  await restricted.goto("http://127.0.0.1:4319");
+  await restricted.getByLabel("界面语言", { exact: true }).selectOption("en");
+  await restricted.getByLabel("Interface language", { exact: true }).waitFor();
+  assert.equal(await restricted.locator("html").getAttribute("lang"), "en");
+  await restricted.close();
   assert.deepEqual(errors, []);
   assert.deepEqual(await readFile(configured.runs[0].report), original);
   console.log(
@@ -474,6 +627,9 @@ try {
   );
   console.log(
     "浏览器验证通过：真实合成来源、八模块/七导航/静态边、跨视图/跨页身份、UP/DOWN非对称映射、现金精确加法、零/Unavailable、负时差/缺端点、范围导出、未知/损坏、游标刷新与窄屏。",
+  );
+  console.log(
+    "中英文验证通过：七视图、表头与控件、保留筛选和证据、切换不读来源、刷新记忆、存储禁用和英文窄屏。",
   );
 } finally {
   await browser?.close();

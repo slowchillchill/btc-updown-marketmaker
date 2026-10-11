@@ -1,4 +1,6 @@
-import { at, fact, type Json } from "./facts";
+import { displayFact as fact } from "./i18n";
+import { useTranslation } from "react-i18next";
+import { at, type Json } from "./facts";
 import type { Evidence } from "./browse";
 export function SourceIdentity({
   report,
@@ -15,6 +17,7 @@ export function SourceIdentity({
   metadataVersion: Json | undefined;
   onSelect: (e: Evidence) => void;
 }) {
+  const { t: tr } = useTranslation();
   const field = (
     source: Evidence["source"],
     root: Json | undefined,
@@ -44,75 +47,75 @@ export function SourceIdentity({
   };
   return (
     <details className="source-identity">
-      <summary>来源与合同版本 · 业务触发模式未保存 / 未交接</summary>
+      <summary>{tr("来源与合同版本 · 业务触发模式未保存 / 未交接")}</summary>
       <div className="fact-grid">
         {field(
           "metadata",
           metadata,
           "/config/implementation_identity/git_commit",
-          "原运行代码提交",
+          tr("原运行代码提交"),
         )}
         {field(
           "metadata",
           metadata,
           "/config/implementation_identity/source_identity_sha256",
-          "原源码身份 SHA-256",
+          tr("原源码身份 SHA-256"),
         )}
         {field(
           "metadata",
           metadata,
           "/config/implementation_identity/cargo_lock_sha256",
-          "原依赖锁 SHA-256",
+          tr("原依赖锁 SHA-256"),
         )}
         {field(
           "metadata",
           metadata,
           "/config/strategy/strategy_rule_version",
-          "策略规则版本",
+          tr("策略规则版本"),
         )}
         {field(
           "public",
           header === undefined ? undefined : { header },
           "/header/canonical_rule_version",
-          "公共规范规则版本",
+          tr("公共规范规则版本"),
         )}
         {field(
           "public",
           header === undefined ? undefined : { header },
           "/header/observation_version",
-          "公共观察版本",
+          tr("公共观察版本"),
         )}
         {field(
           "public",
           header === undefined ? undefined : { header },
           "/header/ordering_version",
-          "公共排序版本",
+          tr("公共排序版本"),
         )}
         {field(
           "report",
           report,
           "/economics_version",
-          "报告经济版本（原值）",
+          tr("报告经济版本（原值）"),
           reportVersion,
         )}
         {field(
           "metadata",
           metadata,
           "/economics_version",
-          "元数据经济版本（原值）",
+          tr("元数据经济版本（原值）"),
           metadataVersion,
         )}
         {field(
           "metadata",
           metadata,
           "/caller_role",
-          "原宿主角色（非触发模式）",
+          tr("原宿主角色（非触发模式）"),
         )}
         {field(
           "metadata",
           metadata,
           "/recording_role",
-          "原耐久角色（非触发模式）",
+          tr("原耐久角色（非触发模式）"),
         )}
         {(
           [
@@ -126,15 +129,14 @@ export function SourceIdentity({
             "metadata",
             metadata,
             "/config/timing/" + key,
-            "历史配置延迟 · " + key,
+            tr("历史配置延迟 · ") + key,
           ),
         )}
       </div>
       <p className="gap">
-        Fixed / Sequence 是历史宿主延迟配置，非 CPU
-        实测或策略计算周期。未保存独立业务触发模式，不从配置、次数或策略名称猜逐帧
-        /
-        100ms。版本分别保留所属来源，缺失不补零；运行提交不使用本页面代码版本代替。
+        {tr(
+          "Fixed / Sequence 是历史宿主延迟配置，非 CPU 实测或策略计算周期。未保存独立业务触发模式，不从配置、次数或策略名称猜逐帧 / 100ms。版本分别保留所属来源，缺失不补零；运行提交不使用本页面代码版本代替。",
+        )}
       </p>
     </details>
   );

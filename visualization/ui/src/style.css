@@ -103,6 +103,7 @@ main {
 }
 header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 20px;
@@ -798,4 +799,14 @@ input {
 }
 .existing-panel > label > select {
   max-width: 100%;
+}
+
+.language-switch {
+  flex-shrink: 0;
+}
+.language-switch select {
+  min-width: 100px;
+}
+html[lang="en"] .module-card {
+  overflow-wrap: anywhere;
 }
