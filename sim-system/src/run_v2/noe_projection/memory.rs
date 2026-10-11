@@ -139,7 +139,8 @@ struct ObservationState<P: MemoryOrderEvidence> {
     closed_receive_time: Option<i64>,
     public_visible_time: Option<i64>,
     feedback: VecDeque<PendingFeedback<P>>,
-    durable_references: Vec<NoeResultReferenceV1>,
+    #[serde(default)]
+    durable_directory: Option<PathBuf>,
     consumption: NoeConsumptionSource<P::Completion>,
 }
 impl<P: MemoryOrderEvidence> Default for ObservationState<P> {
@@ -151,7 +152,7 @@ impl<P: MemoryOrderEvidence> Default for ObservationState<P> {
             closed_receive_time: None,
             public_visible_time: None,
             feedback: VecDeque::new(),
-            durable_references: Vec::new(),
+            durable_directory: None,
             consumption: NoeConsumptionSource::default(),
         }
     }
@@ -210,8 +211,19 @@ impl<P: MemoryOrderEvidence> MemoryNoeObservation<P> {
     pub fn delivered_through(&self) -> u64 {
         self.0.lock().unwrap().delivered
     }
-    pub fn result_references(&self) -> Vec<NoeResultReferenceV1> {
-        self.0.lock().unwrap().durable_references.clone()
+    pub fn result_references(&self) -> Result<Vec<NoeResultReferenceV1>, DurableErrorV1>
+    where
+        SourceNeutralTradeLifecycleResultV2: NoeTradePayload<ControlFor<P>>,
+        ControlFor<P>: serde::de::DeserializeOwned,
+    {
+        let state = self.0.lock().unwrap();
+        let Some(directory) = &state.durable_directory else {
+            return Ok(Vec::new());
+        };
+        let directory = directory.clone();
+        let through = state.durable;
+        drop(state);
+        Writer::<P>::published_result_references(&directory, through)
     }
     /// 唯一实际反馈消费者只领取已闭合且不晚于成功公开组受信时点的反馈。
     /// 按接收时间及原稳定发射序分配交付序；平台预取/闭合不能推进公开可见时点。
@@ -368,9 +380,19 @@ where
     SourceNeutralTradeLifecycleResultV2: NoeTradePayload<ControlFor<P>>,
     ControlFor<P>: serde::de::DeserializeOwned,
 {
-    fn create(accepted: &AcceptedMemoryProjection<P>) -> Result<Self, DurableErrorV1> {
+    fn create(
+        accepted: &AcceptedMemoryProjection<P>,
+        batched: bool,
+    ) -> Result<Self, DurableErrorV1> {
+        let writer = if batched {
+            Writer::<P>::create_batched(&accepted.root, (*accepted.context).clone())?
+        } else {
+            Writer::<P>::create(&accepted.root, (*accepted.context).clone())?
+        };
+        accepted.observation.0.lock().unwrap().durable_directory =
+            Some(writer.context_directory().to_owned());
         Ok(Self {
-            writer: Writer::<P>::create(&accepted.root, (*accepted.context).clone())?,
+            writer,
             observation: accepted.observation.clone(),
             pending_mappings: BTreeMap::new(),
         })
@@ -405,7 +427,6 @@ where
                 }
                 let mut state = observation.0.lock().unwrap();
                 state.durable = commit.boundary.source_watermark.projection_batch_sequence;
-                state.durable_references.extend(commit.result_references());
             },
         )
     }
@@ -438,11 +459,14 @@ impl BackgroundNoeWriterV1 {
     pub(crate) fn stage(
         writer: &mut Option<Self>,
         accepted: AcceptedNoeProjectionV1,
+        batched: bool,
     ) -> Result<(), DurableErrorV1> {
         match accepted {
             AcceptedNoeProjectionV1::Legacy(accepted) => {
                 if writer.is_none() {
-                    *writer = Some(Self::Legacy(BackgroundNoeWriter::create(&accepted)?));
+                    *writer = Some(Self::Legacy(BackgroundNoeWriter::create(
+                        &accepted, batched,
+                    )?));
                 }
                 let Some(Self::Legacy(writer)) = writer else {
                     unreachable!("同一运行端口的订单证据类型固定")
@@ -451,7 +475,9 @@ impl BackgroundNoeWriterV1 {
             }
             AcceptedNoeProjectionV1::Measured(accepted) => {
                 if writer.is_none() {
-                    *writer = Some(Self::Measured(BackgroundNoeWriter::create(&accepted)?));
+                    *writer = Some(Self::Measured(BackgroundNoeWriter::create(
+                        &accepted, batched,
+                    )?));
                 }
                 let Some(Self::Measured(writer)) = writer else {
                     unreachable!("同一运行端口的订单证据类型固定")
@@ -460,13 +486,22 @@ impl BackgroundNoeWriterV1 {
             }
             AcceptedNoeProjectionV1::Cancellation(accepted) => {
                 if writer.is_none() {
-                    *writer = Some(Self::Cancellation(BackgroundNoeWriter::create(&accepted)?));
+                    *writer = Some(Self::Cancellation(BackgroundNoeWriter::create(
+                        &accepted, batched,
+                    )?));
                 }
                 let Some(Self::Cancellation(writer)) = writer else {
                     unreachable!("同一运行端口的订单证据类型固定")
                 };
                 writer.stage(&accepted.batch, accepted.durability)
             }
+        }
+    }
+    pub(crate) fn needs_stability(&self) -> bool {
+        match self {
+            Self::Legacy(writer) => writer.writer.needs_stability(),
+            Self::Measured(writer) => writer.writer.needs_stability(),
+            Self::Cancellation(writer) => writer.writer.needs_stability(),
         }
     }
     pub(crate) fn stabilize(&mut self) -> Result<(), DurableErrorV1> {

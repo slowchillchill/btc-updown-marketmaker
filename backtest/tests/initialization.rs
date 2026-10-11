@@ -423,28 +423,31 @@ async fn one_driver_keeps_prestart_zero_lifecycle_and_starts_calculation_sequenc
     let log = std::fs::read_to_string(&config.sim_log).unwrap();
     // SIM输入日志只保存原输入；零金额自动经济事实在NOE持久记录中核对。
     let mut zero_results = vec![];
-    fn parquet_paths(root: &Path, output: &mut Vec<PathBuf>) {
+    fn context_paths(root: &Path, output: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(root).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
-                parquet_paths(&path, output);
-            } else if path.extension().is_some_and(|ext| ext == "parquet") {
-                output.push(path);
+                if path.join("context.json").exists() {
+                    output.push(path);
+                } else {
+                    context_paths(&path, output);
+                }
             }
         }
     }
-    let mut paths = vec![];
-    parquet_paths(&config.noe_root, &mut paths);
-    for path in paths {
-        if path.extension().is_some_and(|ext| ext == "parquet") {
-            let (_, rows) =
-                ::execution_normalization::record_file::read(&path, "noe_arrow_parquet_v1")
-                    .unwrap();
-            for (_, _, payload) in rows {
-                let value: Value = serde_json::from_slice(&payload).unwrap();
-                if value.to_string().contains("ZeroNoEligibleMakerFill") {
-                    zero_results.push(value);
-                }
+    let mut contexts = vec![];
+    context_paths(&config.noe_root, &mut contexts);
+    for context in contexts {
+        let references = ::execution_normalization::durable::StagedNormalizationWriter::<
+            contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+            contracts::execution_normalization::SourceNeutralControlResultV3,
+        >::published_result_references(&context, u64::MAX)
+        .unwrap();
+        for reference in references {
+            let record = ::execution_normalization::read_durable_noe_record_v2(&reference).unwrap();
+            let value = serde_json::to_value(record.record()).unwrap();
+            if value.to_string().contains("ZeroNoEligibleMakerFill") {
+                zero_results.push(value);
             }
         }
     }

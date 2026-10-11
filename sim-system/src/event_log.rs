@@ -340,6 +340,7 @@ pub(crate) struct SimEventLogV2 {
     durability_role: RunDurabilityRoleV2,
     projection_version: BusinessProjectionVersionV1,
     byte_count: u64,
+    last_synced_byte_count: u64,
     next_input_sequence: u64,
     max_group_bytes: usize,
     #[cfg(feature = "measurement")]
@@ -399,6 +400,7 @@ impl SimEventLogV2 {
             durability_role: opened.durability_role,
             projection_version: opened.projection_version,
             byte_count: saved.byte_count,
+            last_synced_byte_count: saved.byte_count,
             next_input_sequence: saved.next_input_sequence,
             max_group_bytes,
             #[cfg(feature = "measurement")]
@@ -475,6 +477,7 @@ impl SimEventLogV2 {
             durability_role: opened.durability_role,
             projection_version: opened.projection_version,
             byte_count: 0,
+            last_synced_byte_count: 0,
             next_input_sequence: 1,
             max_group_bytes,
             #[cfg(feature = "measurement")]
@@ -633,6 +636,9 @@ impl SimEventLogV2 {
         &mut self,
         #[cfg(feature = "measurement")] context: MeasurementContext,
     ) -> Result<(), SimEventLogErrorV2> {
+        if self.last_synced_byte_count == self.byte_count {
+            return Ok(());
+        }
         #[cfg(test)]
         record_sync_attempt_for_tests();
         #[cfg(test)]
@@ -647,6 +653,7 @@ impl SimEventLogV2 {
         self.file
             .sync_data()
             .map_err(|error| io_error("同步单一事件日志", error))?;
+        self.last_synced_byte_count = self.byte_count;
         #[cfg(feature = "measurement")]
         self.measurement_probe
             .record(context, MeasurementPhase::LogSync, elapsed_ns(started));
@@ -870,6 +877,7 @@ impl SimEventLogRecoveryV2 {
             durability_role: self.durability_role,
             projection_version: self.projection_version,
             byte_count: self.last_complete_offset,
+            last_synced_byte_count: 0, // 原PAPER恢复需先稳定可能截断的文件。
             next_input_sequence: self.next_input_sequence,
             max_group_bytes: self.max_group_bytes,
             #[cfg(feature = "measurement")]
@@ -1812,7 +1820,9 @@ impl BackgroundEventLogV1 {
                                 .0;
                             for batch in group.noe {
                                 crate::run_v2::noe_projection::BackgroundNoeWriterV1::stage(
-                                    &mut noe, batch,
+                                    &mut noe,
+                                    batch,
+                                    matches!(log.layout, SimLogLayoutV1::HistoricalDayV1(_)),
                                 )
                                 .map_err(SimEventLogErrorV2::Noe)?;
                             }
@@ -1821,7 +1831,9 @@ impl BackgroundEventLogV1 {
                                 ledger.accept(group.ledger)?;
                                 if ledger.pending.front().is_some_and(
                                     ledger::LedgerRecordMaterialV2::waiting_for_noe_stability,
-                                ) {
+                                ) && (matches!(log.layout, SimLogLayoutV1::JsonV2)
+                                    || noe.as_ref().is_some_and(|n| n.needs_stability()))
+                                {
                                     #[cfg(feature = "measurement")]
                                     log.sync_data(MeasurementContext::CommitGroup)?;
                                     #[cfg(not(feature = "measurement"))]

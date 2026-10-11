@@ -10,6 +10,8 @@ use sim_system::{execution::*, platform_rules::*};
 use std::sync::Arc;
 #[derive(Default)]
 struct Probe {
+    source_health: bool,
+    trade_details: Option<bool>,
     quantity_demand: Option<bool>,
     expected_quantity_projection: Option<bool>,
     saw_depth: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -57,6 +59,12 @@ fn sim_log_values(path: &std::path::Path) -> Vec<serde_json::Value> {
 impl StrategyV1 for Probe {
     type Error = &'static str;
     type Diagnostics = ();
+    fn uses_source_health(&self) -> bool {
+        self.source_health
+    }
+    fn requires_trade_economics_details(&self) -> bool {
+        self.trade_details.unwrap_or(true)
+    }
     fn observation_requirements(&self) -> contracts::PublicObservationRequirementsV1 {
         contracts::PublicObservationRequirementsV1 {
             binance_depth_quantities: self.quantity_demand.unwrap_or(true),
@@ -2152,4 +2160,48 @@ fn original_day_quantity_demand_union_preserves_complete_and_quantity_free_candi
             assert_eq!(candidate.report["end_reason"], "RangeEnd");
         }
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn source_health_host_honors_trade_detail_demand_without_changing_observation_or_economics() {
+    let mut outputs = Vec::new();
+    for details in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, rules) = setup(temp.path());
+        // 原首市场序列足以生成真实成交；不进入依赖完整明细的第二市场探针。
+        config.preparation.scope.received_end_utc_ms = BASE + 4000;
+        let mut probe = Probe {
+            source_health: true,
+            trade_details: Some(details),
+            rules: Some(rules.clone()),
+            ..Default::default()
+        };
+        let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
+        assert!(report.source_health.is_some(), "实际宿主须走健康观察入口");
+        assert!(probe.bought_first);
+        if details {
+            assert!(
+                probe.observed.iter().any(|(_, _, _, trades)| *trades > 0),
+                "完整消费者确实见到原成交明细，不能以空历史自证省略"
+            );
+        } else {
+            assert!(probe.observed.iter().all(|(_, _, _, trades)| *trades == 0));
+        }
+        outputs.push((
+            probe
+                .observed
+                .iter()
+                .map(|(at, count, ask, _)| (*at, *count, ask.clone()))
+                .collect::<Vec<_>>(),
+            serde_json::to_value(&report.account_economics_memory).unwrap(),
+            serde_json::to_value(&report.day_economics).unwrap(),
+            report.calculation_count,
+            probe.dispatched,
+            serde_json::to_value(&report.source_health).unwrap(),
+        ));
+    }
+    assert_eq!(
+        outputs[0], outputs[1],
+        "健康入口同前沿/观察、真实账户及资金积分保持"
+    );
 }

@@ -226,6 +226,9 @@ impl<'a> PairMarketRead<'a> {
 impl StrategyV1 for ComplementaryPairV1 {
     type Error = StrategyErrorV1;
     type Diagnostics = ComplementaryPairDiagnosticV1;
+    fn requires_trade_economics_details(&self) -> bool {
+        false
+    }
     fn observation_requirements(&self) -> contracts::PublicObservationRequirementsV1 {
         contracts::PublicObservationRequirementsV1 {
             binance_depth_quantities: self.config.probability.binance_pressure_weight_usd != 0.0
@@ -531,7 +534,6 @@ impl StrategyV1 for ComplementaryPairV1 {
                         repair_token,
                         business: Self::business_dependency(
                             &input.action_before,
-                            &input.trade_economics,
                             &o.market.condition_id,
                             &[],
                         )

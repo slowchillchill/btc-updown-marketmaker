@@ -256,7 +256,7 @@ async fn real_memory_noe_delivers_closed_order_feedback_and_cancel_before_finish
     };
     assert!(observation.delivered_through() > 0);
     assert_eq!(observation.durable_through(), 0);
-    assert!(observation.result_references().is_empty());
+    assert!(observation.result_references().unwrap().is_empty());
     assert!(
         driver.execution.actor.pending_projections.is_empty(),
         "已完整移交的投影正文不再由 actor 重复保留"
@@ -337,7 +337,7 @@ async fn real_memory_noe_delivers_closed_order_feedback_and_cancel_before_finish
     );
     driver.complete().unwrap();
     assert_eq!(observation.durable_through(), accepted);
-    let references = observation.result_references();
+    let references = observation.result_references().unwrap();
     assert!(!references.is_empty());
     let resolved = references
         .iter()
@@ -573,7 +573,7 @@ async fn real_memory_noe_stage_and_publish_failures_preserve_materials_without_s
             "独立持有的原始批未被发布器删除"
         );
         assert_eq!(observation.durable_through(), 0);
-        assert!(observation.result_references().is_empty());
+        assert!(observation.result_references().unwrap().is_empty());
         assert!(!std::fs::read_to_string(path).unwrap().contains("RUN_SEAL"));
     }
 }
@@ -617,7 +617,7 @@ async fn finite_legacy_order_consumer_keeps_noe_v2_context_and_reader() {
         "无请求的有限例程没有虚构反馈交付"
     );
     driver.complete().unwrap();
-    for reference in observation.result_references() {
+    for reference in observation.result_references().unwrap() {
         let value = ::execution_normalization::read_noe_result_v2(&reference).unwrap();
         assert_eq!(value.context.contract_version, "execution_normalization_v2");
     }
@@ -818,7 +818,7 @@ async fn training_hidden_prefetch_cannot_advance_public_feedback_visibility_or_o
     }
     assert!(saw_request);
     reader.finish_sealed_clean_run().unwrap();
-    assert!(observation.result_references().iter().any(|reference| {
+    assert!(observation.result_references().unwrap().iter().any(|reference| {
         let result = ::execution_normalization::read_noe_result_v3(reference).unwrap();
         matches!(result.record.source_reference().record, SimV2SourceRecordReferenceV1::DirectResponse { response_received_at_utc_ms, .. } if response_received_at_utc_ms == received)
     }));

@@ -219,3 +219,11 @@ D-0311/D-0312 下的 `run_historical_days_v1` 接收 `HistoricalDayConfigV1` 日
 CLI使用 `--mode day --config <JSON或TOML> --progress-interval-seconds <秒>`。配置顶层提供 `rules`（原规则快照配置）、可选 `parallel_dates` 和 `days`。每个日期提供 `preparation`、`checkpoint_root`、`checkpoint_interval_seconds`、上述可选事件周期／领先目标，以及 `candidates`。每个候选提供原独立宿主 `run: HistoricalPreparedRunConfigV1`、完整43字段 `strategy: ComplementaryPairConfigV1` 和固定 `request_namespace`；宿主时序、规则、账户和命名空间不由策略参数文件自动补齐。CLI沿原字段类型覆盖 `--strategy.<字段> <值>`，day模式把显式覆盖应用到各候选，记录完整有效参数和请求命名空间。再次调用同一日根自动恢复或完成复用；stdout输出 `days` 及上述 `summaries`。旧run／prepare／reuse入口保持原调用。
 
 A的36份策略配置分布在对应五折（7/8/7/7/7），每份只含原43策略字段。调用方按获批比较窗和相应冻结配置装配日期及每候选每日独立2000pUSD账户；入口不自动把36候选用于所有日期，也不自动启动经营研究。
+
+### 日运行的经济读取与物理批量
+
+日入口仍在每个原事件边界读取经济事实并推进统计时间。Ledger 在原事实拥有方维护成交数量、未闭合前驱、剩余费用、投入本金和返佣贡献的增量汇总；报价变化仍重估孤腿，未知估值不替换为零。人工策略只使用这些正式费用归属，不再冻结全部历史成交；需要成交详情的其他策略默认仍取得完整详情。SharedExecution 的动作快照按活动身份和本次请求引用保留原订单及闭合腿的零承诺证据。待关联经济事实只在新反馈、Ledger 应用位置或相关公共市场变化时再次尝试，平台自动结算和原反馈可见顺序保持。
+
+日 SIMDAY01 运行的 NOE 后台将多个逻辑批写入不可变 `noe_arrow_parquet_segment_v1` 段。原数字 `.parquet` 地址是逻辑容器地址，由原 `.manifest.json` 定位段和本批行范围；批内 ordinal、来源水位和发布顺序保持。段正文、footer 和文件同步只完成一次，引用只在对应 manifest 稳定后交付。单条／单批读取仅解码所需范围，显式顺序历史读取复用当前段的 Arrow 页；普通历史／PAPER 的写入保持原单批 Parquet，旧单批 Parquet 和 JSON 仍由同一 owner 读取。运行及检查点不保留全历史耐久引用列表，实际检查消费者按需枚举已发布材料，并接收读取错误。直接对逻辑地址取文件规模的可选展示可能为未知，应由读取方经 manifest 找到物理段；本组不修改独立展示模块。
+
+日后台以 256 逻辑批、4096 行或 4 MiB 已编码正文作为排出目标，大批不会因此被拒绝。原逐市场结束、完整检查点和正常完成仍立即排出所需材料，顺序仍为 SIM 稳定、NOE 发布、Ledger 来源引用持久化。Ledger 内存归约保持实时，Parquet 小交接批合并为有界行组，原交接批的 flush 不等于 fsync；稳定点仍封口并同步。退出不补排空。恢复只删除完整点后的逻辑 manifest，并整体回收已无保留 manifest 引用的 owner 段，不截断共享段或重写已发布前缀。上述表示变化不提供跨实现身份的旧研究续跑，也未验证完整一小时或 174 账户日的吞吐、容量和耗时。

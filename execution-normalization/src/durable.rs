@@ -406,6 +406,7 @@ impl<
         paths.sort();
         let mut commits = Vec::with_capacity(paths.len());
         let mut expected_run_id: Option<String> = None;
+        let mut history = parquet::HistoryReader::default();
         for (expected_commit_sequence, path) in paths.into_iter().enumerate() {
             let expected_commit_sequence = expected_commit_sequence as u64;
             let file_sequence = commit_sequence_from_path(&path)?;
@@ -415,7 +416,12 @@ impl<
                     found: file_sequence,
                 });
             }
-            let container: CommitContainer<T, C> = read_commit_container(&path)?;
+            let container: CommitContainer<T, C> =
+                if path.extension().is_some_and(|e| e == "parquet") {
+                    history.read(&path)?
+                } else {
+                    read_commit_container(&path)?
+                };
             check_container_header(
                 &path,
                 &container.payload.container_version,
@@ -789,7 +795,11 @@ pub struct StagedNormalizationWriter<T, C> {
     context: ExecutionNormalizationContextV1,
     #[cfg(test)]
     publish_fault: PublishFaultV1,
-    staged: std::collections::VecDeque<(SimV2SourceWatermarkV1, u64)>,
+    staged: std::collections::VecDeque<(SimV2SourceWatermarkV1, u64, u64)>,
+    segment: Option<(String, Option<crate::record_file::Writer>)>,
+    staged_rows: u64,
+    staged_bytes: usize,
+    batched: bool,
     published: u64,
     payload: std::marker::PhantomData<(T, C)>,
 }
@@ -799,6 +809,8 @@ pub struct StagedNormalizationCheckpointV1 {
     context_directory: PathBuf,
     context: ExecutionNormalizationContextV1,
     published: u64,
+    #[serde(default)]
+    batched: bool,
 }
 impl<
     T: NoeTradePayload<C>,
@@ -817,18 +829,56 @@ impl<
             #[cfg(test)]
             publish_fault: PublishFaultV1::default(),
             staged: std::collections::VecDeque::new(),
+            segment: None,
+            staged_rows: 0,
+            staged_bytes: 0,
+            batched: false,
             published: 0,
             payload: std::marker::PhantomData,
         })
     }
 
+    /// 日后台选择共享物理段；原普通/PAPER入口继续逐批文件。
+    pub fn create_batched(
+        root: &Path,
+        context: ExecutionNormalizationContextV1,
+    ) -> Result<Self, DurableErrorV1> {
+        let mut writer = Self::create(root, context)?;
+        writer.batched = true;
+        Ok(writer)
+    }
     pub fn checkpoint(&self) -> StagedNormalizationCheckpointV1 {
         debug_assert!(self.staged.is_empty(), "检查点必须先稳定原 NOE 材料");
         StagedNormalizationCheckpointV1 {
             context_directory: self.context_directory.clone(),
             context: self.context.clone(),
             published: self.published,
+            batched: self.batched,
         }
+    }
+    pub fn context_directory(&self) -> &Path {
+        &self.context_directory
+    }
+    /// 仅实际检查消费者枚举已发布材料；运行与快照不保存全历史引用列表。
+    pub fn published_result_references(
+        directory: &Path,
+        through: u64,
+    ) -> Result<Vec<NoeResultReferenceV1>, DurableErrorV1> {
+        let mut paths = published_commit_paths(&directory.join(COMMITS_DIRECTORY_NAME))?;
+        paths.sort();
+        let mut references = Vec::new();
+        for path in paths {
+            let (boundary, count) = parquet::read_position(&path, T::COMMIT_VERSION)?;
+            if boundary.source_watermark.projection_batch_sequence <= through {
+                references.extend((0..count).map(|record_ordinal| NoeResultReferenceV1 {
+                    commit_container: NoePublishedContainerReferenceV1 {
+                        location: path.to_string_lossy().into_owned(),
+                    },
+                    record_ordinal,
+                }));
+            }
+        }
+        Ok(references)
     }
     /// 只丢弃同一写入器在完整检查点之后生成的尾部，不归一化已提交正文。
     pub fn restore_checkpoint(
@@ -842,6 +892,15 @@ impl<
             let name = entry.file_name();
             let name = name.to_string_lossy();
             let name = name.strip_prefix('.').unwrap_or(&name);
+            if name
+                .strip_prefix("segment-")
+                .and_then(|s| s.strip_suffix(".parquet.tmp"))
+                .is_some_and(|n| n.len() == 20 && n.bytes().all(|b| b.is_ascii_digit()))
+            {
+                fs::remove_file(entry.path())
+                    .map_err(|e| io_error("丢弃未封口NOE段", &entry.path(), e))?;
+                continue;
+            }
             let number = name
                 .strip_suffix(".parquet")
                 .or_else(|| name.strip_suffix(".manifest.json"))
@@ -849,17 +908,16 @@ impl<
                 .or_else(|| name.strip_suffix(".manifest.json.tmp"));
             if let Some(number) =
                 number.filter(|n| n.len() == 20 && n.bytes().all(|b| b.is_ascii_digit()))
-            {
-                if number
+                && number
                     .parse::<u64>()
                     .ok()
                     .is_some_and(|n| n >= saved.published)
-                {
-                    fs::remove_file(entry.path())
-                        .map_err(|e| io_error("丢弃 NOE 未提交经济尾", &entry.path(), e))?;
-                }
+            {
+                fs::remove_file(entry.path())
+                    .map_err(|e| io_error("丢弃 NOE 未提交经济尾", &entry.path(), e))?;
             }
         }
+        parquet::discard_unreferenced_segments(&directory)?;
         File::open(&directory)
             .and_then(|f| f.sync_all())
             .map_err(|e| io_error("同步 NOE 检查点尾部", &directory, e))?;
@@ -867,6 +925,10 @@ impl<
             context_directory: saved.context_directory,
             context: saved.context,
             staged: Default::default(),
+            segment: None,
+            staged_rows: 0,
+            staged_bytes: 0,
+            batched: saved.batched,
             published: saved.published,
             payload: std::marker::PhantomData,
             #[cfg(test)]
@@ -877,17 +939,57 @@ impl<
         &mut self,
         batch: &crate::core::NormalizationBatch<MT, MC, I, F>,
     ) -> Result<(), DurableErrorV1> {
-        let path = self.stage_path(self.published + self.staged.len() as u64);
-        parquet::write_batch(&path, &batch.source_watermark, &batch.records)?;
-        self.staged
-            .push_back((batch.source_watermark.clone(), batch.records.len() as u64));
+        if !self.batched {
+            let path = self.stage_path(self.published + self.staged.len() as u64);
+            parquet::write_batch(&path, &batch.source_watermark, &batch.records)?;
+            self.staged.push_back((
+                batch.source_watermark.clone(),
+                batch.records.len() as u64,
+                0,
+            ));
+            return Ok(());
+        }
+        let directory = self.context_directory.join(COMMITS_DIRECTORY_NAME);
+        if self.segment.is_none() {
+            let name = format!("segment-{:020}.parquet", self.published);
+            let path = directory.join(format!(".{name}.tmp"));
+            let writer = crate::record_file::Writer::create(
+                &path,
+                parquet::SEGMENT_FORMAT,
+                "shared_noe_segment_v1",
+            )
+            .map_err(|e| io_error("创建NOE共享段", &path, e))?;
+            self.segment = Some((name, Some(writer)));
+        }
+        let (name, writer) = self.segment.as_mut().unwrap();
+        let path = directory.join(format!(".{name}.tmp"));
+        let rows = parquet::encode_rows(&path, &batch.records)?;
+        let bytes = rows
+            .iter()
+            .map(|(_, kind, body)| kind.len() + body.len() + 8)
+            .sum::<usize>();
+        writer
+            .as_mut()
+            .expect("稳定失败的写入器不再接纳新批")
+            .append(&rows)
+            .map_err(|e| io_error("写入NOE共享段", &path, e))?;
+        self.staged.push_back((
+            batch.source_watermark.clone(),
+            batch.records.len() as u64,
+            self.staged_rows,
+        ));
+        self.staged_rows += batch.records.len() as u64;
+        self.staged_bytes += bytes;
         Ok(())
     }
-
     fn stage_path(&self, sequence: u64) -> PathBuf {
         self.context_directory
             .join(COMMITS_DIRECTORY_NAME)
             .join(format!(".{sequence:020}.parquet.tmp"))
+    }
+    /// 内部排出目标，不拒绝大批；显式稳定点仍立即排出所有已接纳材料。
+    pub fn needs_stability(&self) -> bool {
+        self.staged.len() >= 256 || self.staged_rows >= 4096 || self.staged_bytes >= 4 << 20
     }
 
     /// 调用方必须先稳定关联的 SIM 输入；时间绑定本次稳定尝试。
@@ -897,7 +999,29 @@ impl<
         mut now: impl FnMut() -> i64,
         mut published: impl FnMut(&PublishedNoeCommitV1),
     ) -> Result<(), DurableErrorV1> {
-        while let Some((watermark, record_count)) = self.staged.front() {
+        let directory = self.context_directory.join(COMMITS_DIRECTORY_NAME);
+        if let Some((name, writer)) = &mut self.segment
+            && let Some(writer) = writer.take()
+        {
+            let stage = directory.join(format!(".{name}.tmp"));
+            writer
+                .finish()
+                .map_err(|e| io_error("稳定NOE共享段", &stage, e))?;
+            let parent =
+                File::open(&directory).map_err(|e| io_error("打开NOE共享段目录", &directory, e))?;
+            rustix::fs::renameat_with(
+                &parent,
+                stage.file_name().unwrap(),
+                &parent,
+                name.as_str(),
+                rustix::fs::RenameFlags::NOREPLACE,
+            )
+            .map_err(|e| io_error("发布NOE共享段", &directory.join(name.as_str()), e.into()))?;
+            parent
+                .sync_all()
+                .map_err(|e| io_error("同步NOE共享段目录", &directory, e))?;
+        }
+        while let Some((watermark, record_count, row_start)) = self.staged.front() {
             let sequence = self.published;
             let boundary = NoeSourceCommitBoundaryV1 {
                 context_reference: self.context.context_reference.clone(),
@@ -912,14 +1036,30 @@ impl<
             let fault = std::mem::take(&mut self.publish_fault);
             #[cfg(not(test))]
             let fault = PublishFaultV1::default();
-            parquet::publish(
-                &self.stage_path(sequence),
-                &target_path,
-                T::COMMIT_VERSION,
-                sequence,
-                &boundary,
-                fault,
-            )?;
+            if self.batched {
+                parquet::publish_segment_manifest(
+                    &target_path,
+                    T::COMMIT_VERSION,
+                    sequence,
+                    &boundary,
+                    parquet::SegmentRange {
+                        file_name: self.segment.as_ref().unwrap().0.clone(),
+                        row_start: *row_start,
+                        record_count: *record_count,
+                        source_watermark: watermark.clone(),
+                    },
+                    fault,
+                )?;
+            } else {
+                parquet::publish(
+                    &self.stage_path(sequence),
+                    &target_path,
+                    T::COMMIT_VERSION,
+                    sequence,
+                    &boundary,
+                    fault,
+                )?;
+            }
             published(&PublishedNoeCommitV1 {
                 boundary,
                 container_reference: NoePublishedContainerReferenceV1 {
@@ -930,6 +1070,9 @@ impl<
             self.staged.pop_front();
             self.published += 1;
         }
+        self.segment = None;
+        self.staged_rows = 0;
+        self.staged_bytes = 0;
         Ok(())
     }
 }
@@ -1104,7 +1247,15 @@ fn read_noe_result_with_context<
 ) -> Result<(ResolvedNoeResult<T, C>, u64), DurableErrorV1> {
     let commit_path = PathBuf::from(&reference.commit_container.location);
     let file_sequence = commit_sequence_from_path(&commit_path)?;
-    let container: CommitContainer<T, C> = read_commit_container(&commit_path)?;
+    let (container, record_count, record_index): (CommitContainer<T, C>, u64, usize) =
+        if commit_path.extension().is_some_and(|e| e == "parquet") {
+            let (container, count) = parquet::read_record(&commit_path, reference.record_ordinal)?;
+            (container, count, 0)
+        } else {
+            let container = read_commit_container(&commit_path)?;
+            let count = container.payload.records.len() as u64;
+            (container, count, reference.record_ordinal as usize)
+        };
     check_container_header(
         &commit_path,
         &container.payload.container_version,
@@ -1118,12 +1269,11 @@ fn read_noe_result_with_context<
         });
     }
 
-    let record_count = container.payload.records.len() as u64;
     let record = container
         .payload
         .records
         .into_iter()
-        .nth(reference.record_ordinal as usize)
+        .nth(record_index)
         .ok_or_else(|| DurableErrorV1::RecordOrdinalOutOfRange {
             path: commit_path.clone(),
             record_ordinal: reference.record_ordinal,
@@ -1278,11 +1428,13 @@ fn discard_unpublished_suffixes(directory: &Path) -> Result<(), DurableErrorV1> 
         let name = name.to_string_lossy();
         if (name.starts_with('.') && name.ends_with(".tmp"))
             || (path.extension().is_some_and(|e| e == "parquet")
+                && !name.starts_with("segment-")
                 && !path.with_extension("manifest.json").exists())
         {
             fs::remove_file(&path).map_err(|e| io_error("清理未发布提交后缀", &path, e))?;
         }
     }
+    parquet::discard_unreferenced_segments(directory)?;
     sync_directory(directory, "同步提交后缀恢复")
 }
 
@@ -2122,7 +2274,7 @@ mod tests {
                 serde_json::to_vec(&expected_fact).unwrap()
             );
             let mut writer =
-                StagedNormalizationWriter::<Trade, SourceNeutralControlResultV1>::create(
+                StagedNormalizationWriter::<Trade, SourceNeutralControlResultV1>::create_batched(
                     &new_path,
                     context(),
                 )
@@ -2149,11 +2301,162 @@ mod tests {
             let new: CommitContainer<Trade, SourceNeutralControlResultV1> =
                 read_commit_container(&new_file).unwrap();
             assert_eq!(old, new, "原业务记录、边界和身份保持；物理编码改变");
-            assert_eq!(&fs::read(new_file).unwrap()[..4], b"PAR1");
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &fs::read(new_file.with_extension("manifest.json")).unwrap(),
+            )
+            .unwrap();
+            let physical = new_file
+                .parent()
+                .unwrap()
+                .join(manifest["segment"]["file_name"].as_str().unwrap());
+            assert_eq!(&fs::read(physical).unwrap()[..4], b"PAR1");
         }
+        let commits = context_directory(new.path(), &context().context_reference)
+            .join(COMMITS_DIRECTORY_NAME);
+        let segments: Vec<_> = fs::read_dir(&commits)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("segment-")
+            })
+            .collect();
+        assert_eq!(segments.len(), 1, "两逻辑批共用一个不可变物理段");
+        let first = commits.join(format!("{:020}.parquet", 0));
+        let (_, count) = parquet::read_position(&first, Trade::COMMIT_VERSION).unwrap();
+        let last =
+            parquet::read_record::<Trade, SourceNeutralControlResultV1>(&first, count - 1).unwrap();
+        assert_eq!(last.1, count);
+        assert_eq!(last.0.payload.records.len(), 1);
+        assert!(
+            matches!(
+                parquet::read_record::<Trade, SourceNeutralControlResultV1>(&first, count),
+                Err(DurableErrorV1::RecordOrdinalOutOfRange { .. })
+            ),
+            "不能越界进入邻批"
+        );
+        eprintln!(
+            "NOE physical segments={} logical_commits=2 rows_first={} segment_bytes={}",
+            segments.len(),
+            count,
+            fs::metadata(&segments[0]).unwrap().len()
+        );
         let reopened =
             DurableContextStoreV1::open(new.path(), &context().context_reference).unwrap();
         assert_eq!(reopened.commits().len(), 2);
+    }
+
+    #[test]
+    fn public_single_record_reader_rejects_overflowed_shared_segment_range() {
+        use crate::identity::{MemoryEconomicFactReferenceV1, MemoryLogicalIdentityV1};
+        type Trade = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1;
+        let temp = TempDir::new().unwrap();
+        let context = sim_v2_context(seed(), Trade::CONTRACT_VERSION).unwrap();
+        let mut core = crate::core::NormalizationCore::<
+            Trade,
+            SourceNeutralControlResultV1,
+            MemoryLogicalIdentityV1,
+            MemoryEconomicFactReferenceV1,
+        >::new(context.clone());
+        let batch = core.normalize_and_accept(memory_batch(1)).unwrap();
+        let mut writer =
+            StagedNormalizationWriter::<Trade, SourceNeutralControlResultV1>::create_batched(
+                temp.path(),
+                context,
+            )
+            .unwrap();
+        writer.stage(&batch).unwrap();
+        let mut references = Vec::new();
+        writer
+            .stabilize(
+                || 3000,
+                |commit| references.extend(commit.result_references()),
+            )
+            .unwrap();
+        let mut reference = references.remove(0);
+        read_noe_result_v1(&reference).expect("真实公开读取入口先能读原有效记录");
+        let manifest_path =
+            Path::new(&reference.commit_container.location).with_extension("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["segment"]["row_start"] = serde_json::Value::from(u64::MAX);
+        manifest["segment"]["record_count"] = serde_json::Value::from(2);
+        fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        reference.record_ordinal = 1;
+        assert!(
+            matches!(
+                read_noe_result_v1(&reference),
+                Err(DurableErrorV1::ContainerDecode { .. })
+            ),
+            "公开单记录读取直接拒绝损坏范围，不能依赖先读position或panic"
+        );
+    }
+
+    #[test]
+    fn shared_segment_checkpoint_discards_only_uncommitted_tail_and_reuses_logical_addresses() {
+        type Trade = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1;
+        let root = TempDir::new().unwrap();
+        let mut core =
+            crate::core::NormalizationCore::<Trade, SourceNeutralControlResultV1>::new(context());
+        let mut writer =
+            StagedNormalizationWriter::<Trade, SourceNeutralControlResultV1>::create_batched(
+                root.path(),
+                context(),
+            )
+            .unwrap();
+        writer
+            .stage(&core.normalize_and_accept(batch(1)).unwrap())
+            .unwrap();
+        writer.stabilize(|| 3000, |_| {}).unwrap();
+        let saved = writer.checkpoint();
+        let directory = writer.context_directory.join(COMMITS_DIRECTORY_NAME);
+        let prefix = directory.join(format!("segment-{:020}.parquet", 0));
+        let bytes = fs::read(&prefix).unwrap();
+        writer
+            .stage(&core.normalize_and_accept(batch(2)).unwrap())
+            .unwrap();
+        writer
+            .stage(&core.normalize_and_accept(batch(3)).unwrap())
+            .unwrap();
+        writer.stabilize(|| 4000, |_| {}).unwrap();
+        assert!(
+            directory
+                .join(format!("segment-{:020}.parquet", 1))
+                .exists()
+        );
+        drop(writer);
+        let mut writer =
+            StagedNormalizationWriter::<Trade, SourceNeutralControlResultV1>::restore_checkpoint(
+                saved,
+            )
+            .unwrap();
+        assert_eq!(fs::read(&prefix).unwrap(), bytes);
+        assert!(
+            !directory
+                .join(format!("segment-{:020}.parquet", 1))
+                .exists()
+        );
+        assert_eq!(published_commit_paths(&directory).unwrap().len(), 1);
+        // 同版本继续用原逻辑提交 1；不改已保存的容器或业务序号。
+        let mut core =
+            crate::core::NormalizationCore::<Trade, SourceNeutralControlResultV1>::new(context());
+        core.normalize_and_accept(batch(1)).unwrap();
+        writer
+            .stage(&core.normalize_and_accept(batch(2)).unwrap())
+            .unwrap();
+        writer.stabilize(|| 5000, |_| {}).unwrap();
+        let reopened =
+            DurableContextStoreV1::open(root.path(), &context().context_reference).unwrap();
+        assert_eq!(reopened.commits().len(), 2);
+        assert_eq!(
+            reopened.commits()[1]
+                .boundary
+                .source_watermark
+                .projection_batch_sequence,
+            2
+        );
     }
 
     #[test]

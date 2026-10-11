@@ -5721,7 +5721,7 @@ fn advance_role_time_at_v2(
     logical_at_utc_ms: i64,
 ) -> Result<BusinessReducerStateV2, BusinessReductionErrorV2> {
     let session = state.session.as_mut().expect("逻辑驱动已确认唯一会话");
-    match path {
+    let closed_markets = match path {
         MarketEventPathV1::HiddenPlatform => session
             .hidden_platform_markets
             .as_mut()
@@ -5735,7 +5735,7 @@ fn advance_role_time_at_v2(
     if drives_execution {
         session
             .execution_state
-            .advance_market_time(&session.market_directory, logical_at_utc_ms)
+            .advance_market_time(&closed_markets)
             .map_err(|error| {
                 BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
             })?;

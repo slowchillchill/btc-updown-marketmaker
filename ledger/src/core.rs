@@ -373,6 +373,12 @@ pub struct LedgerWriterV1 {
     funds: self::funds::FundsStateV1,
     economics: self::economics::EconomicsState,
 }
+impl LedgerWriterV1 {
+    /// 原已提交内存经济前缀；公共关联、资金及 NOE 应用共用原序号。
+    pub fn applied_entry_sequence(&self) -> u64 {
+        self.current_ledger_entry_seq
+    }
+}
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -810,7 +816,7 @@ impl LedgerWriterV1 {
                 after_send_unknown_count: market_after_send_unknown_count,
             },
         );
-        reservations.requests.insert(
+        reservations.insert_request(
             request_identity.clone(),
             CachedReservationRequestV1 {
                 outcome: outcome.clone(),
@@ -1694,7 +1700,7 @@ impl LedgerWriterV1 {
         else {
             unreachable!("刚构造的容量决定保持其耐久记录类型")
         };
-        self.reservations.requests.insert(request_identity, request);
+        self.reservations.insert_request(request_identity, request);
         Ok(outcome)
     }
 
@@ -1775,7 +1781,7 @@ impl LedgerWriterV1 {
                 request_identity,
                 request,
             } => {
-                self.reservations.requests.insert(request_identity, request);
+                self.reservations.insert_request(request_identity, request);
                 Ok(())
             }
             DurablePayloadV1::Transaction(effect) => {
@@ -2152,7 +2158,9 @@ fn commit_reservation_slice(target: &mut ReservationStateV1, slice: ReservationS
     target.after_send_unknown_principal_pusd = slice.after_send_unknown_principal_pusd;
     target.after_send_unknown_immediate_fee_pusd = slice.after_send_unknown_immediate_fee_pusd;
     target.after_send_unknown_count = slice.after_send_unknown_count;
-    target.requests.extend(slice.requests);
+    for (id, request) in slice.requests {
+        target.insert_request(id, request);
+    }
     target
         .applied_local_events
         .extend(slice.applied_local_events);
