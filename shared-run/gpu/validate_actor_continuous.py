@@ -23,6 +23,7 @@ import copy
 from dataclasses import fields,is_dataclass
 from ledger_drain import PublicLedgerReceiver
 from task_requests import ActorRequestDirectory,ActorTaskRequests
+import weakref,gc
 
 
 def stored_actual(value):
@@ -237,6 +238,9 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         for at in range(first_observation,1300+offset,100):policies[at]=policies[1800+offset]
         policies[2800+offset]=policies[1800+offset]
     random=ActionRandom(zero+181606,T([[0,0,0,0]]));observations=[];senders=[];bound=[]
+    model_records=[];completed_records=[];retired_observations=[];retired_senders=[]
+    expected_hidden=torch.zeros((2,len(market_indices),64),device=zero.device)
+    warm_steps=0;opened=False
     history_checks=[];history_retry=False;resource_candidate=None;end_retry=False;release_calls=[]
     def freeze(world,at,enabled):
         nonlocal history_retry,resource_candidate
@@ -356,6 +360,55 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         sender=FrozenActorSend(publication,driver,control,ids,codec,submit,receive,observation.source_snapshot,
             decision_cutoff=observation.cutoff)
         senders.append(sender);return sender
+    def model_started(task):
+        nonlocal warm_steps,opened
+        observation=task.observation;at=int(observation.account.cutoff.cpu()[0])
+        original=next(value for value in observations if int(value.account.cutoff.cpu()[0])==at)
+        assert observation is original
+        assert task.policy is policies[at]
+        assert task.evaluation.policy_version.cpu().tolist()==[at]*len(market_indices)
+        if two:
+            # 独立逐市场前向在真实开始点比较，不存历史task/策略/冻结。
+            for role in (0,1):
+                for row in range(2):
+                    if observation.frozen.role[row].cpu().item()!=role:continue
+                    selected=observation.frozen.rows(T([row]))
+                    with torch.no_grad():state,hidden,value=task.policy.state_and_value(*selected.model_inputs(),expected_hidden[:,row:row+1])
+                    torch.testing.assert_close(task.evaluation.hidden[:,row:row+1],hidden)
+                    torch.testing.assert_close(task.evaluation.state[row:row+1],state)
+                    if row==1 and role==0:warm_steps+=1
+                    if row==1 and role==1 and not opened:
+                        assert warm_steps==(300 if full_warmup else 7) and expected_hidden[:,row:row+1].abs().sum().cpu().item()>0
+                        opened=True
+                    expected_hidden[:,row:row+1]=hidden
+        else:
+            with torch.no_grad():expected=task.policy.frozen_state_and_value(observation.frozen,expected_hidden,identities,task.evaluation.policy_version)
+            torch.testing.assert_close(task.evaluation.hidden,expected.hidden)
+            expected_hidden.copy_(expected.hidden)
+        model_records.append(dict(cutoff=at,started=int(task.started_at.cpu()[0]),completed=task.completed_at.cpu().tolist(),
+            version=task.evaluation.policy_version.cpu().tolist(),observation=weakref.ref(original)))
+    def model_completed(task):
+        assert ((task.stage==3)|~task.active).all().cpu().item()
+        original=next(row for row in model_records if row['started']==int(task.started_at.cpu()[0]))
+        version=task.evaluation.policy_version.cpu().tolist()
+        assert task.observation is original['observation']()
+        assert version==original['version']
+        stage('completed_task_binding',cutoff=original['cutoff'],version=version,original_frozen=True)
+        if task.sender is not None:
+            assert task.sender.identities.contexts==task.request_identity.contexts
+            assert torch.equal(task.sender.control.global_requests,task.request_identity.slots)
+            assert (~task.active|task.sender.complete).all().cpu().item()
+            retired_senders.append(weakref.ref(task.sender))
+        retired_observations.append(weakref.ref(task.observation))
+        completed_records.append(int(task.observation.account.cutoff.cpu()[0]))
+    def released_refs():
+        observations.clear();senders.clear();gc.collect()
+        assert all(ref() is None for ref in retired_observations)
+        assert all(ref() is None for ref in retired_senders)
+        assert all(not ((task.stage==3)|~task.active).all().cpu().item() for task in models.tasks)
+        return dict(pending_tasks=len(models.tasks),completed_models=len(completed_records),
+            retired_observations=len(retired_observations),retired_senders=len(retired_senders),
+            weak_references_released=True,queue_owns_only_unfinished=True)
     def release_markets(ended):
         release_calls.append(ended.cpu().tolist());material.release_markets(ended)
     def timing(observation):
@@ -368,7 +421,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     models=ActorModelQueue(torch.zeros((2,len(market_indices),64),device='cuda'),identities,T([first_observation]),policy_start,
         timing,sender_factory,
         row_roots=row_roots,market_ends=market.times[market_indices,1] if two else None,
-        release_markets=release_markets if two else None,request_identities=task_requests)
+        release_markets=release_markets if two else None,request_identities=task_requests,on_started=model_started,on_completed=model_completed)
     def receive_observation(public,delivery,enabled):
         at=clock.gates.public_visible_at.cpu().tolist()
         if at[0] in (1600,1700):
@@ -419,7 +472,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             assert torch.equal(shared.next_observation,failed.account.cutoff)
             assert torch.equal(models.hidden,hidden_before) and torch.equal(models.identities,identity_before)
             assert torch.equal(random.counter,random_before)
-            assert not models.tasks[-1].active.any().cpu().item()
+            assert all(task.observation is not failed for task in models.tasks)
             if two and int(failed.account.cutoff.cpu()[0])==2000+offset:
                 # 无积压的原队列代表：失败的新截止不能替代已接纳观察前沿。
                 released=[]
@@ -458,24 +511,15 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         frozen=observations[-1] if observations else None
         if frozen is not None:stage('blocked_unknown',fault=frozen.frozen.fault.cpu().tolist(),required=frozen.market.required.cpu().tolist())
         raise AssertionError('真实连续路径未完成且尚无已报告物理需求')
-    queued=[task for task in models.tasks if task.evaluation is None and task.request_identity is not None]
-    actual_bindings=[task.request_identity for task in queued if task.request_identity.contexts[0] is not None]
-    assert len(request_directory.keys)==len(actual_bindings)+int('cold_authority' not in source)
-    assert [binding.contexts[0]['global_request_id'] for binding in actual_bindings]==[
-        source['run_id']+'/'+source['session_id']+':actor:'+str(i) for i in range(len(actual_bindings))]
-    for task in models.tasks:
-        if task.evaluation is not None:
-            original=next(old for old in queued if old.observation is task.observation)
-            assert task.request_identity is original.request_identity
-            if task.sender is not None:
-                assert task.sender.identities.contexts==task.request_identity.contexts
-                assert torch.equal(task.sender.control.global_requests,task.request_identity.slots)
+    real_tasks=len(observations)
+    assert len(request_directory.keys)==real_tasks+int('cold_authority' not in source)
+    assert request_directory.keys[int('cold_authority' not in source):]==[
+        source['run_id']+'/'+source['session_id']+':actor:'+str(i) for i in range(real_tasks)]
     raw_bytes,raw_offsets=request_directory.columns();raw=bytes(raw_bytes.cpu().tolist());offsets=raw_offsets.cpu().tolist()
     assert [raw[offsets[i]:offsets[i+1]].decode('utf-8') for i in range(len(offsets)-1)]==request_directory.keys
-    stage('actual_task_request_binding',real_tasks=len(actual_bindings),keys=len(request_directory.keys),
+    stage('actual_task_request_binding',real_tasks=real_tasks,keys=len(request_directory.keys),
         encoded_bytes=len(raw),byte_capacity=request_directory.bytes.numel(),offset_capacity=request_directory.offsets.numel(),
-        contexts=[binding.contexts for binding in actual_bindings],failed_freeze_allocates_no_identity=True,
-        started_task_keeps_original_binding=True)
+        failed_freeze_allocates_no_identity=True,started_task_keeps_original_binding=True)
     if os.environ.get('B_GPU_PUBLIC_BLOCKS'):
         # 有限正确性代表的原整页调度对照；不安装到生产来源或SIM/Ledger。
         from public_device_page import build_public_device_page
@@ -493,7 +537,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     if two:
         assert page_changes and hidden_pages
         result=verify_two_market_continuous(source,clock,material,models,observations,senders,history_retry,
-            history,encoder,random,evidence,started,artifact,stage,end_retry,release_calls)
+            history,encoder,random,evidence,started,artifact,stage,end_retry,release_calls,model_records,warm_steps,opened)
         import shutil
         registry=material.history.registry
         result['source_identity_index']={'entries':registry.identity_count,'disk_bytes':registry.path.stat().st_size,
@@ -543,6 +587,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                 current_cash=str(amounts(clock.public.ledger.platform.balances)[0]),
                 success_quantities=[str(v) for v in amounts(clock.public.ledger.success_pools.quantity)],
                 source_platform_prefix=values(clock.public.ledger.platform.platform_source_prefix),late_predecessor=late_predecessor)
+        result['task_retirement']=released_refs()
         (artifact/'two-market-report.json').write_text(json.dumps(result,indent=2))
         return result
     assert [int(o.frozen.cutoff.cpu()[0]) for o in observations]==[1300,1400,1500,1600,1700,1800,1900]
@@ -607,13 +652,8 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     assert shared.next_observation.cpu().tolist()==[2000] and len(observations)==7
     assert clock.runtime.post_results is not None and clock.runtime.cancel_results is not None
     # C1400在C1300发送前冻结；模型全部层沿同根顺序承接，没有按发送重置。
-    actual=[task for task in models.tasks if task.evaluation is not None]
-    assert [int(task.started_at.cpu()[0]) for task in actual]==[1300,1414,1528,1642,1756,1870]
-    previous=torch.zeros((2,1,64),device='cuda')
-    for task in actual:
-        with torch.no_grad():expected=task.policy.frozen_state_and_value(task.observation.frozen,previous,identities,task.evaluation.policy_version)
-        torch.testing.assert_close(task.evaluation.hidden,expected.hidden)
-        previous=expected.hidden
+    assert [row['started'] for row in model_records]==[1300,1414,1528,1642,1756,1870]
+    assert len(models.tasks)==2  # C1800计算中和C1900排队；旧发送对象已退役。
     # 新真实ID的Accepted/formed都已在C1600首次公开；仍核原请求的成员关联。
     old=observations[3].account.intent_orders
     assert old.origin_known.cpu().tolist()==[[True]*(5 if second_buy else 3)]
@@ -634,9 +674,6 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     first_finish=next(row for row in evidence if row['kind']==2 and row['at']==[1414])
     assert first_finish['published'][0]==[True] and not first_finish['receipts'][0]
     assert first_finish['business_random'][0][0]>0
-    for task in actual:
-        at=int(task.observation.frozen.cutoff.cpu()[0])
-        assert task.policy is policies[at] and task.evaluation.policy_version.cpu().tolist()==[at]
     pending_models=[task for task in models.tasks if task.active.any().cpu().item() and (task.stage<3).any().cpu().item()]
     assert any(task.completed_at is not None and task.completed_at.cpu().tolist()==[2084 if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") else 1984] for task in pending_models)
     if second_buy:
@@ -654,7 +691,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     assert values(clock.runtime.input_frontier.next_sequence)==before_input
     result=dict(passed=True,scope='same runtime/account C1300→C1400 queued→c1414 before s1534→new Pair processed→public C1700→Pair cancel→C1900 original frozen/inflight→actual cancel visibility→current Ledger',
         requests=[{'sent_at':int(s.control.execute_at.cpu()[0]),'input_sequence':values(s.receipt.input_sequence)[0],'body':s.requests[1][0]} for s in senders if s.requests is not None],
-        observations=[int(o.frozen.cutoff.cpu()[0]) for o in observations],model_starts=[int(t.started_at.cpu()[0]) for t in actual],
+        observations=[int(o.frozen.cutoff.cpu()[0]) for o in observations],model_starts=[row['started'] for row in model_records],
         page_changes=page_changes,capacity_continuations=continuations,input_sequence=values(clock.runtime.input_frontier.next_sequence),
         business_random=random.counter.cpu().tolist(),ledger_prefix=before_prefix,private_received=clock.public.registry.events.received.size(1),
         cash=[str(x) for x in amounts(run(clock.public.ledger.funds).actual_available)],full_unbounded_host_delivered=False,elapsed_seconds=time.perf_counter()-started)
@@ -716,16 +753,13 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         result.update(same_tick_finish_send_and_cash_checked=True,send_at=87_000_009,
             pre_send_cash=str(same_tick_cash),subsequent_payment=str(payable))
     elif os.environ.get('B_GPU_ACTOR_WINDOW_TAIL') and not two:
-        original_observations=list(result['observations']);original_frozen={id(task.observation) for task in models.tasks}
-        started_versions=[task.evaluation.policy_version.clone() for task in actual]
+        original_observations=list(result['observations'])
         tail=shared.advance_before(T([2300]),yes,progress=stage)
         assert tail.complete.cpu().tolist()==[True] and tail.fault.cpu().tolist()==[0]
         assert shared.next_observation.cpu().tolist()==[2000]
-        assert all(id(task.observation) in original_frozen for task in models.tasks)
         assert [int(o.frozen.cutoff.cpu()[0]) for o in observations]==original_observations
-        assert all(not (task.active&(task.stage<3)).any().cpu().item() for task in models.tasks)
-        assert all(torch.equal(task.evaluation.policy_version,version) for task,version in zip(actual,started_versions,strict=True))
-        torch.testing.assert_close(models.hidden,models.tasks[-1].evaluation.hidden)
+        torch.testing.assert_close(models.hidden,expected_hidden)
+        assert not models.tasks
         result['window_stops_at']=2000;result['tail_checked_through_open_endpoint']=2300
         result['accepted_models_finish_after_window']=2084
         # 原CPU FOK参考给应收，原日规则给付款；金额不从GPU付款后态生成。
@@ -744,50 +778,35 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         paid_balance=amounts(clock.public.ledger.platform.balances)
         assert paid_balance[0]==pre_cash+payable and paid_balance[5]==0 and paid_balance[7]==cpu_accrued-payable
         assert values(clock.public.ledger.current_entry_sequence)==[pre_entry[0]+4]
-        assert all(id(task.observation) in original_frozen for task in models.tasks) and shared.next_observation.cpu().tolist()==[2000]
+        assert shared.next_observation.cpu().tolist()==[2000]
         assert not (clock.public.waiting.received&~clock.public.waiting.consumed).any().cpu().item()
         result['taker_day_at_utc_ms']=87_000_000;result['taker_paid_pusd']=str(payable)
         result['taker_locked_pusd']=str(cpu_accrued-payable)
         result['elapsed_seconds']=time.perf_counter()-started
+    partial=verify_partial_queue_retirement(observations[0],policies[1300])
+    del sender,pending_models
+    result['task_retirement']=dict(released_refs(),partial_roots=partial)
+    stage('actual_task_retirement',**result['task_retirement'])
     return result
 
 
 def verify_two_market_continuous(source,clock,material,models,observations,senders,history_retry,
-        history,encoder,random,evidence,started,artifact,stage,end_retry,release_calls):
+        history,encoder,random,evidence,started,artifact,stage,end_retry,release_calls,model_records,warm_steps,opened):
     offset=source['continuous_observation_offset']
     assert history_retry and end_retry and release_calls==[[True,False]]
     full_warmup=source.get('continuous_full_warmup',False)
     first_observation=offset-28000 if full_warmup else 1300+offset
     assert [int(o.account.cutoff.cpu()[0]) for o in observations]==list(range(first_observation,2900+offset,100))
     assert clock.public.ledger.fault.numel()==clock.runtime.account.available.sign.numel()==1
-    actual=[task for task in models.tasks if task.evaluation is not None]
     expected_starts=(list(range(first_observation,2000+offset,100))+[2050+offset]+list(range(2100+offset,2801+offset,100))
         if full_warmup else list(range(1300+offset,2801+offset,150)))
-    assert [int(task.started_at.cpu()[0]) for task in actual]==expected_starts
-    # 独立逐市场模型前向：不调用队列/身份映射或其评估方法生成期望。
-    previous=torch.zeros((2,2,64),device='cuda');warm_steps=0;opened=False
-    for task in actual:
-        observation=task.observation
-        for role in (0,1):
-            for row in range(2):
-                if observation.frozen.role[row].cpu().item()!=role:continue
-                selected=observation.frozen.rows(T([row]))
-                with torch.no_grad():state,hidden,value=task.policy.state_and_value(*selected.model_inputs(),previous[:,row:row+1])
-                torch.testing.assert_close(task.evaluation.hidden[:,row:row+1],hidden)
-                torch.testing.assert_close(task.evaluation.state[row:row+1],state)
-                if row==1 and role==0:warm_steps+=1
-                if row==1 and role==1 and not opened:
-                    assert warm_steps==(300 if full_warmup else 7) and previous[:,row:row+1].abs().sum().cpu().item()>0
-                    opened=True
-                previous[:,row:row+1]=hidden
-        assert task.active.numel()==task.stage.numel()==1
-        assert task.evaluation.policy_version.cpu().tolist()==[int(observation.account.cutoff.cpu()[0])]*2
+    assert [row['started'] for row in model_records]==expected_starts
     assert opened
     actor_cutoffs=[int(sender.driver.inputs.actor.cutoff.cpu()[0]) for sender in senders]
-    assert actor_cutoffs==[int(task.observation.account.cutoff.cpu()[0]) for task in actual if task.stage.cpu().item()>=2]
+    assert actor_cutoffs==[row['cutoff'] for row in model_records if row['completed'][0]<2801+offset]
     assert all(sender.driver.inputs.actor.cutoff.numel()==1 for sender in senders)
     old_completed=(2050 if full_warmup else 2350)+offset
-    assert any(int(task.observation.account.cutoff.cpu()[0])==1900+offset and task.completed_at.cpu().tolist()==[old_completed] for task in actual)
+    assert any(row['cutoff']==1900+offset and row['completed']==[old_completed] for row in model_records)
     assert models.hidden[:,0].abs().sum().cpu().item()==0 and models.hidden[:,1].abs().sum().cpu().item()>0
     assert material.memory.counts.cpu().tolist()==[[0]*6,[7,0,0,0,0,0]]
     assert not material.endpoints.pm_sides.known[0].any().cpu().item()
@@ -836,7 +855,7 @@ def verify_two_market_continuous(source,clock,material,models,observations,sende
     assert any(body['method']=='POST_ORDERS' and body['request']['items'][0]['item']['order']['condition_id']==source['initial'][2]['market']['condition_id'] for body in bodies)
     result=dict(passed=True,scope='one account/current trade plus T-30 next ContextOnly; next open inherits all GRU layers',
         account_roots=1,market_memories=2,observation_times=list(range(first_observation,2900+offset,100)),
-        model_starts=[int(task.started_at.cpu()[0]) for task in actual],warm_recurrences_before_open=warm_steps,
+        model_starts=[row['started'] for row in model_records],warm_recurrences_before_open=warm_steps,
         boundary_roles=boundary_roles,late_root_roles=frozen.role.cpu().tolist(),
         old_observation_completes_after_market_end_at=old_completed,shared_slow_except_role=True,
         history_path_and_countdown_checked=True,whole_root_freeze_capacity_retry=True,
@@ -847,6 +866,58 @@ def verify_two_market_continuous(source,clock,material,models,observations,sende
         full_root_history_or_economic_tail_delivered=False,elapsed_seconds=time.perf_counter()-started)
     (artifact/'two-market-report.json').write_text(json.dumps(result,indent=2))
     return result
+
+
+def verify_partial_queue_retirement(original,policy):
+    """实际模型队列三根接口；发布/发送替身只检部分根拥有，不冒充SIM时钟。"""
+    from types import SimpleNamespace
+    from actor_send import ActorSendResult
+    indices=T([0,0,0]);frozen=original.frozen.rows(indices)
+    observation=replace(original,frozen=frozen,market=original.market.rows(indices),
+        account=SimpleNamespace(cutoff=frozen.cutoff),decision_rows=T([0,1,2]))
+    yes=T([True]*3,torch.bool);zero=T([0]*3)
+    class Sender:
+        def __init__(self,task):
+            self.complete=torch.zeros_like(yes);self.allowed=yes.clone()
+            self.driver=self;self.publication=self;self.released=False
+            self.binding=task.request_identity;self.control=self.binding.control(task.send_at)
+        def publish(self,driver,control,active):
+            return SimpleNamespace(published=active,action=SimpleNamespace(family=zero+1))
+        def execute(self,clock,active,**kwargs):
+            self.complete|=active&self.allowed
+            return ActorSendResult(self,None,self.complete.clone(),self.complete.clone())
+        def release_capture(self):self.released=True
+    def make_queue():
+        identities=ActorTaskRequests(ActorRequestDirectory(zero.device),('partial/root0','partial/root1','partial/root2'))
+        return ActorModelQueue(torch.zeros((2,3,64),device=zero.device),frozen.identities,frozen.cutoff,
+            lambda observation,active:(policy,zero+1300),lambda observation:(zero+10,zero),Sender,
+            request_identities=identities)
+    queue=make_queue();queue.enqueue(observation,yes);queued=queue.tasks[0];binding=queued.request_identity
+    for root in range(3):
+        active=T([i==root for i in range(3)],torch.bool)
+        accepted,fault=queue.start(active)
+        assert torch.equal(accepted,active) and not fault.any().cpu().item()
+        assert all(task.request_identity is binding for task in queue.tasks)
+        assert any(item is queued for item in queue.tasks)==(root<2)
+    assert len(queue.tasks)==3 and all(task.evaluation is not None for task in queue.tasks)
+    # 一个started对象拥有三根：前两根完成仍不能释放第三根。
+    queue=make_queue();queue.enqueue(observation,yes);binding=queue.tasks[0].request_identity
+    accepted,fault=queue.start(yes);assert accepted.all().cpu().item() and not fault.any().cpu().item()
+    assert len(queue.tasks)==1;task=queue.tasks[0];assert task.request_identity is binding
+    first=T([True,False,False],torch.bool)
+    assert torch.equal(queue.finish(first),first)
+    complete,fault,blocked=queue.send(None,first)
+    assert torch.equal(complete,first) and not fault.any().cpu().item() and blocked is None
+    assert queue.tasks==[task] and not task.sender.released
+    rest=T([False,True,True],torch.bool);assert torch.equal(queue.finish(rest),rest)
+    task.sender.allowed=T([True,True,False],torch.bool)
+    complete,fault,blocked=queue.send(None,rest)
+    assert complete.cpu().tolist()==[False,True,False] and queue.tasks==[task]
+    assert task.request_identity is binding and not task.sender.released
+    task.sender.allowed=yes;complete,fault,blocked=queue.send(None,T([False,False,True],torch.bool))
+    assert complete.cpu().tolist()==[False,False,True] and not queue.tasks and task.sender.released
+    return dict(actual_queue=True,partial_start_transfers_once=True,partial_finish_and_send_preserve_task=True,
+        identity_unchanged=True,all_roots_complete_retires=True,scope='real queue/model forward; publication/send interface substitutes, no SIM clock')
 
 
 def main():

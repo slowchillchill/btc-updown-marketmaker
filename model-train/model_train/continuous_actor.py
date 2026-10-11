@@ -33,7 +33,7 @@ class ActorModelQueue:
     timing返回显式有限逻辑calculation/dispatch，不使用GPU墙钟。
     sender_factory将本任务已经绑定的评估/版本接原FrozenActorSend。
     """
-    def __init__(self,hidden,identities,initial_completed_at,policy_at_start,timing,sender_factory,*,row_roots=None,market_ends=None,release_markets=None,request_identities=None):
+    def __init__(self,hidden,identities,initial_completed_at,policy_at_start,timing,sender_factory,*,row_roots=None,market_ends=None,release_markets=None,request_identities=None,on_started=None,on_completed=None):
         self.hidden=hidden.clone();self.identities=identities.clone()
         self.last_completed_at=initial_completed_at.clone()
         self.policy_at_start=policy_at_start;self.timing=timing;self.sender_factory=sender_factory
@@ -41,12 +41,14 @@ class ActorModelQueue:
         self.row_roots=torch.arange(len(identities),device=identities.device) if row_roots is None else row_roots
         self.market_ends=market_ends;self.release_markets=release_markets
         self.request_identities=request_identities
+        self.on_started=on_started;self.on_completed=on_completed
 
     def enqueue(self,observation,active):
         calculation,dispatch=self.timing(observation)
         has_rows=torch.zeros_like(active,dtype=torch.int32).scatter_reduce(0,self.row_roots,
             (observation.frozen.role>=0).to(torch.int32),reduce='amax').bool()
         accepted=active&has_rows
+        if not bool(accepted.any().cpu()):return
         identity=None if self.request_identities is None else self.request_identities.bind(accepted)
         self.tasks.append(FrozenActorTask(observation,accepted.clone(),torch.zeros_like(active,dtype=torch.int64),
             calculation.clone(),dispatch.clone(),request_identity=identity))
@@ -103,8 +105,11 @@ class ActorModelQueue:
                 task.calculation_duration,task.dispatch_delay,event.at.clone(),event.at+task.calculation_duration,
                 event.at+task.calculation_duration+task.dispatch_delay,policy,evaluation,
                 request_identity=task.request_identity)
-            self.tasks.append(started)
+            if bool(accepted.any().cpu()):
+                self.tasks.append(started)
+                if self.on_started is not None:self.on_started(started)
             task.stage=torch.where(accepted,3,task.stage)
+        self._retire_completed()
         return ready,fault
 
     def finish(self,enabled):
@@ -128,6 +133,7 @@ class ActorModelQueue:
             task.stage=torch.where(accepted,torch.where(actionable,2,3),task.stage)
             self._release_completed_capture(task)
             complete |= accepted
+        self._retire_completed()
         return complete
 
     def send(self,clock,enabled,*,progress=None):
@@ -144,7 +150,18 @@ class ActorModelQueue:
                 if bool((active&~result.advance.complete).any().cpu()):blocked_advance=result.advance
             task.stage=torch.where(active&result.complete,3,task.stage)
             self._release_completed_capture(task)
+        self._retire_completed()
         return complete,fault,blocked_advance
+
+    def _retire_completed(self):
+        # 当前方法已用完事件下标；稳定保留未开始/续接/待发送对象。
+        pending=[]
+        for task in self.tasks:
+            if bool(((task.stage==3)|~task.active).all().cpu()):
+                # queued被started承接只是转移拥有，不再交付一次业务完成。
+                if task.evaluation is not None and self.on_completed is not None:self.on_completed(task)
+            else:pending.append(task)
+        self.tasks=pending
 
     @staticmethod
     def _release_completed_capture(task):
