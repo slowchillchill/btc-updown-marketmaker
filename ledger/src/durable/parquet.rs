@@ -223,7 +223,7 @@ impl ParquetLedger {
             return Err(LedgerDurableErrorV1::HandlePoisoned);
         }
         if let Some(writer) = &mut self.writer
-            && let Err(error) = writer.flush()
+            && let Err(error) = writer.flush_if_full()
         {
             self.poisoned = true;
             return Err(io_error("写出 Ledger 交接批", &self.directory, error));

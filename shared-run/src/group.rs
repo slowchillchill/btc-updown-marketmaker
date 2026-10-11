@@ -88,6 +88,7 @@ pub struct SharedExecution<P: SharedOrderEvidence> {
     registry: SharedExecutionRegistry<P::Completion>,
     observation: sim_system::execution::MemoryNoeObservation<P>,
     pending: Vec<NoeConsumedRecordRef<P::Completion>>,
+    pending_retry_after: Option<u64>,
 }
 impl<P: SharedOrderEvidence> SharedExecution<P> {
     /// 调用方已经在原运行后台绑定此新Ledger的记录接收器。
@@ -105,6 +106,7 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             registry,
             observation,
             pending: Vec::new(),
+            pending_retry_after: None,
         }))
     }
     pub fn reserve_action_v2(
@@ -141,10 +143,19 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
     }
     /// false 表示仍有待经济应用的原记录，不阻止实到观察与模型组。
     pub fn apply_closed(&mut self) -> Result<bool, LedgerErrorV1> {
+        let mut received = false;
         for record in self.observation.take_closed_records() {
+            received = true;
             self.registry.observe(&record);
             self.pending.push(record);
         }
+        if self.pending.is_empty() {
+            return Ok(true);
+        }
+        if !received && self.pending_retry_after == Some(self.ledger.applied_entry_sequence()) {
+            return Ok(false);
+        }
+        self.pending_retry_after = None;
         loop {
             let mut waiting = Vec::new();
             let mut applied = false;
@@ -166,6 +177,7 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
                 return Ok(true);
             }
             if !applied {
+                self.pending_retry_after = Some(self.ledger.applied_entry_sequence());
                 return Ok(false);
             }
         }
@@ -219,7 +231,9 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
     /// 接纳本组已受信的公共规则；不应用反馈，不构造模型输入或发出请求。
     pub fn observe_group(&mut self, frames: &[PublicObservationFrameV1<'_>]) {
         for frame in frames {
-            self.registry.observe_market(&frame.rule_context);
+            if self.registry.observe_market(&frame.rule_context) {
+                self.pending_retry_after = None;
+            }
         }
     }
     pub fn action_before(
@@ -252,14 +266,14 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
                 })
             })
             .collect();
-        let requests = funds
-            .requests()
-            .filter(|r| {
-                !matches!(
-                    r.reservation_state,
-                    ReservationStatusV1::Converted | ReservationStatusV1::Released
-                ) || required_requests.contains(r.request_identity)
-            })
+        let request_ids: std::collections::BTreeSet<_> = funds
+            .active_requests()
+            .map(|r| r.request_identity)
+            .chain(required_requests)
+            .collect();
+        let requests = request_ids
+            .into_iter()
+            .filter_map(|id| funds.request(id))
             .map(|r| RequestFunds {
                 id: r.request_identity.clone(),
                 condition: r.condition_id.clone(),
@@ -269,9 +283,9 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
                 seq: r.last_ledger_entry_seq,
             })
             .collect();
-        let orders = funds
-            .orders()
-            .filter(|r| registry.contains_unfinished_order(r.order_identity))
+        let orders = registry
+            .unfinished_orders()
+            .filter_map(|o| funds.order(o.order_identity))
             .map(|r| OrderFunds {
                 id: r.order_identity.clone(),
                 principal: r.principal_encumbrance_pusd,
@@ -453,6 +467,7 @@ where
             registry: saved.registry,
             observation,
             pending: saved.pending,
+            pending_retry_after: None,
         })
     }
 }

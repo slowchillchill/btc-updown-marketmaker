@@ -85,6 +85,13 @@ struct Submitted<R> {
     cancel_targets: Vec<Ref<R>>,
     outcomes: BTreeMap<u16, Option<Identity>>,
 }
+/// 原 owner 的活动身份集合；不保存第二份订单或成交事实。
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct ActionPopulation {
+    orders: BTreeSet<Identity>,
+    commitments: BTreeSet<String>,
+    cancellations: BTreeSet<String>,
+}
 /// 普通已稳定 NOE 读取不能直接传入共享登记；这不是公开生产者接口的来源认证。
 /// ```compile_fail
 /// fn observe(registry: &mut shared_run::SharedExecutionRegistryV1,
@@ -99,6 +106,8 @@ pub struct SharedExecutionRegistry<R> {
     orders: BTreeMap<Identity, Order<R>>,
     markets: BTreeMap<String, Arc<PublicTradingRuleContextV1>>,
     cancel_locations: BTreeMap<Identity, Ref<R>>,
+    #[serde(default)]
+    action_population: Option<ActionPopulation>,
 }
 impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
     pub fn new(context: Arc<ExecutionNormalizationContextV1>) -> Self {
@@ -108,19 +117,28 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             orders: BTreeMap::new(),
             markets: BTreeMap::new(),
             cancel_locations: BTreeMap::new(),
+            action_population: Some(ActionPopulation::default()),
         }
     }
-    pub(crate) fn observe_market(&mut self, rules: &Arc<PublicTradingRuleContextV1>) {
-        self.markets
-            .entry(rules.market.condition_id.0.clone())
-            .or_insert_with(|| rules.clone());
+    pub(crate) fn observe_market(&mut self, rules: &Arc<PublicTradingRuleContextV1>) -> bool {
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            self.markets.entry(rules.market.condition_id.0.clone())
+        {
+            entry.insert(rules.clone());
+            true
+        } else {
+            false
+        }
     }
     pub(crate) fn action_snapshot(&self) -> Self {
         let mut orders: BTreeMap<_, _> = self
-            .orders
-            .iter()
-            .filter(|(id, state)| self.unfinished(id, state))
-            .map(|(id, state)| (id.clone(), state.clone()))
+            .unfinished_orders()
+            .map(|o| {
+                (
+                    o.order_identity.clone(),
+                    self.orders[o.order_identity].clone(),
+                )
+            })
             .collect();
         let mut needed: BTreeSet<_> = self
             .all_commitments()
@@ -133,8 +151,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             .map(str::to_owned)
             .collect();
         needed.extend(
-            self.intents
-                .values()
+            self.cancellation_intents()
                 .filter(|r| {
                     r.receipt.is_some()
                         && r.completed.is_none()
@@ -168,29 +185,45 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         // 原响应过滤需要其目标的市场证据；只保留仍被选中响应或在途请求引用的订单。
         for id in &needed {
             let request = &self.intents[id];
-            let explicit = cancellation_scope(request.origin.intent());
-            for (identity, state) in &self.orders {
-                let referenced = matches!(&explicit, Some(CancellationScopeV1::Orders(ids)) if ids.contains(&platform_id(identity)))
-                    || request.cancel_targets.iter().any(|target| matches!(target.record(),
-                        NormalizationRecord::Evidence { evidence: SourceNeutralEvidenceKind::Control {
-                            result: SourceNeutralControlResult::Cancellation { order_identity, .. }
-                        }, .. } if order_identity == identity));
-                if referenced && !orders.contains_key(identity) {
-                    if let Some(record) =
-                        location_records(state).find(|r| record_location(r, identity).is_some())
+            let mut referenced = BTreeSet::new();
+            if let Some(CancellationScopeV1::Orders(ids)) =
+                cancellation_scope(request.origin.intent())
+            {
+                referenced.extend(ids.into_iter().map(|id| self.platform_order_identity(id)));
+            }
+            for target in &request.cancel_targets {
+                if let NormalizationRecord::Evidence {
+                    evidence:
+                        SourceNeutralEvidenceKind::Control {
+                            result: SourceNeutralControlResult::Cancellation { order_identity, .. },
+                        },
+                    ..
+                } = target.record()
+                {
+                    referenced.insert(order_identity.clone());
+                }
+            }
+            for identity in referenced {
+                if !orders.contains_key(&identity) {
+                    if let Some(state) = self.orders.get(&identity)
+                        && let Some(record) = location_records(state)
+                            .find(|r| record_location(r, &identity).is_some())
                     {
                         cancel_locations
                             .entry(identity.clone())
                             .or_insert_with(|| record.clone());
                     }
+                    if let Some(record) = self.cancel_locations.get(&identity) {
+                        cancel_locations
+                            .entry(identity)
+                            .or_insert_with(|| record.clone());
+                    }
                 }
             }
         }
-        let intents = self
-            .intents
-            .iter()
-            .filter(|(id, _)| needed.contains(id.as_str()))
-            .map(|(id, s)| (id.clone(), s.clone()))
+        let intents = needed
+            .into_iter()
+            .filter_map(|id| self.intents.get(&id).map(|s| (id, s.clone())))
             .collect();
         Self {
             context: self.context.clone(),
@@ -198,6 +231,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             orders,
             markets: self.markets.clone(),
             cancel_locations,
+            action_population: None, // 小型动作快照只包含本次所需原事实。
         }
     }
     /// 原请求身份已经绑定的不可变意图；供批次边界保持身份与原值一致。
@@ -236,10 +270,42 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             .get_mut(origin.global_request_id())
             .expect("本账户先冻结意图")
             .receipt = Some(*receipt);
+        self.refresh_request(origin.global_request_id());
     }
     pub fn observe(&mut self, record: &Ref<R>) {
         let NormalizationRecord::Evidence { evidence, .. } = record.record() else {
             return;
+        };
+        let touched: Vec<Identity> = match evidence {
+            SourceNeutralEvidenceKind::Control { result } => match result {
+                SourceNeutralControlResult::Submission {
+                    outcome: SourceNeutralSubmissionOutcomeV2::Accepted { order, .. },
+                } => vec![order.order_identity.clone()],
+                SourceNeutralControlResult::Cancellation { order_identity, .. } => {
+                    vec![order_identity.clone()]
+                }
+                SourceNeutralControlResult::OrderQuery {
+                    result: SourceNeutralOrderQueryResult::Found { order },
+                } => vec![order.order_identity.clone()],
+                SourceNeutralControlResult::OrdersQuery {
+                    result: SourceNeutralOrdersQueryResult::Page(page),
+                } => page
+                    .items
+                    .iter()
+                    .map(|o| o.order_identity.clone())
+                    .collect(),
+                _ => vec![],
+            },
+            SourceNeutralEvidenceKind::OrderLifecycle { result } => {
+                vec![result.order_identity.clone()]
+            }
+            SourceNeutralEvidenceKind::TradeLifecycle { result } => {
+                vec![result.order_identity.clone()]
+            }
+            SourceNeutralEvidenceKind::TradeLifecycleV3 { result } => {
+                vec![result.result.order_identity.clone()]
+            }
+            _ => vec![],
         };
         match evidence {
             SourceNeutralEvidenceKind::Control { result } => match result {
@@ -366,6 +432,22 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             }
             _ => {}
         }
+        for identity in touched {
+            self.refresh_order(&identity);
+        }
+        if let SimV2SourceRecordReferenceV1::DirectResponse {
+            association:
+                SimV2DirectResponseAssociationV1::SubmissionItem {
+                    global_request_id, ..
+                },
+            ..
+        } = &record.record().source_reference().record
+        {
+            self.refresh_request(global_request_id);
+        }
+        if let Some(id) = cancellation_request_id(record) {
+            self.refresh_request(&id);
+        }
     }
     fn unfinished(&self, id: &Identity, state: &Order<R>) -> bool {
         !matches!(self.order_from(id, state).cancellable, Known(false))
@@ -378,9 +460,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
                 .is_none_or(|(_, leg)| !matches!(self.remaining(id, &leg.order), Known(v) if decimal(&v).is_zero()))
     }
     pub(crate) fn unfinished_orders(&self) -> impl Iterator<Item = ExecutionOrderRead<'_, R>> {
-        self.orders
-            .iter()
-            .filter(|(id, state)| self.unfinished(id, state))
+        self.active_order_entries()
             .map(|(id, state)| self.order_from(id, state))
     }
     pub(crate) fn contains_unfinished_order(&self, id: &Identity) -> bool {
@@ -486,32 +566,113 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         })
     }
     pub fn all_commitments(&self) -> impl Iterator<Item = IntentCommitmentReadV1<'_>> {
-        self.intents
-            .values()
-            .filter(|s| s.receipt.is_some())
-            .flat_map(move |s| {
-                (0..2).filter_map(move |ordinal| {
-                    let (_, leg) = leg(s.origin.intent(), ordinal)?;
-                    let outcome = s.outcomes.get(&ordinal);
-                    let order = outcome.and_then(Option::as_ref);
-                    let remaining = match outcome {
-                        Some(None) => Known(exact(Decimal::ZERO)),
-                        Some(Some(id)) => self.remaining(id, &leg.order),
-                        None => target(&leg.order),
-                    };
-                    if matches!(&remaining,Known(q) if decimal(q).is_zero()) {
-                        return None;
-                    }
-                    Some(IntentCommitmentReadV1 {
-                        origin: SubmittedLegReadV1 {
-                            intent: &s.origin,
-                            batch_item_ordinal: ordinal,
-                        },
-                        order_identity: order,
-                        remaining_target_shares: remaining,
-                    })
-                })
+        self.commitment_intents()
+            .flat_map(|s| self.request_commitments(s))
+    }
+    fn request_commitments<'a>(
+        &'a self,
+        s: &'a Submitted<R>,
+    ) -> impl Iterator<Item = IntentCommitmentReadV1<'a>> {
+        (0..2).filter_map(move |ordinal| {
+            let (_, leg) = leg(s.origin.intent(), ordinal)?;
+            let outcome = s.outcomes.get(&ordinal);
+            let order = outcome.and_then(Option::as_ref);
+            let remaining = match outcome {
+                Some(None) => Known(exact(Decimal::ZERO)),
+                Some(Some(id)) => self.remaining(id, &leg.order),
+                None => target(&leg.order),
+            };
+            if matches!(&remaining,Known(q) if decimal(q).is_zero()) {
+                return None;
+            }
+            Some(IntentCommitmentReadV1 {
+                origin: SubmittedLegReadV1 {
+                    intent: &s.origin,
+                    batch_item_ordinal: ordinal,
+                },
+                order_identity: order,
+                remaining_target_shares: remaining,
             })
+        })
+    }
+    fn active_order_entries(&self) -> Box<dyn Iterator<Item = (&Identity, &Order<R>)> + '_> {
+        if let Some(population) = &self.action_population {
+            Box::new(
+                population
+                    .orders
+                    .iter()
+                    .filter_map(|id| self.orders.get_key_value(id)),
+            )
+        } else {
+            Box::new(
+                self.orders
+                    .iter()
+                    .filter(|(id, state)| self.unfinished(id, state)),
+            )
+        }
+    }
+    fn commitment_intents(&self) -> Box<dyn Iterator<Item = &Submitted<R>> + '_> {
+        if let Some(population) = &self.action_population {
+            Box::new(
+                population
+                    .commitments
+                    .iter()
+                    .filter_map(|id| self.intents.get(id)),
+            )
+        } else {
+            Box::new(self.intents.values().filter(|s| s.receipt.is_some()))
+        }
+    }
+    fn cancellation_intents(&self) -> Box<dyn Iterator<Item = &Submitted<R>> + '_> {
+        if let Some(population) = &self.action_population {
+            Box::new(
+                population
+                    .cancellations
+                    .iter()
+                    .filter_map(|id| self.intents.get(id)),
+            )
+        } else {
+            Box::new(
+                self.intents
+                    .values()
+                    .filter(|s| cancellation_scope(s.origin.intent()).is_some()),
+            )
+        }
+    }
+    fn refresh_order(&mut self, identity: &Identity) {
+        let Some(state) = self.orders.get(identity) else {
+            return;
+        };
+        let active = self.unfinished(identity, state);
+        let origin = state.origin.as_ref().map(|(id, _)| id.clone());
+        if let Some(population) = &mut self.action_population {
+            if active {
+                population.orders.insert(identity.clone());
+            } else {
+                population.orders.remove(identity);
+            }
+        }
+        if let Some(id) = origin {
+            self.refresh_request(&id);
+        }
+    }
+    fn refresh_request(&mut self, id: &str) {
+        let Some(request) = self.intents.get(id) else {
+            return;
+        };
+        let commitment =
+            request.receipt.is_some() && self.request_commitments(request).next().is_some();
+        let cancel = cancellation_scope(request.origin.intent()).is_some();
+        if let Some(population) = &mut self.action_population {
+            if commitment {
+                population.commitments.insert(id.to_owned());
+            } else {
+                population.commitments.remove(id);
+            }
+            if cancel {
+                population.cancellations.insert(id.to_owned());
+            }
+        }
     }
     pub fn committed_target_shares(
         &self,
@@ -1108,15 +1269,18 @@ fn cancellation_scope(intent: &ModelIntentV1) -> Option<CancellationScopeV1<'_>>
     })
 }
 impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
-    fn condition_for_platform_id(&self, id: &str) -> Option<&ConditionId> {
-        let identity = Identity {
+    fn platform_order_identity(&self, id: &str) -> Identity {
+        Identity {
             account: Arc::new(self.context.account_identity.clone()),
             key: ::execution_normalization::MemoryIdentityKeyV1::Entity(
                 ::execution_normalization::SourceNeutralEntityKeyV1::Order {
                     source_order_id: id.to_owned(),
                 },
             ),
-        };
+        }
+    }
+    fn condition_for_platform_id(&self, id: &str) -> Option<&ConditionId> {
+        let identity = self.platform_order_identity(id);
         self.orders
             .get_key_value(&identity)
             .and_then(|(identity, state)| order_location(state, identity).map(|(c, _)| c))
@@ -1150,8 +1314,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         &self,
         scope: Option<&CancellationScopeV1<'_>>,
     ) -> Option<(&Submitted<R>, bool)> {
-        self.intents
-            .values()
+        self.cancellation_intents()
             .filter_map(|request| {
                 let request_scope = cancellation_scope(request.origin.intent())?;
                 let complete = request.completed.as_ref()?;

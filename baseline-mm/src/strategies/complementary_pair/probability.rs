@@ -147,6 +147,7 @@ impl SignalMemory {
         {
             let q = spot_price_number_v1(&trade.quantity_btc)?;
             let depth = value(&o.binance_depth)
+                .and_then(BinanceDepthObservationV1::full)
                 .map(|depth| {
                     depth
                         .bids
@@ -168,7 +169,7 @@ impl SignalMemory {
                 * if trade.buyer_is_maker { -1.0 } else { 1.0 };
         }
         if c.binance_pressure_weight_usd != 0.0
-            && let Some(b) = value(&o.binance_depth)
+            && let Some(b) = value(&o.binance_depth).and_then(BinanceDepthObservationV1::full)
         {
             let bid = b.bids.iter().try_fold(0.0, |a, p| {
                 Ok::<_, StrategyErrorV1>(a + spot_price_number_v1(&p.quantity_btc)?)

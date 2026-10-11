@@ -98,6 +98,14 @@ pub enum QualifiedBatchResultV1 {
 pub trait StrategyV1 {
     type Error;
     type Diagnostics;
+    /// 默认保留逐笔冻结；只消费原 owner 费用分配的策略可显式不请求明细。
+    fn requires_trade_economics_details(&self) -> bool {
+        true
+    }
+    /// 默认完整投影；日生产者取所有实际候选的需求并集。
+    fn observation_requirements(&self) -> contracts::PublicObservationRequirementsV1 {
+        contracts::PublicObservationRequirementsV1::FULL
+    }
     /// 默认不选用；旧调用方继续使用原回调、时序与组节奏。
     fn uses_source_health(&self) -> bool {
         false
@@ -219,17 +227,31 @@ impl SharedExecutionV2 {
         &mut self,
         driver: &mut PublicConsumptionStateV1,
     ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+        self.strategy_input_with_trade_details(driver, true)
+    }
+    pub fn strategy_input_with_trade_details(
+        &mut self,
+        driver: &mut PublicConsumptionStateV1,
+        details: bool,
+    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
         let Some(cutoff) = self.prepare_action_group(driver)? else {
             return Ok(None);
         };
         let decision = driver.decision().expect("原公共组");
         let frames = decision.frames();
-        Ok(self.input_from_frames(cutoff, &frames))
+        Ok(self.input_from_frames(cutoff, &frames, details))
     }
     /// 静默时刻及待发复核使用当前受信观察，旧 strategy_input 保留组快照语义。
     pub fn strategy_observation_input(
         &mut self,
         driver: &mut PublicConsumptionStateV1,
+    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+        self.strategy_observation_input_with_trade_details(driver, true)
+    }
+    pub fn strategy_observation_input_with_trade_details(
+        &mut self,
+        driver: &mut PublicConsumptionStateV1,
+        details: bool,
     ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
         self.apply_closed()?;
         let Some(cutoff) = driver.observation_cutoff() else {
@@ -237,7 +259,7 @@ impl SharedExecutionV2 {
         };
         let frames = driver.frames_at_observation();
         self.observe_group(&frames);
-        Ok(self.input_from_frames(cutoff, &frames))
+        Ok(self.input_from_frames(cutoff, &frames, details))
     }
     pub fn strategy_current_read<'a>(
         &mut self,
@@ -247,7 +269,7 @@ impl SharedExecutionV2 {
         let Some(cutoff) = driver.observation_cutoff() else {
             return Ok(None);
         };
-        Ok(self.current_read_from_frames(cutoff, frames))
+        Ok(self.current_read_from_frames(cutoff, frames, true))
     }
     /// 同一真实观察保留领取及登记副作用；期限消费者不需要冻结账户历史。
     pub fn strategy_current_observations<'a>(
@@ -263,11 +285,16 @@ impl SharedExecutionV2 {
         &self,
         cutoff: TrustedGroupDecisionCutoffV1,
         frames: Vec<PublicObservationFrameV1<'a>>,
+        details: bool,
     ) -> Option<StrategyCurrentReadV1<'a>> {
         Some(StrategyCurrentReadV1 {
             action_before: self.freeze_action_before(cutoff, &frames)?,
             markets: frames,
-            trade_economics: self.freeze_trade_economics(),
+            trade_economics: if details {
+                self.freeze_trade_economics()
+            } else {
+                Vec::new()
+            },
         })
     }
     fn freeze_trade_economics(&self) -> Vec<FrozenTradeEconomicsV1> {
@@ -289,11 +316,16 @@ impl SharedExecutionV2 {
         &self,
         cutoff: TrustedGroupDecisionCutoffV1,
         frames: &[PublicObservationFrameV1<'_>],
+        details: bool,
     ) -> Option<StrategyInputV1> {
         let action_before = self.freeze_action_before(cutoff, frames)?;
         Some(StrategyInputV1 {
             action_before,
-            trade_economics: self.freeze_trade_economics(),
+            trade_economics: if details {
+                self.freeze_trade_economics()
+            } else {
+                Vec::new()
+            },
             markets: frames
                 .iter()
                 .map(|f| FrozenMarketReadV1 {
@@ -346,6 +378,7 @@ impl SharedExecutionV2 {
                     self.current_read_from_frames(
                         frames[0].decision_cutoff.clone(),
                         frames.to_vec(),
+                        strategy.requires_trade_economics_details(),
                     )
                     .expect("原已开户观察")
                 });
@@ -391,7 +424,11 @@ impl SharedExecutionV2 {
                 |execution, current_decision, index, at| {
                     let frames = current_decision.frames_at_observation();
                     let input = execution
-                        .current_read_from_frames(frames[0].decision_cutoff.clone(), frames)
+                        .current_read_from_frames(
+                            frames[0].decision_cutoff.clone(),
+                            frames,
+                            strategy.requires_trade_economics_details(),
+                        )
                         .expect("合法观察与已开户账本");
                     qualification_calls += 1;
                     strategy.qualify_intent(&input, &calculation.calculation, index, at)

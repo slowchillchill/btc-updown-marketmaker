@@ -434,7 +434,8 @@ async fn actual_orphan_cost_and_fak_bound_do_not_require_profit_or_a_premium_gat
         .asks = fact(vec![PriceLevelV1 {
         price_pusd_per_share: ExactDecimal("0.4".into()),
         quantity_shares: ExactDecimal("10".into()),
-    }]);
+    }])
+    .into();
     let mut c = config();
     c.quote.base_half_spread = Decimal::new(1, 2);
     c.repair.base_loss_allowance_per_share = Decimal::new(2, 1);
@@ -795,7 +796,8 @@ async fn active_repair_cancels_same_side_then_recalculates_and_does_not_resend_u
             .asks = fact(vec![PriceLevelV1 {
             price_pusd_per_share: ExactDecimal("0.4".into()),
             quantity_shares: ExactDecimal("2.5".into()),
-        }]);
+        }])
+        .into();
         input
     };
     let input = adjust(input);
@@ -1281,7 +1283,8 @@ async fn fak_minimum_principal_is_independent_of_maker_minimum_shares() {
             .asks = fact(vec![PriceLevelV1 {
             price_pusd_per_share: ExactDecimal("0.4".into()),
             quantity_shares: ExactDecimal("2.5".into()),
-        }]);
+        }])
+        .into();
         let now = input
             .action_before
             .cutoff()
@@ -1385,6 +1388,7 @@ async fn health_dependencies_follow_enabled_algorithm_and_asset_scope() {
         .collect::<Vec<_>>()
         .into();
     let mut s = strategy(c.clone(), rules.clone());
+    assert!(s.observation_requirements().binance_depth_quantities);
     let output = s.decide(&input, 22_000).unwrap();
     assert!(
         diagnostic(&output).markets[0]
@@ -1398,6 +1402,7 @@ async fn health_dependencies_follow_enabled_algorithm_and_asset_scope() {
     );
     c.probability.binance_trade_pressure_weight_usd = 0.0;
     let mut disabled = strategy(c, rules);
+    assert!(!disabled.observation_requirements().binance_depth_quantities);
     let output = disabled.decide(&input, 22_000).unwrap();
     assert!(diagnostic(&output).markets[0].source_health.is_empty());
     assert!(!intents(&output).is_empty());

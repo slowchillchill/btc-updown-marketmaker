@@ -101,16 +101,7 @@ impl DayEconomicsStateV1 {
             _ => self.unknown_nav += 1,
         }
         let mut capital = amount(&economics.cash.actual_reserved_pusd);
-        for trade in ledger.successful_trades() {
-            capital = capital.add(&rational(&trade.remaining_principal_cost_pusd));
-        }
-        // 原经济已扣款但终局尚未应用的成交仍占用本金，不与成功成交重复计数。
-        for trade in ledger
-            .trades()
-            .filter(|t| t.economic_applied && !t.success_applied)
-        {
-            capital = capital.add(&amount(&trade.fact.quote_amount_pusd));
-        }
+        capital = capital.add(&rational(&ledger.committed_principal_pusd()));
         self.peak_capital = rational(&self.peak_capital).max(capital.clone()).public();
         self.last_capital = Some(capital.public());
     }

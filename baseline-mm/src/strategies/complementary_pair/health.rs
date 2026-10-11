@@ -241,7 +241,6 @@ impl ComplementaryPairV1 {
     }
     pub(super) fn business_dependency(
         read: &ActionBeforeReadV2,
-        trades: &[FrozenTradeEconomicsV1],
         condition: &ConditionId,
         batch_ids: &[&str],
     ) -> Option<ActionBusinessDependencyV1> {
@@ -272,9 +271,7 @@ impl ComplementaryPairV1 {
         Some(ActionBusinessDependencyV1 {
             orphan_shares: market.orphan_shares.clone(),
             orphan_principal: market.unresolved_orphan_principal_cost_pusd.clone(),
-            orphan_fee: Self::orphan_fee(trades, condition)
-                .ok()
-                .and_then(|(fee, unknown)| (!unknown).then(|| fee.public())),
+            orphan_fee: known(&market.unpaired_success_fee_pusd).cloned(),
             success_shares: market.success_shares.clone(),
             success_principal: market.success_principal_cost_pusd.clone(),
             actual_fees: std::array::from_fn(|i| market.executed[i].actual_fee_pusd.clone()),
@@ -328,13 +325,8 @@ impl ComplementaryPairV1 {
             .iter()
             .map(|i| i.context.global_request_id.as_str())
             .collect();
-        if Self::business_dependency(
-            &input.action_before,
-            &input.trade_economics,
-            &dependency.condition_id,
-            &batch_ids,
-        )
-        .as_ref()
+        if Self::business_dependency(&input.action_before, &dependency.condition_id, &batch_ids)
+            .as_ref()
             != Some(&dependency.business)
         {
             return reject("action_business_facts_changed", vec![]);

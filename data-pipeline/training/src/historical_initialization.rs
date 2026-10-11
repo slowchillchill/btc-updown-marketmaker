@@ -83,11 +83,10 @@ fn order(row: &PolymarketMarketMetadataRow, id: &Sha256Hex) -> MetadataOrder {
         id,
     )
 }
-/// 只保存文件事实及目标Snapshot坐标，不缓存元数据载荷或市场状态。
+/// 一次读取选择正式Snapshot及所需前序行；不建立账户或价格预热。
 pub struct MetadataInitializationSelectionV1 {
     pub files: Vec<MetadataInitializationFileFactsV1>,
-    starts: BTreeMap<String, MetadataOrder>,
-    received_start: i64,
+    selected: Vec<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>,
 }
 impl MetadataInitializationSelectionV1 {
     pub fn open(
@@ -103,8 +102,8 @@ impl MetadataInitializationSelectionV1 {
         bytes: usize,
         progress: Option<&HistoricalPreparationNotifierV1<'_>>,
     ) -> RecordingResult<Self> {
-        let mut files = Vec::new();
-        let mut seen = BTreeSet::new();
+        let mut files: Vec<MetadataInitializationFileFactsV1> = Vec::new();
+        let mut seen = BTreeMap::<PathBuf, usize>::new();
         for selection in &config.files {
             let manifest_path = std::fs::canonicalize(&selection.manifest_path)?;
             let raw = crate::read_daily_manifest(&manifest_path)?;
@@ -120,21 +119,18 @@ impl MetadataInitializationSelectionV1 {
                     return Err("初始化只接受市场元数据文件".into());
                 }
                 let path = std::fs::canonicalize(manifest_path.parent().unwrap().join(relative))?;
-                if !seen.insert(path.clone()) {
-                    open_finite_public_input_v1(
-                        &PublicFiniteFileV1 {
-                            path: path.clone(),
-                            source_kind: facts.source_kind.clone(),
-                            schema_version: facts.schema_version.clone(),
-                            bytes: facts.bytes,
-                            rows: facts.rows,
-                            sha256: facts.sha256.clone(),
-                        },
-                        rows,
-                        bytes,
-                    )?;
+                if let Some(&first) = seen.get(&path) {
+                    let original = &files[first].file;
+                    if facts.schema_version != original.schema_version
+                        || facts.bytes != original.bytes
+                        || facts.rows != original.rows
+                        || facts.sha256 != original.sha256
+                    {
+                        return Err("同一初始化文件的清单事实互相矛盾".into());
+                    }
                     continue;
                 }
+                seen.insert(path.clone(), files.len());
                 files.push(MetadataInitializationFileFactsV1 {
                     manifest_sha256: manifest_sha256.clone(),
                     relative_path: relative.clone(),
@@ -151,6 +147,7 @@ impl MetadataInitializationSelectionV1 {
         }
         let mut starts = BTreeMap::new();
         let mut found = BTreeSet::new();
+        let mut candidates = Vec::new();
         for file in &files {
             for batch in open_finite_public_input_v1(&file.file, rows, bytes)? {
                 let batch = batch?;
@@ -167,6 +164,25 @@ impl MetadataInitializationSelectionV1 {
                         continue;
                     };
                     let source = source_evidence_v3_from_typed_raw_v2(&row)?;
+                    if source.received_at_utc_ms < config.received_start_utc_ms
+                        && config
+                            .markets
+                            .iter()
+                            .any(|m| m.condition_id.0 == metadata.condition_id)
+                    {
+                        let binding = SourceArtifactBindingV1 {
+                            source_message_id: source.source_message_id.clone(),
+                            manifest_sha256: file.manifest_sha256.clone(),
+                            file_sha256: Sha256Hex(file.file.sha256.clone()),
+                            relative_path: file.relative_path.to_string_lossy().into_owned(),
+                        };
+                        candidates.push((
+                            metadata.condition_id.clone(),
+                            order(metadata, &source.source_message_id),
+                            row.clone(),
+                            Some(binding),
+                        ));
+                    }
                     for target in &config.markets {
                         if source.source_message_id != target.snapshot_source_message_id {
                             continue;
@@ -212,8 +228,13 @@ impl MetadataInitializationSelectionV1 {
         }
         Ok(Self {
             files,
-            starts,
-            received_start: config.received_start_utc_ms,
+            selected: candidates
+                .into_iter()
+                .filter(|(condition, key, _, _)| {
+                    starts.get(condition).is_some_and(|start| key >= start)
+                })
+                .map(|(_, _, row, binding)| (row, binding))
+                .collect(),
         })
     }
     pub fn read(
@@ -226,81 +247,21 @@ impl MetadataInitializationSelectionV1 {
     }
     pub fn read_with_progress<'a>(
         &'a self,
-        rows: usize,
-        bytes: usize,
+        _rows: usize,
+        _bytes: usize,
         progress: Option<&'a HistoricalPreparationNotifierV1<'_>>,
         pass: Pass,
     ) -> impl Iterator<Item = RecordingResult<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>> + 'a
     {
-        self.files.iter().flat_map(move |file| {
-            let stream: Box<dyn Iterator<Item = RecordingResult<TypedRawRowV2>>> =
-                match open_finite_public_input_v1(&file.file, rows, bytes) {
-                    Ok(stream) => Box::new(stream.flat_map(move |batch| match batch {
-                        Ok(rows) => {
-                            notify(
-                                progress,
-                                Notice::RawBatch {
-                                    pass,
-                                    initialization: true,
-                                    rows: rows.len() as u64,
-                                },
-                            );
-                            rows.into_iter().map(Ok).collect::<Vec<_>>()
-                        }
-                        Err(error) => vec![Err(error.into())],
-                    })),
-                    Err(error) => Box::new(std::iter::once(Err(error.into()))),
-                };
-            stream
-                .filter_map(move |row| {
-                    let selected = (|| -> RecordingResult<Option<_>> {
-                        let row = row?;
-                        let Some(metadata) = existing(&row) else {
-                            return Ok(None);
-                        };
-                        let Some(start) = self.starts.get(&metadata.condition_id) else {
-                            return Ok(None);
-                        };
-                        let source = source_evidence_v3_from_typed_raw_v2(&row)?;
-                        if source.received_at_utc_ms >= self.received_start
-                            || order(metadata, &source.source_message_id) < *start
-                        {
-                            return Ok(None);
-                        }
-                        let binding = SourceArtifactBindingV1 {
-                            source_message_id: source.source_message_id,
-                            manifest_sha256: file.manifest_sha256.clone(),
-                            file_sha256: Sha256Hex(file.file.sha256.clone()),
-                            relative_path: file.relative_path.to_string_lossy().into_owned(),
-                        };
-                        notify(
-                            progress,
-                            Notice::SelectedRow {
-                                pass,
-                                initialization: true,
-                            },
-                        );
-                        Ok(Some((row, Some(binding))))
-                    })();
-                    match selected {
-                        Ok(None) => None,
-                        Ok(Some(row)) => Some(Ok(row)),
-                        Err(error) => Some(Err(error)),
-                    }
-                })
-                .chain(
-                    std::iter::once_with(move || {
-                        notify(
-                            progress,
-                            Notice::RawFileComplete {
-                                pass,
-                                initialization: true,
-                            },
-                        );
-                        None
-                    })
-                    .flatten(),
-                )
+        self.selected.iter().map(move |row| {
+            notify(
+                progress,
+                Notice::SelectedRow {
+                    pass,
+                    initialization: true,
+                },
+            );
+            Ok(row.clone())
         })
     }
     /// v1组合身份只编码原日集合、真实文件事实和显式选择；物理根路径不参与。

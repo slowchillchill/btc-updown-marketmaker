@@ -363,21 +363,30 @@ pub fn open_validated_public_input_at_v1(
     max_batch_bytes: usize,
     cursor: &typed_raw::TypedRawCursorV1,
 ) -> Result<TypedRawParquetStream<TypedRawRowV2>, TypedRawReadError> {
-    typed_raw::open_parquet_at_with_decoder(
-        ParquetInputFacts {
-            path: file.file_path(),
-            source_kind: file.source_kind(),
-            schema_version: file.schema_version(),
-            bytes: file.bytes(),
-            rows: file.rows(),
-            sha256: file.sha256(),
-        },
+    open_public_input_from_opened(
+        file,
+        file.take_opened()?,
+        batch_size,
+        max_batch_bytes,
+        cursor.physical_row,
+    )
+}
+pub(crate) fn open_public_input_from_opened(
+    file: &ValidatedDirectSourceParquetFileV3,
+    opened: typed_raw::OpenedParquetV1,
+    batch_size: usize,
+    max_batch_bytes: usize,
+    physical_row: u64,
+) -> Result<TypedRawParquetStream<TypedRawRowV2>, TypedRawReadError> {
+    typed_raw::stream_with_opened(
+        file.input_facts(),
         batch_size,
         None,
         Some(max_batch_bytes),
         expected_public_schema,
         decode_public_batch_with_layout,
-        cursor.physical_row,
+        opened,
+        physical_row,
     )
 }
 

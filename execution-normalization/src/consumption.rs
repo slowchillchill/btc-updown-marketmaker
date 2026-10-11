@@ -5,7 +5,10 @@ mod mapping;
 use crate::*;
 use contracts::execution_normalization::*;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, OnceLock};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
+};
 
 pub type NoeMemoryRecord<R> = NormalizationRecord<
     SourceNeutralTradeLifecycleResultV2<MemoryLogicalIdentityV1>,
@@ -175,7 +178,8 @@ fn durable_record_view<R>(
 pub struct NoeConsumptionSource<R> {
     opening: Option<NoeConsumedRecordRef<R>>,
     admitted: Vec<NoeConsumedRecordRef<R>>,
-    pending: Vec<(Arc<Batch<R>>, Vec<usize>)>,
+    #[serde(with = "ordered_feedback")]
+    pending: BTreeMap<(i64, u64, u32), Vec<NoeConsumedRecordRef<R>>>,
     delivered: u64,
 }
 impl<R: Clone + std::fmt::Debug + PartialEq> NoeConsumptionSource<R> {
@@ -191,7 +195,6 @@ impl<R: Clone + std::fmt::Debug + PartialEq> NoeConsumptionSource<R> {
             batch,
             durable: durable.clone(),
         });
-        let mut ordinals = Vec::new();
         for (ordinal, record) in batch.batch.records.iter().enumerate() {
             if matches!(record, NormalizationRecord::EconomicFact { fact, .. } if matches!(fact.disposition, SourceNeutralEconomicDispositionV1::AccountOpening { .. }))
             {
@@ -215,12 +218,16 @@ impl<R: Clone + std::fmt::Debug + PartialEq> NoeConsumptionSource<R> {
                     visibility: NoeConsumptionVisibilityV1::ControlAdmission,
                 });
             }
-            if feedback_coordinate(record).is_some() {
-                ordinals.push(ordinal);
+            if let Some((received, sequence)) = feedback_coordinate(record) {
+                self.pending
+                    .entry((received, sequence, record.source_order().ordinal))
+                    .or_default()
+                    .push(NoeConsumedRecordRef {
+                        batch: batch.clone(),
+                        ordinal,
+                        visibility: NoeConsumptionVisibilityV1::Initialization,
+                    });
             }
-        }
-        if !ordinals.is_empty() {
-            self.pending.push((batch, ordinals));
         }
         durable
     }
@@ -236,44 +243,94 @@ impl<R: Clone + std::fmt::Debug + PartialEq> NoeConsumptionSource<R> {
     }
     /// 仅由原受信来源驱动器传递其已闭合接收/公开逻辑时点。
     pub fn take_closed(&mut self, closed: i64, visible: i64) -> Vec<NoeConsumedRecordRef<R>> {
+        let cutoff = closed.min(visible);
         let mut ready = Vec::new();
-        for (batch, ordinals) in &mut self.pending {
-            ordinals.retain(|ordinal| {
-                let record = &batch.batch.records[*ordinal];
-                let (received, sequence) =
-                    feedback_coordinate(record).expect("来源反馈队列仅含反馈");
-                if received <= closed && received <= visible {
-                    ready.push((
-                        received,
-                        sequence,
-                        record.source_order().ordinal,
-                        batch.clone(),
-                        *ordinal,
-                    ));
-                    false
-                } else {
-                    true
-                }
-            });
+        while self
+            .pending
+            .first_key_value()
+            .is_some_and(|(key, _)| key.0 <= cutoff)
+        {
+            let (key, records) = self.pending.pop_first().expect("存在可领取前缀");
+            ready.extend(records.into_iter().map(|r| (key, r)));
         }
-        self.pending.retain(|(_, ordinals)| !ordinals.is_empty());
-        ready.sort_by_key(|(received, sequence, ordinal, _, _)| (*received, *sequence, *ordinal));
         let mut source = None;
         ready
             .into_iter()
-            .map(|(received, sequence, _, batch, ordinal)| {
+            .map(|((received, sequence, _), mut record)| {
                 if source != Some((received, sequence)) {
                     self.delivered = self.delivered.checked_add(1).expect("原交付序不溢出");
                     source = Some((received, sequence));
                 }
-                NoeConsumedRecordRef {
-                    batch,
-                    ordinal,
-                    visibility: NoeConsumptionVisibilityV1::Feedback {
-                        delivery_sequence: self.delivered,
-                        available_at_utc_ms: visible,
-                    },
-                }
+                record.visibility = NoeConsumptionVisibilityV1::Feedback {
+                    delivery_sequence: self.delivered,
+                    available_at_utc_ms: visible,
+                };
+                record
+            })
+            .collect()
+    }
+}
+
+// 私有恢复队列只编码一次原批；有序坐标引用批内 ordinal，不复制经济事实。
+mod ordered_feedback {
+    use super::*;
+    type Coordinate = (i64, u64, u32);
+    type Entry = (Coordinate, Vec<(usize, usize, NoeConsumptionVisibilityV1)>);
+    #[derive(Serialize, Deserialize)]
+    struct Stored<R> {
+        batches: Vec<Arc<Batch<R>>>,
+        entries: Vec<Entry>,
+    }
+    pub fn serialize<S: serde::Serializer, R: Serialize>(
+        queue: &BTreeMap<Coordinate, Vec<NoeConsumedRecordRef<R>>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut ids = BTreeMap::new();
+        let mut batches = Vec::new();
+        let entries = queue
+            .iter()
+            .map(|(coordinate, records)| {
+                let refs = records
+                    .iter()
+                    .map(|r| {
+                        let pointer = Arc::as_ptr(&r.batch) as usize;
+                        let index = *ids.entry(pointer).or_insert_with(|| {
+                            let i = batches.len();
+                            batches.push(r.batch.clone());
+                            i
+                        });
+                        (index, r.ordinal, r.visibility.clone())
+                    })
+                    .collect();
+                (*coordinate, refs)
+            })
+            .collect();
+        Stored { batches, entries }.serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>, R: Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<Coordinate, Vec<NoeConsumedRecordRef<R>>>, D::Error> {
+        let stored = Stored::<R>::deserialize(deserializer)?;
+        stored
+            .entries
+            .into_iter()
+            .map(|(coordinate, entries)| {
+                let refs = entries
+                    .into_iter()
+                    .map(|(index, ordinal, visibility)| {
+                        let batch = stored
+                            .batches
+                            .get(index)
+                            .filter(|b| ordinal < b.batch.records.len())
+                            .ok_or_else(|| serde::de::Error::custom("反馈队列原批引用越界"))?;
+                        Ok(NoeConsumedRecordRef {
+                            batch: batch.clone(),
+                            ordinal,
+                            visibility,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, D::Error>>()?;
+                Ok((coordinate, refs))
             })
             .collect()
     }
@@ -309,7 +366,7 @@ impl<R> Default for NoeConsumptionSource<R> {
         Self {
             opening: None,
             admitted: Vec::new(),
-            pending: Vec::new(),
+            pending: BTreeMap::new(),
             delivered: 0,
         }
     }

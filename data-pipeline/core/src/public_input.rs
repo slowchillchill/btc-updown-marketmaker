@@ -244,10 +244,12 @@ pub enum PreparedCanonicalInputV1<'a> {
     },
     BinanceDepthSnapshot {
         row: &'a crate::typed_raw::BinanceDepthSnapshotRow,
+        depth: crate::reduction::PreparedBinanceDepthV1,
         source: crate::pm_reduction::PreparedPmEvidenceV1<contracts::SourceEvidenceRefV3>,
     },
     BinanceDepthUpdate {
         row: &'a crate::typed_raw::BinanceDepthUpdateRow,
+        depth: crate::reduction::PreparedBinanceDepthV1,
         source: crate::pm_reduction::PreparedPmEvidenceV1<contracts::SourceEvidenceRefV3>,
     },
     BinanceAggregateTrade {
@@ -408,12 +410,14 @@ fn prepare_ingress_view_v1<'a>(
         TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(row)) => {
             PreparedCanonicalInputV1::BinanceDepthSnapshot {
                 row,
+                depth: crate::reduction::PreparedBinanceDepthV1::prepare(&row.bids, &row.asks)?,
                 source: prepared_source()?,
             }
         }
         TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(row)) => {
             PreparedCanonicalInputV1::BinanceDepthUpdate {
                 row,
+                depth: crate::reduction::PreparedBinanceDepthV1::prepare(&row.bids, &row.asks)?,
                 source: prepared_source()?,
             }
         }

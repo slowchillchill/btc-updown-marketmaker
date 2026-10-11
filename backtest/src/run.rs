@@ -1008,9 +1008,15 @@ where
             if pending.is_none() && start_at == Some(at) {
                 start_at = None;
                 let input = if health_enabled {
-                    shared.strategy_observation_input(&mut driver)
+                    shared.strategy_observation_input_with_trade_details(
+                        &mut driver,
+                        strategy.requires_trade_economics_details(),
+                    )
                 } else {
-                    shared.strategy_input(&mut driver)
+                    shared.strategy_input_with_trade_details(
+                        &mut driver,
+                        strategy.requires_trade_economics_details(),
+                    )
                 }
                 .map_err(HistoricalFailureCauseV1::Ledger)?;
                 if let Some(input) = input {

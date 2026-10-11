@@ -167,6 +167,7 @@ pub(crate) enum MarketLifecyclePhaseV1 {
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MarketStateStoreV2 {
     markets: BTreeMap<String, MarketStateV2>,
+    pending_ends: std::collections::BTreeSet<(i64, String)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,6 +352,15 @@ impl MarketStateStoreV2 {
     }
 
     pub(crate) fn new(directory: &SessionMarketDirectoryV1) -> Self {
+        let pending_ends = directory
+            .markets()
+            .map(|market| {
+                (
+                    market.market().window.end_at_utc_ms,
+                    market.market().condition_id.0.clone(),
+                )
+            })
+            .collect();
         let markets = directory
             .markets()
             .map(|market| {
@@ -360,10 +370,17 @@ impl MarketStateStoreV2 {
                 )
             })
             .collect();
-        Self { markets }
+        Self {
+            markets,
+            pending_ends,
+        }
     }
 
     pub(crate) fn commit_admitted_market(&mut self, market: &PlatformMarketV1) {
+        self.pending_ends.insert((
+            market.market().window.end_at_utc_ms,
+            market.market().condition_id.0.clone(),
+        ));
         self.markets.insert(
             market.market().condition_id.0.clone(),
             MarketStateV2::new(market),
@@ -465,21 +482,25 @@ impl MarketStateStoreV2 {
 
     pub(crate) fn advance_time(
         &mut self,
-        directory: &crate::market_directory::SessionMarketDirectoryV1,
+        _directory: &crate::market_directory::SessionMarketDirectoryV1,
         platform_effective_at_utc_ms: i64,
-    ) -> Result<(), MarketEventErrorV1> {
-        for admitted in directory.markets() {
-            let condition_id = &admitted.market().condition_id.0;
+    ) -> Result<Vec<String>, MarketEventErrorV1> {
+        let mut closed = Vec::new();
+        // 公开/隐藏各自持有截止队列；后加入的市场也进入本实例的队列。
+        while self
+            .pending_ends
+            .first()
+            .is_some_and(|(end, _)| *end <= platform_effective_at_utc_ms)
+        {
+            let (end, condition_id) = self.pending_ends.pop_first().expect("存在已跨截止市场");
             let market = self
                 .markets
-                .get_mut(condition_id)
+                .get_mut(&condition_id)
                 .ok_or_else(|| MarketEventErrorV1::UnknownMarket(condition_id.clone()))?;
-            market.advance_time(
-                platform_effective_at_utc_ms,
-                admitted.market().window.end_at_utc_ms,
-            );
+            market.advance_time(platform_effective_at_utc_ms, end);
+            closed.push(condition_id);
         }
-        Ok(())
+        Ok(closed)
     }
 
     pub(crate) fn validate_input_complete(&self) -> Result<(), MarketEventErrorV1> {

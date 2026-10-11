@@ -58,7 +58,7 @@ impl<'a> DayProducerV1<'a> {
         let initialization_binding = self.ingress.initialization_binding().cloned();
         let first_canonical_position = self.core.next_canonical_position();
         let prepared = self.ingress.prepare_input(&self.core, &mut input)?;
-        let applied = self.core.push(&prepared)?.into_owned();
+        let mut applied = self.core.push(&prepared)?.into_owned();
         let dependencies = prepared.recorded.dependency_record_refs.clone();
         let prepared_pm = match prepared.current {
             PreparedCanonicalInputV1::PolymarketMessage(pm) => Some(pm),
@@ -77,6 +77,52 @@ impl<'a> DayProducerV1<'a> {
                     }
                 };
                 materials.insert(position, material);
+            }
+        }
+        if !self
+            .core
+            .observation_requirements()
+            .binance_depth_quantities
+        {
+            for group in &mut applied.applied.closed_groups {
+                if !group.records.iter().any(|fact| {
+                    matches!(
+                        materials.get(&fact.position),
+                        Some(CompactCanonicalReferenceV1::BinanceDepth { .. })
+                    )
+                }) {
+                    continue;
+                }
+                let group = std::sync::Arc::make_mut(group);
+                let records = group
+                    .records
+                    .iter()
+                    .map(|fact| {
+                        let payload = if let Some(CompactCanonicalReferenceV1::BinanceDepth {
+                            binding,
+                            ..
+                        }) = materials.get(&fact.position)
+                        {
+                            PublicBusinessPayloadV1::BinanceDepthReference(binding.clone())
+                        } else {
+                            fact.payload.clone()
+                        };
+                        PublicBusinessFactV1 {
+                            position: fact.position.clone(),
+                            payload,
+                            source_refs: fact.source_refs.clone(),
+                            lineage: fact.lineage.clone(),
+                            direct_time: fact.direct_time.clone(),
+                            dependency_time: fact.dependency_time.clone(),
+                            quality: fact.quality.clone(),
+                            direct_sources: fact.direct_sources.clone(),
+                        }
+                    })
+                    .collect::<std::sync::Arc<[_]>>();
+                for observation in &mut group.observations {
+                    observation.group_events = records.clone();
+                }
+                group.records = records;
             }
         }
         let mut canonical = first_canonical_position;

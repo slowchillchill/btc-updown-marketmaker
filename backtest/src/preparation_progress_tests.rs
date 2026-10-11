@@ -110,7 +110,10 @@ fn phase_progress_preserves_full_material_statistics_and_reconciles_consecutive_
         assert_eq!(work[pass]["decoded_batches"], 2);
         assert_eq!(work[pass]["physical_rows"], 8);
         assert_eq!(work[pass]["selected_rows"], 7);
-        assert_eq!(work[pass]["initialization_physical_rows"], 2);
+        // 初始化已在selection阶段真实读取；后续pass只复用选中行，不虚报I/O。
+        assert_eq!(work[pass]["initialization_files_completed"], 0);
+        assert_eq!(work[pass]["initialization_decoded_batches"], 0);
+        assert_eq!(work[pass]["initialization_physical_rows"], 0);
         assert_eq!(work[pass]["initialization_selected_rows"], 1);
     }
     assert_eq!(

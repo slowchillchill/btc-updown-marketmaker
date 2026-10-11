@@ -1,7 +1,13 @@
 use super::*;
 
 fn scenario() -> (PublicObservationCoreV1, Vec<Arc<ClosedBusinessGroupV1>>) {
+    scenario_with_requirements(PublicObservationRequirementsV1::FULL)
+}
+fn scenario_with_requirements(
+    requirements: PublicObservationRequirementsV1,
+) -> (PublicObservationCoreV1, Vec<Arc<ClosedBusinessGroupV1>>) {
     let mut core = core();
+    core.set_observation_requirements(requirements);
     push(&mut core, &meta(0));
     let mut other = metadata_snapshot_row();
     other.condition_id = format!("0x{}", "2".repeat(64));
@@ -129,16 +135,22 @@ fn one_depth_owner_per_group_keeps_complete_values_quality_and_old_snapshots() {
     };
     assert_eq!(
         groups[1].observations[0].binance_depth.value,
-        Some(reference(100, "0.7"))
+        Some(BinanceDepthObservationV1::Full(
+            reference(100, "0.7").into()
+        ))
     );
     assert_eq!(
         groups[2].observations[0].binance_depth.value,
-        Some(reference(101, "0.2"))
+        Some(BinanceDepthObservationV1::Full(
+            reference(101, "0.2").into()
+        ))
     );
     assert!(groups[3].observations[0].binance_depth.value.is_none());
     assert_eq!(
         groups[4].observations[0].binance_depth.value,
-        Some(reference(200, "0.7"))
+        Some(BinanceDepthObservationV1::Full(
+            reference(200, "0.7").into()
+        ))
     );
     let before = serde_json::to_value(&groups[1].observations).unwrap();
     drop(core);
@@ -148,7 +160,9 @@ fn one_depth_owner_per_group_keeps_complete_values_quality_and_old_snapshots() {
     );
     assert_eq!(
         groups[1].observations[0].binance_depth.value,
-        Some(reference(100, "0.7"))
+        Some(BinanceDepthObservationV1::Full(
+            reference(100, "0.7").into()
+        ))
     );
 }
 
@@ -174,10 +188,12 @@ fn complete_pre_arc_observation_json_remains_readable_and_identical() {
 // 独立沿改动前完整公式投影，核对所有字段而非只看价格/指针。
 fn original_projection(
     core: &PublicObservationCoreV1,
-) -> ObservedFactV1<BinanceDepthStateReferenceV1> {
+) -> ObservedFactV1<BinanceDepthObservationV1> {
     ObservedFactV1 {
         value: if core.global.depth.value.is_some() {
-            core.binance_depth.current_depth_value()
+            core.binance_depth
+                .current_depth_value()
+                .map(|value| BinanceDepthObservationV1::Full(value.into()))
         } else {
             None
         },
@@ -248,14 +264,17 @@ fn unchanged_depth_is_shared_without_refreshing_anchors_and_old_targets_are_rele
     assert_original_projection(&core, &third);
     let depth = &third.closed_groups[0].observations[0].binance_depth;
     assert!(!Arc::ptr_eq(&old.binance_depth, depth));
-    assert_eq!(depth.value.as_ref().unwrap().last_update_id, 101);
+    assert_eq!(
+        depth.value.as_ref().unwrap().full().unwrap().last_update_id,
+        101
+    );
     assert_ne!(old.binance_depth.direct_anchors, depth.direct_anchors);
     assert_ne!(
         old.binance_depth.dependency_frontier,
         depth.dependency_frontier
     );
     assert_eq!(serde_json::to_value(old).unwrap(), old_json);
-    let value = depth.value.as_ref().unwrap();
+    let value = depth.value.as_ref().unwrap().full().unwrap();
     let strings: usize = value
         .bids
         .iter()
@@ -603,4 +622,45 @@ fn source_progress_disabled_keeps_identical_confirmation_without_group() {
         ),
     );
     assert!(same.closed_groups.is_empty());
+}
+
+#[test]
+fn quantity_free_depth_keeps_original_unknown_quality_anchors_and_prefix() {
+    let (full_core, full) = scenario();
+    let (compact_core, compact) = scenario_with_requirements(PublicObservationRequirementsV1 {
+        binance_depth_quantities: false,
+    });
+    assert_eq!(full_core.object_counts(), compact_core.object_counts());
+    for (a, b) in full.iter().zip(&compact) {
+        assert_eq!(a.records, b.records);
+        assert_eq!(a.group_id, b.group_id);
+        assert_eq!(a.group_position, b.group_position);
+        for (a, b) in a.observations.iter().zip(&b.observations) {
+            assert_eq!(a.visible_prefix, b.visible_prefix);
+            assert_eq!(a.assets, b.assets);
+            assert_eq!(a.binance_depth.quality, b.binance_depth.quality);
+            assert_eq!(
+                a.binance_depth.direct_anchors,
+                b.binance_depth.direct_anchors
+            );
+            assert_eq!(
+                a.binance_depth.dependency_frontier,
+                b.binance_depth.dependency_frontier
+            );
+            assert_eq!(
+                a.binance_depth.value.is_some(),
+                b.binance_depth.value.is_some()
+            );
+            if b.binance_depth.value.is_some() {
+                assert_eq!(
+                    b.binance_depth.value,
+                    Some(BinanceDepthObservationV1::NotMaterialized)
+                );
+            }
+        }
+    }
+    let mut bytes = Vec::new();
+    compact_core.write_checkpoint(&mut bytes).unwrap();
+    let restored = PublicObservationCoreV1::read_checkpoint(bytes.as_slice()).unwrap();
+    assert!(!restored.observation_requirements().binance_depth_quantities);
 }

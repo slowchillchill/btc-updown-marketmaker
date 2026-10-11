@@ -170,8 +170,9 @@ pub(crate) fn locate(
     files: &[&ValidatedDirectSourceParquetFileV3],
     rows: usize,
     range: &std::ops::Range<i64>,
-    epochs: &BTreeMap<(u8, String), u64>,
-) -> RecordingResult<Vec<Vec<LocatedInputV1>>> {
+    opened: &[crate::typed_raw::OpenedParquetV1],
+    limit: usize,
+) -> RecordingResult<(Vec<Vec<LocatedInputV1>>, BTreeMap<(u8, String), u64>)> {
     use parquet::arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder};
     use rayon::prelude::*;
     let common = [
@@ -180,9 +181,10 @@ pub(crate) fn locate(
         "collector_admission_sequence",
         "collector_admission_time_utc_ms",
     ];
-    files
+    let parts: Vec<RecordingResult<_>> = files
         .par_iter()
-        .map(|file| {
+        .zip(opened)
+        .map(|(file, opened)| {
             let kind = file.source_kind();
             let mut columns = common.to_vec();
             columns.extend(match kind {
@@ -217,49 +219,165 @@ pub(crate) fn locate(
                 ],
                 _ => return Err(format!("未支持的原始来源 {kind}").into()),
             });
-            let b =
-                ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file.file_path())?)?;
+            let b = ParquetRecordBatchReaderBuilder::new_with_metadata(
+                opened.reader.clone(),
+                opened.metadata.clone(),
+            );
             let projection = ProjectionMask::columns(b.parquet_schema(), columns);
             let mut position = 0;
             let mut entries = Vec::new();
-            for batch in b
-                .with_projection(projection)
-                .with_batch_size(rows)
-                .build()?
-            {
-                let batch = batch?;
-                for row in 0..batch.num_rows() {
-                    let mut fields = crate::public_input::primitive_row(&batch, row);
-                    let (e, a) = evidence(kind, file.schema_version(), &mut fields)?;
-                    if range.contains(&e.received_at_utc_ms) {
-                        let source = source(&e) as u8;
-                        let first = if source == 1 || source == 2 {
-                            epochs[&(
-                                source,
-                                e.collector_admission
-                                    .as_ref()
-                                    .unwrap()
-                                    .source_sequence_epoch_id
-                                    .clone(),
-                            )]
-                        } else {
-                            (a.0 as u64) ^ (1 << 63)
-                        };
-                        entries.push(LocatedInputV1 {
-                            physical_row: position + row as u64,
-                            source,
-                            first,
-                            sequence: a.1,
-                            identity: e.source_message_id.0,
-                            received: e.received_at_utc_ms,
-                            source_at: e.source_event_at_utc_ms,
-                        });
-                    }
+            let mut starts = BTreeMap::new();
+            for (group_index, group) in opened.metadata.metadata().row_groups().iter().enumerate() {
+                let first_row = position;
+                position += group.num_rows() as u64;
+                if !group_may_overlap(group, range) {
+                    continue;
                 }
-                position += batch.num_rows() as u64;
+                let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(
+                    opened.reader.clone(),
+                    opened.metadata.clone(),
+                )
+                .with_row_groups(vec![group_index])
+                .with_projection(projection.clone())
+                .with_batch_size(rows)
+                .build()?;
+                let mut offset = first_row;
+                for batch in reader {
+                    let batch = batch?;
+                    use arrow_array::{Array, TimestampMillisecondArray};
+                    let received = batch
+                        .column_by_name("timestamp_received")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap();
+                    for row in 0..batch.num_rows() {
+                        // 保留空值原错误边界；范围外行不再构造无消费者的身份。
+                        if !received.is_null(row) && !range.contains(&received.value(row)) {
+                            continue;
+                        }
+                        let mut fields = crate::public_input::primitive_row(&batch, row);
+                        let (e, a) = evidence(kind, file.schema_version(), &mut fields)?;
+                        let source = source(&e) as u8;
+                        let epoch = if source == 1 || source == 2 {
+                            let epoch = e
+                                .collector_admission
+                                .as_ref()
+                                .unwrap()
+                                .source_sequence_epoch_id
+                                .clone();
+                            crate::canonical_run::update_epoch_start(
+                                &mut starts,
+                                &epoch,
+                                crate::canonical_run::CaptureCoordinate {
+                                    admitted_at_utc_ms: a.0,
+                                    received_at_utc_ms: e.received_at_utc_ms,
+                                    collector_admission_sequence: a.1,
+                                },
+                                if source == 1 {
+                                    "polymarket_market"
+                                } else {
+                                    "binance_depth"
+                                },
+                                limit,
+                            )?;
+                            Some(epoch)
+                        } else {
+                            None
+                        };
+                        entries.push((
+                            LocatedInputV1 {
+                                physical_row: offset + row as u64,
+                                source,
+                                first: (a.0 as u64) ^ (1 << 63),
+                                sequence: a.1,
+                                identity: e.source_message_id.0,
+                                received: e.received_at_utc_ms,
+                                source_at: e.source_event_at_utc_ms,
+                            },
+                            epoch,
+                        ));
+                    }
+                    offset += batch.num_rows() as u64;
+                }
             }
-            entries.sort_by(|a, b| a.key().cmp(&b.key()));
-            Ok(entries)
+            Ok((entries, starts))
         })
-        .collect()
+        .collect();
+    let mut starts = [BTreeMap::new(), BTreeMap::new()];
+    let mut all = Vec::new();
+    for part in parts {
+        let (entries, file_starts) = part?;
+        if let Some((entry, _)) = entries.first()
+            && (entry.source == 1 || entry.source == 2)
+        {
+            for (epoch, coordinate) in file_starts {
+                crate::canonical_run::update_epoch_start(
+                    &mut starts[(entry.source - 1) as usize],
+                    &epoch,
+                    coordinate,
+                    if entry.source == 1 {
+                        "polymarket_market"
+                    } else {
+                        "binance_depth"
+                    },
+                    limit,
+                )?;
+            }
+        }
+        all.push(entries);
+    }
+    let mut epochs = BTreeMap::new();
+    for (index, starts) in starts.into_iter().enumerate() {
+        for (epoch, rank) in crate::canonical_run::rank_epochs(
+            starts,
+            if index == 0 {
+                "polymarket_market"
+            } else {
+                "binance_depth"
+            },
+        )? {
+            epochs.insert(((index + 1) as u8, epoch), rank as u64);
+        }
+    }
+    let order = all
+        .into_iter()
+        .map(|entries| {
+            let mut entries: Vec<_> = entries
+                .into_iter()
+                .map(|(mut e, epoch)| {
+                    if let Some(epoch) = epoch {
+                        e.first = epochs[&(e.source, epoch)];
+                    }
+                    e
+                })
+                .collect();
+            if entries.windows(2).any(|pair| pair[0].key() > pair[1].key()) {
+                entries.sort_by(|a, b| a.key().cmp(&b.key()));
+            }
+            entries
+        })
+        .collect();
+    Ok((order, epochs))
+}
+
+/// footer没有统计时仍读取真实行；物理组号不替代来源坐标。
+fn group_may_overlap(
+    group: &parquet::file::metadata::RowGroupMetaData,
+    range: &std::ops::Range<i64>,
+) -> bool {
+    let Some(column) = group
+        .columns()
+        .iter()
+        .find(|c| c.column_path().string() == "timestamp_received")
+    else {
+        return true;
+    };
+    let Some(parquet::file::statistics::Statistics::Int64(stats)) = column.statistics() else {
+        return true;
+    };
+    match (stats.min_opt(), stats.max_opt()) {
+        (Some(min), Some(max)) => *min < range.end && *max >= range.start,
+        _ => true,
+    }
 }

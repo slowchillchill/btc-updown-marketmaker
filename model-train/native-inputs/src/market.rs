@@ -836,6 +836,7 @@ pub(crate) fn trades(
 }
 fn event_class(p: &PublicBusinessPayloadV1) -> (usize, usize) {
     match p {
+        PublicBusinessPayloadV1::BinanceDepthReference(_) => (17, 6),
         PublicBusinessPayloadV1::PolymarketMessage(m) => (
             match &m.payload {
                 CanonicalPmPayloadV1::Book {
@@ -1035,7 +1036,9 @@ pub(crate) fn encode_features(
                     previous.inputs = None;
                 }
             } else {
-                let levels = visible(&o.binance_depth).map(|d| if bid { &d.bids } else { &d.asks });
+                let levels = visible(&o.binance_depth)
+                    .and_then(BinanceDepthObservationV1::full)
+                    .map(|d| if bid { &d.bids } else { &d.asks });
                 side(
                     projection,
                     features,

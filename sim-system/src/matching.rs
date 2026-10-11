@@ -2909,13 +2909,10 @@ impl ExecutionStateV2 {
 
     pub(crate) fn advance_market_time(
         &mut self,
-        directory: &SessionMarketDirectoryV1,
-        platform_effective_at_utc_ms: i64,
+        closed_markets: &[String],
     ) -> Result<(), MatchingStateErrorV1> {
-        for market in directory.markets() {
-            if platform_effective_at_utc_ms >= market.market().window.end_at_utc_ms {
-                self.queues.end_matching(&market.market().condition_id.0)?;
-            }
+        for condition in closed_markets {
+            self.queues.end_matching(condition)?;
         }
         Ok(())
     }

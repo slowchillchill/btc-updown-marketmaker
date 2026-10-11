@@ -2965,7 +2965,12 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             "原引用重交不改变余额或经济序"
         );
         let reference = empty_completion.durable_reference().unwrap();
-        assert!(observation.result_references().contains(reference.result()));
+        assert!(
+            observation
+                .result_references()
+                .unwrap()
+                .contains(reference.result())
+        );
         assert_eq!(
             ::execution_normalization::read_durable_noe_record_position(reference.result())
                 .unwrap(),
