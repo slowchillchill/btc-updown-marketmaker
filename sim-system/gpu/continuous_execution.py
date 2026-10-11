@@ -86,6 +86,10 @@ class ContinuousExecution:
                     projection,self.sampler,self.asset_tokens,self.source_assets))
                 batches.append(batch)
                 if bool((batch.fault|effect.fault).any().cpu()):return world,projection,tuple(batches),effect
+                world,projection,autos=Numbers.run_exact_batch(lambda:world.try_auto_redeem(
+                    choice.at,choice.present,projection,self.sampler,preceding=(batch,)))
+                batches.extend(autos)
+                if any(bool(value.fault.any().cpu()) for value in autos):return world,projection,tuple(batches),effect
             else:
                 world=Numbers.run_exact_batch(lambda:world.apply_hidden_reference(self.refresh(world,choice),
                     indices,self.source_assets))
@@ -148,4 +152,17 @@ class ContinuousExecution:
         return world,projection,tuple(batches),None
 
     def handlers(self):
-        return {0:self.settlement,2:self.finality,3:self.rebate,4:self.hidden,5:self.mutation}
+        def with_auto(method):
+            def advance(world,projection,choice):
+                world,projection,batch,effect=method(world,projection,choice)
+                batches=() if batch is None else batch if isinstance(batch,tuple) else (batch,)
+                fault=choice.fault.clone()
+                for value in batches:fault |= value.fault
+                if effect is not None and hasattr(effect,'fault'):fault |= effect.fault
+                world,projection,autos=Numbers.run_exact_batch(lambda:world.try_auto_redeem(
+                    choice.at,choice.present&(fault==0),projection,self.sampler,
+                    preceding=batches))
+                return world,projection,batches+autos,effect
+            return advance
+        return {phase:with_auto(method) for phase,method in
+            ((0,self.settlement),(2,self.finality),(3,self.rebate),(4,self.hidden),(5,self.mutation))}

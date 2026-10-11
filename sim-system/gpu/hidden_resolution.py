@@ -134,12 +134,16 @@ class ResolutionObligations:
     pending: torch.Tensor  # [root,market,fill slot]，仅首次登记时的非终局人口。
     sequences: object  # [root,fill slot]完整u64；不能把slot作为源fill身份。
     fault: torch.Tensor
+    auto_redeemed: torch.Tensor  # 原义务完成，独立于是否存在账户delta。
+    invalidated_by_quality: torch.Tensor  # 原已登记义务的Market Invalid失效，完成后不追溯。
 
     @classmethod
     def empty(cls, roots, markets, pool):
         return cls(torch.full((roots,markets),-1,dtype=torch.int64,device=pool.occupied.device),
             torch.zeros((roots,markets,pool.capacity),dtype=torch.bool,device=pool.occupied.device),
-            pool.sequences.constant(0),torch.zeros(roots,dtype=torch.int32,device=pool.occupied.device))
+            pool.sequences.constant(0),torch.zeros(roots,dtype=torch.int32,device=pool.occupied.device),
+            torch.zeros((roots,markets),dtype=torch.bool,device=pool.occupied.device),
+            torch.zeros((roots,markets),dtype=torch.bool,device=pool.occupied.device))
 
     def register(self, source, pool, condition, enabled):
         """只在首次执行合格判定时冻结原pending fill集合，不重新登记重复判定。"""
@@ -181,6 +185,14 @@ class ResolutionObligations:
             sequences=pool.sequences.select(sequence_mask,self.sequences),fault=fault)
         return candidate,fresh
 
+    def invalidate_market(self, rows, enabled):
+        """原MARKET Invalid只使未清偿义务失效；仍等待pending/Maker后才报冲突。"""
+        markets=self.reference_indices.size(1)
+        selected=enabled[:,None] & (torch.arange(markets,device=rows.device)[None,:]==rows[:,1,None])
+        invalid=selected & ((rows[:,0]==7)&(rows[:,10]==5))[:,None]
+        invalid &= (self.reference_indices>=0) & ~self.auto_redeemed
+        return replace(self,invalidated_by_quality=self.invalidated_by_quality|invalid)
+
     def complete(self, transition):
         """真实终态消费只移除该完整fill身份；MINED/经济应用不关闭屏障。"""
         from queues import _take
@@ -220,6 +232,8 @@ class ResolutionObligations:
         return replace(self,
             reference_indices=torch.where(valid[:,None],self.reference_indices,original.reference_indices),
             pending=torch.where(valid[:,None,None],self.pending,original.pending),
+            auto_redeemed=torch.where(valid[:,None],self.auto_redeemed,original.auto_redeemed),
+            invalidated_by_quality=torch.where(valid[:,None],self.invalidated_by_quality,original.invalidated_by_quality),
             sequences=self.sequences.select(valid.repeat_interleave(width),original.sequences),fault=root_fault)
 
 

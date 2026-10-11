@@ -103,7 +103,10 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         return T([[0]*width])
     backend=ContinuousExecution(population,rule,codec,sampler,asks,T(list(range(len(tokens)))),
         T(asset_ends),taker,maker,
-        assembled.condition_by_asset,block.asset_axis,paths,scenario)
+        assembled.condition_by_asset,block.asset_axis,paths,scenario,
+        condition_by_market=T([list(range(len(conditions)))]),
+        market_end_by_market=T([[next(market['window']['end_at_utc_ms'] for market in
+            clock.source.prepared.columns['markets'] if market['condition_id']==condition) for condition in conditions]]))
     if two and 'cold_authority' not in source:
         from maker_days import MakerDays
         from rebate_coordinator import RebateCoordinator

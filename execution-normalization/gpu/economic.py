@@ -142,14 +142,15 @@ def map_rebate_economic(delta,account,asset_roots,private,ordinal,at,kind,day,pa
 
 def map_resolution_redemption(delta,account,condition,resolution,policy,assets,tokens,asset_roots,
                               private,ordinal,at):
-    """原ResolutionRedeemApplied一次经济事实，完整两腿delta保持原成员人口。"""
+    """原请求式或Auto兑付经济事实，完整两腿delta保持原成员人口。"""
     from queues import ExactRational,Numbers,_take
     from asset_buy import take_ratio
     from lifecycle import input_fault,source_order
     from fields import RecordList
     from account_state import grouped_fault
     roots=account.numel()
-    fault=delta.fault | input_fault([delta.sequence,private],[account,condition,resolution,policy,at],ordinal)
+    scalar=[account,condition,resolution,at]+([] if policy is None else [policy])
+    fault=delta.fault | input_fault([delta.sequence,private],scalar,ordinal)
     if assets.shape!=(roots,2) or tokens.shape!=assets.shape:
         raise ValueError('兑付经济成员须同根原两腿资产/token绑定')
     safe=assets.clamp(0,max(asset_roots.numel()-1,0))
@@ -159,7 +160,8 @@ def map_resolution_redemption(delta,account,condition,resolution,policy,assets,t
     member=(torch.arange(asset_roots.numel(),device=account.device)[:,None]==assets[asset_roots]).any(1)
     extra=(delta.movement.outcomes.sign!=0)&~member
     fault |= Numbers.combine_fault_rows((~valid).to(torch.int32)) | grouped_fault(extra.to(torch.int32),asset_roots,roots)
-    fault |= ((account<0)|(condition<0)|(resolution<0)|(policy<0)|(assets[:,0]==assets[:,1])).to(torch.int32)
+    fault |= ((account<0)|(condition<0)|(resolution<0)|(assets[:,0]==assets[:,1])).to(torch.int32)
+    if policy is not None: fault |= (policy<0).to(torch.int32)
     balances=tuple(ExactRational.ratio(value,value.constant(1_000_000)) for value in
         [delta.movement.cash,delta.movement.available,delta.movement.principal,delta.movement.fee])+tuple(
         take_ratio(delta.movement.rebates,torch.arange(roots,device=account.device)*4+field) for field in range(4))
@@ -170,6 +172,7 @@ def map_resolution_redemption(delta,account,condition,resolution,policy,assets,t
     zero=ExactRational(delta.sequence.constant(0),delta.sequence.constant(1))
     logical=encode_fields([account,torch.full_like(account,11),delta.sequence])
     economic=encode_fields([account,torch.ones_like(account),delta.sequence])
-    semantic=encode_fields([account,condition,at,resolution,policy,*balances,semantic_members,zero,zero])
+    semantic=encode_fields([account,condition,at,resolution]+([] if policy is None else [policy])+
+        [*balances,semantic_members,zero,zero])
     return EconomicEvidence(logical,economic,semantic,source_order(private,ordinal),balances,zero,
-        present.any(1),delta.emitted & (fault==0),fault,delta.sequence,21,None,transported)
+        present.any(1),delta.emitted & (fault==0),fault,delta.sequence,29 if policy is None else 21,None,transported)

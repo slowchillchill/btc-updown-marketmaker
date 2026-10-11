@@ -1510,7 +1510,8 @@ FixedIdentity只在原完整目录/成员绑定后消费，InitialTick只设置t
 真实初始化Active、接单准入或Terminal/结算状态，未装该控制后端的运行仍等待MarketFact。
 Terminal保留原来源并等待真实Resolution、义务与NOE输出协调。当前 #181 B100ms 批准目标为
 [D-0329](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6097003779)
-的平台自动结算；GPU Auto 纵向链尚待实施。此前 RESOLUTION_REDEEM_ONLY 请求能力与验证保留历史范围。
+的平台自动结算；SIM／NOE／Ledger及B连续入口的有限Auto接线见末尾“B默认平台自动结算”。
+此前 RESOLUTION_REDEEM_ONLY 请求能力与验证保留历史范围。
 当前mapped值ID借同一固定源页字典解释，跨页更换须承接完整原值/字典引用，不能直接复用局部ID。
 
 冷材料的市场事实身份沿 `public_reduction::materialize_market_fact_v1` 复用原纯物化配方。
@@ -2219,7 +2220,7 @@ PPO或活动恢复仍未交付。
 ### 连续宿主的 Terminal、请求式结算与经济尾段
 
 本节记录已交付请求能力及其历史验证。D-0329已批准#181 B100ms默认平台自动结算；
-本次冷开户不切换GPU运行模式，Auto的SIM／NOE／Ledger纵向链仍待下一增量实现。
+此前冷开户批未切换GPU运行模式；后续Auto接线见末尾“B默认平台自动结算”。
 
 `ContinuousExecution.hidden` 将原 Terminal tag9 交给 `BaseSimRuntime.apply_hidden_terminal`，
 保订单关闭、Resolved、账户和同一引用游标共同提交。其余 hidden 引用及操作继续用原
@@ -2460,4 +2461,67 @@ token4 ask0.6；两腿 limit0.5，只有 token3成交24.19份。独立 Fraction 
 
 本批只闭合真实冷开户和完整目录。有限请求身份仍由验证器配置，通用请求拥有者、
 活跃行与任务／冻结引用释放、跨UTC连续根和15／3日工作集未完成。D-0329批准的 GPU
-Auto 纵向链属下一批；本次不切结算模式，不声称活动恢复、PPO或正式训练已交付。
+Auto 纵向链在该冷开户批之后接入，见下节；冷开户批本身未切结算模式，
+不声称活动恢复、PPO或正式训练已交付。
+
+
+### B默认平台自动结算
+
+[D-0329](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6097003779)
+只将#181 B100ms默认装配对齐平台Auto。`open_actor_root`保公共显式配置，B调用者启用Auto；
+公共请求式能力继续保留。模式不扩展至#5、C、PAPER或LIVE。
+
+`BaseSimRuntime.try_auto_redeem`复用原Resolution身份、真实非终局fill义务和Maker市场结果。
+`ContinuousExecution`在原Terminal、最终性及原日时钟等实际事件完成后尝试Auto。
+市场已判定、pending finality清空且Maker市场应计完成后，原账户精确兑付两种资产；
+同一事件和兑付候选共同提交。NOE沿原自然批、record ordinal、private sequence及真实received
+产生Auto生命周期和可选经济事实，不签发虚构请求、不固定等待180秒。
+condition直接读取原Maker市场目录；Auto不另建condition副本或日时钟。
+
+已登记且尚未兑付的判定义务，沿原 Market QualityBoundary tag7／质量码5记录失效。
+失效保存在原`ResolutionObligations.invalidated_by_quality`，后续质量恢复不清除；
+资产tag8、Stale和已完成Auto不扩大为失效。记录失效时不提前失败，仍等待pending／Maker前驱。
+前驱齐备后，Auto返回原整数fault；原`BoundedSendClock`共同事务拒绝当前触发事件、回款、
+销仓及NOE候选，保留此前成功前缀。新增状态随原构造、容量承接和`coordinate_result`携带，
+不复制判定正文、condition或账户，不建立第二事务或Rust错误接口。
+
+
+Auto生命周期使用schema28，经济事实使用schema29。纯输家虽现金为零，仍有销份额经济事实；
+无持仓只需生命周期完成，二者不能混为同一分支。Ledger沿原Resolved身份、waiting及经济前驱消费。
+成功池仍按同condition累计，配对与赢家孤腿的现金和成本归属复用原归约，应收只消除一次；
+没有恢复逐成交剩余贡献维护。Auto完成标记用于零持仓／零现金的公开结算状态，不依赖赎回请求。
+
+连续宿主停止新增观察后继续已接纳模型任务、实际发送及原SIM／NOE义务。Auto尾段不装公开赎回
+协调器、不发送赎回请求；反馈仍按真实可见时刻领取，原物理容量退出续接与合法前驱等待保持区分。
+收益确认、应收与现金到账仍是不同事实，Maker／Taker返佣等权，不因次日付款扣分。
+
+有限证据分别检验生产者和公开消费者。原PR278真实CPU材料给独立金额与身份：Up10／Down5，
+本金6＋3、费用0.168＋0.084；兑付后cash100.748、maker95.748、directional5。
+纯输家cash96.916且份额／成本／应收归零；无持仓cash100且只有Auto生命周期。
+冷前缀Auto对照不等同从开户跑完整GPU撮合。另一原NOE领取代表按实际received推进，
+67032首次领取Auto而67033 Confirmed仍未领时，平台prefix6、Auto仍waiting；随后消费Confirmed
+和Auto到prefix7，首次available_at保67032。原CPU材料两条first_available均为71000，
+不把它们冒称67032的本地Ledger前缀。真实Terminal／最终性Auto尾段的两个反馈同为33009可见，
+另核Maker真实成熟89100000、公开领取89100010后付款1.008；这些时刻是有限夹具，不是平台SLA。
+
+真实TypedRaw metadata与WS的后继冲突，经原DPT在31500产生Market Fresh→Invalid，
+原因`POLYMARKET_TERMINAL_DUPLICATE_CONFLICT`。原CPU在33000最终性齐备时报冲突；
+旧GPU错误将现金1880变2180、销去UP300份并标记完成，保留该原缺陷反证。
+修复代表15.62秒通过：31500只登记失效，33000返回fault1，原finality／Maker候选自身fault0；
+现金1880、UP300、pending和未完成义务保持，runtime／projection／公开记录没有提交本次候选。
+对象身份断言仅对应现有时钟的候选安装方式，不是通用业务合同。该运行最初新增归因断言
+误读返回层级的exit101及正式接口查证保留，不写成整入口通过。
+
+冲突修复后的正常Terminal／最终性／Maker付款尾段16.41秒通过。先前Auto组件与原NOE
+乱序领取对照20.46秒、反序双市场B装配51.33秒按未变业务范围复用；原正常尾段19.52秒
+保留为历史版本证据。上述时间是测试内耗时，完整命令另记；不作为性能基准。
+原请求式尾段22.90秒、真实第二Day容量续接84.13秒按未变非Auto调用范围复用；
+后者从合法一槽日目录触发required days2，在最后反馈领取后无外部事件时增长并同刻续接，
+不刷新receive_rank／available_at、不重复提交。该原GTC材料无Auto，检验的是共用Ledger／宿主
+资源路径；小额Taker／Maker日应收不足付款阈值，无Payment。原legacy公共观察截止／在途任务及
+Taker付款39.02秒检验该段不涉及Resolution的未变路径。该夹具未启用Auto，
+不冒称同一模型材料同时覆盖Auto与在途任务。
+
+本增量不交付通用请求身份拥有者、活跃市场／完成任务引用释放、跨UTC完整根、15／3日工作集，
+也不证明PPO、MLflow、活动恢复、正式容量或正式训练完成。原309观察与公共格式／来源索引证据
+只按其未变调用范围复用。实际验证命令、源码快照、失败与查证先后见#181本批执行记录。

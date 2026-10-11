@@ -91,6 +91,7 @@ class MarketResolutions:
     redeemed_orphan: object
     realized_pnl: object
     directional_cash: object
+    auto_redeemed: torch.Tensor
 
     @classmethod
     def open(cls, pools, markets, sources, *, known=True):
@@ -104,7 +105,8 @@ class MarketResolutions:
             torch.full_like(markets.conditions, -1), torch.zeros(count, dtype=torch.bool, device=assets.device),
             ExactRational(zero, zero.constant(1)), markets.known & torch.full((count,), known, dtype=torch.bool, device=assets.device),
             markets.fault.clone(), pools.fault.clone(), PublicSettlementRequests.empty(markets.conditions),
-            amount,ExactRational(zero,zero.constant(1)),amount,amount)
+            amount,ExactRational(zero,zero.constant(1)),amount,amount,
+            torch.zeros(count,dtype=torch.bool,device=assets.device))
 
     def observe(self, condition, identity, terminal, pools, enabled):
         roots = pools.fault.numel()
@@ -143,7 +145,7 @@ class MarketResolutions:
     def coordinated(self, original, valid_roots):
         use = valid_roots[self.roots]
         return replace(self, **{name:torch.where(use, getattr(self, name), getattr(original, name))
-            for name in ('present', 'identities', 'terminals', 'maker_category', 'known')},
+            for name in ('present', 'identities', 'terminals', 'maker_category', 'known','auto_redeemed')},
             payouts=select(self.payouts, use.repeat_interleave(2), original.payouts),
             redeemed_pair=select(self.redeemed_pair,use,original.redeemed_pair),
             redeemed_orphan=select(self.redeemed_orphan,use.repeat_interleave(2),original.redeemed_orphan),
@@ -169,6 +171,16 @@ class MarketResolutions:
     def associated(self,condition,identity):
         member=self.present & (self.conditions==condition[self.roots]) & (self.identities==identity[self.roots])
         return torch.zeros_like(condition,dtype=torch.int32).scatter_reduce(0,self.roots,member.to(torch.int32),reduce='amax').bool()
+
+    def auto_ready(self,condition,identity,trades,days):
+        predecessors=self.economic_predecessors(trades,days)
+        member=self.present&(self.conditions==condition[self.roots])&(self.identities==identity[self.roots])
+        member &= predecessors.known&predecessors.closed&(predecessors.fault==0)
+        return torch.zeros_like(condition,dtype=torch.int32).scatter_reduce(0,self.roots,member.to(torch.int32),reduce='amax').bool()
+
+    def complete_auto(self,condition,identity,enabled):
+        selected=self.present&(self.conditions==condition[self.roots])&(self.identities==identity[self.roots])&enabled[self.roots]
+        return replace(self,auto_redeemed=self.auto_redeemed|selected)
 
     def maker_attribution(self,condition,identity):
         """首次实际Resolution决定费用现金归属，不随迟到成功重分。"""
@@ -233,6 +245,7 @@ class MarketResolutions:
         state=torch.where(~self.present,0,torch.where(~request.present,
             torch.where(receivable,2,1),torch.where(request.outcomes==3,5,
                 torch.where((request.outcomes==2)&redeemed,4,3))))
+        state=torch.where(self.auto_redeemed,4,state)
         return ResolutionRead(self.present, self.identities, self.terminals, self.maker_category,
             select(pair, self.present, zero), select(orphan, self.present, zero), self.known,
             self.fault | self.root_fault[self.roots] | pair.fault | orphan.fault | total_receivable.fault,state)

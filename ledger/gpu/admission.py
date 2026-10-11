@@ -288,7 +288,7 @@ class AdmissionLifecycle:
             (outcome_kind==OUT_LOGICAL_CONFLICT)|(outcome_kind==OUT_ECONOMIC_CONFLICT))
         requested=requested & ~not_applicable
         fault=self.fault | torch.where(requested,self.lifecycle.fault[root,local],0)
-        economic=requested&(outcome_kind==OUT_FACT)&((tag==11)|(tag==18)|(tag==21)|(tag==24))
+        economic=requested&(outcome_kind==OUT_FACT)&((tag==11)|(tag==18)|(tag==21)|(tag==24)|(tag==29))
         sequence=_take(self.columns.sequences,index)
         balances=take_ratio(self.columns.balances,(index[:,None]*8+torch.arange(8,device=index.device)).flatten())
         owners=self.platform.asset_roots
@@ -297,7 +297,9 @@ class AdmissionLifecycle:
         fault |= torch.where(economic,self.columns.outcome_fault(index,owners),0)
         next_entry=self.current_entry_sequence+self.current_entry_sequence.constant(1)
         fault=fault | torch.where(requested,sequence_fault(next_entry),0)
-        redemption=economic & (tag==21)
+        redemption=economic & ((tag==21)|(tag==29))
+        auto_event=requested&(outcome_kind==OUT_EVIDENCE)&(tag==28)
+        auto=auto_event|(economic&(tag==29))
         fee_economic=economic & (tag==24)
         paid_economic=fee_economic & (self.lifecycle.economic_tags[root,local]==16)
         cash_economic=fee_economic & (self.lifecycle.economic_tags[root,local]==17)
@@ -308,11 +310,13 @@ class AdmissionLifecycle:
         identity=self.lifecycle.settlement_identities[root,local]
         resolution_maker=torch.zeros_like(economic)
         if self.resolutions is None:
-            fault |= (redemption|cost_event|(fee_economic&~cash_economic)).to(torch.int32)
+            fault |= (redemption|auto_event|cost_event|(fee_economic&~cash_economic)).to(torch.int32)
         else:
             resolved_ready=self.resolutions.associated(condition,resolution)
             resolution_maker=self.resolutions.maker_attribution(condition,resolution)
             association_available=association_available & (~(redemption|cost_event|(fee_economic&~cash_economic)) | resolved_ready)
+            auto_ready=self.resolutions.auto_ready(condition,resolution,self.trade_success,self.rebate_days)
+            association_available &= ~auto|auto_ready
         costs=self.settlement_costs
         cash_identities=self.external_cash
         settlement_ready=torch.ones_like(economic)
@@ -351,7 +355,7 @@ class AdmissionLifecycle:
             fault |= torch.where(cash_economic & result.applied,other_cash.fault,0)
         fault=fault | torch.where(result.applied,maker_cash.fault,0)
         applicable=((outcome_kind==OUT_EVIDENCE)&((tag==3)|(tag==7)|(tag==8)|(tag==9)|
-            (tag==12)|(tag==13)|(tag==14)|(tag==15)|(tag==16)|(tag==17)|(tag==19)|(tag==20)|(tag==22)|(tag==23)|(tag==25)|(tag==26)|(tag==27))) | (outcome_kind==OUT_PENDING)
+            (tag==12)|(tag==13)|(tag==14)|(tag==15)|(tag==16)|(tag==17)|(tag==19)|(tag==20)|(tag==22)|(tag==23)|(tag==25)|(tag==26)|(tag==27)|(tag==28))) | (outcome_kind==OUT_PENDING)
         query_control=requested&(outcome_kind==OUT_EVIDENCE)&(tag==25)
         query_request=torch.full_like(local,-1)
         query_bound=torch.zeros_like(enabled)
@@ -362,7 +366,7 @@ class AdmissionLifecycle:
             fault|=torch.where(query_control,self.query_associations.fault,0)
         query_definitive=query_control&query_bound&(self.lifecycle.query_outcomes[root,local]==0)&(
             (self.lifecycle.query_states[root,local]==0)|(self.lifecycle.query_states[root,local]==1))
-        use=(requested&applicable)|result.applied
+        use=((requested&applicable)&(~auto_event|association_available))|result.applied
         fault=fault | result.fault
         use=use&(fault==0)&settlement_ready
         order=_take(self.lifecycle.orders,index)
@@ -550,6 +554,7 @@ class AdmissionLifecycle:
                 self.lifecycle.settlement_outcomes[root,local],self.lifecycle.settlement_observations[root,local],
                 request_event & use & (fault==0))
             use &= ~request_event | request_ready
+            resolutions=resolutions.complete_auto(condition,resolution,auto_event&use&(fault==0))
             resolutions,maker_delta=resolutions.redeem(self.lifecycle.conditions[root,local],
                 self.lifecycle.resolution_identities[root,local],cash_delta,removed_cost,success_pools,
                 redemption & result.applied & use & (fault==0))

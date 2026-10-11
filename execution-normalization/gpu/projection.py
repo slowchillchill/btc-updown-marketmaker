@@ -320,6 +320,44 @@ class Projection:
             (economic,ECONOMIC,private,batch,received,torch.full_like(conditions,3),at,delta.emitted)]
         return self._finish(emitter,records,fault | frame.root_fault | ordinals.fault)
 
+    def auto_redeem(self,sampler,condition,resolution,source_at,assets,tokens,delta,at,emitted,fault,*,preceding=None):
+        """原Auto生命周期及Option(delta)，沿实际private序和收到时刻发射。"""
+        from lifecycle import map_auto_redeem
+        from economic import map_resolution_redemption
+        active=emitted[:,None];categories=torch.full_like(active,3,dtype=torch.int64)
+        ordinals=map_source_ordinals(active,categories,(1+delta.emitted.to(torch.int64))[:,None],fault[:,None])
+        # Auto属于触发事件的原自然批。只有该批实际已有记录时续用其坐标。
+        from queues import _take
+        preceding=() if preceding is None else preceding
+        start=self.emitter.next_batch_sequence
+        continued=torch.zeros_like(emitted)
+        for prior in preceding:
+            width=prior.emitted.size(1)
+            location=torch.arange(at.numel(),device=at.device)*width+prior.emitted.to(torch.int64).argmax(1)
+            present=prior.emitted.any(1)
+            start=_take(prior.batch_sequences,location).select(present,start)
+            continued |= present
+        count=torch.zeros_like(at)
+        for prior in preceding:
+            width=prior.emitted.size(1)
+            selected=_take(start,torch.arange(at.numel(),device=at.device).repeat_interleave(width))
+            same=prior.batch_sequences.compare(selected)
+            count += (prior.emitted&(same.order.reshape(at.numel(),width)==0)).to(torch.int64).sum(1)
+        original_emitter=self.emitter
+        emitting=replace(original_emitter,next_batch_sequence=start)
+        emitter,frame=emitting.emit(sampler,active,torch.zeros_like(active),at[:,None],at[:,None],
+            torch.zeros_like(at[:,None]),fault[:,None])
+        emitter=replace(emitter,next_batch_sequence=original_emitter.next_batch_sequence.select(continued,emitter.next_batch_sequence))
+        private,batch=frame.private_sequences,frame.batch_sequences
+        first=ordinals.first_ordinals[:,0]+count
+        life=map_auto_redeem(self.account_slots,condition,resolution,source_at,private,first,frame.emitted[:,0])
+        economic=map_resolution_redemption(delta,self.account_slots,condition,resolution,None,assets,tokens,
+            self.asset_roots,private,first+1,at)
+        common=(private,batch,frame.received_at[:,0],categories[:,0],at)
+        return self._finish(emitter,[(life,EVIDENCE,*common,emitted),
+            (economic,ECONOMIC,*common,emitted&delta.emitted)],fault|frame.root_fault|ordinals.fault,
+            record_ordinal_base=ExactInt.from_i64_tensor(count))
+
     def _record_bank(self,mapped,kind):
         roots=self.account_slots.numel()
         zero=torch.zeros(roots,dtype=torch.int64,device=self.account_slots.device)

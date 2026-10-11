@@ -103,7 +103,8 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
             cancellations=run(lambda:PublicCancellationState.open(integers([]),T([[]],torch.bool))))
     else:
         from actor_opening import open_actor_root
-        cold=open_actor_root(prepared,prepared_hidden,codec,cold_request,page_groups=3,hidden_page_buckets=1)
+        cold=open_actor_root(prepared,prepared_hidden,codec,cold_request,page_groups=3,hidden_page_buckets=1,
+            auto_redemption=True)
         assembled=cold.sources;runtime,public,noe=assembled.runtime,cold.public,cold.projection
         public_source,block=assembled.source,assembled.block
         pm,market,reference,binance=assembled.states

@@ -32,6 +32,48 @@ class BaseSimRuntime:
 
     post_results: object = None  # 原逐项Post正文，末项封口前保留真实第一结果。
     cancel_results: object = None  # 原逐目标取消正文，完整末项封口后仍保原决定。
+    auto_redemption_sources: object = None  # 显式Auto装配；公共请求路径不被默认替换。
+
+    def install_auto_redemption(self,sources):
+        return replace(self,auto_redemption_sources=sources).install_hidden_resolutions()
+
+    def try_auto_redeem(self,at,enabled,projection,sampler,*,preceding=None):
+        """原判定、成交终局及Maker市场结果齐备时，按该实际事件时刻兑付。"""
+        if self.auto_redemption_sources is None:
+            return self,projection,()
+        obligations=self.resolution_obligations
+        roots,markets=obligations.reference_indices.shape
+        batches=[];world=self
+        for market in range(markets):
+            obligations=world.resolution_obligations
+            reference=obligations.reference_indices[:,market]
+            ready=enabled&(reference>=0)&~obligations.pending[:,market].any(1)&(
+                world.calendars.maker.market_result[:,market]>=0)&~obligations.auto_redeemed[:,market]
+            if not bool(ready.any().cpu()):continue
+            sources=world.auto_redemption_sources
+            assets,tokens,payouts,error=sources.gather(reference)
+            fault=obligations.fault|world.account.fault|world.calendars.maker.fault|torch.where(ready,error,0)
+            # 原ResolutionConflict只在前驱齐备时失败，不提前提交销仓/回款。
+            fault |= (ready & obligations.invalidated_by_quality[:,market]).to(torch.int32)
+            account,delta=world.account.redeem_outcomes(assets,payouts,ready&(fault==0))
+            fault |= account.fault
+            identity=sources.columns.fields[reference.clamp(0,sources.columns.fields.size(0)-1),3]
+            source_at=world.source_resolutions.source_times[:,market]
+            projected,batch=projection.auto_redeem(sampler,world.calendars.maker.market_ids[:,market],identity,
+                source_at,assets,tokens,delta,at,ready&(fault==0),fault,preceding=preceding)
+            fault |= batch.fault
+            valid=fault==0
+            account=account.coordinate_result(world.account,fault)
+            complete=ready&valid
+            selected=(torch.arange(markets,device=at.device)[None,:]==market)&complete[:,None]
+            obligations=replace(obligations,auto_redeemed=obligations.auto_redeemed|selected,fault=fault)
+            world=replace(world,account=account,resolution_obligations=obligations)
+            projection=projected
+            preceding=(() if preceding is None else preceding)+(batch,)
+            batches.append(replace(batch,emitted=batch.emitted&valid[:,None],
+                economic_enabled=batch.economic_enabled&valid[:,None],fault=fault))
+            if bool(fault.any().cpu()):break
+        return world,projection,tuple(batches)
 
     def install_order_query_history(self,history):
         if self.order_query_history is not None:
@@ -421,8 +463,13 @@ class BaseSimRuntime:
         hidden = hidden.quality_boundary(selected & (tags == 8)[owner],
             rows[owner,9], rows[owner,10], rows[owner,11] != 0)
         fault = fault | grouped_fault(hidden.fault, owner, self.orders.roots)
+        obligations=self.resolution_obligations
+        if obligations is not None:
+            obligations=obligations.invalidate_market(rows,supported & (fault==0)).coordinate_result(
+                self.resolution_obligations,fault)
         candidate = replace(self, hidden=hidden.coordinate_result(self.hidden, owner, fault),
-                            market_controls=control.coordinate_result(self.market_controls, fault))
+                            market_controls=control.coordinate_result(self.market_controls, fault),
+                            resolution_obligations=obligations)
         return candidate.hidden_reference_applied(indices, supported & (fault == 0), fault)
 
     def finish_hidden_bucket(self):

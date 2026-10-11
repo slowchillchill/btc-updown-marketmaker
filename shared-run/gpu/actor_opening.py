@@ -18,7 +18,7 @@ class ActorOpening:
     asset_ends: tuple
 
 
-def open_actor_root(public,hidden,codec,request,*,page_groups=256,hidden_page_buckets=64):
+def open_actor_root(public,hidden,codec,request,*,page_groups=256,hidden_page_buckets=64,auto_redemption=False):
     """已准备完整目录不是已见市场事实；资金仅来自本次合法SessionSpec。"""
     from hidden_inputs import HiddenPmBlock
     from account_state import PlatformAccountState
@@ -121,5 +121,10 @@ def open_actor_root(public,hidden,codec,request,*,page_groups=256,hidden_page_bu
     runtime,public_state,noe=Numbers.run_exact_batch(build)
     sources=install_actor_sources(public,hidden,runtime,conditions,page_groups=page_groups,
         hidden_page_buckets=hidden_page_buckets)
+    if auto_redemption:
+        from settlement_redemption import RedemptionSources
+        sources=replace(sources,runtime=Numbers.run_exact_batch(lambda:sources.runtime.install_auto_redemption(
+            RedemptionSources.bind(sources.block.terminal_columns,
+                tokens,[0]*len(tokens),list(range(len(tokens))),1))))
     return ActorOpening(sources,public_state,noe,authority,conditions,tokens,
         tuple(by_condition[by_token[token][0]]['window']['end_at_utc_ms'] for token in tokens))

@@ -69,9 +69,12 @@ def verify(source,runtime,projection,accepted_batch,block,sampler,receipt,kind,a
     build_public_device_page(os.environ['B_GPU_COLUMNS_BINARY'],source['source_binding']['public'],page)
     prepared=PreparedPublicPage(page,source['source_binding']['public'])
     public_source=PublicGroupSource(prepared,1,page_groups=2)
-    runtime=runtime.install_settlement_registration(T([[0]]),T([[1]]),T([[50001 if source['with_query'] else 20001]]))
-    if source['with_query']:runtime=runtime.install_settlement_queries(T([[30001]]),T([[40001]]),T([[2]]))
+    auto_mode=source.get('auto_mode',False)
+    if not auto_mode:
+        runtime=runtime.install_settlement_registration(T([[0]]),T([[1]]),T([[50001 if source['with_query'] else 20001]]))
+        if source['with_query']:runtime=runtime.install_settlement_queries(T([[30001]]),T([[40001]]),T([[2]]))
     redemption=RedemptionSources.bind(block.terminal_columns,[a['token_id'] for a in block.assets],[0,0],[0,1],1)
+    if auto_mode:runtime=runtime.install_auto_redemption(redemption)
     identities,offsets=byte_column([text.encode() for text in block.terminal_columns.canonical_ids])
     backend=ContinuousExecution(None,None,None,sampler,None,T([0,1]),T([source['market_end']]*2),rebate,
         rational(['0.2']),T([0,0]),T([0,1]),lambda *args:T([[0]*runtime.hidden.queues.capacity]),None,
@@ -99,7 +102,7 @@ def verify(source,runtime,projection,accepted_batch,block,sampler,receipt,kind,a
         assert complete.cpu().tolist()==[True],('原waiting未完成',receiver.captured.required if receiver.captured else None)
         return state,complete
     def freeze_account(state,at):return state.freeze_account(intents,at,submitted_legs=submitted)
-    settle=PublicSettlementRun(SettlementCoordinator.open(public.ledger.resolutions),freeze_account,backend.register_settlement)
+    settle=None if auto_mode else PublicSettlementRun(SettlementCoordinator.open(public.ledger.resolutions),freeze_account,backend.register_settlement)
     def forbidden(*args):raise AssertionError('交易截止后不得新增模型观察/调用Actor')
     cutoff=T([source['post_reference']['processing_at']])
     models=ActorModelQueue(torch.zeros((2,1,64),device='cuda'),T([[0,0,0]]),cutoff,forbidden,forbidden,forbidden)
@@ -112,23 +115,74 @@ def verify(source,runtime,projection,accepted_batch,block,sampler,receipt,kind,a
         assert result.complete.cpu().tolist()==[True] and result.fault.cpu().tolist()==[0]
         assert torch.equal(clock.runtime.calendars.maker.mature,clock.runtime.calendars.maker.occupied)
         assert not clock.runtime.calendars.maker.finalized.any().cpu().item()
-        assert values(clock.runtime.settlement_registrations.sends)==[0]
+        if not auto_mode:assert values(clock.runtime.settlement_registrations.sends)==[0]
+    if source.get('terminal_conflict',False):
+        # 原TypedRaw第二Terminal经DPT输出MARKET Fresh→Invalid，不伪造控制行。
+        boundaries=[]
+        for bucket in source['buckets']:
+            for reference in bucket['references']:
+                fact=reference['payload'].get('Inline',{}).get('MarketFact',{})
+                boundary=fact.get('payload',{}).get('QualityBoundary')
+                if boundary and boundary['scope']['kind']=='MARKET':
+                    boundaries.append((bucket['bucket']['bucket_time_utc_ms'],reference,boundary))
+        assert len(boundaries)==1
+        boundary_at,reference,boundary=boundaries[0]
+        assert boundary_at==31500 and boundary['current_quality']=='invalid'
+        assert boundary['reason_code']=='POLYMARKET_TERMINAL_DUPLICATE_CONFLICT'
+        result=shared.advance_before(T([source['confirmed_at']]),yes,progress=progress)
+        assert result.complete.cpu().tolist()==[True] and result.fault.cpu().tolist()==[0]
+        before_runtime=clock.runtime;before_projection=clock.projection;before_public=clock.public
+        cash=values(before_runtime.account.cash);outcomes=values(before_runtime.account.outcomes)
+        expected_outcomes=[0]*len(block.assets);expected_outcomes[asset]=units('300')
+        assert outcomes==expected_outcomes and before_runtime.resolution_obligations.pending.any().cpu().item()
+        assert before_runtime.market_controls.quality.cpu().tolist()==[[5]]
+        if not os.environ.get('B_GPU_CONFLICT_OLD_CANDIDATE'):
+            assert before_runtime.resolution_obligations.invalidated_by_quality.cpu().tolist()==[[True]]
+            assert before_runtime.resolution_obligations.fault.cpu().tolist()==[0]
+            assert before_runtime.account.fault.cpu().tolist()==[0] and before_runtime.calendars.maker.fault.cpu().tolist()==[0]
+            assert redemption.gather(before_runtime.resolution_obligations.reference_indices[:,0])[-1].cpu().tolist()==[0]
+        result=shared.advance_before(T([source['confirmed_at']+1]),yes,progress=progress)
+        report=dict(conflict_source=reference,at=source['confirmed_at'],fault=result.fault.cpu().tolist(),
+            before_cash=cash,after_cash=values(clock.runtime.account.cash),before_outcomes=outcomes,
+            after_outcomes=values(clock.runtime.account.outcomes),auto_completed=clock.runtime.resolution_obligations.auto_redeemed.cpu().tolist())
+        (artifact/'terminal-conflict-result.json').write_text(json.dumps(report,indent=2)+'\n')
+        if os.environ.get('B_GPU_CONFLICT_OLD_CANDIDATE'):
+            assert result.complete.cpu().tolist()==[True] and result.fault.cpu().tolist()==[0]
+            assert values(clock.runtime.account.cash)==[cash[0]+units('300')]
+            assert values(clock.runtime.account.outcomes)==[0,0]
+            assert clock.runtime.resolution_obligations.auto_redeemed.cpu().tolist()==[[True]]
+            print(json.dumps(dict(old_candidate_conflict_wrong_redemption=True,**report)))
+        else:
+            assert result.complete.cpu().tolist()==[False] and result.fault.cpu().tolist()==[1]
+            assert result.stage_result.stage_result.fault.cpu().tolist()==[0], '原finality/Maker候选本身合法，失败来自失效义务'
+            assert clock.runtime is before_runtime and clock.projection is before_projection and clock.public is before_public
+            assert values(clock.runtime.account.cash)==cash and values(clock.runtime.account.outcomes)==outcomes
+            assert clock.runtime.resolution_obligations.auto_redeemed.cpu().tolist()==[[False]]
+            assert clock.runtime.resolution_obligations.pending.any().cpu().item()
+            print(json.dumps(dict(conflict_rejected_common_transaction_preserved=True,**report)))
+        return
     result=shared.advance_before(T([source['confirmed_at']+200000]),yes,progress=progress)
     assert result.complete.cpu().tolist()==[True] and result.fault.cpu().tolist()==[0]
     assert not models.tasks and torch.equal(shared.next_observation,cutoff)
     assert clock.runtime.resolution_obligations.pending.sum().cpu().item()==0
     assert values(clock.runtime.account.outcomes)==[0,0]
-    assert values(clock.runtime.settlement_registrations.sends)==[1]
+    if not auto_mode:assert values(clock.runtime.settlement_registrations.sends)==[1]
+    else:
+        assert clock.runtime.settlement_registrations is None
+        assert clock.runtime.resolution_obligations.auto_redeemed.cpu().tolist()==[[True]]
     if source['with_query']:
         assert values(clock.runtime.settlement_registrations.query_state.queries)==[1]
         assert values(clock.runtime.settlement_registrations.query_state.consumed_queries)==[1]
-    expected=source['settlement_success_reference']['ledger']['projection']
+    expected=(source['finality_reference'][-1] if auto_mode else source['settlement_success_reference'])['ledger']['projection']
     balances=clock.public.ledger.platform.balances
     amounts=lambda v:[Fraction(n,d) for n,d in zip(values(v.numerator),values(v.denominator))]
     assert amounts(balances)==[Fraction(expected['platform_confirmed_projection'][key]) for key in names]
     assert values(clock.public.ledger.current_entry_sequence)==[expected['ledger_entry_seq']]
     assert values(clock.public.ledger.platform.platform_source_prefix)==[expected['platform_source_prefix']]
-    assert clock.public.ledger.resolutions.requests.outcomes.cpu().tolist()==[2]
+    if not auto_mode:assert clock.public.ledger.resolutions.requests.outcomes.cpu().tolist()==[2]
+    else:
+        assert not clock.public.ledger.resolutions.requests.present.any().cpu().item()
+        assert clock.public.ledger.resolutions.auto_redeemed.cpu().tolist()==[True]
     if not source['late_maker']:
         old_cash=values(clock.runtime.account.cash);old_entry=values(clock.public.ledger.current_entry_sequence)
         held=clock.public
@@ -170,7 +224,7 @@ def verify(source,runtime,projection,accepted_batch,block,sampler,receipt,kind,a
     assert not clock.public.pending_noe.active.any().cpu().item()
     assert not (clock.public.waiting.received&~clock.public.waiting.consumed).any().cpu().item()
     (artifact/'continuous-tail-trace.json').write_text(json.dumps(trace,indent=2)+'\n')
-    print(json.dumps(dict(production_continuous_tail=True,with_query=source['with_query'],
+    print(json.dumps(dict(production_continuous_tail=True,auto_mode=auto_mode,with_query=source['with_query'],
         terminal_pending_and_real_settlement_checked=True,next_day_maker_boundary_checked=True,
         actual_receive_times=received,observations=0,elapsed_seconds=time.perf_counter()-started)))
 

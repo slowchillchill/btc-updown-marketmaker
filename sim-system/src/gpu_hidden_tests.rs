@@ -89,35 +89,43 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
 #[tokio::test(flavor="current_thread")]
 #[ignore="AutoDL真实紧凑TWAP/空Book/Terminal→一次原Resolved与后继Lifecycle"]
 async fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_effects() {
-    gpu_hidden_terminal_source(false,false,false).await;
+    gpu_hidden_terminal_source(false,false,false,false).await;
 }
 
 #[cfg(feature="shared-execution")]
 #[tokio::test(flavor="current_thread")]
 #[ignore="AutoDL真实空Book→外层GTC挂单→Terminal市场关闭/释放→同NOE/Ledger"]
 async fn gpu_compact_hidden_terminal_closes_real_resting_gtc_and_releases_once() {
-    gpu_hidden_terminal_source(true,false,false).await;
+    gpu_hidden_terminal_source(true,false,false,false).await;
 }
 
 #[cfg(feature="shared-execution")]
 #[tokio::test(flavor="current_thread")]
 #[ignore="AutoDL真实Maker→Terminal→实际最终性关闭请求前驱"]
 async fn gpu_compact_hidden_terminal_keeps_actual_maker_pending_until_terminal() {
-    gpu_hidden_terminal_source(true,true,false).await;
+    gpu_hidden_terminal_source(true,true,false,false).await;
 }
 
 #[cfg(feature="shared-execution")]
 #[tokio::test(flavor="current_thread")]
 #[ignore="AutoDL真实无初始Book的Terminal→原Resolved/NOE/Ledger"]
 async fn gpu_compact_hidden_terminal_without_initial_books_resolves_once() {
-    gpu_hidden_terminal_source(false,false,true).await;
+    gpu_hidden_terminal_source(false,false,true,false).await;
 }
 
 #[cfg(feature="shared-execution")]
-async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, without_initial_books: bool) {
+#[tokio::test(flavor="current_thread")]
+#[ignore="真实Maker未终局→Terminal→Auto原SIM/NOE/Ledger经济尾段"]
+async fn gpu_auto_terminal_and_continuous_tail_use_original_obligations() {
+    gpu_hidden_terminal_source(true,true,false,true).await;
+}
+
+#[cfg(feature="shared-execution")]
+async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, without_initial_books: bool, auto_mode: bool) {
     use data_pipeline_training::{compact_public::{PublicCompactWriterV1, CompactFactPayloadV1},
         compact_hidden_material::{prepare_compact_hidden_material_v1, CompactHiddenMaterialReaderV1},
         compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1, gpu_initial_sort::GpuInitialRunOrderV1};
+    let conflict = auto_mode && std::env::var_os("B_GPU_TERMINAL_CONFLICT").is_some();
     let payable_maker = with_pending && std::env::var_os("B_GPU_CONTINUOUS_TAIL").is_some();
     let late_maker = payable_maker && std::env::var_os("B_GPU_TAIL_LATE_CONFIRMATION").is_some();
     let confirmed_at = if late_maker {90_027_000} else {33000};
@@ -155,7 +163,34 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
         inputs.insert(6,pm(6,3,26000,delta(if payable_maker {"300"} else {"3"})));
         inputs.insert(7,pm(7,4,27000,delta("0")));
     }
-    inputs.push(end(if with_pending {10} else {8}));
+    if conflict {
+        assert!(with_pending);
+        let mut row = terminal_orderbook_row(&market());
+        row.timestamp = Some(31500);
+        row.timestamp_received = 31501;
+        row.collector_admission_time_utc_ms = 31502;
+        row.collector_admission_sequence += 1;
+        if let PolymarketOrderbookEvent::MarketResolved {winning_asset_id,winning_outcome,..} = &mut row.event {
+            *winning_asset_id = DOWN_TOKEN_ID.into();
+            *winning_outcome = "DOWN".into();
+        }
+        let mut metadata=terminal_metadata_row(&market());
+        metadata.collector_admission_sequence += 1;
+        metadata.timestamp_received = row.timestamp_received;
+        metadata.collector_admission_time_utc_ms = row.collector_admission_time_utc_ms;
+        metadata.source_evidence_received_at_utc = Some(row.timestamp_received);
+        metadata.row_evidence_validation_completed_at_utc = Some(row.timestamp_received+1);
+        metadata.lifecycle_applied_at_utc = Some(row.timestamp_received+2);
+        metadata.runtime_role_applied_at_utc = Some(row.timestamp_received+2);
+        metadata.ws_platform_timestamp_utc = row.timestamp;
+        metadata.ws_platform_timestamp_raw = Some("31500".into());
+        metadata.ws_claimant_collector_admission_sequence = Some(row.collector_admission_sequence);
+        metadata.winning_asset_id = Some(DOWN_TOKEN_ID.into());
+        metadata.winning_outcome = Some("DOWN".into());
+        inputs.push(record(10, TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata)))));
+        inputs.push(record(11, TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row))));
+    }
+    inputs.push(end(if conflict {12} else if with_pending {10} else {8}));
     if without_initial_books {
         assert!(!with_order && !with_pending);
         inputs.drain(4..6);
@@ -205,7 +240,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
         }
         buckets.push(bucket);
     }
-    assert_eq!(buckets.iter().map(|b| b.bucket.bucket_time_utc_ms).collect::<Vec<_>>(), if without_initial_books {vec![21000,31000]} else if with_pending {vec![21000,22000,26000,27000,31000]} else {vec![21000,22000,31000]});
+    assert_eq!(buckets.iter().map(|b| b.bucket.bucket_time_utc_ms).collect::<Vec<_>>(), if without_initial_books {vec![21000,31000]} else if conflict {vec![21000,22000,26000,27000,31000,31500]} else if with_pending {vec![21000,22000,26000,27000,31000]} else {vec![21000,22000,31000]});
     assert_eq!(buckets[0].references.len(), 2);
     assert!(buckets[0].steps.is_empty());
     assert!(buckets[0].references.iter().all(|r| matches!(r.payload,
@@ -238,7 +273,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
             Box::new(GpuNoeReferencePort {memory,durable,normalization_reference:normalization_capture,normalization_core:None})
         })),finality,None,false,if payable_maker {"2000"} else {"10"}).await;
     // 有pending成交例显式Registered→TerminalSuccess，有限工程scenario非训练默认。
-    let with_query=with_pending && std::env::var_os("B_GPU_SETTLEMENT_QUERY").is_some();
+    let with_query=!auto_mode && with_pending && std::env::var_os("B_GPU_SETTLEMENT_QUERY").is_some();
     let settlement_scenario=crate::ResolutionRedeemScenarioV1 {
         steps:if with_query {vec![crate::ResolutionRedeemScenarioStepV1 {offset_ms:1,
             event:crate::ResolutionRedeemScenarioEventV1::SubmissionReceipt(crate::SettlementSubmissionReceiptV1::Registered)},
@@ -248,7 +283,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
         else if with_pending {vec![crate::ResolutionRedeemScenarioStepV1 {offset_ms:1,
             event:crate::ResolutionRedeemScenarioEventV1::SubmissionReceipt(crate::SettlementSubmissionReceiptV1::Registered)},
             crate::ResolutionRedeemScenarioStepV1 {offset_ms:20001,event:crate::ResolutionRedeemScenarioEventV1::Terminal(crate::SettlementTerminalV1::Success)}]} else {Vec::new()},costs:Vec::new()};
-    execution.configure_resolution_redeem_v1(settlement_scenario.clone()).unwrap();
+    if !auto_mode { execution.configure_resolution_redeem_v1(settlement_scenario.clone()).unwrap(); }
     let observation=saved.borrow_mut().take().unwrap();
     // 开户/初始市场已由同一原端口接纳；唯一消费者先领取初始化人口。
     let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
@@ -365,14 +400,14 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
     }
     assert!(terminal_index.is_some());
     // 非WS元数据无source time，不进hidden；真实终态组先Terminal再Lifecycle。
-    assert_eq!(controls.len(),1,"只有Terminal之后的真实Lifecycle");
+    assert_eq!(controls.len(),if conflict {2} else {1},"只有Terminal之后的真实Lifecycle");
     assert_eq!(qualified_sources.len(),2,"Terminal与后继Lifecycle均给同一原qualified源");
     assert_eq!(lifecycle_count,if with_order {2} else {1},"每订单关闭加首次Resolved，后继qualified不重复，不自动兑付");
     assert_eq!(qualified_sources[0]["event_id"],qualified_sources[1]["event_id"]);
     assert!(canonical_market_facts_checked > 0);
-    assert!(matches!(buckets.last().unwrap().references[0].payload,
+    assert!(matches!(buckets.iter().find(|b| b.bucket.bucket_time_utc_ms==31000).unwrap().references[0].payload,
         CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact {payload:CanonicalMarketFactPayloadV1::Terminal(_),..})));
-    assert!(matches!(buckets.last().unwrap().references[1].payload,
+    assert!(matches!(buckets.iter().find(|b| b.bucket.bucket_time_utc_ms==31000).unwrap().references[1].payload,
         CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact {payload:CanonicalMarketFactPayloadV1::LifecycleTransition(_),..})));
     let close_at=41000;
     execution.actor.projection_port.close_receive_prefix(close_at);
@@ -409,6 +444,15 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
                 state=next;
                 assert!(effects.into_lifecycle_feedback().unwrap().is_empty(),"日已成熟仍等待真实pending，不提前日结或付款");
             }
+            if conflict && at==confirmed_at {
+                let pending_state: crate::matching::ExecutionStateV2=serde_json::from_value(
+                    serde_json::to_value(&state.session.as_ref().unwrap().execution_state).unwrap()).unwrap();
+                let outcome=pending_state.advance_next_scheduled_finality_at(
+                    at,execution.actor._finality_policy.as_ref(),execution.actor._rule_snapshot.snapshot());
+                assert!(matches!(outcome,Err(crate::matching::MatchingStateErrorV1::ResolutionConflict(ref condition)) if condition==CONDITION_ID),
+                    "原冲突义务在最后终局/Maker完成时失败");
+                break;
+            }
             let (next,effects)=advance_finality_to_candidate(state,at,execution.actor._rule_snapshot.snapshot(),execution.actor._finality_policy.as_ref());
             state=next;
             let lifecycle=effects.into_lifecycle_feedback().unwrap();
@@ -430,7 +474,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
     let mut settlement_reference=None;
     let mut settlement_query_reference=Vec::new();
     let mut settlement_success_reference=None;
-    if with_pending {
+    if with_pending && !auto_mode {
         use contracts::economics::{SettlementRequestV1,SettlementRequestIdV1};
         use crate::matching::settlement::SettlementOperationV1;
         let request=SettlementRequestV1 {identity:SettlementRequestIdV1 {
@@ -514,7 +558,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
 
     }
     let mut rebate_reference=None;
-    if payable_maker {
+    if payable_maker && !conflict {
         if !late_maker {
             let (next,effect)=advance_rebate_clock_to_candidate(state,89_100_000);
             state=gpu_accept_projection_reference(&mut execution.actor,next,
@@ -529,7 +573,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
         for record in &received {ledger.apply_noe_memory_v2(record).unwrap();}
         rebate_reference=Some(gpu_ledger_reservation_checkpoint(&ledger,"Maker_day_payment"));
     }
-    let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,"with_pending":with_pending,"without_initial_books":without_initial_books,
+    let mut input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,"with_pending":with_pending,"without_initial_books":without_initial_books,
         "settlement_reference":settlement_reference,"settlement_success_reference":settlement_success_reference,"rebate_reference":rebate_reference,
         "with_query":with_query,"late_maker":late_maker,"confirmed_at":confirmed_at,"settlement_query_reference":settlement_query_reference,
         "engineering_finality_path":finality_path,"maker_checkpoints":maker_checkpoints,"finality_reference":finality_reference,
@@ -541,6 +585,8 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
         "accepted_records":accepted_records,"ledger_accepted":ledger_accepted,"terminal_attempts":terminal_attempts,"post_reference":post_reference,"original_order_after":if with_order {Some(state.session.as_ref().unwrap().execution_state.gpu_order_checkpoint_for_tests("sim-1"))} else {None},
         "source_binding":{"binary":std::env::var("B_GPU_HIDDEN_CLI").unwrap(),"hidden":hidden,"public":source,
             "rows":1,"bytes":1048576,"max_batch_bytes":1048576}});
+    input.as_object_mut().unwrap().insert("auto_mode".into(), serde_json::json!(auto_mode));
+    input.as_object_mut().unwrap().insert("terminal_conflict".into(), serde_json::json!(conflict));
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
         .arg(std::env::var("B_GPU_HIDDEN_REFERENCE_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();

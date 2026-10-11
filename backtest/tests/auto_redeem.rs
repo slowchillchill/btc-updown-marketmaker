@@ -862,3 +862,81 @@ async fn historical_v4_host_applies_original_auto_feedback_in_loop_and_range_tai
         std::fs::remove_dir_all(temp).unwrap();
     }
 }
+
+/// 原 PR278 材料和正式 V4 消费链，仅导出实际 Auto 前后作为 GPU 数值对照。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "AutoDL GPU Auto 生命周期、双资产经济和公开 Ledger 对照"]
+async fn gpu_auto_redeem_uses_original_pair_loser_and_empty_records() {
+    let destination = std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
+    let mut cases = Vec::new();
+    for case in ["pair", "loser", "empty"] {
+        let path = destination.join(case);
+        std::fs::create_dir_all(&path).unwrap();
+        let root = path.join("dpt");
+        let (core, times) = recorded_trading_with_probes(&root, "10", None, 60_000, 80, "100", &[]);
+        let policy = if case == "pair" {
+            br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":45000},{"state":"CONFIRMED","offset_ms":45010}],"economic_application_ordinal":1},"failure_overrides":[]}"#.as_slice()
+        } else { SUCCESS_POLICY };
+        let (execution, observation, _) = execution_with_rules_v4(&path.join("sim.jsonl"), &core, policy, None, "e".repeat(64), "100");
+        let materials = Arc::new(std::sync::Mutex::new(Vec::<LedgerRecordMaterialV2>::new()));
+        let output = materials.clone();
+        let mut ledger = LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        ledger.bind_record_sink_v2(Box::new(move |material| output.lock().unwrap().push(material)));
+        let mut shared = SharedExecutionV2::from_opening(ledger, observation).unwrap().unwrap();
+        let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
+        let mut driver = FinitePublicConsumptionV1::new(execution, source, format!("gpu-auto-{case}"));
+        for _ in 0..4 { driver.next_group().unwrap().unwrap(); }
+        let buys = match case { "pair" => vec![(UP_TOKEN_ID, 10), (DOWN_TOKEN_ID, 5)], "loser" => vec![(DOWN_TOKEN_ID, 5)], _ => vec![] };
+        for (token, quantity) in buys {
+            shared.execute(&mut driver.decision().unwrap(), RequestContextV2 {global_request_id: format!("buy-{token}"), caller_correlation_id: None},
+                Some(Arc::new(ModelIntentV1::SubmitSingleBuy {condition_id: ConditionId(CONDITION_ID.into()), order: BuyLegIntentV1 {
+                    token_id: TokenId(token.into()), order: BuyOrderIntentV1::GtcLimit {limit_price_pusd_per_share: Decimal::new(6,1), size_shares: Decimal::from(quantity), post_only: false}}}))).await.unwrap();
+        }
+        while driver.next_group().unwrap().is_some() { shared.apply_closed().unwrap(); }
+        assert!(shared.apply_closed().unwrap());
+        driver.complete().unwrap();
+        let snapshot = |ledger: &LedgerWriterV1| {
+            let read = ledger.economic_read().unwrap();
+            serde_json::json!({"projection":read.base(),"cash":read.cash(),"directional_cash":read.residual_cash().directional_cash_pusd,
+                "markets":read.market_totals().collect::<Vec<_>>(),"resolved":read.resolutions().next().unwrap().resolved,
+                "successful_trades":read.successful_trades().map(|trade|serde_json::json!({"fact":trade.terminal,"remaining_shares":trade.remaining_success_shares,"remaining_principal":trade.remaining_principal_cost_pusd})).collect::<Vec<_>>()})
+        };
+        let mut writer = LedgerBackgroundWriterV2::new(&path.join("prefix"));
+        let mut before = None;
+        let mut auto_records = Vec::new();
+        let mut all_records = Vec::new();
+        for material in materials.lock().unwrap().iter() {
+            if let Some(record) = material.consumed_record_v2() {
+                let record_json = serde_json::to_value(record.record()).unwrap();
+                let automatic = record_json["Evidence"]["evidence"]["SettlementLifecycle"]["result"].get("AutoRedeemApplied").is_some()
+                    || record_json["EconomicFactV2"]["fact"]["disposition"]["AccountTransition"]["transition"]["Existing"].get("AutoRedeemApplied").is_some()
+                    || record_json["EconomicFact"]["fact"]["disposition"]["AccountTransition"]["transition"].get("AutoRedeemApplied").is_some();
+                let row = serde_json::json!({"record":record.record(),"position":record.position(),"visibility":record.visibility(),"ledger_entry_seq":material.ledger_entry_seq()});
+                all_records.push(row.clone());
+                if automatic {
+                    if before.is_none() { writer.finish().unwrap(); before = Some(snapshot(&LedgerWriterV1::open_durable(path.join("prefix")).unwrap())); }
+                    auto_records.push(row);
+                }
+            }
+            assert!(writer.write(material).unwrap());
+        }
+        writer.finish().unwrap();
+        let after = snapshot(&LedgerWriterV1::open_durable(path.join("prefix")).unwrap());
+        assert_eq!(auto_records.len(), if case == "empty" {1} else {2});
+        assert_eq!(after["cash"]["actual_available_pusd"], match case {"pair" => "100.748", "loser" => "96.916", _ => "100"});
+        assert_eq!(after["markets"][0]["settlement_state"], "Redeemed");
+        cases.push(serde_json::json!({"case":case,"before":before.unwrap(),"after":after,"auto_records":auto_records,"all_records":all_records}));
+    }
+    let input = serde_json::json!({"cases":cases});
+    std::fs::write(destination.join("original-auto.json"),serde_json::to_vec_pretty(&input).unwrap()).unwrap();
+    let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+        .arg(std::env::var("B_GPU_AUTO_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let input_write = serde_json::to_writer(child.stdin.take().unwrap(),&input);
+    let output = child.wait_with_output().unwrap();
+    std::fs::write(destination.join("auto-python.stdout"),&output.stdout).unwrap();
+    std::fs::write(destination.join("auto-python.stderr"),&output.stderr).unwrap();
+    assert!(output.status.success(),"{:?}: {}",output.status,String::from_utf8_lossy(&output.stderr));
+    input_write.unwrap();
+    eprintln!("{}",String::from_utf8_lossy(&output.stdout));
+}

@@ -142,6 +142,15 @@ def map_resolved_position(account,condition,resolution_identity,terminal_identit
     return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,17)
 
 
+def map_auto_redeem(account,condition,resolution,source_at,private,ordinal,active):
+    """原AutoRedeemApplied生命周期，无请求身份，零持仓仍发完成事实。"""
+    fault=input_fault([private],[account,condition,resolution,source_at],ordinal)
+    fault |= ((account<0)|(condition<0)|(resolution<0)).to(torch.int32)
+    logical=encode_fields([account,torch.full_like(account,9),private])
+    semantic=encode_fields([account,condition,resolution,source_at])
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active&(fault==0),fault,28)
+
+
 def map_settlement_request(account,condition,resolution,policy,outcome,observation,private,ordinal,active):
     """原SettlementLifecycleV2::Request，固定SDK U256[1,2]完整保留。"""
     fault=input_fault([private],[account,condition,resolution,policy,outcome,observation],ordinal)
