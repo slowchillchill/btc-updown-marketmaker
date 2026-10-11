@@ -1336,7 +1336,61 @@ pub struct CancellationRequestsReadV1<'a> {
     /// None 为从未收到；Unavailable 为最新可能相关响应无法确定。
     pub latest_response: ExecutionReadValueV1<Option<&'a Ref<CancellationRequestCompletedV1>>>,
 }
+/// 从原请求及完成事实只读累计。有SIM回执的请求与无回执注册分列；回执不证明平台接受。
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ExecutionRequestTotalsReadV1 {
+    pub registered_requests_without_receipt: u64,
+    pub receipted_submission_requests: u64,
+    pub receipted_submission_requested_legs: u64,
+    pub receipted_cancellation_requests: u64,
+    pub completed_receipted_cancellation_requests: u64,
+    pub receipted_cancellation_response_counts: [u64; 3],
+}
 impl SharedExecutionRegistryV2 {
+    pub fn cumulative_request_totals(&self) -> ExecutionRequestTotalsReadV1 {
+        let mut totals = ExecutionRequestTotalsReadV1::default();
+        for request in self.intents.values() {
+            if request.receipt.is_none() {
+                totals.registered_requests_without_receipt += 1;
+                continue;
+            }
+            match request.origin.intent() {
+                ModelIntentV1::SubmitSingleBuy { .. } => {
+                    totals.receipted_submission_requests += 1;
+                    totals.receipted_submission_requested_legs += 1;
+                }
+                ModelIntentV1::SubmitPairedBuy { .. } => {
+                    totals.receipted_submission_requests += 1;
+                    totals.receipted_submission_requested_legs += 2;
+                }
+                _ => {
+                    totals.receipted_cancellation_requests += 1;
+                    if let Some(complete) = &request.completed {
+                        if let NormalizationRecord::Evidence {
+                            evidence:
+                                SourceNeutralEvidenceKind::Control {
+                                    result:
+                                        SourceNeutralControlResult::CancellationRequestCompleted {
+                                            result,
+                                        },
+                                },
+                            ..
+                        } = complete.record()
+                        {
+                            totals.completed_receipted_cancellation_requests += 1;
+                            totals.receipted_cancellation_response_counts[0] +=
+                                result.canceled_count;
+                            totals.receipted_cancellation_response_counts[1] +=
+                                result.not_canceled_no_effect_count;
+                            totals.receipted_cancellation_response_counts[2] +=
+                                result.evidence_unknown_no_effect_count;
+                        }
+                    }
+                }
+            }
+        }
+        totals
+    }
     pub fn cancellation_requests(
         &self,
         scope: Option<&CancellationScopeV1<'_>>,

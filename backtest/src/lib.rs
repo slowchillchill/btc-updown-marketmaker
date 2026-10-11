@@ -11,10 +11,14 @@ mod preparation;
 mod preparation_progress;
 mod prepared_material;
 mod process_measurement;
+mod research_summary;
 mod run;
 pub use day::*;
 pub use day_economics::HistoricalDayEconomicsSummaryV1;
 pub use day_summary::*;
+pub use research_summary::{
+    DecisionCountsV1, ResearchHourV1, ResearchSnapshotV1, ResearchSummaryV1,
+};
 mod statistics;
 #[cfg(test)]
 #[allow(dead_code)]

@@ -117,6 +117,7 @@ impl From<&HistoricalRunConfigV1> for HistoricalPreparedRunConfigV1 {
 pub enum HistoricalEndReasonV1 {
     RangeEnd,
     StrategyExit,
+    BudgetStop,
     Failure,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,6 +165,8 @@ pub struct SourceHealthRunSummaryV1 {
 }
 #[derive(Debug, Serialize)]
 pub struct HistoricalRunReportV1 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub research: Option<crate::research_summary::ResearchSummaryV1>,
     pub day_economics: HistoricalDayEconomicsSummaryV1,
     pub end_reason: HistoricalEndReasonV1,
     pub last_observed_at_utc_ms: Option<i64>,
@@ -346,6 +349,31 @@ fn sample_day_economics<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunA
         state.sample(at, None);
     }
 }
+fn research_snapshot<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>(
+    driver: &FinitePublicConsumptionV1<I>,
+    shared: &SharedExecutionV2,
+    boundary: i64,
+    health: &SourceHealthRunSummaryV1,
+    pending: Option<CalculationTimingRecordV1>,
+    day: &crate::day_economics::DayEconomicsStateV1,
+) -> crate::research_summary::ResearchSnapshotV1 {
+    let frames = driver.frames_at_observation();
+    let economics = shared.ledger().economic_read().map(|read| {
+        AccountEconomicsReadV2::from_ledger_and_observations(
+            &read,
+            frames.iter().map(|f| f.observation),
+        )
+    });
+    crate::research_summary::snapshot(
+        boundary,
+        driver.observation_cutoff(),
+        shared,
+        economics.as_ref(),
+        health,
+        pending,
+        day,
+    )
+}
 fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>(
     driver: &FinitePublicConsumptionV1<I>,
     shared: &SharedExecutionV2,
@@ -364,6 +392,7 @@ fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         )
     });
     HistoricalRunReportV1 {
+        research: None,
         end_reason: reason,
         last_observed_at_utc_ms: observation_cutoff
             .as_ref()
@@ -652,12 +681,29 @@ where
         mut unconsumed_required_trigger_at,
         mut delivery_summary,
         mut day_economics,
+        mut research,
     } = saved_loop.unwrap_or_default();
     let end = context.end;
     let operating_start = context.operating_start;
     let economics_start = context.start.max(operating_start.unwrap_or(context.start));
     if fresh {
         sample_day_economics(&driver, &shared, economics_start, &mut day_economics);
+    }
+    if research.is_none() && checkpoint.research_enabled() {
+        let baseline_at = driver.observation_cutoff().map_or(economics_start, |c| {
+            c.decision_time().logical_time_utc_ms().max(economics_start)
+        });
+        let baseline = research_snapshot(
+            &driver,
+            &shared,
+            baseline_at,
+            &health_summary,
+            pending.as_ref().map(|p| p.record.clone()),
+            &day_economics,
+        );
+        research = Some(crate::research_summary::ResearchStateV1::new(
+            baseline, fresh,
+        ));
     }
     let running = async {
         let mut next_hidden = checkpoint
@@ -703,8 +749,35 @@ where
             .filter(|at| *at < end)
             .min();
             let Some(at) = at else {
+                // 无事件小时先读取当前已完成事实，再执行原范围尾部。
+                if let Some(summary) = &mut research {
+                    while summary.next_boundary < end {
+                        day_economics.finish_duration(summary.next_boundary);
+                        summary.push(research_snapshot(
+                            &driver,
+                            &shared,
+                            summary.next_boundary,
+                            &health_summary,
+                            pending.as_ref().map(|p| p.record.clone()),
+                            &day_economics,
+                        ));
+                    }
+                }
                 break;
             };
+            if let Some(summary) = &mut research {
+                while summary.next_boundary <= at {
+                    day_economics.finish_duration(summary.next_boundary);
+                    summary.push(research_snapshot(
+                        &driver,
+                        &shared,
+                        summary.next_boundary,
+                        &health_summary,
+                        pending.as_ref().map(|p| p.record.clone()),
+                        &day_economics,
+                    ));
+                }
+            }
             let operating = operating_start.is_none_or(|start| at >= start);
             if pending_at == Some(at)
                 && pending.as_ref().is_some_and(|p| {
@@ -715,7 +788,7 @@ where
                 })
             {
                 sample_day_economics(&driver, &shared, at, &mut day_economics);
-                return Ok(HistoricalEndReasonV1::StrategyExit);
+                return Ok((HistoricalEndReasonV1::StrategyExit, at));
             }
             let health_due = health_at == Some(at);
             if health_due {
@@ -938,7 +1011,7 @@ where
                     p.calculation.calculation.output,
                     StrategyOutputV1::Exit { .. }
                 ) {
-                    return Ok(HistoricalEndReasonV1::StrategyExit);
+                    return Ok((HistoricalEndReasonV1::StrategyExit, at));
                 }
                 if p.health_invalidated {
                     dirty = true;
@@ -1145,6 +1218,9 @@ where
                         input.calculate(strategy, at)
                     )
                     .map_err(HistoricalFailureCauseV1::Strategy)?;
+                    if let Some(counts) = research.as_mut().and_then(|s| s.decisions.as_mut()) {
+                        counts.record(&calculation.output);
+                    }
                     let observation_at = calculation
                         .input_cutoff
                         .decision_time()
@@ -1241,10 +1317,25 @@ where
                         unconsumed_required_trigger_at,
                         delivery_summary: &delivery_summary,
                         day_economics: &day_economics,
+                        research: &research,
                     },
                     next_hidden.as_ref(),
                 )
                 .map_err(HistoricalFailureCauseV1::Material)?;
+            if checkpoint.budget_stopped() {
+                // 同毫秒已算完的Exit沿原下一轮立即终止；未到期的Exit仍随Running保存。
+                if pending.as_ref().is_some_and(|p| {
+                    p.completed_at == at
+                        && matches!(
+                            p.calculation.calculation.output,
+                            StrategyOutputV1::Exit { .. }
+                        )
+                }) {
+                    sample_day_economics(&driver, &shared, at, &mut day_economics);
+                    return Ok((HistoricalEndReasonV1::StrategyExit, at));
+                }
+                return Ok((HistoricalEndReasonV1::BudgetStop, at));
+            }
         }
         let tail_at = end.checked_sub(1).ok_or_else(|| {
             HistoricalFailureCauseV1::Sim(SimRunActorErrorV2::InvalidBusinessRequest(
@@ -1264,12 +1355,25 @@ where
         if tail_at >= economics_start {
             sample_day_economics(&driver, &shared, tail_at, &mut day_economics);
         }
+        if let Some(summary) = &mut research {
+            while summary.next_boundary <= end {
+                day_economics.finish_duration(summary.next_boundary);
+                summary.push(research_snapshot(
+                    &driver,
+                    &shared,
+                    summary.next_boundary,
+                    &health_summary,
+                    pending.as_ref().map(|p| p.record.clone()),
+                    &day_economics,
+                ));
+            }
+        }
         day_economics.finish_duration(end);
-        Ok(HistoricalEndReasonV1::RangeEnd)
+        Ok((HistoricalEndReasonV1::RangeEnd, end))
     }
     .await;
     match running {
-        Ok(reason) => {
+        Ok((reason, ended_at)) => {
             let normal = reason == HistoricalEndReasonV1::RangeEnd;
             let mut result = report(
                 &driver,
@@ -1282,6 +1386,17 @@ where
             );
             result.delivery_summary = operating_start.map(|_| delivery_summary.clone());
             result.day_economics = day_economics.summary();
+            result.research = research.as_ref().map(|summary| {
+                summary.summary(Some(crate::research_summary::snapshot(
+                    ended_at,
+                    result.observation_cutoff.clone(),
+                    &shared,
+                    result.account_economics_memory.as_ref(),
+                    &health_summary,
+                    result.pending_calculation_timing.clone(),
+                    &day_economics,
+                )))
+            });
             result.source_health = health_enabled.then_some(health_summary);
             if normal {
                 measure_stage!(stages, "recording_stop_and_drain", driver.stop_and_drain())
@@ -1319,6 +1434,19 @@ where
             );
             failure_report.delivery_summary = operating_start.map(|_| delivery_summary.clone());
             failure_report.day_economics = day_economics.summary();
+            failure_report.research = research.as_ref().map(|summary| {
+                summary.summary(Some(crate::research_summary::snapshot(
+                    failure_report
+                        .last_observed_at_utc_ms
+                        .unwrap_or(economics_start),
+                    failure_report.observation_cutoff.clone(),
+                    &shared,
+                    failure_report.account_economics_memory.as_ref(),
+                    &health_summary,
+                    failure_report.pending_calculation_timing.clone(),
+                    &day_economics,
+                )))
+            });
             failure_report.source_health = health_enabled.then_some(health_summary);
             Err(HistoricalRunFailureV1 {
                 cause,
@@ -1341,6 +1469,8 @@ pub(crate) struct RuntimeLoopCheckpointV1<D> {
     unconsumed_required_trigger_at: Option<i64>,
     delivery_summary: HistoricalDeliverySummaryV1,
     day_economics: crate::day_economics::DayEconomicsStateV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    research: Option<crate::research_summary::ResearchStateV1>,
 }
 impl<D> Default for RuntimeLoopCheckpointV1<D> {
     fn default() -> Self {
@@ -1361,6 +1491,7 @@ impl<D> Default for RuntimeLoopCheckpointV1<D> {
             unconsumed_required_trigger_at: None,
             delivery_summary: Default::default(),
             day_economics: Default::default(),
+            research: None,
         }
     }
 }
@@ -1377,6 +1508,8 @@ pub(crate) struct RuntimeLoopCheckpointRefV1<'a, D> {
     unconsumed_required_trigger_at: Option<i64>,
     delivery_summary: &'a HistoricalDeliverySummaryV1,
     day_economics: &'a crate::day_economics::DayEconomicsStateV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    research: &'a Option<crate::research_summary::ResearchStateV1>,
 }
 pub(crate) type RestoredRuntimeV1<D> = (
     PublicConsumptionStateV1,
@@ -1390,6 +1523,12 @@ pub(crate) trait RuntimeCheckpointV1<
 >
 {
     fn started(&mut self) {}
+    fn research_enabled(&self) -> bool {
+        false
+    }
+    fn budget_stopped(&self) -> bool {
+        false
+    }
     fn restore(
         &mut self,
         _config: &HistoricalPreparedRunConfigV1,
