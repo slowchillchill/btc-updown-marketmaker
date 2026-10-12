@@ -975,7 +975,10 @@ impl UniqueSessionStateV2 {
 }
 
 pub(crate) enum BusinessReducerInputV2<'a> {
-    CreateSession(&'a SessionSpecV3),
+    CreateSession {
+        spec: &'a SessionSpecV3,
+        rules: &'a PlatformRuleSnapshotV3,
+    },
     ActivateSession(&'a str),
     FailSessionInitialization(&'a str),
     EnrollMarket(&'a MarketEnrollmentRequestV1),
@@ -1575,7 +1578,7 @@ fn reduce_actor_input_v2(
             opened,
             initial_market_directory,
             state,
-            BusinessReducerInputV2::CreateSession(spec),
+            BusinessReducerInputV2::CreateSession { spec, rules },
         ),
         BusinessInputV2::ActivateSession { activation_id } => reduce_business_input_v2(
             opened,
@@ -6244,7 +6247,7 @@ fn reduce_business_input_v2(
     #[cfg(test)]
     record_reducer_call_for_tests();
     let output = match input {
-        BusinessReducerInputV2::CreateSession(spec) => {
+        BusinessReducerInputV2::CreateSession { spec, rules } => {
             if state.session.is_some() {
                 return Err(unaccepted_business_input_v2(
                     state,
@@ -6287,7 +6290,8 @@ fn reduce_business_input_v2(
                 }
                 SimCallerRoleV1::Paper => None,
             };
-            let execution_state = ExecutionStateV2::new(&market_directory, account);
+            let execution_state =
+                ExecutionStateV2::new_with_rules(&market_directory, account, rules);
 
             state.session = Some(UniqueSessionStateV2 {
                 opening_fact: Arc::clone(&opening_fact),
@@ -7435,6 +7439,36 @@ mod tests {
             ],
         )
         .expect("构造带窗口的逻辑驱动测试市场")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn historical_maker_role_dispatch_keeps_paper_and_training_legacy() {
+        for (role, expected) in [
+            (
+                SimCallerRoleV1::HistoricalBacktest,
+                "PublicTradeConservativeFifoV1",
+            ),
+            (SimCallerRoleV1::Paper, "L2BookDeltaFifoEstimateV1"),
+            (SimCallerRoleV1::ModelTrain, "L2BookDeltaFifoEstimateV1"),
+            (
+                SimCallerRoleV1::OfflineEvaluation,
+                "L2BookDeltaFifoEstimateV1",
+            ),
+        ] {
+            let (_dir, actor) = active_market_actor(role, &format!("model-{role:?}")).await;
+            let session = actor.state.as_ref().unwrap().session.as_ref().unwrap();
+            let encoded = serde_json::to_value(&session.execution_state).unwrap();
+            assert_eq!(encoded["maker_model"], expected);
+            let version = actor._rule_snapshot.maker_model_version_for(role);
+            assert_eq!(
+                version,
+                if role == SimCallerRoleV1::HistoricalBacktest {
+                    "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1"
+                } else {
+                    "L2_BOOK_DELTA_FIFO_ESTIMATE_V1"
+                }
+            );
+        }
     }
 
     async fn active_market_actor(
@@ -14198,6 +14232,123 @@ mod tests {
             0
         );
         assert_eq!(session.execution_state.next_account_transition_seq(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn historical_maker_trade_reaches_original_lifecycle_without_initial_l2_dependency() {
+        let (_dir, mut actor) = active_market_actor_with_policy(
+            SimCallerRoleV1::HistoricalBacktest, "historical-maker-chain",
+            Arc::new(TradeFinalityPolicyV2::decode_and_seal(
+                br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10},{"state":"CONFIRMED","offset_ms":20}],"economic_application_ordinal":0},"failure_overrides":[]}"#).unwrap()),
+        ).await;
+        let trade = |source, received, seq| {
+            let event = crate::task21_tests::sealed_event(
+                ExecutionMarketEventPayloadV3::PublicTrade(contracts::PublicTradeV2 {
+                    asset: crate::task21_tests::asset("1", 0, "Up"),
+                    trade_id: format!("derived-{seq}"),
+                    trade_id_source: PublicTradeIdSourceV1::DerivedSourceEvidence,
+                    price_pusd_per_share: ExactDecimal("0.4".into()),
+                    quantity_shares: ExactDecimal("4".into()),
+                    aggressor_side: contracts::TradeSide::Sell,
+                    fee_rate_bps: None,
+                }),
+                crate::task21_tests::orderbook_evidence(source, received, seq),
+                crate::task21_tests::fresh_quality(),
+            );
+            data_pipeline_core::decode_execution_market_event_v3(
+                &data_pipeline_core::encode_execution_market_event_v3(&event).unwrap(),
+            )
+            .unwrap()
+        };
+        let early = trade(1050, 1090, 10);
+        let (state, effects) = reduce_market_event_slice_v2(
+            actor.state.take().unwrap(),
+            MarketEventPathV1::HiddenPlatform,
+            1050,
+            &[early],
+            actor._rule_snapshot.snapshot(),
+            &actor._finality_policy,
+        )
+        .unwrap_or_else(|_| panic!("合法成交不要求初始L2"));
+        assert_eq!(
+            effects
+                .execution
+                .iter()
+                .map(ExecutionMarketEventEffectsV2::initial_finality_count_for_tests)
+                .sum::<usize>(),
+            0
+        );
+        let initial = decoded_maker_initial_events();
+        let condition = initial[0].market.condition_id.clone();
+        let (state, _) = reduce_market_event_slice_v2(
+            state,
+            MarketEventPathV1::HiddenPlatform,
+            1100,
+            &initial,
+            actor._rule_snapshot.snapshot(),
+            &actor._finality_policy,
+        )
+        .unwrap_or_else(|_| panic!("初始盘口"));
+        let (state, _) = apply_buy_to_candidate(
+            state,
+            BuyOrderActionV2 {
+                global_request_id: "historical-maker-order".into(),
+                batch_item_ordinal: 0,
+                item_id: "item".into(),
+                condition_id: condition,
+                token_id: TokenId("1".into()),
+                effective_processing_at_utc_ms: 1200,
+                terms: BuyOrderTermsV2::Gtc {
+                    limit_price_pusd_per_share: "0.4".parse().unwrap(),
+                    accepted_base_units: 5_000_000,
+                    accepted_quote_units: 2_000_000,
+                    post_only: false,
+                },
+            },
+            actor._rule_snapshot.snapshot(),
+            &actor._finality_policy,
+        );
+        // 初始2股外部排位；订单先Taker买1.000001股，公开SELL4股仅再填Maker2股。
+        let later = trade(1300, 1500, 11);
+        let (state, effects) = reduce_market_event_slice_v2(
+            state,
+            MarketEventPathV1::HiddenPlatform,
+            1300,
+            &[later],
+            actor._rule_snapshot.snapshot(),
+            &actor._finality_policy,
+        )
+        .unwrap_or_else(|_| panic!("公开成交进入原生命周期链"));
+        let feedback = effects
+            .execution
+            .into_iter()
+            .map(ExecutionMarketEventEffectsV2::into_lifecycle_feedback)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let [LifecycleFeedbackEffectV2::Trade(fill)] = feedback.as_slice() else {
+            panic!("一笔Maker")
+        };
+        assert_eq!(fill.matched_at_utc_ms, 1300);
+        assert_eq!(fill.base_quantity_shares.0, "2");
+        assert_eq!(fill.quote_amount_pusd.0, "0.8");
+        assert_eq!(
+            fill.liquidity_role,
+            contracts::TradeLiquidityRoleV2::MakerInferred
+        );
+        assert!(fill.account_delta.is_some());
+        let session = state.session.unwrap();
+        assert_eq!(session.execution_state.fill_shape_for_tests(), (2, 3));
+        assert_eq!(
+            session
+                .execution_state
+                .base_order_quantities_for_tests("sim-1")
+                .unwrap()
+                .0,
+            3_000_001
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

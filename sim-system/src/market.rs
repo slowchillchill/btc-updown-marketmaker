@@ -697,7 +697,8 @@ impl MarketStateV2 {
                 asset.current_tick_size_pusd_per_share = Some(*new_tick_size_pusd_per_share);
             }
             NormalizedMarketEventV2::PublicTrade(trade) => {
-                self.initialized_admitted_asset_mut(&trade.asset)?;
+                // 成交事实不建立或要求完整 L2。
+                self.admitted_asset_mut(&trade.asset);
             }
             NormalizedMarketEventV2::LevelExecutionTransition {
                 transition,
