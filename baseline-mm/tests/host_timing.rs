@@ -569,6 +569,25 @@ async fn representative_host_calculation_timing() {
                 .cutoff()
                 .decision_time()
                 .logical_time_utc_ms();
+            // 观察市场和Ledger经济市场分别计数；不以866推定经济规模。
+            let economic_markets = &before.action_before.economics().markets;
+            let positive_orphan_market_count = economic_markets
+                .iter()
+                .filter(|m| {
+                    m.settlement_state == EconomicSettlementStateV1::Unresolved
+                        && m.orphan_shares
+                            .iter()
+                            .any(|q| Decimal::from_str_exact(&q.0).unwrap() > Decimal::ZERO)
+                })
+                .count();
+            let positive_orphan_leg_count = economic_markets
+                .iter()
+                .filter(|m| m.settlement_state == EconomicSettlementStateV1::Unresolved)
+                .flat_map(|m| &m.orphan_shares)
+                .filter(|q| Decimal::from_str_exact(&q.0).unwrap() > Decimal::ZERO)
+                .count();
+            let economic_market_count = economic_markets.len();
+            let account_economics = serde_json::to_value(before.action_before.economics()).unwrap();
             let economics = format!("{:?}", before.action_before.economics());
             let trades = format!("{:?}", before.trade_economics);
             let mut assembly_samples = Vec::new();
@@ -608,6 +627,12 @@ async fn representative_host_calculation_timing() {
                 let economic_read = shared.ledger().economic_read().unwrap();
                 let economic_read_ns = start.elapsed().as_nanos() as u64;
                 let start = Instant::now();
+                let market_totals: Vec<_> = economic_read.market_totals().collect();
+                let market_totals_ns = start.elapsed().as_nanos() as u64;
+                let start = Instant::now();
+                let account_v1 = AccountEconomicsReadV1::from_ledger(&economic_read);
+                let account_v1_ns = start.elapsed().as_nanos() as u64;
+                let start = Instant::now();
                 let account = AccountEconomicsReadV2::from_ledger_and_observations(
                     &economic_read,
                     frames.iter().map(|f| f.observation),
@@ -624,6 +649,8 @@ async fn representative_host_calculation_timing() {
                 assert_eq!(frozen.economics(), input.action_before.economics());
                 assert_eq!(&projection, input.action_before.ledger());
                 assert_eq!(&account, input.action_before.economics());
+                assert_eq!(market_totals, account.markets);
+                assert_eq!(account_v1.markets, account.markets);
                 assert_eq!(
                     serde_json::to_value(&output).unwrap(),
                     serde_json::to_value(&calculation.output).unwrap()
@@ -645,6 +672,8 @@ async fn representative_host_calculation_timing() {
                         ("freeze_action_before", freeze_ns),
                         ("funds_projection", projection_ns),
                         ("economic_read_including_projection", economic_read_ns),
+                        ("market_totals_collect", market_totals_ns),
+                        ("account_economics_v1_from_existing_read", account_v1_ns),
                         ("account_economics_from_existing_read", account_ns),
                         ("frozen_market_vector_clone", clone_ns),
                         ("calculate_same_pre_decide_state", calculate_ns),
@@ -713,11 +742,11 @@ async fn representative_host_calculation_timing() {
             println!(
                 "independent_diagnostics_ns: {state}/{id} {diagnostic_summaries:?} output_counts={output_counts:?}"
             );
-            cells.push(json!({"state":state,"candidate":id,"requires_trade_economics_details":requires_details,"independent_diagnostic_samples_ns":diagnostic_samples,"independent_diagnostic_nearest_rank":diagnostic_summaries,"output_counts":output_counts,"assembly_samples_ns":assembly_samples,"decide_samples_ns":decide_samples,"assembly_nearest_rank":assembly_summary,"decide_nearest_rank":decide_summary,"current_diagnostic":current,"closed_diagnostics":d.markets.iter().filter(|m|m.condition_id==ConditionId(condition(0))||m.condition_id==ConditionId(condition(1))).collect::<Vec<_>>(),"intents":intents.iter().map(|i|format!("{:?}",i.intent)).collect::<Vec<_>>(),"account_economics_debug":economics,"trades_debug":trades}));
+            cells.push(json!({"state":state,"candidate":id,"economic_market_count":economic_market_count,"positive_unresolved_orphan_market_count":positive_orphan_market_count,"positive_unresolved_orphan_leg_count":positive_orphan_leg_count,"account_economics":account_economics,"requires_trade_economics_details":requires_details,"independent_diagnostic_samples_ns":diagnostic_samples,"independent_diagnostic_nearest_rank":diagnostic_summaries,"output_counts":output_counts,"assembly_samples_ns":assembly_samples,"decide_samples_ns":decide_samples,"assembly_nearest_rank":assembly_summary,"decide_nearest_rank":decide_summary,"current_diagnostic":current,"closed_diagnostics":d.markets.iter().filter(|m|m.condition_id==ConditionId(condition(0))||m.condition_id==ConditionId(condition(1))).collect::<Vec<_>>(),"intents":intents.iter().map(|i|format!("{:?}",i.intent)).collect::<Vec<_>>(),"account_economics_debug":economics,"trades_debug":trades}));
         }
     }
     assert_eq!(cells.len() * 32, 96);
-    let output = json!({"format":"issue185-host-assembly-diagnostic-v3","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rules_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"candidates_sha256":hash(candidates_bytes),"markets":866,"history_points":301,"history_span_ms":300000,"warmup_per_cell":1,"samples_per_cell":32,"sample_count":96,"timed_path":"separate complete assembly and pure decide; six independent same-state public diagnostics, not additive decomposition","cells":cells});
+    let output = json!({"format":"issue185-host-economics-composition-diagnostic-v1","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rules_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"candidates_sha256":hash(candidates_bytes),"markets":866,"history_points":301,"history_span_ms":300000,"warmup_per_cell":1,"samples_per_cell":32,"sample_count":96,"timed_path":"separate complete assembly and pure decide; eight independent same-state public diagnostics, not additive decomposition","cells":cells});
     std::fs::write(
         std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(),
         serde_json::to_vec_pretty(&output).unwrap(),

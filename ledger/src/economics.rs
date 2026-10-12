@@ -1651,6 +1651,34 @@ mod rational_tests {
     use super::*;
 
     #[test]
+    fn exact_zero_identities_keep_normalized_nonterminating_values_and_reject_zero_divisor() {
+        let zero = EconomicRational::ratio(0.into(), (-7).into());
+        assert_eq!(
+            zero.public(),
+            ExactRationalV1 {
+                numerator: "0".into(),
+                denominator: "1".into()
+            }
+        );
+        for (n, d, expected_n, expected_d) in
+            [(2, 3, "2", "3"), (-7, 3, "-7", "3"), (7, -3, "-7", "3")]
+        {
+            let value = EconomicRational::ratio(n.into(), d.into());
+            let expected = ExactRationalV1 {
+                numerator: expected_n.into(),
+                denominator: expected_d.into(),
+            };
+            assert_eq!(value.add(&zero).public(), expected);
+            assert_eq!(zero.add(&value).public(), expected);
+            assert_eq!(value.sub(&zero), value);
+            assert_eq!(value.mul(&zero), zero);
+            assert_eq!(zero.divided_by(&value), zero);
+        }
+        assert!(std::panic::catch_unwind(|| EconomicRational::ratio(0.into(), 0.into())).is_err());
+        assert!(std::panic::catch_unwind(|| zero.divided_by(&zero)).is_err());
+    }
+
+    #[test]
     fn integer_ratios_normalize_for_arithmetic_and_persistence() {
         let half = EconomicRational::from_decimal(Decimal::new(5, 1));
         for (n, d) in [("2", "4"), ("01", "02"), ("-1", "-2")] {
