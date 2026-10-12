@@ -1,0 +1,915 @@
+{
+  "format": "issue185-notrade-and-timing-summary-v1",
+  "base_head": "3d2397f234a57a93da69f2c2d750794b9fc6b348",
+  "measurement_helper_binding": {
+    "actual_helper_sha256": "df1229ea7bf9ab43e370ac4bc81812b71f195f953444ea7d91a8b9de646e8804",
+    "base_head": "3d2397f234a57a93da69f2c2d750794b9fc6b348",
+    "measured_diff": "measured-progress-fixed.patch",
+    "source_unchanged_result": "notrade-progress-fixed-result.json",
+    "raw_identity_field": "d1fb62dd8efefcce251c52ec6e209f0449aef2b85be1a8e1c3475a7557d4d94b",
+    "correction": "raw env identity inadvertently retained from previous helper; actual measurement used source bound by unchanged patch and actual_helper_sha256; no raw original rewritten"
+  },
+  "measurement_source_paths": [
+    "baseline-mm/tests/host_timing.rs",
+    "backtest/cli/tests/source_health.rs"
+  ],
+  "same_state_checks": "all 64: full strategy output, strategy checkpoint, business cutoff and complete account economics compare outside timing; requests unchanged; measured outputs not dispatched",
+  "notrade_cells": [
+    {
+      "state": "maintain",
+      "sample_count": 32,
+      "warmup_count": 1,
+      "classification_counts": {
+        "Actions": 0,
+        "NoTrade": 32
+      },
+      "setup_history_groups": 301,
+      "extra_fresh_source_point": true,
+      "retained_current_chainlink_samples": 242,
+      "observation_market_count": 866,
+      "economic_market_count": 866,
+      "positive_unresolved_orphan_market_count": 1,
+      "current_diagnostic": {
+        "choice": "Maintain",
+        "comparison": null,
+        "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+        "maximum_repair_price": null,
+        "probability": {
+          "Known": {
+            "approximate_window_integral": false,
+            "binance_innovation_usd": 0.0,
+            "information_age_ms": 2,
+            "mean_usd": 64999.0,
+            "sigma_usd_per_sqrt_second": 2.839013913315678,
+            "standardized_distance": -0.022928641177423822,
+            "temporary_reference": false,
+            "uncertainty_usd": 43.613574492352726,
+            "up": 0.49085359702096487
+          }
+        },
+        "source_health": [],
+        "source_health_states": [
+          {
+            "scope": {
+              "asset_or_symbol": "btc/usd",
+              "condition_id": null,
+              "source": "ChainlinkSpot"
+            },
+            "state": "Normal"
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "BTCUSDT",
+              "condition_id": null,
+              "source": "BinanceAggregateTrade"
+            },
+            "state": "Normal"
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "2730",
+              "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+              "source": "PolymarketBook"
+            },
+            "state": "Normal"
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "2731",
+              "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+              "source": "PolymarketBook"
+            },
+            "state": "Normal"
+          }
+        ],
+        "unavailable": [],
+        "urgency": {
+          "active_path_ms": 0,
+          "binance_innovation_usd": 0.0,
+          "free_cash_pusd": "1948.66337",
+          "information_age_ms": 2,
+          "maker_path_ms": 0,
+          "orphan_cost_pusd": {
+            "denominator": "1",
+            "numerator": "0"
+          },
+          "repair_ask_depth_shares": null,
+          "settlement_window_start_utc_ms": 1787615400000,
+          "standardized_distance": -0.022928641177423822,
+          "trading_remaining_ms": 235998,
+          "uncertainty_usd": 43.613574492352726,
+          "unresolved_commitment_count": 2,
+          "window_remaining_ms": 0
+        }
+      },
+      "decision_time": 1787615164002,
+      "global_intent_count": 0,
+      "orders": [
+        {
+          "accepted": true,
+          "cancellable": {
+            "Known": true
+          },
+          "condition": "0x0000000000000000000000000000000000000000000000000000000000000362",
+          "quantity": {
+            "Known": "50"
+          },
+          "token": "2730"
+        },
+        {
+          "accepted": true,
+          "cancellable": {
+            "Known": true
+          },
+          "condition": "0x0000000000000000000000000000000000000000000000000000000000000362",
+          "quantity": {
+            "Known": "50"
+          },
+          "token": "2731"
+        }
+      ],
+      "request_totals": {
+        "completed_receipted_cancellation_requests": 1,
+        "receipted_cancellation_requests": 1,
+        "receipted_cancellation_response_counts": [
+          1,
+          0,
+          0
+        ],
+        "receipted_submission_requested_legs": 4,
+        "receipted_submission_requests": 3,
+        "registered_requests_without_receipt": 0
+      },
+      "pending_noe": 0,
+      "cancellation_pending": {
+        "Known": 0
+      },
+      "cancellation_response_counts": [
+        {
+          "Known": 1
+        },
+        {
+          "Known": 0
+        },
+        {
+          "Known": 0
+        }
+      ],
+      "account_summary": {
+        "cash": {
+          "actual_available_pusd": "1948.66337",
+          "actual_reserved_pusd": "48.5",
+          "maker_available_pusd": "1948.66337",
+          "maker_reserved_pusd": "48.5"
+        },
+        "conservative_nav_pusd": {
+          "Known": {
+            "denominator": "100000",
+            "numerator": "199941337"
+          }
+        },
+        "directional_residual_pusd": {
+          "Known": {
+            "denominator": "4",
+            "numerator": "9"
+          }
+        },
+        "other_account_residual_pusd": {
+          "denominator": "1",
+          "numerator": "0"
+        },
+        "other_liability_pusd": {
+          "denominator": "1",
+          "numerator": "0"
+        },
+        "other_receivable_pusd": {
+          "denominator": "1",
+          "numerator": "0"
+        },
+        "worst_case_maker_nav_pusd": {
+          "denominator": "100000",
+          "numerator": "199716337"
+        }
+      },
+      "timings": {
+        "assembly_ns": {
+          "p50_ns": 7133821,
+          "p95_ns": 7413888,
+          "p99_ns": 7483138,
+          "max_ns": 7483138,
+          "count": 32
+        },
+        "calculate_ns": {
+          "p50_ns": 3954274,
+          "p95_ns": 4312409,
+          "p99_ns": 4320213,
+          "max_ns": 4320213,
+          "count": 32
+        },
+        "decide_ns": {
+          "p50_ns": 3789815,
+          "p95_ns": 3947312,
+          "p99_ns": 3962059,
+          "max_ns": 3962059,
+          "count": 32
+        },
+        "assembly_calculate_ns": {
+          "p50_ns": 11126748,
+          "p95_ns": 11695669,
+          "p99_ns": 11778245,
+          "max_ns": 11778245,
+          "count": 32
+        }
+      }
+    },
+    {
+      "state": "missing_price_wait",
+      "sample_count": 32,
+      "warmup_count": 1,
+      "classification_counts": {
+        "Actions": 0,
+        "NoTrade": 32
+      },
+      "setup_history_groups": 1,
+      "extra_fresh_source_point": false,
+      "retained_current_chainlink_samples": null,
+      "observation_market_count": 866,
+      "economic_market_count": 866,
+      "positive_unresolved_orphan_market_count": 1,
+      "current_diagnostic": {
+        "choice": "Wait",
+        "comparison": null,
+        "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+        "maximum_repair_price": null,
+        "probability": {
+          "Unavailable": "UnhealthySource"
+        },
+        "source_health": [
+          {
+            "failure": "UnknownBusinessProgress",
+            "scope": {
+              "asset_or_symbol": "btc/usd",
+              "condition_id": null,
+              "source": "ChainlinkSpot"
+            }
+          },
+          {
+            "failure": "UnknownBusinessProgress",
+            "scope": {
+              "asset_or_symbol": "BTCUSDT",
+              "condition_id": null,
+              "source": "BinanceAggregateTrade"
+            }
+          }
+        ],
+        "source_health_states": [
+          {
+            "scope": {
+              "asset_or_symbol": "btc/usd",
+              "condition_id": null,
+              "source": "ChainlinkSpot"
+            },
+            "state": {
+              "Unavailable": "UnknownBusinessProgress"
+            }
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "BTCUSDT",
+              "condition_id": null,
+              "source": "BinanceAggregateTrade"
+            },
+            "state": {
+              "Unavailable": "UnknownBusinessProgress"
+            }
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "2730",
+              "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+              "source": "PolymarketBook"
+            },
+            "state": "Normal"
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "2731",
+              "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+              "source": "PolymarketBook"
+            },
+            "state": "Normal"
+          }
+        ],
+        "unavailable": [],
+        "urgency": {
+          "active_path_ms": 0,
+          "binance_innovation_usd": null,
+          "free_cash_pusd": "1997.16337",
+          "information_age_ms": null,
+          "maker_path_ms": 0,
+          "orphan_cost_pusd": {
+            "denominator": "1",
+            "numerator": "0"
+          },
+          "repair_ask_depth_shares": null,
+          "settlement_window_start_utc_ms": 1787615400000,
+          "standardized_distance": null,
+          "trading_remaining_ms": 299998,
+          "uncertainty_usd": null,
+          "unresolved_commitment_count": 0,
+          "window_remaining_ms": 0
+        }
+      },
+      "decision_time": 1787615100002,
+      "global_intent_count": 0,
+      "orders": [],
+      "request_totals": {
+        "completed_receipted_cancellation_requests": 0,
+        "receipted_cancellation_requests": 0,
+        "receipted_cancellation_response_counts": [
+          0,
+          0,
+          0
+        ],
+        "receipted_submission_requested_legs": 1,
+        "receipted_submission_requests": 1,
+        "registered_requests_without_receipt": 0
+      },
+      "pending_noe": 0,
+      "cancellation_pending": {
+        "Known": 0
+      },
+      "cancellation_response_counts": [
+        "NotApplicable",
+        "NotApplicable",
+        "NotApplicable"
+      ],
+      "account_summary": {
+        "cash": {
+          "actual_available_pusd": "1997.16337",
+          "actual_reserved_pusd": "0",
+          "maker_available_pusd": "1997.16337",
+          "maker_reserved_pusd": "0"
+        },
+        "conservative_nav_pusd": {
+          "Known": {
+            "denominator": "100000",
+            "numerator": "199941337"
+          }
+        },
+        "directional_residual_pusd": {
+          "Known": {
+            "denominator": "4",
+            "numerator": "9"
+          }
+        },
+        "other_account_residual_pusd": {
+          "denominator": "1",
+          "numerator": "0"
+        },
+        "other_liability_pusd": {
+          "denominator": "1",
+          "numerator": "0"
+        },
+        "other_receivable_pusd": {
+          "denominator": "1",
+          "numerator": "0"
+        },
+        "worst_case_maker_nav_pusd": {
+          "denominator": "100000",
+          "numerator": "199716337"
+        }
+      },
+      "timings": {
+        "assembly_ns": {
+          "p50_ns": 6803780,
+          "p95_ns": 7102081,
+          "p99_ns": 7181541,
+          "max_ns": 7181541,
+          "count": 32
+        },
+        "calculate_ns": {
+          "p50_ns": 2375623,
+          "p95_ns": 2641293,
+          "p99_ns": 2781337,
+          "max_ns": 2781337,
+          "count": 32
+        },
+        "decide_ns": {
+          "p50_ns": 2117737,
+          "p95_ns": 2292877,
+          "p99_ns": 2301634,
+          "max_ns": 2301634,
+          "count": 32
+        },
+        "assembly_calculate_ns": {
+          "p50_ns": 9200882,
+          "p95_ns": 9637384,
+          "p99_ns": 9780974,
+          "max_ns": 9780974,
+          "count": 32
+        }
+      }
+    }
+  ],
+  "actions_reuse": {
+    "archive": "btc-updown-marketmaker/issue-185/economics-composition-uncommitted-1267df3-20261012T071021Z",
+    "base_head": "1267df31cdc75bcebc7c18cbecb942f204f1a315",
+    "helper_sha256": "455abb2748fc89c4f14ba126501c519656cefe1aed8c8cd9aa2421534034676a",
+    "samples": 96,
+    "rerun": false,
+    "limits": "current-market states, not zero whole-account positions; different fixed state and helper, not strict before-after comparison; no combined calculate measurement in reused evidence",
+    "cells": [
+      {
+        "state": "empty",
+        "output_counts": {
+          "Actions": 32
+        },
+        "economic_market_count": 866,
+        "positive_unresolved_orphan_market_count": 1,
+        "assembly_nearest_rank": {
+          "max_ns": 7966799,
+          "p50_ns": 7416724,
+          "p95_ns": 7963573
+        },
+        "decide_nearest_rank": {
+          "max_ns": 4258738,
+          "p50_ns": 3241522,
+          "p95_ns": 4105580
+        }
+      },
+      {
+        "state": "resting",
+        "output_counts": {
+          "Actions": 32
+        },
+        "economic_market_count": 866,
+        "positive_unresolved_orphan_market_count": 1,
+        "assembly_nearest_rank": {
+          "max_ns": 8646389,
+          "p50_ns": 7653520,
+          "p95_ns": 8274358
+        },
+        "decide_nearest_rank": {
+          "max_ns": 5316910,
+          "p50_ns": 4297762,
+          "p95_ns": 5208265
+        }
+      },
+      {
+        "state": "single_leg",
+        "output_counts": {
+          "Actions": 32
+        },
+        "economic_market_count": 866,
+        "positive_unresolved_orphan_market_count": 2,
+        "assembly_nearest_rank": {
+          "max_ns": 9158292,
+          "p50_ns": 7875006,
+          "p95_ns": 9090604
+        },
+        "decide_nearest_rank": {
+          "max_ns": 5302173,
+          "p50_ns": 3642558,
+          "p95_ns": 4624426
+        }
+      }
+    ]
+  },
+  "finite_day": {
+    "measurement": {
+      "actual_requests": [
+        [
+          1787529602101,
+          "pair"
+        ],
+        [
+          1787529602713,
+          "cancel"
+        ],
+        [
+          1787529603501,
+          "maker"
+        ],
+        [
+          1787529610600,
+          "cancel"
+        ]
+      ],
+      "callbacks": {
+        "full_qualification": {
+          "count": 11,
+          "max_ns": 7584,
+          "total_ns": 21200
+        },
+        "next_health_evaluation": {
+          "count": 49,
+          "max_ns": 5360,
+          "total_ns": 35507
+        },
+        "public_qualification": {
+          "count": 1,
+          "max_ns": 1412,
+          "total_ns": 1412
+        },
+        "pure_decide": {
+          "count": 14,
+          "max_ns": 74229,
+          "total_ns": 426843
+        }
+      },
+      "deadline_wakeups": 1,
+      "decide_samples": [
+        {
+          "elapsed_ns": 30468,
+          "outcome": "NoTrade",
+          "started_at_utc_ms": 1787529600101
+        },
+        {
+          "elapsed_ns": 5961,
+          "outcome": "NoTrade",
+          "started_at_utc_ms": 1787529600501
+        },
+        {
+          "elapsed_ns": 19848,
+          "outcome": "NoTrade",
+          "started_at_utc_ms": 1787529600901
+        },
+        {
+          "elapsed_ns": 14618,
+          "outcome": "NoTrade",
+          "started_at_utc_ms": 1787529601301
+        },
+        {
+          "elapsed_ns": 28223,
+          "outcome": "Actions",
+          "started_at_utc_ms": 1787529601701
+        },
+        {
+          "elapsed_ns": 29255,
+          "outcome": "Actions",
+          "started_at_utc_ms": 1787529602113
+        },
+        {
+          "elapsed_ns": 16431,
+          "outcome": "Actions",
+          "started_at_utc_ms": 1787529602313
+        },
+        {
+          "elapsed_ns": 74229,
+          "outcome": "Actions",
+          "started_at_utc_ms": 1787529602713
+        },
+        {
+          "elapsed_ns": 45395,
+          "outcome": "Actions",
+          "started_at_utc_ms": 1787529603101
+        },
+        {
+          "elapsed_ns": 26189,
+          "outcome": "NoTrade",
+          "started_at_utc_ms": 1787529603511
+        },
+        {
+          "elapsed_ns": 46638,
+          "outcome": "NoTrade",
+          "started_at_utc_ms": 1787529606101
+        },
+        {
+          "elapsed_ns": 31769,
+          "outcome": "NoTrade",
+          "started_at_utc_ms": 1787529609800
+        },
+        {
+          "elapsed_ns": 42270,
+          "outcome": "Actions",
+          "started_at_utc_ms": 1787529610200
+        },
+        {
+          "elapsed_ns": 15549,
+          "outcome": "NoTrade",
+          "started_at_utc_ms": 1787529610635
+        }
+      ],
+      "decisions": 14,
+      "input_manifest_sha256": "812a6c740777b86c74766693aa2fde383d4775a3bbb46cc63c0908132680c7a9",
+      "invalidated_batches": 2,
+      "markets_with_actual_trades": 1,
+      "purpose": "有限合成工程实耗，不是盈利或在线性能结论",
+      "qualification_calls": 12,
+      "timing_note": "生产day有限合成负载；actual_requests为发送前资格的at，decisions为计算开始；回调仅计原委托调用，嵌套/并行阶段不相加；不是旧小时调用分布、在线尾延迟或线上积压证据",
+      "whole_run_elapsed_ns": 115190406
+    },
+    "stages": [
+      {
+        "scope": "candidate:synthetic-history",
+        "scope_wall_ns": 100937152,
+        "stages": {
+          "apply_closed_including_noe_claim_and_ledger": {
+            "count": 36,
+            "max_ns": 4208,
+            "total_ns": 10871
+          },
+          "calculation_including_cutoff_copy_and_decide": {
+            "count": 14,
+            "max_ns": 86213,
+            "total_ns": 522573
+          },
+          "current_public_observation_assembly": {
+            "count": 35,
+            "max_ns": 110588,
+            "total_ns": 486637
+          },
+          "dispatch_including_reserve_full_qualification_bridge_sim": {
+            "count": 12,
+            "max_ns": 111640,
+            "total_ns": 306207
+          },
+          "hidden_source_wait_and_acquisition": {
+            "count": 6,
+            "max_ns": 1942447,
+            "total_ns": 1950642
+          },
+          "next_health_evaluation_including_dependency_lookup": {
+            "count": 49,
+            "max_ns": 5911,
+            "total_ns": 49695
+          },
+          "public_qualification": {
+            "count": 1,
+            "max_ns": 1463,
+            "total_ns": 1463
+          },
+          "recording_stabilization_wait": {
+            "count": 98,
+            "max_ns": 772,
+            "total_ns": 5491
+          },
+          "recording_stop_and_drain": {
+            "count": 1,
+            "max_ns": 20257639,
+            "total_ns": 20257639
+          },
+          "revalidation_including_current_read_and_full_qualification": {
+            "count": 15,
+            "max_ns": 52218,
+            "total_ns": 220234
+          },
+          "runtime_open_and_account_assembly": {
+            "count": 1,
+            "max_ns": 1221470,
+            "total_ns": 1221470
+          },
+          "sim_advance_before_including_noe": {
+            "count": 42,
+            "max_ns": 73025954,
+            "total_ns": 73383056
+          },
+          "sim_hidden_bucket_including_noe": {
+            "count": 5,
+            "max_ns": 24335,
+            "total_ns": 59551
+          },
+          "sim_next_group_at_including_source_wait": {
+            "count": 80,
+            "max_ns": 4589,
+            "total_ns": 20391
+          },
+          "sim_next_group_including_noe": {
+            "count": 9,
+            "max_ns": 41468,
+            "total_ns": 145354
+          },
+          "strategy_input_assembly": {
+            "count": 14,
+            "max_ns": 110448,
+            "total_ns": 485155
+          }
+        }
+      },
+      {
+        "scope": "day_producer",
+        "scope_wall_ns": 108973361,
+        "stages": {
+          "checkpoint_capture_write_and_publish": {
+            "count": 1,
+            "max_ns": 7109525,
+            "total_ns": 7109525
+          },
+          "delivery_assembly_and_publish_including_lock": {
+            "count": 10,
+            "max_ns": 12824,
+            "total_ns": 42599
+          },
+          "next_applied_including_decode_core_hidden": {
+            "count": 11,
+            "max_ns": 1060657,
+            "total_ns": 2251440
+          },
+          "producer_wait_startup_checkpoint_or_completion": {
+            "count": 16,
+            "max_ns": 20058503,
+            "total_ns": 99498041
+          }
+        }
+      }
+    ],
+    "decide_classification_counts": {
+      "NoTrade": 8,
+      "Actions": 6
+    },
+    "decide_distribution_by_class": {
+      "Actions": {
+        "p50_ns": 29255,
+        "p95_ns": 74229,
+        "p99_ns": 74229,
+        "max_ns": 74229,
+        "count": 6
+      },
+      "NoTrade": {
+        "p50_ns": 19848,
+        "p95_ns": 46638,
+        "p99_ns": 46638,
+        "max_ns": 46638,
+        "count": 8
+      }
+    },
+    "actual_maker_model_version": "L2_BOOK_DELTA_FIFO_ESTIMATE_V1",
+    "caller_role_source": "backtest/src/run.rs HistoricalSessionV1::spec -> HistoricalBacktest",
+    "durability_role_source": "actual day assembly -> PublicSimExecutionV1::create_new_historical_day -> FiniteHistorical",
+    "limits": "original finite synthetic engineering fixture with old sealed Maker model, not new conservative historical Maker operating acceptance; whole run/day/candidate scope timers have different boundaries and overlap"
+  },
+  "failures": [
+    {
+      "stage": "initial test compilation",
+      "error": "E0369: NoeConsumedRecordRef intentionally has no PartialEq; test Known(None) equality replaced by matches! without changing expected meaning",
+      "result": "build-result.json"
+    },
+    {
+      "stage": "Maintain preparation",
+      "error": "CancelOrders present; SubmitPairedBuy absent; 0 timed samples",
+      "cause": "new reader omitted original enable_source_progress; reader owns a separately reconstructed Core, default disabled",
+      "first_result": "notrade-host-result.json",
+      "primary_source": "source-progress-official.json",
+      "repair_result": "notrade-progress-fixed-result.json",
+      "input_clock_seed_assertions_changed": false
+    }
+  ],
+  "commands": {
+    "build": {
+      "argv": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "baseline-mm",
+        "--test",
+        "host_timing",
+        "-p",
+        "backtest-cli",
+        "--test",
+        "source_health",
+        "--features",
+        "backtest/stage-timing",
+        "--locked",
+        "--offline",
+        "--no-run",
+        "-j32",
+        "--message-format=json"
+      ],
+      "start": "2026-10-12T11:09:51.012397+00:00",
+      "end": "2026-10-12T11:10:33.674579+00:00",
+      "wall_seconds": 42.66218373599986,
+      "exit_code": 101
+    },
+    "build-fixed": {
+      "argv": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "baseline-mm",
+        "--test",
+        "host_timing",
+        "-p",
+        "backtest-cli",
+        "--test",
+        "source_health",
+        "--features",
+        "backtest/stage-timing",
+        "--locked",
+        "--offline",
+        "--no-run",
+        "-j32",
+        "--message-format=json"
+      ],
+      "start": "2026-10-12T11:11:33.989117+00:00",
+      "end": "2026-10-12T11:12:41.643713+00:00",
+      "wall_seconds": 67.65460098100448,
+      "exit_code": 0
+    },
+    "build-progress-fixed": {
+      "argv": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "baseline-mm",
+        "--test",
+        "host_timing",
+        "-p",
+        "backtest-cli",
+        "--test",
+        "source_health",
+        "--features",
+        "backtest/stage-timing",
+        "--locked",
+        "--offline",
+        "--no-run",
+        "-j32",
+        "--message-format=json"
+      ],
+      "start": "2026-10-12T11:19:57.980722+00:00",
+      "end": "2026-10-12T11:20:01.666272+00:00",
+      "wall_seconds": 3.685539637997863,
+      "exit_code": 0,
+      "source_unchanged": true
+    },
+    "notrade-host": {
+      "argv": [
+        "<shared-release-tests>/host_timing-a0e1dba2eb28ee1a",
+        "--ignored",
+        "--exact",
+        "representative_notrade_host_calculation_timing",
+        "--nocapture"
+      ],
+      "start": "2026-10-12T11:13:32.147073+00:00",
+      "end": "2026-10-12T11:13:42.848640+00:00",
+      "wall_seconds": 10.701577865002037,
+      "exit_code": 101,
+      "source_unchanged": true
+    },
+    "notrade-progress-fixed": {
+      "argv": [
+        "<shared-release-tests>/host_timing-a0e1dba2eb28ee1a",
+        "--ignored",
+        "--exact",
+        "representative_notrade_host_calculation_timing",
+        "--nocapture"
+      ],
+      "start": "2026-10-12T11:20:20.023442+00:00",
+      "end": "2026-10-12T11:20:38.067118+00:00",
+      "wall_seconds": 18.043661730996973,
+      "exit_code": 0,
+      "source_unchanged": true
+    },
+    "health": {
+      "argv": [
+        "<shared-release-tests>/source_health-bd86620d64120e97",
+        "--ignored",
+        "--exact",
+        "real_strategy_finite_health_callback_measurement",
+        "--nocapture"
+      ],
+      "start": "2026-10-12T11:21:02.401731+00:00",
+      "end": "2026-10-12T11:21:02.555322+00:00",
+      "wall_seconds": 0.15356751800572965,
+      "exit_code": 0,
+      "source_unchanged": true
+    },
+    "clippy": {
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "baseline-mm",
+        "--test",
+        "host_timing",
+        "-p",
+        "backtest-cli",
+        "--test",
+        "source_health",
+        "--features",
+        "backtest/stage-timing",
+        "--locked",
+        "--offline",
+        "-j32"
+      ],
+      "start": "2026-10-12T11:22:01.465879+00:00",
+      "end": "2026-10-12T11:22:26.848566+00:00",
+      "wall_seconds": 25.38270040399948,
+      "exit_code": 0,
+      "source_unchanged": true
+    }
+  },
+  "limits": [
+    "No production changes or new research replay",
+    "NoTrade Continue with empty intents still creates pending until send_at (15ms plus configured dispatch delay); dirty recalculation only when pending is cleared and start delay permits; empty dispatch creates no order request",
+    "Public groups are not fixed 4ms/15ms frames; group delivery need not start a calculation",
+    "Synchronous calculate completes before simulated pending is created; configured 15ms is not background Rust execution",
+    "No direct second whole observation copy found; StrategyInput owns its one input_from_frames clone, and backtest retains result after calculate",
+    "No online end-to-end latency claim or reason established to change 15ms; sample p95 values are not additive",
+    "A1 samples signal at actual decide; intermediate waiting prices can be absent from strategy history; approved boundary unchanged",
+    "B current candidate not run or claimed compatible; no server access"
+  ]
+}
