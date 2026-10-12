@@ -67,3 +67,28 @@ git diff --check
 ```
 
 本机32核、约107GiB可用内存，复用共享target（构建前188GiB）及约1.060TB可用磁盘；没有专用缓存或清理共享产物。实际任务树没有索引项目，源码及字面量直接回读，不以主树索引替代。原规则、历史材料及此次原日志留在仓库外；提交前冻结完整Git差异，待独立内容审查。
+
+## 20261012 等待状态通知修复与有限复验
+
+按[#185后续分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6119014237)，本次修复基线为`b238bc8c88f671a37f6582b949447d3a4b4e8052`。上述诊断的基线、原始数据与首次失败记录保持，不把本次复验并入原96样本。
+
+`DayPublicSourceV1::next`与`DayHiddenSourceV1::next`在空输入时，仅在对应candidate.waiting从false变成true后notify_all。已经waiting且无变化时继续原Condvar.wait与循环。修改仍在同一锁内；数据消费、游标推进、材料发布、检查点、候选完成、Ended和Failed通知保持。没有新增生产计数、持久状态、超时或notify_one。
+
+原200ms空Hub测试在本次修复后一次运行，public／hidden分别返回1／2次wait，正常Ended后返回EOF；窗口及汇合墙钟200.285002ms，调用墙钟0.202120秒。两条等待墙钟（含锁重取）分别为200.083523／200.104272ms。此前相同诊断各68,102次是原始结果；此次计数只说明该固定空输入场景不再持续互唤。调度和虚假唤醒仍可能改变次数，测试没有固定次数或性能门。它不测CPU耗时、不证明整场提速或收益变化，两条等待墙钟也不能相加。
+
+三个现有有限日回放用例各1 passed／0 failed：`original_day_shares_public_core_and_keeps_delayed_candidates_independent`核对共享材料、延迟候选的独立前沿、完成复用及恢复；`candidate_unwind_publishes_failure_and_wakes_daily_waiters`核对候选失败传播与无结果发布；`research_budget_retains_pending_and_resumes_without_recount_or_business_change`核对预算保存、在途恢复、不重计数及发布失败保留旧点。调用墙钟分别为0.085287、0.006010、0.070748秒。失败注入是用例的有效断言，不是本次研究或后台失败。既有测试已覆盖本次必要消费／发布／结束／失败／恢复边界，没有扩大测试矩阵。
+
+release测试编译通过，墙钟104.073113秒；本次只执行上述四个具名用例，没有重跑host96样本、全工作区、公共撮合回归或经营研究。受影响clippy通过，墙钟24.181873秒；修改文件rustfmt及diff检查通过。clippy提示位于未改的恢复／发布及既有测试代码，没有新增行提示。未改变原15ms计算时序、A1保证或SIM自动结算。
+
+```bash
+CARGO_TARGET_DIR=<shared-target> cargo test --release -p backtest --lib --test historical --locked --offline --no-run -j32 --message-format=json
+ISSUE185_WAIT_OUTPUT=<new-wait-json> <release-backtest-lib-test-binary> --exact day_state::tests::two_empty_day_consumers_observe_existing_wakeups --nocapture --ignored
+<release-historical-test-binary> --exact original_day_shares_public_core_and_keeps_delayed_candidates_independent --nocapture
+<release-historical-test-binary> --exact candidate_unwind_publishes_failure_and_wakes_daily_waiters --nocapture
+<release-historical-test-binary> --exact research_budget_retains_pending_and_resumes_without_recount_or_business_change --nocapture
+CARGO_TARGET_DIR=<shared-target> cargo clippy -p backtest --lib --test historical --locked --offline -j32
+rustfmt --edition 2024 --check backtest/src/day_state.rs
+git diff --check
+```
+
+此次修复属于公共日回放实现。当前main已确认A生产消费，未发现B调用；B未提交候选未核，不声称B整体兼容。没有修改公共经济组合或观察所有权，也没有访问训练服务器、修改或运行B。
