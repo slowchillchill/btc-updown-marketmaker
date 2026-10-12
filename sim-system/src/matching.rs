@@ -7,11 +7,11 @@ use contracts::{
     ConditionId, ExactDecimal, MakerRebateAccrualStatusV2, MakerRebateFillContributionV2,
     MarketResolutionTerminalV3, OrderKindProjectionV2, OrderLifecycleEventV2, OrderProjectionV2,
     OrderQuantityProjectionV2, PlatformAccountDeltaReasonV2, PlatformAccountDeltaV2,
-    PlatformOutcomeBalanceV1, QualityScopeV1, SettlementLifecycleEventV2, SimOrderTerminalReasonV2,
-    SimulatedOrderKnownStatusV2, SimulatedOrderStatusV2, SimulatedTradeKnownStatusV2,
-    SimulatedTradeStatusV2, SubmissionFillV2,
+    PlatformOutcomeBalanceV1, PublicTradeV2, QualityScopeV1, SettlementLifecycleEventV2,
+    SimCallerRoleV1, SimOrderTerminalReasonV2, SimulatedOrderKnownStatusV2, SimulatedOrderStatusV2,
+    SimulatedTradeKnownStatusV2, SimulatedTradeStatusV2, SubmissionFillV2,
     SubmissionMeasurementV2 as ContractSubmissionMeasurementV2, TokenId,
-    TradeEconomicDispositionV2, TradeLiquidityRoleV2, TradeProjectionV2,
+    TradeEconomicDispositionV2, TradeLiquidityRoleV2, TradeProjectionV2, TradeSide,
 };
 #[cfg(test)]
 use contracts::{
@@ -154,6 +154,45 @@ struct PriceQueueV2 {
     account_taker_depletion_debt_units: u128,
 }
 
+impl PriceQueueV2 {
+    fn remove_maker_account_segment(&mut self, index: usize) {
+        self.segments.remove(index);
+        if index == 0 {
+            return;
+        }
+        let (
+            Some(QueueSegmentV2::External {
+                total_base_units: left_total,
+                consumed_base_units: left_consumed,
+                ..
+            }),
+            Some(QueueSegmentV2::External {
+                total_base_units: right_total,
+                consumed_base_units: right_consumed,
+                ..
+            }),
+        ) = (self.segments.get(index - 1), self.segments.get(index))
+        else {
+            return;
+        };
+        // Maker 外部段无独立对价；仅合并本次删除造成的相邻剩余量。
+        let Some(remaining) = left_total.checked_sub(*left_consumed).and_then(|left| {
+            right_total
+                .checked_sub(*right_consumed)
+                .and_then(|right| left.checked_add(right))
+        }) else {
+            // 单段无法表示时保留原两段，不改变数量或引入新的拒绝条件。
+            return;
+        };
+        self.segments[index - 1] = QueueSegmentV2::External {
+            total_base_units: remaining,
+            total_quote_units: 0,
+            consumed_base_units: 0,
+        };
+        self.segments.remove(index);
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct TakerFillSliceV2 {
     price_pusd_per_share: Decimal,
@@ -190,6 +229,9 @@ struct AssetQueueEffectsV2 {
 #[allow(dead_code)]
 #[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AssetQueueV2 {
+    // 仅存有本账户挂单的价位；可执行深度仍由 bids/asks 维护。
+    #[serde(default)]
+    maker_bids: BTreeMap<Decimal, PriceQueueV2>,
     bids: BTreeMap<Decimal, PriceQueueV2>,
     asks: BTreeMap<Decimal, PriceQueueV2>,
 }
@@ -259,6 +301,155 @@ impl AssetQueueV2 {
         Ok(())
     }
 
+    fn insert_conservative_account_remainder(
+        &mut self,
+        price: Decimal,
+        platform_order_id: String,
+        base_units: u128,
+    ) -> Result<(), MatchingStateErrorV1> {
+        if !self.maker_bids.contains_key(&price) {
+            let external = self.bids.get(&price).map_or(Ok(0), |queue| {
+                queue.segments.iter().try_fold(0_u128, |sum, segment| {
+                    sum.checked_add(segment.remaining_base_units()?)
+                        .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)
+                })
+            })?;
+            let mut queue = PriceQueueV2::default();
+            if external > 0 {
+                queue.segments.push_back(QueueSegmentV2::External {
+                    total_base_units: external,
+                    total_quote_units: 0,
+                    consumed_base_units: 0,
+                });
+            }
+            self.maker_bids.insert(price, queue);
+        }
+        self.maker_bids
+            .get_mut(&price)
+            .expect("已建立 Maker 价位")
+            .segments
+            .push_back(QueueSegmentV2::Account {
+                platform_order_id,
+                remaining_base_units: base_units,
+            });
+        Ok(())
+    }
+
+    fn apply_conservative_level_transition(
+        &mut self,
+        side: BookSide,
+        price: Decimal,
+        before: u128,
+        after: u128,
+    ) -> Result<AssetQueueEffectsV2, MatchingStateErrorV1> {
+        // 实际盘口中没有本账户 Maker 段，净减量只减少可执行外部深度。
+        self.apply_level_transition(side, price, before, after)?;
+        if side == BookSide::Bid
+            && after > before
+            && let Some(queue) = self.maker_bids.get_mut(&price)
+        {
+            let added = after - before;
+            // 新外部量在既有账户单之后；未知撤单不移动其前方保守排位。
+            if let Some(QueueSegmentV2::External {
+                total_base_units, ..
+            }) = queue.segments.back_mut()
+            {
+                *total_base_units = total_base_units
+                    .checked_add(added)
+                    .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+            } else {
+                queue.segments.push_back(QueueSegmentV2::External {
+                    total_base_units: added,
+                    // Maker 只使用 base 排位；成交金额沿订单原累计量化计算。
+                    total_quote_units: 0,
+                    consumed_base_units: 0,
+                });
+            }
+        }
+        Ok(AssetQueueEffectsV2::default())
+    }
+
+    fn consume_public_trade(
+        &mut self,
+        lowest_price: Decimal,
+        mut budget: u128,
+    ) -> Result<AssetQueueEffectsV2, MatchingStateErrorV1> {
+        let mut effects = AssetQueueEffectsV2::default();
+        if self.maker_bids.range(lowest_price..).next().is_none() {
+            return Ok(effects);
+        }
+        // 穿价成交按价格优先共享有限量。未挂账户单的更好价位也占用可见外部量。
+        let prices: BTreeSet<_> = self
+            .bids
+            .range(lowest_price..)
+            .map(|(p, _)| *p)
+            .chain(self.maker_bids.range(lowest_price..).map(|(p, _)| *p))
+            .collect();
+        for price in prices.into_iter().rev() {
+            if budget == 0 {
+                break;
+            }
+            if let Some(queue) = self.maker_bids.get_mut(&price) {
+                while budget > 0 {
+                    let Some(segment) = queue.segments.front_mut() else {
+                        break;
+                    };
+                    let consumed = segment.remaining_base_units()?.min(budget);
+                    match segment {
+                        QueueSegmentV2::External {
+                            consumed_base_units,
+                            ..
+                        } => {
+                            *consumed_base_units += consumed;
+                        }
+                        QueueSegmentV2::Account {
+                            platform_order_id,
+                            remaining_base_units,
+                        } => {
+                            *remaining_base_units -= consumed;
+                            effects.maker_depletions.push(MakerQueueDepletionV2 {
+                                platform_order_id: platform_order_id.clone(),
+                                price_pusd_per_share: price,
+                                base_units: consumed,
+                            });
+                        }
+                    }
+                    budget -= consumed;
+                    if segment.remaining_base_units()? == 0 {
+                        queue.segments.pop_front();
+                    }
+                }
+                if queue.segments.len() == 1
+                    && let Some(QueueSegmentV2::Account {
+                        platform_order_id,
+                        remaining_base_units,
+                    }) = queue.segments.front()
+                    && *remaining_base_units > 0
+                {
+                    effects.venue_dust_candidate = Some(AssetVenueDustCandidateV2 {
+                        platform_order_id: platform_order_id.clone(),
+                        price_pusd_per_share: price,
+                    });
+                }
+            } else if let Some(queue) = self.bids.get(&price) {
+                for segment in &queue.segments {
+                    budget -= segment.remaining_base_units()?.min(budget);
+                    if budget == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        // 没有账户单的排位没有后续消费者，不为未来账户单留下历史成交状态。
+        self.maker_bids.retain(|_, queue| {
+            queue
+                .segments
+                .iter()
+                .any(|s| matches!(s, QueueSegmentV2::Account { .. }))
+        });
+        Ok(effects)
+    }
+
     fn best_executable_ask(&self) -> Option<Decimal> {
         self.asks
             .iter()
@@ -298,7 +489,10 @@ impl AssetQueueV2 {
         price: Decimal,
         platform_order_id: &str,
     ) -> Option<AssetVenueDustCandidateV2> {
-        let queue = self.bids.get(&price)?;
+        let queue = self
+            .maker_bids
+            .get(&price)
+            .or_else(|| self.bids.get(&price))?;
         if queue.account_taker_depletion_debt_units != 0 || queue.segments.len() != 1 {
             return None;
         }
@@ -319,6 +513,18 @@ impl AssetQueueV2 {
     }
 
     fn remove_account_order(&mut self, platform_order_id: &str) {
+        self.maker_bids.retain(|_, queue| {
+            if let Some(index) = queue.segments.iter().position(|segment| {
+                matches!(segment,
+                QueueSegmentV2::Account { platform_order_id: id, .. } if id == platform_order_id)
+            }) {
+                queue.remove_maker_account_segment(index);
+            }
+            queue
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, QueueSegmentV2::Account { .. }))
+        });
         self.bids.retain(|_, queue| {
             queue.segments.retain(|segment| {
                 let remove = matches!(segment, QueueSegmentV2::Account {
@@ -337,17 +543,33 @@ impl AssetQueueV2 {
         price: Decimal,
         platform_order_id: &str,
     ) -> Option<()> {
-        let queue = self.bids.get_mut(&price)?;
+        let is_maker_queue = self.maker_bids.contains_key(&price);
+        let levels = if is_maker_queue {
+            &mut self.maker_bids
+        } else {
+            &mut self.bids
+        };
+        let queue = levels.get_mut(&price)?;
         let index = queue.segments.iter().position(|segment| {
             matches!(segment, QueueSegmentV2::Account {
                 platform_order_id: existing,
                 ..
             } if existing == platform_order_id)
         })?;
-        queue.segments.remove(index);
+        if is_maker_queue {
+            queue.remove_maker_account_segment(index);
+        } else {
+            queue.segments.remove(index);
+        }
 
-        if queue.segments.is_empty() && queue.account_taker_depletion_debt_units == 0 {
-            self.bids.remove(&price);
+        if (queue.segments.is_empty() && queue.account_taker_depletion_debt_units == 0)
+            || (is_maker_queue
+                && !queue
+                    .segments
+                    .iter()
+                    .any(|s| matches!(s, QueueSegmentV2::Account { .. })))
+        {
+            levels.remove(&price);
         }
         Some(())
     }
@@ -617,6 +839,7 @@ impl AssetQueueV2 {
     fn clear_matching_segments(&mut self) {
         self.bids.clear();
         self.asks.clear();
+        self.maker_bids.clear();
     }
 }
 
@@ -2499,11 +2722,20 @@ pub(crate) enum BuyOrderDispositionV2 {
     RejectedNoEffect(BuyOrderRejectedReasonV2),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum MakerExecutionModelV1 {
+    #[default]
+    L2BookDeltaFifoEstimateV1,
+    PublicTradeConservativeFifoV1,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ExecutionStateV2 {
     cancel_scenario: BTreeMap<(String, String), u64>,
     pub(crate) cancel_scenario_hits: Vec<crate::runtime_v2::CancelScenarioHitV1>,
+    #[serde(default)]
+    maker_model: MakerExecutionModelV1,
     queues: ExecutionQueueStateV2,
     account_overlay: AccountBookOverlayStoreV1,
     account: PlatformAccountStateV2,
@@ -2526,6 +2758,7 @@ impl ExecutionStateV2 {
         account: PlatformAccountStateV2,
     ) -> Self {
         Self {
+            maker_model: MakerExecutionModelV1::L2BookDeltaFifoEstimateV1,
             cancel_scenario: BTreeMap::new(),
             cancel_scenario_hits: Vec::new(),
             queues: ExecutionQueueStateV2::new(directory),
@@ -2542,6 +2775,26 @@ impl ExecutionStateV2 {
             next_order_sequence: 1,
             next_fill_sequence: 1,
         }
+    }
+
+    pub(crate) fn new_with_rules(
+        directory: &SessionMarketDirectoryV1,
+        account: PlatformAccountStateV2,
+        rules: &PlatformRuleSnapshotV3,
+    ) -> Self {
+        let role = account.account_instance_key().caller_role;
+        let mut state = Self::new(directory, account);
+        if role == SimCallerRoleV1::HistoricalBacktest
+            && rules
+                .project_account_rules
+                .l2_queue_model
+                .value
+                .historical_backtest_model
+                .is_some()
+        {
+            state.maker_model = MakerExecutionModelV1::PublicTradeConservativeFifoV1;
+        }
+        state
     }
 
     pub(crate) fn commit_admitted_market(&mut self, market: &PlatformMarketV1) {
@@ -2864,20 +3117,44 @@ impl ExecutionStateV2 {
                 quantity_before_shares,
                 quantity_after_shares,
             } => {
-                let queue_effects = self
+                let asset = self
                     .queues
-                    .asset_mut(condition_id, &transition.asset.token_id.0)?
-                    .apply_level_transition(
-                        transition.side,
-                        *price_pusd_per_share,
-                        micro_units_v1(*quantity_before_shares)?,
-                        micro_units_v1(*quantity_after_shares)?,
-                    )?;
+                    .asset_mut(condition_id, &transition.asset.token_id.0)?;
+                let before = micro_units_v1(*quantity_before_shares)?;
+                let after = micro_units_v1(*quantity_after_shares)?;
+                let queue_effects =
+                    if self.maker_model == MakerExecutionModelV1::PublicTradeConservativeFifoV1 {
+                        asset.apply_conservative_level_transition(
+                            transition.side,
+                            *price_pusd_per_share,
+                            before,
+                            after,
+                        )?
+                    } else {
+                        asset.apply_level_transition(
+                            transition.side,
+                            *price_pusd_per_share,
+                            before,
+                            after,
+                        )?
+                    };
                 self.apply_maker_depletions(
                     condition_id,
                     &transition.asset.token_id.0,
                     platform_effective_at_utc_ms,
                     queue_effects,
+                    rules,
+                    finality_policy,
+                    &mut effects,
+                )?;
+            }
+            NormalizedMarketEventV2::PublicTrade(trade)
+                if self.maker_model == MakerExecutionModelV1::PublicTradeConservativeFifoV1 =>
+            {
+                self.apply_public_trade(
+                    condition_id,
+                    trade,
+                    platform_effective_at_utc_ms,
                     rules,
                     finality_policy,
                     &mut effects,
@@ -2905,6 +3182,61 @@ impl ExecutionStateV2 {
             | NormalizedMarketEventV2::MarketResolutionTerminal { .. } => {}
         }
         Ok(effects)
+    }
+
+    fn apply_public_trade(
+        &mut self,
+        condition_id: &str,
+        trade: &PublicTradeV2,
+        at: i64,
+        rules: &PlatformRuleSnapshotV3,
+        finality_policy: &TradeFinalityPolicyV2,
+        effects: &mut ExecutionMarketEventEffectsV2,
+    ) -> Result<(), MatchingStateErrorV1> {
+        let price = trade
+            .price_pusd_per_share
+            .0
+            .parse::<Decimal>()
+            .map_err(|_| MatchingStateErrorV1::QueuePredecessorConflict)?;
+        let quantity = trade
+            .quantity_shares
+            .0
+            .parse::<Decimal>()
+            .map_err(|_| MatchingStateErrorV1::QueuePredecessorConflict)?;
+        let market = self
+            .queues
+            .markets
+            .get_mut(condition_id)
+            .ok_or_else(|| MatchingStateErrorV1::UnknownMarket(condition_id.to_owned()))?;
+        // 当前正式订单入口只有 BUY；BUY 成交对应互补资产的卖出，不能再用一遍量。
+        let token = match trade.aggressor_side {
+            TradeSide::Sell => trade.asset.token_id.0.clone(),
+            TradeSide::Buy => market
+                .assets
+                .keys()
+                .find(|token| **token != trade.asset.token_id.0)
+                .ok_or_else(|| MatchingStateErrorV1::UnknownAsset(trade.asset.token_id.0.clone()))?
+                .clone(),
+        };
+        let lowest_price = if trade.aggressor_side == TradeSide::Buy {
+            Decimal::ONE - price
+        } else {
+            price
+        };
+        let queue_effects = market
+            .assets
+            .get_mut(&token)
+            .ok_or_else(|| MatchingStateErrorV1::UnknownAsset(token.clone()))?
+            .consume_public_trade(lowest_price, micro_units_v1(quantity)?)?;
+        self.apply_maker_depletions(
+            condition_id,
+            &token,
+            at,
+            queue_effects,
+            rules,
+            finality_policy,
+            effects,
+        )
     }
 
     pub(crate) fn advance_market_time(
@@ -3645,13 +3977,22 @@ impl ExecutionStateV2 {
         let mut initial_trade_finality = Vec::with_capacity(fill_sequences.len());
 
         if open_base_units > 0 {
-            self.queues
-                .asset_mut(&order.condition_id.0, &order.token_id.0)?
-                .insert_account_buy_remainder(
+            let asset = self
+                .queues
+                .asset_mut(&order.condition_id.0, &order.token_id.0)?;
+            if self.maker_model == MakerExecutionModelV1::PublicTradeConservativeFifoV1 {
+                asset.insert_conservative_account_remainder(
+                    order.source_price_pusd_per_share,
+                    platform_order_id.clone(),
+                    open_base_units,
+                )?;
+            } else {
+                asset.insert_account_buy_remainder(
                     order.source_price_pusd_per_share,
                     platform_order_id.clone(),
                     open_base_units,
                 );
+            }
 
             self.account_overlay
                 .add_quantity(
@@ -5888,7 +6229,7 @@ impl ExecutionStateV2 {
             total.add_record(condition.len() as u64);
             for (token, asset) in &market.assets {
                 total.add_record(token.len() as u64);
-                for levels in [&asset.bids, &asset.asks] {
+                for levels in [&asset.bids, &asset.asks, &asset.maker_bids] {
                     total.add_records(levels.len() as u64);
                     for queue in levels.values() {
                         for segment in &queue.segments {
@@ -6353,6 +6694,435 @@ mod tests {
             received_at_utc_ms,
             sequence,
         )
+    }
+
+    #[test]
+    fn conservative_maker_real_book_before_trade_fragment() {
+        // 三条真实记录证明事实值与先后，账户排位是独立构造的反例，不冒称重放旧 sim-3。
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/maker-book-before-trade-real.json"
+        ))
+        .unwrap();
+        let bid = &rows[0]["event"]["price_changes"][0];
+        let removed = &rows[1]["event"]["price_changes"][0];
+        let trade = &rows[2]["event"];
+        assert_eq!(bid["asset_id"], removed["asset_id"]);
+        assert_ne!(bid["asset_id"], trade["asset_id"]);
+        assert_eq!(bid["side"], "BUY");
+        assert_eq!(trade["side"], "BUY");
+        assert!(rows[1]["timestamp"].as_i64().unwrap() < rows[2]["timestamp"].as_i64().unwrap());
+        assert!(
+            rows[1]["timestamp_received"].as_i64().unwrap()
+                < rows[2]["timestamp_received"].as_i64().unwrap()
+        );
+        let p = decimal(bid["price"].as_str().unwrap());
+        assert_eq!(p, Decimal::ONE - decimal(trade["price"].as_str().unwrap()));
+        let before = micro_units_v1(decimal(bid["size"].as_str().unwrap())).unwrap();
+        let after = micro_units_v1(decimal(removed["size"].as_str().unwrap())).unwrap();
+        let quantity = micro_units_v1(decimal(trade["size"].as_str().unwrap())).unwrap();
+        assert_eq!((before, after, quantity), (65_000_000, 0, 65_000_000));
+        let mut asset = AssetQueueV2::from_initial_levels(&[(p, before)], &[]).unwrap();
+        asset
+            .insert_conservative_account_remainder(p, "sim-1".into(), 19_000_000)
+            .unwrap();
+        assert!(
+            asset
+                .apply_conservative_level_transition(BookSide::Bid, p, before, after)
+                .unwrap()
+                .maker_depletions
+                .is_empty()
+        );
+        assert!(
+            asset
+                .consume_public_trade(p, quantity)
+                .unwrap()
+                .maker_depletions
+                .is_empty()
+        );
+        assert_eq!(
+            asset
+                .consume_public_trade(p, 1_000_000)
+                .unwrap()
+                .maker_depletions[0]
+                .base_units,
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn conservative_maker_cost_sample() {
+        // 只测撮合新增路径；开发构建，不能解释为策略/在线端到端延迟。
+        const N: u128 = 10_000;
+        for active in [false, true] {
+            let mut asset =
+                AssetQueueV2::from_initial_levels(&[(decimal("0.5"), N + 1)], &[]).unwrap();
+            if active {
+                asset
+                    .insert_conservative_account_remainder(decimal("0.5"), "sim-1".into(), 5)
+                    .unwrap();
+            }
+            let started = std::time::Instant::now();
+            for _ in 0..N {
+                std::hint::black_box(asset.consume_public_trade(decimal("0.5"), 1).unwrap());
+            }
+            println!(
+                "maker_cost active={active} calls={N} elapsed_ns={} maker_prices={} maker_segments={}",
+                started.elapsed().as_nanos(),
+                asset.maker_bids.len(),
+                asset
+                    .maker_bids
+                    .values()
+                    .map(|q| q.segments.len())
+                    .sum::<usize>()
+            );
+            assert_eq!(asset.maker_bids.len(), usize::from(active));
+            if active {
+                assert_eq!(asset.maker_bids[&decimal("0.5")].segments.len(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn conservative_maker_book_decrease_and_trade_share_no_depletion() {
+        for book_first in [true, false] {
+            let mut asset = AssetQueueV2::from_initial_levels(
+                &[(decimal("0.5"), 10_000_000)],
+                &[(decimal("0.6"), 10_000_000)],
+            )
+            .unwrap();
+            asset
+                .insert_conservative_account_remainder(decimal("0.5"), "sim-1".into(), 5_000_000)
+                .unwrap();
+            asset
+                .insert_conservative_account_remainder(decimal("0.5"), "sim-2".into(), 5_000_000)
+                .unwrap();
+            if book_first {
+                assert!(
+                    asset
+                        .apply_conservative_level_transition(
+                            BookSide::Bid,
+                            decimal("0.5"),
+                            10_000_000,
+                            0
+                        )
+                        .unwrap()
+                        .maker_depletions
+                        .is_empty()
+                );
+            }
+            let effects = asset
+                .consume_public_trade(decimal("0.5"), 12_000_000)
+                .unwrap();
+            assert_eq!(
+                effects.maker_depletions,
+                vec![MakerQueueDepletionV2 {
+                    platform_order_id: "sim-1".into(),
+                    price_pusd_per_share: decimal("0.5"),
+                    base_units: 2_000_000,
+                }]
+            );
+            if !book_first {
+                asset
+                    .apply_conservative_level_transition(
+                        BookSide::Bid,
+                        decimal("0.5"),
+                        10_000_000,
+                        0,
+                    )
+                    .unwrap();
+            }
+            // 第二单没有获得第一次成交预算。盘口减量也没有推进未成交账户量。
+            let effects = asset
+                .consume_public_trade(decimal("0.5"), 4_000_000)
+                .unwrap();
+            assert_eq!(
+                effects
+                    .maker_depletions
+                    .iter()
+                    .map(|d| (&*d.platform_order_id, d.base_units))
+                    .collect::<Vec<_>>(),
+                vec![("sim-1", 3_000_000), ("sim-2", 1_000_000)]
+            );
+            asset
+                .apply_conservative_level_transition(BookSide::Ask, decimal("0.6"), 10_000_000, 0)
+                .unwrap();
+            assert!(
+                asset
+                    .calculate_taker_buy(decimal("0.6"), TakerTargetV1::Quote(10_000_000))
+                    .unwrap()
+                    .fills
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn conservative_maker_repeated_middle_cancel_merges_external_neighbors() {
+        let price = decimal("0.5");
+        for by_price in [true, false] {
+            let mut asset = AssetQueueV2::from_initial_levels(&[(price, 10_000_000)], &[]).unwrap();
+            asset
+                .insert_conservative_account_remainder(price, "sim-1".into(), 5_000_000)
+                .unwrap();
+            for cycle in 0..1000 {
+                let id = format!("sim-{}", cycle + 2);
+                asset
+                    .insert_conservative_account_remainder(price, id.clone(), 5_000_000)
+                    .unwrap();
+                asset
+                    .apply_conservative_level_transition(
+                        BookSide::Bid,
+                        price,
+                        10_000_000,
+                        11_000_000,
+                    )
+                    .unwrap();
+                asset
+                    .apply_conservative_level_transition(
+                        BookSide::Bid,
+                        price,
+                        11_000_000,
+                        10_000_000,
+                    )
+                    .unwrap();
+                if by_price {
+                    asset.remove_account_order_at_price(price, &id).unwrap();
+                } else {
+                    asset.remove_account_order(&id);
+                }
+                assert_eq!(
+                    asset.maker_bids[&price].segments.len(),
+                    3,
+                    "锚定订单存续时，撤换历史不能累积无必要外部段：by_price={by_price}, cycle={cycle}"
+                );
+            }
+            asset
+                .insert_conservative_account_remainder(price, "sim-1002".into(), 5_000_000)
+                .unwrap();
+            let fills = asset
+                .consume_public_trade(price, 12_000_000)
+                .unwrap()
+                .maker_depletions;
+            assert_eq!(
+                fills
+                    .iter()
+                    .map(|d| (&*d.platform_order_id, d.base_units))
+                    .collect::<Vec<_>>(),
+                vec![("sim-1", 2_000_000)]
+            );
+            // 剩余账户3股与累积队尾1000股全部占用下一次预算，后单还不能成交。
+            let fills = asset
+                .consume_public_trade(price, 1_003_000_000)
+                .unwrap()
+                .maker_depletions;
+            assert_eq!(
+                fills
+                    .iter()
+                    .map(|d| (&*d.platform_order_id, d.base_units))
+                    .collect::<Vec<_>>(),
+                vec![("sim-1", 3_000_000)]
+            );
+            assert_eq!(
+                asset
+                    .consume_public_trade(price, 1_000_000)
+                    .unwrap()
+                    .maker_depletions[0]
+                    .platform_order_id,
+                "sim-1002"
+            );
+
+            // 删除夹在两个外部段之间的单，合并的是剩余量，不是已被成交消费的原总量。
+            let mut partial =
+                AssetQueueV2::from_initial_levels(&[(price, 10_000_000)], &[]).unwrap();
+            partial
+                .insert_conservative_account_remainder(price, "sim-1".into(), 5_000_000)
+                .unwrap();
+            partial
+                .apply_conservative_level_transition(BookSide::Bid, price, 10_000_000, 11_000_000)
+                .unwrap();
+            partial
+                .insert_conservative_account_remainder(price, "sim-2".into(), 5_000_000)
+                .unwrap();
+            assert!(
+                partial
+                    .consume_public_trade(price, 2_000_000)
+                    .unwrap()
+                    .maker_depletions
+                    .is_empty()
+            );
+            if by_price {
+                partial
+                    .remove_account_order_at_price(price, "sim-1")
+                    .unwrap();
+            } else {
+                partial.remove_account_order("sim-1");
+            }
+            assert_eq!(partial.maker_bids[&price].segments.len(), 2);
+            assert!(
+                partial
+                    .consume_public_trade(price, 8_000_000)
+                    .unwrap()
+                    .maker_depletions
+                    .is_empty()
+            );
+            assert_eq!(
+                partial
+                    .consume_public_trade(price, 3_000_000)
+                    .unwrap()
+                    .maker_depletions[0]
+                    .base_units,
+                2_000_000
+            );
+        }
+    }
+
+    #[test]
+    fn conservative_maker_price_priority_resync_and_bounded_tail() {
+        let mut asset =
+            AssetQueueV2::from_initial_levels(&[(decimal("0.6"), 3), (decimal("0.5"), 10)], &[])
+                .unwrap();
+        asset
+            .insert_conservative_account_remainder(decimal("0.5"), "sim-1".into(), 5)
+            .unwrap();
+        // 更好价位的可见外部量也必须占用穿价成交的有限预算。
+        assert!(
+            asset
+                .consume_public_trade(decimal("0.4"), 12)
+                .unwrap()
+                .maker_depletions
+                .is_empty()
+        );
+        // 模拟 Required 清理与从0重建；不能删除既有保守前方1单位。
+        asset.clear_external_segments();
+        for _ in 0..1000 {
+            asset
+                .apply_conservative_level_transition(BookSide::Bid, decimal("0.5"), 0, 1)
+                .unwrap();
+            asset
+                .apply_conservative_level_transition(BookSide::Bid, decimal("0.5"), 1, 0)
+                .unwrap();
+        }
+        assert_eq!(asset.maker_bids[&decimal("0.5")].segments.len(), 3);
+        assert!(
+            asset
+                .consume_public_trade(decimal("0.5"), 1)
+                .unwrap()
+                .maker_depletions
+                .is_empty()
+        );
+        assert_eq!(
+            asset
+                .consume_public_trade(decimal("0.5"), 2)
+                .unwrap()
+                .maker_depletions[0]
+                .base_units,
+            2
+        );
+        asset
+            .remove_account_order_at_price(decimal("0.5"), "sim-1")
+            .unwrap();
+        assert!(asset.maker_bids.is_empty());
+    }
+
+    fn public_trade_for_maker_test(
+        token: &str,
+        side: TradeSide,
+        price: &str,
+        qty: &str,
+        source: i64,
+        received: i64,
+    ) -> ExecutionMarketEventV3 {
+        let event = crate::task21_tests::sealed_event(
+            ExecutionMarketEventPayloadV3::PublicTrade(PublicTradeV2 {
+                asset: crate::task21_tests::asset(
+                    token,
+                    if token == "1" { 0 } else { 1 },
+                    if token == "1" { "Up" } else { "Down" },
+                ),
+                trade_id: format!("derived-{source}"),
+                trade_id_source: contracts::PublicTradeIdSourceV1::DerivedSourceEvidence,
+                price_pusd_per_share: ExactDecimal(price.into()),
+                quantity_shares: ExactDecimal(qty.into()),
+                aggressor_side: side,
+                fee_rate_bps: None,
+            }),
+            crate::task21_tests::orderbook_evidence(source, received, source as u64),
+            crate::task21_tests::fresh_quality(),
+        );
+        let bytes = data_pipeline_core::encode_execution_market_event_v3(&event).unwrap();
+        data_pipeline_core::decode_execution_market_event_v3(&bytes).unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn conservative_maker_partial_trade_economics_complement_and_cancel() {
+        let rules = crate::platform_rules::tests::successful_snapshot_v3_for_sim_tests().await;
+        let policy = economic_at_zero_policy_v2_for_tests();
+        for (token, side, price) in [("1", TradeSide::Sell, "0.3"), ("2", TradeSide::Buy, "0.7")] {
+            let (mut state, condition, own_token) =
+                execution_state_v2_for_resting_limit_tests("10");
+            state.maker_model = MakerExecutionModelV1::PublicTradeConservativeFifoV1;
+            let early = public_trade_for_maker_test(token, side, price, "99", 1100, 1190);
+            let n = crate::market::normalize_market_event_v2(&early).unwrap();
+            state
+                .apply_market_event(&condition.0, &n, 1100, 2000, rules.snapshot(), &policy)
+                .unwrap();
+            assert!(state.fills.is_empty());
+            state
+                .apply_initial_levels(
+                    &condition.0,
+                    &own_token.0,
+                    &[(decimal("0.3"), 10_000_000)],
+                    &[],
+                )
+                .unwrap();
+            let (next, disposition) = state
+                .apply_buy_order(
+                    BuyOrderActionV2 {
+                        global_request_id: "maker-new-model".into(),
+                        batch_item_ordinal: 0,
+                        item_id: "item".into(),
+                        condition_id: condition.clone(),
+                        token_id: own_token.clone(),
+                        effective_processing_at_utc_ms: 1200,
+                        terms: BuyOrderTermsV2::Gtc {
+                            limit_price_pusd_per_share: decimal("0.3"),
+                            accepted_base_units: 5_000_000,
+                            accepted_quote_units: 1_500_000,
+                            post_only: true,
+                        },
+                    },
+                    rules.snapshot(),
+                    &policy,
+                )
+                .unwrap();
+            assert!(matches!(disposition, BuyOrderDispositionV2::Accepted(_)));
+            state = next;
+            let event = public_trade_for_maker_test(token, side, price, "12", 1300, 1500);
+            let n = crate::market::normalize_market_event_v2(&event).unwrap();
+            let effects = state
+                .apply_market_event(&condition.0, &n, 1300, 2000, rules.snapshot(), &policy)
+                .unwrap();
+            assert_eq!(effects.initial_trade_finality.len(), 1);
+            assert_eq!(effects.initial_trade_finality[0].base_units, 2_000_000);
+            assert_eq!(
+                effects.initial_trade_finality[0].liquidity_role,
+                SimLiquidityRoleV1::MakerInferred
+            );
+            assert_eq!(state.account.available_pusd(), decimal("8.5"));
+            assert_eq!(state.account.principal_encumbrance_pusd(), decimal("0.9"));
+            // 私有反馈1500到达不改变1300先成交、1400再撤单的实际经济顺序。
+            let (state, _) = state.apply_caller_cancel("sim-1", 1400).unwrap();
+            assert_eq!(state.account.available_pusd(), decimal("9.4"));
+            assert_eq!(state.account.principal_encumbrance_pusd(), Decimal::ZERO);
+            assert_eq!(state.fills.len(), 1);
+            let mut restored: ExecutionStateV2 =
+                serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+            assert_eq!(restored, state);
+            restored
+                .apply_market_event(&condition.0, &n, 1600, 2000, rules.snapshot(), &policy)
+                .unwrap();
+            assert_eq!(restored.fills.len(), 1, "已撤订单不能再分配成交量");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

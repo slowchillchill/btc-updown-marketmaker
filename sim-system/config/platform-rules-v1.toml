@@ -98,14 +98,15 @@ failure_semantics = "Unknown status versions are not guessed"
 
 [project_account_rules.l2_queue_model.value]
 model_version = "L2_BOOK_DELTA_FIFO_ESTIMATE_V1"
+historical_backtest_model = "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1"
 
 [project_account_rules.l2_queue_model.evidence]
 category = "PROJECT_ASSUMPTION"
-source = "user-decision:2026-08-01:l2-queue-estimate"
-reviewed_on_utc_date = "2026-08-09"
-scope = "deterministic external L2 queue estimate"
-limitation = "Does not claim true per-order FIFO or market impact"
-version = "L2_BOOK_DELTA_FIFO_ESTIMATE_V1"
+source = "https://github.com/slowchillchill/btc-updown-marketmaker/issues/289#issuecomment-6117762587"
+reviewed_on_utc_date = "2026-10-12"
+scope = "历史回测采用公开成交保守队列；PAPER与尚未采用的模型消费者保留旧L2估计"
+limitation = "两种模型均为推断，不声称真实FIFO或市场影响；规范成交记录之间的底层重复可能未知"
+version = "CPU_MAKER_MODELS_V1"
 failure_semantics = "Invalid conservation evidence isolates the affected market"
 
 [project_account_rules.lifecycle_account_behavior.value]

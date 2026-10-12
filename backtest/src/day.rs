@@ -391,7 +391,7 @@ where
             let rules = rules.clone();
             let hub = hub.clone();
             let metadata = serde_json::json!({"config":candidate,"day":day,"input_set_identity_sha256":input_identity,"source_identity_sha256":source_identity,
-                "source_manifests":admitted.iter().map(|d|(d.utc_day(),d.manifest_sha256())).collect::<Vec<_>>(),"rules_file_sha256":rules.file_sha256(),"entry":"original-parquet-day-v1"});
+                "source_manifests":admitted.iter().map(|d|(d.utc_day(),d.manifest_sha256())).collect::<Vec<_>>(),"rules_file_sha256":rules.file_sha256(),"maker_model_version":rules.maker_model_version_for(contracts::SimCallerRoleV1::HistoricalBacktest),"entry":"original-parquet-day-v1"});
             workers.push(scope.spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                     || -> Result<_, MaterialError> {
