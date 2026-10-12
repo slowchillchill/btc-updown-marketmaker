@@ -40,6 +40,8 @@ import {
 } from "./Existing";
 import { LanguageSwitch } from "./LanguageSwitch";
 import { displayLabel, displayError } from "./i18n";
+import { HourlySnapshot } from "./HourlySnapshot";
+import { utc } from "./snapshotValues";
 import { SourceIdentity } from "./SourceIdentity";
 import { usePublicBrowse } from "./PublicBrowse";
 const views = [
@@ -66,6 +68,14 @@ export default function App() {
     [start, setStart] = useState(""),
     [end, setEnd] = useState(""),
     [exportScope, setExportScope] = useState("range");
+  const [hour, setHour] = useState("1");
+  const changeHour = (value: string) => {
+    setHour(value);
+    setSelection(null);
+    setCondition("");
+    setStart("");
+    setEnd("");
+  };
   const currentRun = useRef(run);
   currentRun.current = run;
   const downloadUrl = useRef<string | null>(null);
@@ -102,7 +112,11 @@ export default function App() {
         return r.json() as Promise<Snapshot>;
       })
       .then((d) => {
-        if (!abort.signal.aborted) setSnapshot(d);
+        if (!abort.signal.aborted) {
+          const hours = list(at(d.report.exact ?? undefined, "research", "hours"));
+          setHour(hours.length > 1 ? "1" : "0");
+          setSnapshot(d);
+        }
       })
       .catch((e) => {
         if (!abort.signal.aborted) setError(String(e));
@@ -116,6 +130,7 @@ export default function App() {
     snapshot?.report.status === "ready"
       ? (snapshot.report.exact ?? undefined)
       : undefined;
+  const hasHours = list(at(report, "research", "hours")).length > 0;
   const metadata =
     snapshot?.metadata.status === "ready"
       ? (snapshot.metadata.exact ?? undefined)
@@ -295,7 +310,9 @@ export default function App() {
         )
       : points;
   const sourceName = (source: Evidence["source"]) =>
-    source === "existing"
+    source === "provenance"
+      ? tr("提取来源映射")
+      : source === "existing"
       ? tr(existingLabel(existingStatus?.kind))
       : source === "report"
         ? engineeringProjection
@@ -319,6 +336,23 @@ export default function App() {
             {run}
           </p>
           <code>{selection.path || "/"}</code>
+          {hasHours && <>
+            <pre>{JSON.stringify(selection.value, null, 2)}</pre>
+            <div className="selected-snapshot-source">
+              <p>{snapshot?.label} · {tr("累计至 {{hours}}h", {hours: Number(hour)+1})}</p>
+              <p>{tr("快照边界")}: {utc(at(report,"research","hours",hour,"cumulative","boundary_utc_ms"))}</p>
+              <p>{tr("实际加载文件")}: <code title={(selection.source === "provenance" ? snapshot?.report_provenance.source : snapshot?.report.source) ?? undefined}>{(selection.source === "provenance" ? snapshot?.report_provenance.source : snapshot?.report.source)?.split("/").at(-1)}</code></p>
+              <details><summary>{tr("完整来源路径与映射")}</summary>
+                <p>{tr("实际加载文件")}: <code>{selection.source === "provenance" ? snapshot?.report_provenance.source : snapshot?.report.source}</code></p>
+                {snapshot?.report_provenance?.status === "ready" && <>
+                  <p>{tr("原包装文件")}: <code>{fact(at(snapshot.report_provenance.exact ?? undefined,"original_file"))}</code></p>
+                  <p>{tr("原包装路径")}: <code>{selection.source === "provenance"
+                    ? selection.path === "/initial_available_pusd" ? fact(at(snapshot.report_provenance.exact ?? undefined,"initial_available_pointer")) : tr("见提取来源映射")
+                    : fact(at(snapshot.report_provenance.exact ?? undefined,"report_pointer")) + selection.path}</code></p>
+                </>}
+              </details>
+            </div>
+          </>}
           {condition &&
             selection.condition !== condition &&
             !selection.markets?.some((m) => m.condition === condition) && (
@@ -374,7 +408,7 @@ export default function App() {
               })}
             </div>
           )}
-          <pre>{JSON.stringify(selection.value, null, 2)}</pre>
+          {!hasHours && <pre>{JSON.stringify(selection.value, null, 2)}</pre>}
         </>
       ) : (
         <p className="empty">{tr("点击卡片、字段或事件引用查原值。")}</p>
@@ -559,16 +593,17 @@ export default function App() {
     );
   }
   return (
-    <div className="shell">
+    <div className={`shell ${hasHours ? "snapshot-shell" : ""}`}>
       <aside>
         <div className="brand">
-          ◈{" "}
+          {hasHours ? <div className="pmm-logo"><div><img src="/pmm-cobalt.png" alt="PMM" /></div></div> : <>◈{" "}
           <span>
             {tr("公共事实")}
             <br />
             <b>{tr("浏览器")}</b>
-          </span>
+          </span></>}
         </div>
+        {hasHours && <p className="pmm-name">Prediction Market Maker</p>}
         <div className="nav-label">{tr("只读 · 历史快照")}</div>
         {views.map(([id, label]) => (
           <button
@@ -592,7 +627,7 @@ export default function App() {
           <div>
             <p className="eyebrow">{tr("公共业务事实浏览器")}</p>
             <h1>
-              {view === "overview"
+              {hasHours ? tr("已保存研究快照") : view === "overview"
                 ? existingReady
                   ? tr(existingLabel(existingStatus?.kind))
                   : researchReady
@@ -628,6 +663,7 @@ export default function App() {
         {error && <p role="alert">{displayError(error)}</p>}
         {snapshot && (
           <>
+            {hasHours && report ? <HourlySnapshot snapshot={snapshot} report={report} hour={hour} onHour={changeHour} onSelect={select} evidence={evidencePanel} view={view}/> : <>
             <div className="run-strip">
               <b>
                 {existingReady
@@ -1248,6 +1284,7 @@ export default function App() {
               {tr(statusLabel[String(snapshot.public_recording.status)] ?? "")}
               {tr(" / 派生追踪可重建，不参加恢复或归约。")}
             </footer>
+            </>}
           </>
         )}
       </main>

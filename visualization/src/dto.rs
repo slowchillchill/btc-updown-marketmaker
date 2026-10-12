@@ -11,6 +11,8 @@ pub struct SourcesConfig {
 pub struct RunSourceConfig {
     pub label: String,
     pub report: Option<PathBuf>,
+    /// 显式提取来源映射；不伪造生产启动 metadata。
+    pub report_provenance: Option<PathBuf>,
     pub research: Option<PathBuf>,
     pub existing_source: Option<crate::sources::existing::ExistingSourceConfig>,
     #[serde(default)]
@@ -59,6 +61,7 @@ pub struct Document {
 pub struct Snapshot {
     pub label: String,
     pub report: Document,
+    pub report_provenance: Document,
     pub research: Value,
     pub existing_source: Value,
     pub report_kind: ReportSourceKind,

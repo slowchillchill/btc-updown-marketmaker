@@ -104,6 +104,7 @@ async fn production_range_end_report_and_missing_metadata_are_independent_read_o
     let app = router(
         load_sources(SourcesConfig {
             runs: vec![RunSourceConfig {
+                report_provenance: None,
                 existing_source: None,
                 research: None,
                 label: "合成工程验证".into(),
@@ -371,4 +372,38 @@ fn engineering_projection_is_explicit_and_has_no_fabricated_host_end_or_economic
     assert!(exact.get("economics_version").is_none());
     assert_eq!(load_document(Some(&path), true).status, "unknown_version");
     assert_eq!(raw, std::fs::read(&path).unwrap());
+}
+
+#[test]
+fn budget_stop_preserves_compact_hours_and_unknown_end_reason_is_not_interpreted() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("saved-report.json");
+    // 最小 JSON 读取边界，不伪造完整运行或经济状态；期望直接来自保存合同。
+    let raw = r#"{"economics_version":"account_economics_v2","end_reason":"BudgetStop","recording_drained":false,"conservative_nav_pusd":{"Known":{"numerator":"3664871","denominator":"1000"}},"research":{"hours":[{"cumulative":{"boundary_utc_ms":1789174800000,"metrics":{"conservative_nav_pusd":{"Known":{"numerator":"30214593","denominator":"10000"}}}}},{"cumulative":{"boundary_utc_ms":1789178400000,"metrics":{"conservative_nav_pusd":{"Known":{"numerator":"35190333","denominator":"10000"}},"actual_reserved_pusd":{"Known":{"numerator":"0","denominator":"1"}},"taker_fee_pusd":"Unknown"},"pending_calculation":{"actual_sent_at_utc_ms":null}}}]}}"#;
+    std::fs::write(&path, raw).unwrap();
+    let document = load_document(Some(&path), true);
+    assert_eq!(document.status, "ready");
+    let exact = document.exact.unwrap();
+    assert_eq!(exact["end_reason"], "BudgetStop");
+    assert_eq!(exact["recording_drained"], false);
+    assert_eq!(
+        exact["research"]["hours"][1]["cumulative"]["boundary_utc_ms"],
+        "1789178400000"
+    );
+    assert_eq!(
+        exact["research"]["hours"][1]["cumulative"]["metrics"]["conservative_nav_pusd"]["Known"]["numerator"],
+        "35190333"
+    );
+    assert_eq!(
+        exact["conservative_nav_pusd"]["Known"]["numerator"],
+        "3664871"
+    );
+    assert_eq!(document.raw_json.as_deref(), Some(raw));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+    let future = raw.replace("BudgetStop", "FutureStop");
+    std::fs::write(&path, &future).unwrap();
+    let document = load_document(Some(&path), true);
+    assert_eq!(document.status, "unsupported_report");
+    assert_eq!(document.raw_json.as_deref(), Some(future.as_str()));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), future);
 }

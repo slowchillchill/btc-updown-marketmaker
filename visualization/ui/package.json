@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test:browser": "node tests/browser.mjs",
-    "test:i18n": "node tests/i18n.mjs"
+    "test:i18n": "node tests/i18n.mjs",
+    "test:snapshot-values": "node tests/snapshot-values.mjs",
+    "test:snapshots": "node tests/snapshot-browser.mjs"
   },
   "dependencies": {
     "@tanstack/react-table": "8.21.3",

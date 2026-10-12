@@ -8,7 +8,9 @@ export function Field({
   path,
   report,
   onSelect,
+  display,
 }: {
+  display?: string;
   source?: Evidence["source"];
   label: string;
   path: string;
@@ -39,7 +41,7 @@ export function Field({
       }
     >
       <span>{label}</span>
-      <strong>{fact(value)}</strong>
+      <strong>{display ?? fact(value)}</strong>
       <small>{path}</small>
     </button>
   );
