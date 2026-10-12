@@ -190,8 +190,10 @@ impl Iterator for DayPublicSourceV1 {
                 }
                 ProductionV1::Running => {}
             }
-            buffer.candidates[self.index].waiting = true;
-            self.hub.0.1.notify_all();
+            if !buffer.candidates[self.index].waiting {
+                buffer.candidates[self.index].waiting = true;
+                self.hub.0.1.notify_all();
+            }
             #[cfg(test)]
             let observed_wait = tests::empty_wait_started();
             buffer = self.hub.0.1.wait(buffer).unwrap();
@@ -242,8 +244,10 @@ impl Iterator for DayHiddenSourceV1 {
                 }
                 ProductionV1::Running => {}
             }
-            buffer.candidates[self.index].waiting = true;
-            self.hub.0.1.notify_all();
+            if !buffer.candidates[self.index].waiting {
+                buffer.candidates[self.index].waiting = true;
+                self.hub.0.1.notify_all();
+            }
             #[cfg(test)]
             let observed_wait = tests::empty_wait_started();
             buffer = self.hub.0.1.wait(buffer).unwrap();
