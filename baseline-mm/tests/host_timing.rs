@@ -231,6 +231,9 @@ fn anchor(at: i64) -> TypedRawRowV2 {
 }
 fn sources(at: i64, n: u64) -> Vec<TypedRawRowV2> {
     let price = (65000_i64 + (n as i64 % 11) - 5).to_string();
+    sources_with_price(at, n, price)
+}
+fn sources_with_price(at: i64, n: u64, price: String) -> Vec<TypedRawRowV2> {
     let mut spot = common::reference_after(at, n).common;
     spot.message_timestamp = at;
     spot.payload_timestamp = at;
@@ -257,8 +260,12 @@ struct Material {
     times: TradingTimes,
     early: u64,
     history: Vec<u64>,
+    follow_up: Option<u64>,
 }
 fn material(root: &Path) -> Material {
+    material_for_notrade(root, false, false)
+}
+fn material_for_notrade(root: &Path, missing_price: bool, follow_up: bool) -> Material {
     let mut c = core();
     c.enable_source_progress();
     let mut writer =
@@ -306,27 +313,46 @@ fn material(root: &Path) -> Material {
         push(&mut c, metadata(i, BASE + 3000, true, true), BASE + 3000);
     }
     let mut history = Vec::new();
-    for n in 0..=300 {
+    for n in if missing_price { 296..=296 } else { 0..=300 } {
         let at = BASE + 4000 + n * 1000;
         if n == 296 {
             push(&mut c, metadata(CURRENT, at, false, true), at);
         }
+        let mut last = 0;
+        for up in [true, false] {
+            seq += 1;
+            last = push(&mut c, book(CURRENT, up, at, seq), at);
+        }
+        if !missing_price {
+            for row in sources(at, n as u64 + 1) {
+                last = push(&mut c, row, at);
+            }
+        }
+        history.push(last);
+    }
+    let follow_up = if follow_up {
+        // 原请求出站+反馈入站各至多29697ms；一次固定后续前缀，不搜索完成时刻。
+        let at = BASE + 364000;
         for up in [true, false] {
             seq += 1;
             push(&mut c, book(CURRENT, up, at, seq), at);
         }
         let mut last = 0;
-        for row in sources(at, n as u64 + 1) {
+        // 保持最后价格64999，正式新消息序号302；不更改已冻结输入。
+        for row in sources_with_price(at, 302, "64999".into()) {
             last = push(&mut c, row, at);
         }
-        history.push(last);
-    }
+        Some(last)
+    } else {
+        None
+    };
     writer.stabilize().unwrap();
     Material {
         core: c,
         times: TradingTimes(times),
         early,
         history,
+        follow_up,
     }
 }
 fn buy(rules: &SealedProcessRuleSnapshotV3, i: usize, id: &str, maker: bool) -> ReservedIntentV1 {
@@ -752,4 +778,294 @@ async fn representative_host_calculation_timing() {
         serde_json::to_vec_pretty(&output).unwrap(),
     )
     .unwrap();
+}
+
+/// 两个真实NoTrade前缀；准备/公共分派/恢复均在测量之外，测量输出不发送。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "#185 NoTrade fixed-state timing; explicit sealed inputs/source/output required"]
+async fn representative_notrade_host_calculation_timing() {
+    let root = std::path::PathBuf::from(std::env::var("ISSUE185_NOTRADE_ROOT").unwrap());
+    std::fs::create_dir(&root).unwrap();
+    let finality_bytes = std::fs::read(std::env::var("ISSUE185_FINALITY").unwrap()).unwrap();
+    assert_eq!(hash(&finality_bytes), FINALITY_SHA);
+    let finality = Arc::new(TradeFinalityPolicyV2::decode_and_seal(&finality_bytes).unwrap());
+    let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+        snapshot_path: std::env::var("ISSUE185_RULES").unwrap().into(),
+        expected_file_sha256: Sha256Hex(RULE_SHA.into()),
+        replay_causal_start_utc_ms: BASE,
+    })
+    .unwrap();
+    let package: Value = serde_json::from_slice(include_bytes!(
+        "../configs/strategies/complementary_pair/business-candidates-20261008.json"
+    ))
+    .unwrap();
+    let config: ComplementaryPairConfigV1 = serde_json::from_value(
+        package["folds"][0]["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["identifier"] == "center")
+            .unwrap()["strategy"]
+            .clone(),
+    )
+    .unwrap();
+    let mut cells = Vec::new();
+    for state in ["maintain", "missing_price_wait"] {
+        let state_root = root.join(state);
+        std::fs::create_dir(&state_root).unwrap();
+        println!("prepare_notrade: {state}");
+        let missing = state == "missing_price_wait";
+        let material = material_for_notrade(&state_root.join("dpt"), missing, !missing);
+        let (mut execution, observation) = execution(
+            &state_root.join("sim.jsonl"),
+            &material.core,
+            rules.clone(),
+            finality.clone(),
+            &format!("notrade-{state}"),
+        );
+        let mut ledger =
+            LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        execution
+            .bind_ledger_recording_v2(&mut ledger, &state_root.join("ledger"))
+            .unwrap();
+        let mut shared = SharedExecutionV2::from_opening(ledger, observation)
+            .unwrap()
+            .unwrap();
+        let mut source = RecordedPublicGroupSourceV1::open(
+            &state_root.join("dpt"),
+            128,
+            16 << 20,
+            material.times,
+        )
+        .unwrap();
+        source.enable_source_progress();
+        let mut driver =
+            FinitePublicConsumptionV1::new(execution, source, format!("notrade-{state}"));
+        driver.enable_finite_recording_wait().unwrap();
+        advance(&mut driver, material.early);
+        let mut setup_orders = vec![buy(&rules, 0, "closed-single-leg", false)];
+        if !missing {
+            setup_orders.push(buy(&rules, 1, "closed-resting", true));
+        }
+        shared
+            .execute_batch_reserved(&mut driver.decision().unwrap(), &setup_orders)
+            .await
+            .unwrap();
+        let mut strategy = ComplementaryPairV1::new(
+            config.clone(),
+            rules.clone(),
+            format!("notrade-{state}"),
+            StrategyContinuityV1::new_account(),
+        )
+        .unwrap();
+        for &group in &material.history {
+            advance(&mut driver, group);
+            let input = shared
+                .strategy_observation_input_with_trade_details(&mut driver, false)
+                .unwrap()
+                .unwrap();
+            let at = input
+                .action_before
+                .cutoff()
+                .decision_time()
+                .logical_time_utc_ms();
+            input.calculate(&mut strategy, at).unwrap();
+        }
+        if !missing {
+            let input = shared
+                .strategy_observation_input_with_trade_details(&mut driver, false)
+                .unwrap()
+                .unwrap();
+            let at = input
+                .action_before
+                .cutoff()
+                .decision_time()
+                .logical_time_utc_ms();
+            let calculation = input.calculate(&mut strategy, at).unwrap();
+            let (diagnostic, intents) = diagnostics(&calculation.output);
+            std::fs::write(
+                state_root.join("before_dispatch.json"),
+                serde_json::to_vec_pretty(
+                    &json!({"decision_time":at,"diagnostic":diagnostic,"intents":intents}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                intents
+                    .iter()
+                    .any(|i| matches!(i.intent.as_ref(), ModelIntentV1::CancelOrders { .. }))
+            );
+            assert!(
+                intents
+                    .iter()
+                    .any(|i| matches!(i.intent.as_ref(), ModelIntentV1::SubmitPairedBuy { .. }))
+            );
+            let mut decision = driver
+                .send_decision_at(calculation.input_cutoff.clone(), at + 15)
+                .unwrap();
+            let dispatched = shared
+                .dispatch_strategy_qualified(
+                    &mut decision,
+                    &mut strategy,
+                    calculation.complete(at + 15),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                dispatched,
+                QualifiedStrategyDispatchV1::Dispatched { .. }
+            ));
+            drop(decision);
+            advance(&mut driver, material.follow_up.unwrap());
+        }
+        let before = shared
+            .strategy_observation_input_with_trade_details(&mut driver, false)
+            .unwrap()
+            .unwrap();
+        let at = before
+            .action_before
+            .cutoff()
+            .decision_time()
+            .logical_time_utc_ms();
+        let initial = before.calculate(&mut strategy, at).unwrap();
+        let (diagnostic, intents) = diagnostics(&initial.output);
+        let current = diagnostic
+            .markets
+            .iter()
+            .find(|m| m.condition_id == ConditionId(condition(CURRENT)))
+            .unwrap();
+        let requests = shared.registry().cumulative_request_totals();
+        let cancellations = before.action_before.cancellation_requests(None);
+        let orders: Vec<_> = before.action_before.orders().map(|o| json!({"condition":o.condition_id,"token":o.token_id,"accepted":o.accepted.is_some(),"quantity":o.active_unfilled_shares,"cancellable":o.cancellable})).collect();
+        let signals = serde_json::to_value(strategy.checkpoint()).unwrap();
+        let prefix = json!({"state":state,"decision_time":at,"current_diagnostic":current,"global_intent_count":intents.len(),"orders":orders,"request_totals":requests,"pending_noe":before.action_before.pending_noe_record_count(),"cancellation_pending":cancellations.pending_count,"cancellation_response_counts":cancellations.response_counts,"account_economics":before.action_before.economics(),"current_signal_samples":signals["signals"][condition(CURRENT)]["chainlink"].as_array().map(Vec::len),"observations":before.markets.len()});
+        std::fs::write(
+            state_root.join("prefix.json"),
+            serde_json::to_vec_pretty(&prefix).unwrap(),
+        )
+        .unwrap();
+        println!(
+            "prepared_notrade: {state}, at={at}, choice={:?}, intents={}, requests={requests:?}",
+            current.choice,
+            intents.len()
+        );
+        assert!(intents.is_empty(), "真实全策略NoTrade前提: {current:?}");
+        assert_eq!(before.action_before.pending_noe_record_count(), 0);
+        assert_eq!(requests.registered_requests_without_receipt, 0);
+        assert_eq!(cancellations.pending_count, ExecutionReadValueV1::Known(0));
+        if missing {
+            assert!(matches!(
+                cancellations.latest_response,
+                ExecutionReadValueV1::Known(None)
+            ));
+            assert_eq!(current.choice, MarketChoiceV1::Wait);
+            assert!(matches!(
+                current.probability,
+                ProbabilityEstimateV1::Unavailable(_)
+            ));
+            let o = &before
+                .markets
+                .iter()
+                .find(|m| m.observation.market.condition_id == ConditionId(condition(CURRENT)))
+                .unwrap()
+                .observation;
+            assert!(o.chainlink_spot.value.is_none());
+            assert!(before.action_before.orders().next().is_none());
+        } else {
+            assert_eq!(
+                cancellations.response_counts[2],
+                ExecutionReadValueV1::Known(0)
+            );
+            assert_eq!(current.choice, MarketChoiceV1::Maintain);
+            assert!(current.source_health.is_empty());
+            assert!(matches!(
+                current.probability,
+                ProbabilityEstimateV1::Known { .. }
+            ));
+            let current_orders: Vec<_> = before
+                .action_before
+                .orders()
+                .filter(|o| o.condition_id == Some(&ConditionId(condition(CURRENT))))
+                .collect();
+            assert_eq!(current_orders.len(), 2);
+            assert!(current_orders.iter().all(|o| o.accepted.is_some()
+                && o.active_unfilled_shares
+                    == ExecutionReadValueV1::Known(ExactDecimal("50".into()))));
+            assert!(
+                before
+                    .action_before
+                    .orders()
+                    .all(|o| o.condition_id != Some(&ConditionId(condition(1))))
+            );
+            assert_eq!(requests.completed_receipted_cancellation_requests, 1);
+            assert_eq!(requests.receipted_cancellation_response_counts, [1, 0, 0]);
+        }
+        let initial_economics = serde_json::to_value(before.action_before.economics()).unwrap();
+        let initial_cutoff = before.action_before.cutoff().clone();
+        let mut samples = Vec::new();
+        for n in 0..=32 {
+            let mut calculate_strategy =
+                ComplementaryPairV1::restore(config.clone(), rules.clone(), strategy.checkpoint())
+                    .unwrap();
+            let mut decide_strategy =
+                ComplementaryPairV1::restore(config.clone(), rules.clone(), strategy.checkpoint())
+                    .unwrap();
+            let combined_start = Instant::now();
+            let start = Instant::now();
+            let input = shared
+                .strategy_observation_input_with_trade_details(&mut driver, false)
+                .unwrap()
+                .unwrap();
+            let assembly_ns = start.elapsed().as_nanos() as u64;
+            let start = Instant::now();
+            let calculation = input.calculate(&mut calculate_strategy, at).unwrap();
+            let calculate_ns = start.elapsed().as_nanos() as u64;
+            let assembly_calculate_ns = combined_start.elapsed().as_nanos() as u64;
+            let start = Instant::now();
+            let decide = decide_strategy.decide(&input, at).unwrap();
+            let decide_ns = start.elapsed().as_nanos() as u64;
+            std::hint::black_box(&calculation);
+            std::hint::black_box(&decide);
+            assert_eq!(
+                serde_json::to_value(&calculation.output).unwrap(),
+                serde_json::to_value(&decide).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&decide).unwrap(),
+                serde_json::to_value(&initial.output).unwrap()
+            );
+            assert!(diagnostics(&calculation.output).1.is_empty());
+            assert_eq!(input.action_before.cutoff(), &initial_cutoff);
+            assert_eq!(
+                serde_json::to_value(input.action_before.economics()).unwrap(),
+                initial_economics
+            );
+            assert_eq!(
+                serde_json::to_value(calculate_strategy.checkpoint()).unwrap(),
+                serde_json::to_value(decide_strategy.checkpoint()).unwrap()
+            );
+            if n > 0 {
+                samples.push(json!({"assembly_ns":assembly_ns,"calculate_ns":calculate_ns,"decide_ns":decide_ns,"assembly_calculate_ns":assembly_calculate_ns,"classification":"NoTrade"}));
+            }
+        }
+        let after = shared
+            .strategy_observation_input_with_trade_details(&mut driver, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(after.action_before.economics()).unwrap(),
+            initial_economics
+        );
+        assert_eq!(
+            shared
+                .registry()
+                .cumulative_request_totals()
+                .receipted_submission_requests,
+            requests.receipted_submission_requests
+        );
+        cells.push(json!({"state":state,"prefix":prefix,"samples":samples,"setup_history_points":material.history.len(),"setup_extra_fresh_prefix":material.follow_up.is_some(),"warmup":1,"sample_count":32,"classification_counts":{"NoTrade":32,"Actions":0}}));
+        driver.stop_and_drain().unwrap();
+    }
+    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(), serde_json::to_vec_pretty(&json!({"format":"issue185-notrade-timing-v1","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"helper_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rule_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"cells":cells,"sample_count":64,"limits":"fixed real NoTrade prefixes; setup/restore/serialization/comparison outside timing; combined assembly+calculate excludes feed/qualification/send and is not online end-to-end latency"})).unwrap()).unwrap();
 }

@@ -36,12 +36,19 @@ impl CallbackSamples {
     }
 }
 #[derive(serde::Serialize)]
+struct DecideSample {
+    started_at_utc_ms: i64,
+    elapsed_ns: u128,
+    outcome: &'static str,
+}
+#[derive(serde::Serialize)]
 struct TraceSummary {
     decisions: Vec<(i64, ComplementaryPairDiagnosticV1, Vec<String>)>,
     sent: Vec<(i64, String)>,
     invalidated: usize,
     invalidated_at: Vec<(i64, i64)>,
     pure_decide: CallbackSamples,
+    decide_samples: Vec<DecideSample>,
     public_qualification: CallbackSamples,
     full_qualification: CallbackSamples,
     next_health_evaluation: CallbackSamples,
@@ -54,6 +61,7 @@ struct Trace {
     sent: Vec<(i64, String)>,
     invalidated: usize,
     pure_decide: CallbackSamples,
+    decide_samples: Vec<DecideSample>,
     public_qualification: std::cell::Cell<CallbackSamples>,
     full_qualification: CallbackSamples,
     next_health_evaluation: std::cell::Cell<CallbackSamples>,
@@ -67,6 +75,9 @@ impl StrategyV1 for Trace {
     type Diagnostics = ComplementaryPairDiagnosticV1;
     fn requires_trade_economics_details(&self) -> bool {
         self.strategy.requires_trade_economics_details()
+    }
+    fn observation_requirements(&self) -> PublicObservationRequirementsV1 {
+        self.strategy.observation_requirements()
     }
     fn uses_source_health(&self) -> bool {
         self.strategy.uses_source_health()
@@ -127,7 +138,19 @@ impl StrategyV1 for Trace {
     ) -> Result<StrategyOutputV1<Self::Diagnostics>, Self::Error> {
         let started = Instant::now();
         let result = self.strategy.decide(input, at);
-        self.pure_decide.record(started.elapsed());
+        let elapsed = started.elapsed();
+        self.pure_decide.record(elapsed);
+        let outcome = match &result {
+            Ok(StrategyOutputV1::Continue { intents, .. }) if intents.is_empty() => "NoTrade",
+            Ok(StrategyOutputV1::Continue { .. }) => "Actions",
+            Ok(StrategyOutputV1::Exit { .. }) => "Exit",
+            Err(_) => "Error",
+        };
+        self.decide_samples.push(DecideSample {
+            started_at_utc_ms: at,
+            elapsed_ns: elapsed.as_nanos(),
+            outcome,
+        });
         let result = result?;
         if let StrategyOutputV1::Continue {
             diagnostics,
@@ -240,6 +263,7 @@ impl Drop for Trace {
                 invalidated: self.invalidated,
                 invalidated_at: std::mem::take(&mut self.invalidated_at),
                 pure_decide: self.pure_decide,
+                decide_samples: std::mem::take(&mut self.decide_samples),
                 public_qualification: self.public_qualification.get(),
                 full_qualification: self.full_qualification,
                 next_health_evaluation: self.next_health_evaluation.get(),
@@ -290,6 +314,7 @@ fn run_day_trace_with_research(
             sent: vec![],
             invalidated: 0,
             pure_decide: Default::default(),
+            decide_samples: Vec::new(),
             public_qualification: Default::default(),
             full_qualification: Default::default(),
             next_health_evaluation: Default::default(),
@@ -503,6 +528,7 @@ async fn run(
         sent: vec![],
         invalidated: 0,
         pure_decide: Default::default(),
+        decide_samples: Vec::new(),
         public_qualification: Default::default(),
         full_qualification: Default::default(),
         next_health_evaluation: Default::default(),
@@ -958,7 +984,7 @@ fn real_strategy_finite_health_callback_measurement() {
         "新增当前费用读取实际消费非空原交易事实"
     );
     let measurement = json!({"purpose":"有限合成工程实耗，不是盈利或在线性能结论", "input_manifest_sha256":identity,
-        "whole_run_elapsed_ns":elapsed_ns, "callbacks":{"pure_decide":trace.pure_decide,"public_qualification":trace.public_qualification,"full_qualification":trace.full_qualification,"next_health_evaluation":trace.next_health_evaluation}, "qualification_calls":health["qualification_calls"],
+        "whole_run_elapsed_ns":elapsed_ns, "decide_samples":trace.decide_samples, "callbacks":{"pure_decide":trace.pure_decide,"public_qualification":trace.public_qualification,"full_qualification":trace.full_qualification,"next_health_evaluation":trace.next_health_evaluation}, "qualification_calls":health["qualification_calls"],
         "deadline_wakeups":health["deadline_wakeups"], "invalidated_batches":health["invalidated_batches"],
         "decisions":trace.decisions.len(), "markets_with_actual_trades":current_trade_count,"actual_requests":trace.sent,
         "timing_note":"生产day有限合成负载；actual_requests为发送前资格的at，decisions为计算开始；回调仅计原委托调用，嵌套/并行阶段不相加；不是旧小时调用分布、在线尾延迟或线上积压证据"});
@@ -1326,6 +1352,7 @@ fn actual_baseline_day_restores_signal_memory_pending_calculation_and_execution_
             sent: vec![],
             invalidated: 0,
             pure_decide: Default::default(),
+            decide_samples: Vec::new(),
             public_qualification: Default::default(),
             full_qualification: Default::default(),
             next_health_evaluation: Default::default(),
