@@ -65,7 +65,7 @@ cargo run -p visualization --locked --offline -- sources.json 127.0.0.1:4317 vis
 
 报告/元数据响应的 `exact` 和公共页记录把**所有 JSON 数字转换为十进制文本**，避免 JS 安全整数或浮点表示损失。金额字符串、原 `ExactRationalV1` 的分子/分母、`Known`、`Unavailable`、布尔值和空值保持各自表示；界面不通过 JS 浮点转换重算经济事实；唯一现金总额显示用精确十进制将实际可用与实际预留相加，并保留两项原引用。报告/元数据另有 `raw_json`，保存未改写的原 JSON 文本；损坏文本可用时也保留。JSON 字段浏览按需展开，不自动构造历史曲线。
 
-`RangeEnd`、`StrategyExit`、`Failure` 保留原结束原因。正常范围结束的耐久报告、内存经济快照和 NOE 稳定前缀各自标明。当前没有诊断全历史、挂单本金专用读取或市场损益归因，不能把总本金占用当有效挂单价值，也不能插值历史 NAV。
+`RangeEnd`、`StrategyExit`、`Failure`、`BudgetStop` 保留原结束原因。正常范围结束的耐久报告、内存经济快照和 NOE 稳定前缀各自标明。当前没有诊断全历史、挂单本金专用读取或市场损益归因，不能把总本金占用当有效挂单价值，也不能插值历史 NAV。
 
 ## 总览、经济与有限范围
 
@@ -417,3 +417,8 @@ CARGO_TARGET_DIR=<实际target> node visualization/ui/tests/measurement-missing-
 ```
 
 该修复前端build与定向Chrome通过，无pageerror，自有资源已结束。仅前端选择边界/脚本/说明变化，未重复根回归或成本负载；历史成本摘要与源码哈希继续对应原测量头 `85cb6fcc58e930fd78089f00f66d5ec35301dc8a`，不把修复后的界面源码重标成曾测量版本。
+
+
+## 已保存小时研究快照
+
+`account_economics_v2` 报告含 `research.hours` 时提供累计小时选择。现金、NAV、风险、资金、返佣与执行/决策计数都读取同一 cumulative；缺逐市场与 Ledger 不借最终状态补齐。可通过可选 `report_provenance` 文件保留忠实提取来源、原包装 pointer 与初始资金。字段映射、英文 Demo 六镜、启动/停止和定向验证见[小时快照说明](docs/hour-snapshots.md)。
