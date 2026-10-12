@@ -192,7 +192,11 @@ impl Iterator for DayPublicSourceV1 {
             }
             buffer.candidates[self.index].waiting = true;
             self.hub.0.1.notify_all();
+            #[cfg(test)]
+            let observed_wait = tests::empty_wait_started();
             buffer = self.hub.0.1.wait(buffer).unwrap();
+            #[cfg(test)]
+            tests::empty_wait_returned(observed_wait);
         }
     }
 }
@@ -240,7 +244,11 @@ impl Iterator for DayHiddenSourceV1 {
             }
             buffer.candidates[self.index].waiting = true;
             self.hub.0.1.notify_all();
+            #[cfg(test)]
+            let observed_wait = tests::empty_wait_started();
             buffer = self.hub.0.1.wait(buffer).unwrap();
+            #[cfg(test)]
+            tests::empty_wait_returned(observed_wait);
         }
     }
 }
@@ -673,6 +681,117 @@ pub(crate) fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        cell::RefCell,
+        time::{Duration, Instant},
+    };
+
+    #[derive(Default, Serialize)]
+    struct EmptyWaitObservation {
+        wait_calls: u64,
+        returned_waits: u64,
+        wait_wall_including_lock_reacquire_ns: u128,
+    }
+    thread_local! {
+        static EMPTY_WAITS: RefCell<Option<EmptyWaitObservation>> = const { RefCell::new(None) };
+    }
+    pub(super) fn empty_wait_started() -> Option<Instant> {
+        EMPTY_WAITS.with(|value| {
+            let mut value = value.borrow_mut();
+            value.as_mut().map(|v| {
+                v.wait_calls += 1;
+                Instant::now()
+            })
+        })
+    }
+    pub(super) fn empty_wait_returned(started: Option<Instant>) {
+        if let Some(started) = started {
+            EMPTY_WAITS.with(|value| {
+                let mut value = value.borrow_mut();
+                let v = value.as_mut().unwrap();
+                v.returned_waits += 1;
+                v.wait_wall_including_lock_reacquire_ns += started.elapsed().as_nanos();
+            });
+        }
+    }
+    #[test]
+    #[ignore = "#185 explicit bounded empty-Hub wait observation, not a throughput gate"]
+    fn two_empty_day_consumers_observe_existing_wakeups() {
+        let hub = DayHubV1::new(&[]);
+        {
+            let mut buffer = hub.0.0.lock().unwrap();
+            for _ in 0..2 {
+                buffer.candidates.push(CandidateProgressV1 {
+                    cursor: CandidateCursorV1 {
+                        public: 0,
+                        hidden: 0,
+                        times: crate::timing::DeliveryTimes {
+                            delays: crate::timing::DelayScheduleV1::Fixed(0),
+                            last: None,
+                        },
+                    },
+                    active: true,
+                    waiting: false,
+                    ready: None,
+                    complete: None,
+                    source_health: None,
+                    requirements: None,
+                    runtime_started: false,
+                });
+            }
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let started = Instant::now();
+        let observations = std::thread::scope(|scope| {
+            let workers = (0..2)
+                .map(|index| {
+                    let hub = hub.clone();
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        EMPTY_WAITS.with(|value| {
+                            *value.borrow_mut() = Some(EmptyWaitObservation::default())
+                        });
+                        barrier.wait();
+                        // 两条原 next/Condvar 路径共享空Hub；不制造输入或业务超时。
+                        if index == 0 {
+                            assert!(
+                                DayPublicSourceV1::new(hub, index, VecDeque::new())
+                                    .next()
+                                    .is_none()
+                            );
+                        } else {
+                            assert!(DayHiddenSourceV1::new(hub, index).next().is_none());
+                        }
+                        EMPTY_WAITS.with(|value| value.borrow_mut().take().unwrap())
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            std::thread::sleep(Duration::from_millis(200));
+            {
+                let mut buffer = hub.0.0.lock().unwrap();
+                buffer.production = ProductionV1::Ended;
+                hub.0.1.notify_all();
+            }
+            workers
+                .into_iter()
+                .map(|w| w.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for v in &observations {
+            assert_eq!(v.wait_calls, v.returned_waits);
+        }
+        let output = serde_json::json!({
+            "format":"issue185-empty-hub-waits-v1", "empty_observation_requested_ms":200,
+            "wall_ns":started.elapsed().as_nanos(), "sources":["public","hidden"],
+            "observations":observations, "termination":"original ProductionV1::Ended + notify_all",
+            "limits":"test-only counters; wait wall includes lock reacquire, not CPU; no minimum wake count gate or extrapolated savings"
+        });
+        println!("empty_hub_observation: {output}");
+        if let Ok(path) = std::env::var("ISSUE185_WAIT_OUTPUT") {
+            std::fs::write(path, serde_json::to_vec_pretty(&output).unwrap()).unwrap();
+        }
+    }
     #[test]
     fn checkpoint_read_digest_includes_the_complete_decode_tail() {
         let tmp = tempfile::tempdir().unwrap();

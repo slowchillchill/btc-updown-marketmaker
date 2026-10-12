@@ -451,6 +451,8 @@ async fn representative_host_calculation_timing() {
             source.enable_source_progress();
             let mut driver =
                 FinitePublicConsumptionV1::new(execution, source, format!("timing-{state}-{id}"));
+            // 原有限宿主在未成功提交前交接回压；不重试复合驱动的已成功步骤。
+            driver.enable_finite_recording_wait().unwrap();
             advance(&mut driver, material.early);
             shared
                 .execute_batch_reserved(
@@ -571,9 +573,18 @@ async fn representative_host_calculation_timing() {
             let trades = format!("{:?}", before.trade_economics);
             let mut assembly_samples = Vec::new();
             let mut decide_samples = Vec::new();
+            let mut diagnostic_samples: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
+            let mut output_counts: BTreeMap<&str, u64> = BTreeMap::new();
             let mut last = None;
             let requires_details = strategy.requires_trade_economics_details();
             for n in 0..=32 {
+                // 独立 calculate 使用同一调用前策略状态；复制/恢复不计时，也不推进主实例。
+                let mut diagnostic_strategy = ComplementaryPairV1::restore(
+                    serde_json::from_value(candidate["strategy"].clone()).unwrap(),
+                    rules.clone(),
+                    strategy.checkpoint(),
+                )
+                .unwrap();
                 let start = Instant::now();
                 let input = shared
                     .strategy_observation_input_with_trade_details(&mut driver, requires_details)
@@ -584,9 +595,70 @@ async fn representative_host_calculation_timing() {
                 let output = strategy.decide(&input, at).unwrap();
                 let decide_ns = start.elapsed().as_nanos() as u64;
                 std::hint::black_box(&output);
+                // 以下各项是同状态下的独立诊断调用，不能求和冒充完整装配分解。
+                let frames = driver.frames_at_observation();
+                let cutoff = driver.observation_cutoff().unwrap();
+                let start = Instant::now();
+                let frozen = shared.freeze_action_before(cutoff, &frames).unwrap();
+                let freeze_ns = start.elapsed().as_nanos() as u64;
+                let start = Instant::now();
+                let projection = shared.ledger().funds_read_v1().projection().unwrap();
+                let projection_ns = start.elapsed().as_nanos() as u64;
+                let start = Instant::now();
+                let economic_read = shared.ledger().economic_read().unwrap();
+                let economic_read_ns = start.elapsed().as_nanos() as u64;
+                let start = Instant::now();
+                let account = AccountEconomicsReadV2::from_ledger_and_observations(
+                    &economic_read,
+                    frames.iter().map(|f| f.observation),
+                );
+                let account_ns = start.elapsed().as_nanos() as u64;
+                let start = Instant::now();
+                let cloned_markets = input.markets.clone();
+                let clone_ns = start.elapsed().as_nanos() as u64;
+                let start = Instant::now();
+                let calculation = input.calculate(&mut diagnostic_strategy, at).unwrap();
+                let calculate_ns = start.elapsed().as_nanos() as u64;
+                // 原金额、截止、观察及策略结果在计时外核对；不分派诊断动作。
+                assert_eq!(frozen.cutoff(), input.action_before.cutoff());
+                assert_eq!(frozen.economics(), input.action_before.economics());
+                assert_eq!(&projection, input.action_before.ledger());
+                assert_eq!(&account, input.action_before.economics());
+                assert_eq!(
+                    serde_json::to_value(&output).unwrap(),
+                    serde_json::to_value(&calculation.output).unwrap()
+                );
+                assert_eq!(cloned_markets.len(), input.markets.len());
+                if n == 0 || n == 32 {
+                    for (original, cloned) in input.markets.iter().zip(&cloned_markets) {
+                        assert_eq!(
+                            serde_json::to_value(&original.observation).unwrap(),
+                            serde_json::to_value(&cloned.observation).unwrap()
+                        );
+                        assert!(Arc::ptr_eq(&original.rule_context, &cloned.rule_context));
+                    }
+                }
                 if n > 0 {
                     assembly_samples.push(assembly_ns);
                     decide_samples.push(decide_ns);
+                    for (name, ns) in [
+                        ("freeze_action_before", freeze_ns),
+                        ("funds_projection", projection_ns),
+                        ("economic_read_including_projection", economic_read_ns),
+                        ("account_economics_from_existing_read", account_ns),
+                        ("frozen_market_vector_clone", clone_ns),
+                        ("calculate_same_pre_decide_state", calculate_ns),
+                    ] {
+                        diagnostic_samples.entry(name).or_default().push(ns);
+                    }
+                    let kind = match &output {
+                        StrategyOutputV1::Continue { intents, .. } if intents.is_empty() => {
+                            "NoTrade"
+                        }
+                        StrategyOutputV1::Continue { .. } => "Actions",
+                        StrategyOutputV1::Exit { .. } => "Exit",
+                    };
+                    *output_counts.entry(kind).or_default() += 1;
                 }
                 last = Some(output);
             }
@@ -634,11 +706,18 @@ async fn representative_host_calculation_timing() {
                 current.choice,
                 intents.len()
             );
-            cells.push(json!({"state":state,"candidate":id,"requires_trade_economics_details":requires_details,"assembly_samples_ns":assembly_samples,"decide_samples_ns":decide_samples,"assembly_nearest_rank":assembly_summary,"decide_nearest_rank":decide_summary,"current_diagnostic":current,"closed_diagnostics":d.markets.iter().filter(|m|m.condition_id==ConditionId(condition(0))||m.condition_id==ConditionId(condition(1))).collect::<Vec<_>>(),"intents":intents.iter().map(|i|format!("{:?}",i.intent)).collect::<Vec<_>>(),"account_economics_debug":economics,"trades_debug":trades}));
+            let diagnostic_summaries: BTreeMap<_, _> = diagnostic_samples
+                .iter()
+                .map(|(name, samples)| (*name, nearest_rank(samples)))
+                .collect();
+            println!(
+                "independent_diagnostics_ns: {state}/{id} {diagnostic_summaries:?} output_counts={output_counts:?}"
+            );
+            cells.push(json!({"state":state,"candidate":id,"requires_trade_economics_details":requires_details,"independent_diagnostic_samples_ns":diagnostic_samples,"independent_diagnostic_nearest_rank":diagnostic_summaries,"output_counts":output_counts,"assembly_samples_ns":assembly_samples,"decide_samples_ns":decide_samples,"assembly_nearest_rank":assembly_summary,"decide_nearest_rank":decide_summary,"current_diagnostic":current,"closed_diagnostics":d.markets.iter().filter(|m|m.condition_id==ConditionId(condition(0))||m.condition_id==ConditionId(condition(1))).collect::<Vec<_>>(),"intents":intents.iter().map(|i|format!("{:?}",i.intent)).collect::<Vec<_>>(),"account_economics_debug":economics,"trades_debug":trades}));
         }
     }
     assert_eq!(cells.len() * 32, 96);
-    let output = json!({"format":"issue185-host-stage-timing-v2","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rules_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"candidates_sha256":hash(candidates_bytes),"markets":866,"history_points":301,"history_span_ms":300000,"warmup_per_cell":1,"samples_per_cell":32,"sample_count":96,"timed_path":"separate strategy_observation_input_with_trade_details and pure StrategyV1::decide","cells":cells});
+    let output = json!({"format":"issue185-host-assembly-diagnostic-v3","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rules_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"candidates_sha256":hash(candidates_bytes),"markets":866,"history_points":301,"history_span_ms":300000,"warmup_per_cell":1,"samples_per_cell":32,"sample_count":96,"timed_path":"separate complete assembly and pure decide; six independent same-state public diagnostics, not additive decomposition","cells":cells});
     std::fs::write(
         std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(),
         serde_json::to_vec_pretty(&output).unwrap(),
