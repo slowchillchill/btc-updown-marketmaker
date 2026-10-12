@@ -49,6 +49,9 @@ impl EconomicRational {
     /// 从非零分母的整数比构造数值，沿同一入口约分并归一化符号。
     pub fn ratio(mut numerator: BigInt, mut denominator: BigInt) -> Self {
         assert!(!denominator.is_zero(), "内部有理除法要求已知非零分母");
+        if numerator.is_zero() {
+            return Self::zero();
+        }
         if denominator.is_negative() {
             numerator = -numerator;
             denominator = -denominator;
@@ -72,6 +75,13 @@ impl EconomicRational {
         self.numerator.is_positive()
     }
     pub fn add(&self, rhs: &Self) -> Self {
+        // 内部值已规范化；加零不需要重新构造整数积和约分。
+        if rhs.is_zero() {
+            return self.clone();
+        }
+        if self.is_zero() {
+            return rhs.clone();
+        }
         Self::ratio(
             &self.numerator * &rhs.denominator + &rhs.numerator * &self.denominator,
             &self.denominator * &rhs.denominator,
