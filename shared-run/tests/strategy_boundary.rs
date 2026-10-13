@@ -62,6 +62,126 @@ fn buy(id: &str, principal: u32) -> ReservedIntentV1 {
         }],
     }
 }
+/// 只变公开报价、不变Ledger前缀；借用和完整拥有式都必须重估原10份孤腿。
+#[tokio::test(flavor = "current_thread")]
+async fn borrowed_input_revalues_same_ledger_and_keeps_owned_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let dpt = temp.path().join("dpt");
+    let (core, times) = recorded_nav_marks_with_book_quantity(&dpt, "10");
+    let (mut execution, observation, _) = execution_with_rules_v4(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SUCCESS_POLICY,
+        None,
+        "e".repeat(64),
+        "100",
+    );
+    let mut ledger =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
+        .unwrap();
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation)
+        .unwrap()
+        .unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&dpt, 1, 1 << 20, times).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "borrowed-nav".into());
+    driver.enable_finite_recording_wait().unwrap();
+    for _ in 0..8 {
+        driver.next_group().unwrap().unwrap();
+    }
+    shared
+        .execute(
+            &mut driver.decision().unwrap(),
+            RequestContextV2 {
+                global_request_id: "nav-ten".into(),
+                caller_correlation_id: None,
+            },
+            Some(Arc::new(ModelIntentV1::SubmitSingleBuy {
+                condition_id: ConditionId(CONDITION_ID.into()),
+                order: BuyLegIntentV1 {
+                    token_id: TokenId(UP_TOKEN_ID.into()),
+                    order: BuyOrderIntentV1::GtcLimit {
+                        limit_price_pusd_per_share: Decimal::new(6, 1),
+                        size_shares: Decimal::from(10),
+                        post_only: false,
+                    },
+                },
+            })),
+        )
+        .await
+        .unwrap();
+    let mut first = None;
+    let mut seen = Vec::new();
+    while driver.next_group().unwrap().is_some() {
+        let owned = shared
+            .strategy_observation_input(&mut driver)
+            .unwrap()
+            .unwrap();
+        let at = owned
+            .action_before
+            .cutoff()
+            .decision_time()
+            .logical_time_utc_ms();
+        let expected = match at {
+            36_000 | 37_000 => ("12229", "125"), // 100 - 6 - .168 + 10*.4
+            38_000 | 42_000 => ("12354", "125"), // 100 - 6 - .168 + 10*.5
+            40_000 => ("11729", "125"),          // fresh空bid是已知零标记
+            _ => continue,
+        };
+        let borrowed = shared
+            .strategy_borrowed_observation_input(&mut driver, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            borrowed.action_before.economics(),
+            owned.action_before.economics()
+        );
+        assert_eq!(borrowed.trade_economics, owned.trade_economics);
+        assert_eq!(
+            borrowed.action_before.cutoff(),
+            owned.action_before.cutoff()
+        );
+        assert!(
+            borrowed
+                .markets
+                .iter()
+                .all(|frame| &frame.decision_cutoff == borrowed.action_before.cutoff())
+        );
+        assert_eq!(
+            borrowed.action_before.economics().conservative_nav_pusd,
+            ExecutionReadValueV1::Known(ExactRationalV1 {
+                numerator: expected.0.into(),
+                denominator: expected.1.into()
+            })
+        );
+        if let Some(prior) = &first {
+            let prior: &StrategyInputV1 = prior;
+            assert_eq!(
+                borrowed.action_before.ledger(),
+                prior.action_before.ledger(),
+                "只有公开报价推进，账户事实不变"
+            );
+            assert_eq!(
+                prior.action_before.economics().conservative_nav_pusd,
+                ExecutionReadValueV1::Known(ExactRationalV1 {
+                    numerator: "12229".into(),
+                    denominator: "125".into()
+                })
+            );
+        }
+        drop(borrowed);
+        if first.is_none() {
+            first = Some(owned);
+        }
+        seen.push(at);
+        if at == 42_000 {
+            break; // 报价前缀验证到此结束；原材料未声明市场最终终态。
+        }
+    }
+    assert_eq!(seen, [36_000, 37_000, 38_000, 40_000, 42_000]);
+    driver.stop_and_drain().unwrap();
+}
 #[tokio::test(flavor = "current_thread")]
 async fn batch_insufficiency_sends_nothing_and_never_releases_prior_unknown() {
     let temp = tempfile::tempdir().unwrap();

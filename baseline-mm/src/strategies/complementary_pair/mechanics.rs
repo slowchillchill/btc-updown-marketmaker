@@ -2,12 +2,15 @@ use super::*;
 
 impl ComplementaryPairV1 {
     pub(super) fn profit_and_equity(
-        input: &StrategyInputV1,
+        input: &StrategyInputV1<
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl StrategyMarketReadV1,
+        >,
     ) -> Result<(R, ExecutionReadValueV1<ExactRationalV1>), StrategyErrorV1> {
         Self::profit_and_equity_read(&input.action_before)
     }
     pub(super) fn profit_and_equity_read(
-        read: &ActionBeforeReadV2,
+        read: &ActionBeforeReadV2<impl std::borrow::Borrow<SharedExecutionRegistryV2>>,
     ) -> Result<(R, ExecutionReadValueV1<ExactRationalV1>), StrategyErrorV1> {
         let economics = read.economics();
         let mut unpaid = R::zero();
@@ -27,13 +30,16 @@ impl ComplementaryPairV1 {
         Ok((pnl.sub(&unpaid), equity))
     }
     pub(super) fn profit_bound(
-        input: &StrategyInputV1,
+        input: &StrategyInputV1<
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl StrategyMarketReadV1,
+        >,
         a: &ProfitAllocationV1,
     ) -> Result<Option<R>, StrategyErrorV1> {
         Self::profit_bound_read(&input.action_before, a)
     }
     pub(super) fn profit_bound_read(
-        read: &ActionBeforeReadV2,
+        read: &ActionBeforeReadV2<impl std::borrow::Borrow<SharedExecutionRegistryV2>>,
         a: &ProfitAllocationV1,
     ) -> Result<Option<R>, StrategyErrorV1> {
         let mut remaining = R::zero();
@@ -77,7 +83,10 @@ impl ComplementaryPairV1 {
     }
     pub(super) fn reconcile_profit(
         &mut self,
-        input: &StrategyInputV1,
+        input: &StrategyInputV1<
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl StrategyMarketReadV1,
+        >,
     ) -> Result<R, StrategyErrorV1> {
         let mut total = R::zero();
         let mut remove = Vec::new();
@@ -236,17 +245,17 @@ impl ComplementaryPairV1 {
     }
     pub(super) fn cancel_available(
         &self,
-        input: &StrategyInputV1,
+        input: &StrategyInputV1<
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl StrategyMarketReadV1,
+        >,
         ids: Vec<String>,
     ) -> Vec<String> {
         ids.into_iter()
             .filter(|id| {
                 let scope = CancellationScopeV1::Orders(vec![id.as_str()]);
                 matches!(
-                    input
-                        .action_before
-                        .cancellation_requests(Some(&scope))
-                        .pending_count,
+                    input.action_before.pending_cancellation_count(Some(&scope)),
                     ExecutionReadValueV1::Known(0)
                 )
             })

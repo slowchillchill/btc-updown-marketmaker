@@ -109,6 +109,9 @@ impl StrategyV1 for Trace {
         self.public_qualification.set(samples);
         result
     }
+    fn uses_borrowed_input(&self) -> bool {
+        self.strategy.uses_borrowed_input()
+    }
     fn qualify_intent(
         &mut self,
         input: &StrategyCurrentReadV1<'_>,
@@ -118,82 +121,36 @@ impl StrategyV1 for Trace {
     ) -> Result<IntentQualificationV1, Self::Error> {
         let start = Instant::now();
         let result = self.strategy.qualify_intent(input, c, index, at);
-        self.full_qualification.record(start.elapsed());
-        if matches!(result, Ok(IntentQualificationV1::Invalidated(_))) {
-            self.qualification_invalidations
-                .push((c.calculation_started_at_utc_ms, at));
-        }
-        if matches!(result, Ok(IntentQualificationV1::Qualified))
-            && let StrategyOutputV1::Continue { intents, .. } = &c.output
-        {
-            self.qualified_at
-                .insert(intents[index].context.global_request_id.clone(), at);
-        }
-        result
+        self.record_qualification(result, c, index, at, start.elapsed())
+    }
+    fn qualify_intent_borrowed(
+        &mut self,
+        input: &BorrowedStrategyCurrentReadV1<'_>,
+        c: &StrategyCalculationV1<Self::Diagnostics>,
+        index: usize,
+        at: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        let start = Instant::now();
+        let result = self.strategy.qualify_intent_borrowed(input, c, index, at);
+        self.record_qualification(result, c, index, at, start.elapsed())
     }
     fn decide(
         &mut self,
         input: &StrategyInputV1,
         at: i64,
     ) -> Result<StrategyOutputV1<Self::Diagnostics>, Self::Error> {
-        let started = Instant::now();
+        let start = Instant::now();
         let result = self.strategy.decide(input, at);
-        let elapsed = started.elapsed();
-        self.pure_decide.record(elapsed);
-        let outcome = match &result {
-            Ok(StrategyOutputV1::Continue { intents, .. }) if intents.is_empty() => "NoTrade",
-            Ok(StrategyOutputV1::Continue { .. }) => "Actions",
-            Ok(StrategyOutputV1::Exit { .. }) => "Exit",
-            Err(_) => "Error",
-        };
-        self.decide_samples.push(DecideSample {
-            started_at_utc_ms: at,
-            elapsed_ns: elapsed.as_nanos(),
-            outcome,
-        });
-        let result = result?;
-        if let StrategyOutputV1::Continue {
-            diagnostics,
-            intents,
-            ..
-        } = &result
-        {
-            if !intents.is_empty() {
-                println!(
-                    "decision_at={} intents={:?}",
-                    at - BASE,
-                    intents
-                        .iter()
-                        .map(|i| i.intent.as_ref())
-                        .collect::<Vec<_>>()
-                );
-            }
-            self.decisions.push((
-                at,
-                diagnostics.clone(),
-                intents
-                    .iter()
-                    .map(|i| {
-                        match i.intent.as_ref() {
-                            ModelIntentV1::SubmitPairedBuy { .. } => "pair",
-                            ModelIntentV1::SubmitSingleBuy {
-                                order:
-                                    BuyLegIntentV1 {
-                                        order: BuyOrderIntentV1::FakMarket { .. },
-                                        ..
-                                    },
-                                ..
-                            } => "fak",
-                            ModelIntentV1::SubmitSingleBuy { .. } => "maker",
-                            ModelIntentV1::CancelOrders { .. } => "cancel",
-                            _ => "other",
-                        }
-                        .into()
-                    })
-                    .collect(),
-            ));
-        }
-        Ok(result)
+        self.record_decision(result, at, start.elapsed())
+    }
+    fn decide_borrowed(
+        &mut self,
+        input: &BorrowedStrategyInputV1<'_>,
+        at: i64,
+    ) -> Result<StrategyOutputV1<Self::Diagnostics>, Self::Error> {
+        let start = Instant::now();
+        let result = self.strategy.decide_borrowed(input, at);
+        self.record_decision(result, at, start.elapsed())
     }
     fn dispatched(
         &mut self,
@@ -1546,4 +1503,90 @@ fn research_counts_successful_decisions_even_when_frozen_batch_is_invalidated() 
     assert_eq!(counts["actions"], trace.decisions.len() - no_trade);
     assert_eq!(counts["exits"], 0);
     assert_eq!(counts["successful"], report["calculation_count"]);
+}
+
+impl Trace {
+    fn record_qualification(
+        &mut self,
+        result: Result<IntentQualificationV1, StrategyErrorV1>,
+        c: &StrategyCalculationV1<ComplementaryPairDiagnosticV1>,
+        index: usize,
+        at: i64,
+        elapsed: std::time::Duration,
+    ) -> Result<IntentQualificationV1, StrategyErrorV1> {
+        self.full_qualification.record(elapsed);
+        if matches!(result, Ok(IntentQualificationV1::Invalidated(_))) {
+            self.qualification_invalidations
+                .push((c.calculation_started_at_utc_ms, at));
+        }
+        if matches!(result, Ok(IntentQualificationV1::Qualified))
+            && let StrategyOutputV1::Continue { intents, .. } = &c.output
+        {
+            self.qualified_at
+                .insert(intents[index].context.global_request_id.clone(), at);
+        }
+        result
+    }
+    fn record_decision(
+        &mut self,
+        result: Result<StrategyOutputV1<ComplementaryPairDiagnosticV1>, StrategyErrorV1>,
+        at: i64,
+        elapsed: std::time::Duration,
+    ) -> Result<StrategyOutputV1<ComplementaryPairDiagnosticV1>, StrategyErrorV1> {
+        self.pure_decide.record(elapsed);
+        let outcome = match &result {
+            Ok(StrategyOutputV1::Continue { intents, .. }) if intents.is_empty() => "NoTrade",
+            Ok(StrategyOutputV1::Continue { .. }) => "Actions",
+            Ok(StrategyOutputV1::Exit { .. }) => "Exit",
+            Err(_) => "Error",
+        };
+        self.decide_samples.push(DecideSample {
+            started_at_utc_ms: at,
+            elapsed_ns: elapsed.as_nanos(),
+            outcome,
+        });
+        let result = result?;
+        if let StrategyOutputV1::Continue {
+            diagnostics,
+            intents,
+            ..
+        } = &result
+        {
+            if !intents.is_empty() {
+                println!(
+                    "decision_at={} intents={:?}",
+                    at - BASE,
+                    intents
+                        .iter()
+                        .map(|i| i.intent.as_ref())
+                        .collect::<Vec<_>>()
+                );
+            }
+            self.decisions.push((
+                at,
+                diagnostics.clone(),
+                intents
+                    .iter()
+                    .map(|i| {
+                        match i.intent.as_ref() {
+                            ModelIntentV1::SubmitPairedBuy { .. } => "pair",
+                            ModelIntentV1::SubmitSingleBuy {
+                                order:
+                                    BuyLegIntentV1 {
+                                        order: BuyOrderIntentV1::FakMarket { .. },
+                                        ..
+                                    },
+                                ..
+                            } => "fak",
+                            ModelIntentV1::SubmitSingleBuy { .. } => "maker",
+                            ModelIntentV1::CancelOrders { .. } => "cancel",
+                            _ => "other",
+                        }
+                        .into()
+                    })
+                    .collect(),
+            ));
+        }
+        Ok(result)
+    }
 }
