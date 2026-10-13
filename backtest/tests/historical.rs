@@ -2325,6 +2325,13 @@ fn research_budget_retains_pending_and_resumes_without_recount_or_business_chang
     .unwrap();
     assert_eq!(stopped[0].candidates[0].report["end_reason"], "BudgetStop");
     assert!(
+        stopped[0].candidates[0].report["research"]["hours"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "预算前缀尚未抵达整点，不能补未完成小时"
+    );
+    assert!(
         !stopped[0].candidates[0].report["recording_drained"]
             .as_bool()
             .unwrap()
