@@ -5,6 +5,20 @@ use data_pipeline_core::pm_reduction::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// 缺少平台源时间的 Gamma 终态经济政策。旧运行和恢复默认保持原语义。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GammaResolutionPolicyV1 {
+    #[default]
+    SourceTimeOnly,
+    QualifiedPublicConsumption,
+}
+impl GammaResolutionPolicyV1 {
+    pub fn is_source_time_only(&self) -> bool {
+        *self == Self::SourceTimeOnly
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ActorTimeRecordV1 {
     pub run_id: String,

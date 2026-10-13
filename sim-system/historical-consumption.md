@@ -1,6 +1,6 @@
 # 有限历史消费
 
-`contracts::SimCallerRoleV1::HistoricalBacktest` 使用原隐藏撮合路径，与训练和独立评价共享行情归约、请求和经济链。Maker模型由冻结规则及实际调用方选择。公开路径仅用于因果观测。其市场登记可以随着连续历史材料继续增加；原训练和评价的登记冻结规则保持原有职责。
+`contracts::SimCallerRoleV1::HistoricalBacktest` 使用原隐藏撮合路径，与训练和独立评价共享行情归约、请求和经济链。Maker模型由冻结规则及实际调用方选择。公开路径默认仅用于因果观测；显式 Gamma 政策的窄终态接纳见下文。其市场登记可以随着连续历史材料继续增加；原训练和评价的登记冻结规则保持原有职责。
 
 `PublicSimExecutionV1::create_new_historical` 使用 `RunDurabilityRoleV2::FiniteHistorical`。该角色表示实际有限记录前缀，不表示全部市场或经济义务已经闭合，不能签发 `CleanRun`。普通公共消费构造仍沿原持久角色运行。
 
@@ -46,3 +46,22 @@ cargo run -p sim-system --example derive_historical_maker_rules --locked --offli
 实现身份JSON沿原 `ImplementationIdentityV1`，含准确 `git_commit`、`source_identity_sha256`、
 `cargo_lock_sha256`。命令输出新规则SHA及历史/PAPER各自模型身份。将新路径和SHA交给原backtest入口；
 旧规则文件、旧结果和旧检查点原样保留。该命令不重置或授权研究预算。
+
+## 显式 Gamma 终态经济政策（D-0346）
+
+`GammaResolutionPolicyV1` 默认 `SourceTimeOnly`，保留旧研究、旧检查点及其他消费者的含义。
+已批准的新 A 复核显式选择 `QualifiedPublicConsumption`；SIM 在首个业务输入前将该选择记入原输入日志。
+
+只有原 DPT 已通过终态资格、且 SIM 成功消费的无平台源时间 Gamma 元数据终态进入这一政策。
+原来源、证据和 `source_event_at_utc_ms=None` 保持。SIM 保存实际消费该公开组的受信逻辑时刻作为
+最早经济生效依据，不使用墙钟、市场截止、`closed_time` 或接收时间回填平台源时间。
+
+成功消费先形成有限待处理终态。隐藏逻辑实际到达消费毫秒后，才将资格接入原平台市场状态；
+不提前推进隐藏时间，不更新盘口或交易状态。原逐记录经济路径仍处理已知平台源时间的资格。
+Gamma 只在执行前沿完全闭合消费毫秒后，沿原判定、订单释放、成交最终性／补偿和适用返佣前驱应用经济。
+同毫秒原隐藏质量冲突沿原失效理由取消待处理终态。重复和恢复沿原身份与已应用状态避免重复支付。
+
+自动回款反馈的 `resolution_source_event_at_utc_ms` 对 Gamma 为 `None`，另以
+`resolution_public_consumed_at_utc_ms` 保存消费依据；WS 保持原整数源时间及原 JSON 形状。
+NOE 忠实传递这些依据，Ledger 继续归约原经济事实。交易侧不发起 redeem。
+这项政策是 SIM 对经济生效时点的假设，不证明真实平台兑付时间或始终比真实平台更晚。

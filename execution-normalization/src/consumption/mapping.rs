@@ -360,10 +360,12 @@ fn map_settlement_lifecycle_result_v1(
             condition_id,
             resolution_identity,
             resolution_source_event_at_utc_ms,
+            resolution_public_consumed_at_utc_ms,
         } => SourceNeutralSettlementLifecycleResultV1::AutoRedeemApplied {
             condition_id,
             resolution_identity: logical(resolution_identity)?,
             resolution_source_event_at_utc_ms,
+            resolution_public_consumed_at_utc_ms,
         },
     })
 }

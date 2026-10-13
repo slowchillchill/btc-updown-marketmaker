@@ -1533,7 +1533,12 @@ async fn midnight_resolution_without_initial_books_redeems_zero_balance_once_lay
         panic!("零余额自动赎回反馈必须恰好一次: {redemptions:?}");
     };
     assert_eq!(condition.0, CONDITION);
-    assert_eq!(**at, SOURCE);
+    assert_eq!(**at, Some(SOURCE));
+    let old_event = &feedback.iter().find(|f| matches!(f.event, SettlementLifecycleEventV2::AutoRedeemApplied { .. })).unwrap().event;
+    let wire = serde_json::to_value(old_event).unwrap();
+    let old_shape = &wire["AutoRedeemApplied"];
+    assert_eq!(old_shape["resolution_source_event_at_utc_ms"], serde_json::json!(SOURCE));
+    assert!(old_shape.get("resolution_public_consumed_at_utc_ms").is_none());
     assert_eq!(amount.0, "0");
     assert!(delta.is_none());
     assert_eq!(balances.len(), 2);
@@ -3902,4 +3907,8 @@ fn shared_day_observation_encoding_preserves_eight_markets_and_lagging_groups() 
         count("depth_values"),
         count("events")
     );
+}
+
+mod gamma_resolution_tests {
+    include!("gamma_resolution_tests.rs");
 }

@@ -2636,3 +2636,50 @@ fn research_zero_duration_exit_keeps_original_terminal_boundary_on_budget_save()
     .unwrap();
     assert_eq!(report, &resumed[0].candidates[0].report);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn gamma_policy_is_explicit_in_the_actual_historical_entry_and_old_config() {
+    use sim_system::public_consumption::GammaResolutionPolicyV1;
+    for policy in [
+        GammaResolutionPolicyV1::SourceTimeOnly,
+        GammaResolutionPolicyV1::QualifiedPublicConsumption,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, rules) = setup(temp.path());
+        config.gamma_resolution_policy = policy;
+        let wire = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            wire.get("gamma_resolution_policy").is_some(),
+            !policy.is_source_time_only()
+        );
+        let restored: HistoricalRunConfigV1 = serde_json::from_value(wire).unwrap();
+        assert_eq!(restored.gamma_resolution_policy, policy);
+        assert_eq!(
+            HistoricalPreparedRunConfigV1::from(&restored).gamma_resolution_policy,
+            policy
+        );
+        let mut probe = Probe {
+            no_trade_only: true,
+            ..Default::default()
+        };
+        let report = run_historical_v1(&restored, rules, &mut probe)
+            .await
+            .unwrap();
+        assert!(report.recording_drained);
+        let inputs = sim_log_values(&restored.sim_log);
+        let policies = inputs
+            .iter()
+            .filter_map(|frame| match frame["kind"].as_str() {
+                Some("ACCEPTED_INPUTS") => frame["body"].as_array(),
+                Some("ACCEPTED_INPUTS_V3") => frame["body"]["inputs"].as_array(),
+                _ => None,
+            })
+            .flatten()
+            .filter(|input| input["input"] == "GAMMA_RESOLUTION_POLICY")
+            .collect::<Vec<_>>();
+        assert_eq!(policies.len(), usize::from(!policy.is_source_time_only()));
+        if let Some(input) = policies.first() {
+            assert_eq!(input["body"], "qualified_public_consumption");
+        }
+    }
+}

@@ -131,7 +131,8 @@ fn main() {
             result: SourceNeutralSettlementLifecycleResultV1::AutoRedeemApplied {
                 condition_id: condition.clone(),
                 resolution_identity: StableLogicalIdentityV1("clock-resolution".into()),
-                resolution_source_event_at_utc_ms: 1788840000000,
+                resolution_source_event_at_utc_ms: Some(1788840000000),
+                resolution_public_consumed_at_utc_ms: None,
             },
         },
     ];

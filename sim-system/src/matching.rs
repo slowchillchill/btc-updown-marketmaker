@@ -1303,7 +1303,9 @@ impl MakerRebateStateV2 {
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct MarketResolutionObligationV2 {
     resolution_event_id: String,
-    resolution_source_event_at_utc_ms: i64,
+    resolution_source_event_at_utc_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolution_public_consumed_at_utc_ms: Option<i64>,
     terminal: MarketResolutionTerminalV3,
     parsed_payouts: [Decimal; 2],
     pending_fill_sequences: BTreeSet<u64>,
@@ -1762,6 +1764,8 @@ fn economic_lifecycle_effect_v2(
                     condition_id: effect.condition_id,
                     resolution_event_id: effect.resolution_event_id,
                     resolution_source_event_at_utc_ms: effect.resolution_source_event_at_utc_ms,
+                    resolution_public_consumed_at_utc_ms: effect
+                        .resolution_public_consumed_at_utc_ms,
                     resolution: effect.terminal,
                     redeemed_outcome_balances: effect.redeemed_outcome_balances,
                     redeemed_pusd: exact_decimal_v2(effect.redeemed_pusd),
@@ -1900,7 +1904,8 @@ pub(crate) struct MarketResolutionOrderEffectV2 {
 pub(crate) struct AutoRedeemEffectV2 {
     pub(crate) condition_id: ConditionId,
     pub(crate) resolution_event_id: String,
-    pub(crate) resolution_source_event_at_utc_ms: i64,
+    pub(crate) resolution_source_event_at_utc_ms: Option<i64>,
+    pub(crate) resolution_public_consumed_at_utc_ms: Option<i64>,
     pub(crate) terminal: MarketResolutionTerminalV3,
     pub(crate) platform_effective_at_utc_ms: i64,
     pub(crate) redeemed_outcome_balances: Vec<PlatformOutcomeBalanceV1>,
@@ -3328,6 +3333,7 @@ impl ExecutionStateV2 {
         let obligation = MarketResolutionObligationV2 {
             resolution_event_id: resolution.resolution_event_id.clone(),
             resolution_source_event_at_utc_ms: resolution.resolution_source_event_at_utc_ms,
+            resolution_public_consumed_at_utc_ms: resolution.resolution_public_consumed_at_utc_ms,
             terminal: resolution.terminal.clone(),
             parsed_payouts: resolution.parsed_payouts,
             pending_fill_sequences,
@@ -5085,9 +5091,16 @@ impl ExecutionStateV2 {
                 condition_id.0.clone(),
             ));
         }
-        let (resolution_event_id, resolution_source_event_at_utc_ms, terminal, parsed_payouts) = (
+        let (
+            resolution_event_id,
+            resolution_source_event_at_utc_ms,
+            resolution_public_consumed_at_utc_ms,
+            terminal,
+            parsed_payouts,
+        ) = (
             obligation.resolution_event_id.clone(),
             obligation.resolution_source_event_at_utc_ms,
+            obligation.resolution_public_consumed_at_utc_ms,
             obligation.terminal.clone(),
             obligation.parsed_payouts,
         );
@@ -5130,6 +5143,7 @@ impl ExecutionStateV2 {
             condition_id: condition_id.clone(),
             resolution_event_id,
             resolution_source_event_at_utc_ms,
+            resolution_public_consumed_at_utc_ms,
             terminal,
             platform_effective_at_utc_ms,
             redeemed_outcome_balances,
@@ -9397,7 +9411,8 @@ mod tests {
         let resolution_at_utc_ms = if resolution_first { 4_000 } else { 8_000 };
         let resolution = QualifiedMarketResolutionV2 {
             resolution_event_id: resolution_event_id.to_owned(),
-            resolution_source_event_at_utc_ms: 4_000,
+            resolution_source_event_at_utc_ms: Some(4_000),
+            resolution_public_consumed_at_utc_ms: None,
             terminal: terminal.clone(),
             parsed_payouts: [Decimal::ONE, Decimal::ZERO],
         };
@@ -9808,7 +9823,8 @@ mod tests {
         };
         let resolution = QualifiedMarketResolutionV2 {
             resolution_event_id: "v2-zero-balance-resolution".to_owned(),
-            resolution_source_event_at_utc_ms: 4_000,
+            resolution_source_event_at_utc_ms: Some(4_000),
+            resolution_public_consumed_at_utc_ms: None,
             terminal: terminal.clone(),
             parsed_payouts: [Decimal::ONE, Decimal::ZERO],
         };

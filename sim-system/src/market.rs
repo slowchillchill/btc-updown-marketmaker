@@ -240,10 +240,11 @@ pub(crate) enum NormalizedMarketEventV2<'a> {
     },
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct QualifiedMarketResolutionV2 {
     pub(crate) resolution_event_id: String,
-    pub(crate) resolution_source_event_at_utc_ms: i64,
+    pub(crate) resolution_source_event_at_utc_ms: Option<i64>,
+    pub(crate) resolution_public_consumed_at_utc_ms: Option<i64>,
     pub(crate) terminal: MarketResolutionTerminalV3,
     pub(crate) parsed_payouts: [Decimal; 2],
 }
@@ -480,6 +481,40 @@ impl MarketStateStoreV2 {
             )
     }
 
+    /// 已通过 DPT Gamma 终态资格、且成功公开消费的证据；不伪造平台源时间。
+    pub(crate) fn accept_gamma_resolution(
+        &mut self,
+        condition: &str,
+        identity: &str,
+        terminal: &MarketResolutionTerminalV3,
+        parsed_payouts: [Decimal; 2],
+        consumed_at: i64,
+    ) -> Result<Option<QualifiedMarketResolutionV2>, MarketEventErrorV1> {
+        let market = self
+            .markets
+            .get_mut(condition)
+            .expect("公开组已验证市场成员");
+        // 只有已通过原DPT资格的终态调用此入口；不改变盘口、交易状态或生命周期。
+        market.market_quality = MarketDataQuality::Fresh;
+        if let Some(existing) = &market.source_qualified_resolution {
+            if existing.terminal != *terminal {
+                return Err(MarketEventErrorV1::ResolutionConflict(condition.to_owned()));
+            }
+            if existing.resolution_source_event_at_utc_ms.is_some() {
+                return Ok(None); // 已有 WS 资格由原平台路径负责。
+            }
+        } else {
+            market.source_qualified_resolution = Some(SourceQualifiedResolutionV2 {
+                resolution_event_id: identity.to_owned(),
+                resolution_source_event_at_utc_ms: None,
+                resolution_public_consumed_at_utc_ms: Some(consumed_at),
+                terminal: terminal.clone(),
+                parsed_payouts,
+            });
+        }
+        Ok(market.qualified_resolution())
+    }
+
     pub(crate) fn advance_time(
         &mut self,
         _directory: &crate::market_directory::SessionMarketDirectoryV1,
@@ -595,7 +630,9 @@ struct MarketStateV2 {
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct SourceQualifiedResolutionV2 {
     resolution_event_id: String,
-    resolution_source_event_at_utc_ms: i64,
+    resolution_source_event_at_utc_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolution_public_consumed_at_utc_ms: Option<i64>,
     terminal: MarketResolutionTerminalV3,
     parsed_payouts: [Decimal; 2],
 }
@@ -781,7 +818,8 @@ impl MarketStateV2 {
                     if self.source_qualified_resolution.is_none() {
                         let evidence = SourceQualifiedResolutionV2 {
                             resolution_event_id: event.identity.to_owned(),
-                            resolution_source_event_at_utc_ms: source_event_at_utc_ms,
+                            resolution_source_event_at_utc_ms: Some(source_event_at_utc_ms),
+                            resolution_public_consumed_at_utc_ms: None,
                             terminal: (*terminal).clone(),
                             parsed_payouts: *parsed_payouts,
                         };
@@ -821,6 +859,8 @@ impl MarketStateV2 {
                         resolution_event_id: resolution.resolution_event_id.clone(),
                         resolution_source_event_at_utc_ms: resolution
                             .resolution_source_event_at_utc_ms,
+                        resolution_public_consumed_at_utc_ms: resolution
+                            .resolution_public_consumed_at_utc_ms,
                         terminal: resolution.terminal.clone(),
                         parsed_payouts: resolution.parsed_payouts,
                     }

@@ -44,6 +44,11 @@ impl HistoricalSessionV1 {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistoricalRunConfigV1 {
+    #[serde(
+        default,
+        skip_serializing_if = "GammaResolutionPolicyV1::is_source_time_only"
+    )]
+    pub gamma_resolution_policy: GammaResolutionPolicyV1,
     pub preparation: HistoricalPreparationConfigV1,
     pub timing: HistoricalTimingV1,
     pub session: HistoricalSessionV1,
@@ -66,6 +71,11 @@ pub struct HistoricalRunConfigV1 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoricalPreparedRunConfigV1 {
+    #[serde(
+        default,
+        skip_serializing_if = "GammaResolutionPolicyV1::is_source_time_only"
+    )]
+    pub gamma_resolution_policy: GammaResolutionPolicyV1,
     /// 日作业将策略的固定请求命名空间纳入恢复身份；旧入口由原命令提供。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_request_namespace: Option<String>,
@@ -92,6 +102,7 @@ pub struct HistoricalPreparedRunConfigV1 {
 impl From<&HistoricalRunConfigV1> for HistoricalPreparedRunConfigV1 {
     fn from(c: &HistoricalRunConfigV1) -> Self {
         Self {
+            gamma_resolution_policy: c.gamma_resolution_policy,
             strategy_request_namespace: None,
             timing: c.timing.clone(),
             session: c.session.clone(),
@@ -312,6 +323,19 @@ fn assemble(
             result => {
                 result?;
                 break;
+            }
+        }
+    }
+    if !config.gamma_resolution_policy.is_source_time_only() {
+        loop {
+            match execution.configure_gamma_resolution_policy_v1(config.gamma_resolution_policy) {
+                Err(SimRunActorErrorV2::RecordingBackpressured) => {
+                    execution.wait_for_recording_capacity()?
+                }
+                result => {
+                    result?;
+                    break;
+                }
             }
         }
     }

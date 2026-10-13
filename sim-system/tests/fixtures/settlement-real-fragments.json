@@ -1,0 +1,22 @@
+[
+  {
+    "path": "gamma-terminal-20260912-024700047.parquet",
+    "source_kind": "polymarket_market_metadata",
+    "schema_version": "polymarket_market_metadata_v6",
+    "bytes": 36817,
+    "rows": 1,
+    "sha256": "0bc434930893179ad0f8ba58f492137e33281afcfb1595648bc26c205b0911cd",
+    "original_file": "polymarket_market_metadata_02-part-1.parquet",
+    "original_row_index": 14
+  },
+  {
+    "path": "ws-terminal-20260912-040154033.parquet",
+    "source_kind": "polymarket_market_metadata",
+    "schema_version": "polymarket_market_metadata_v6",
+    "bytes": 36007,
+    "rows": 1,
+    "sha256": "0d32bc65daadc29bff6841460cb4b2a36f2ee1ae80d2f794970caccd3feed7fc",
+    "original_file": "polymarket_market_metadata_04.parquet",
+    "original_row_index": 29
+  }
+]

@@ -22,7 +22,7 @@ let report = backtest::run_historical_v1(&run_config, sealed_rules, &mut strateg
 
 调用方记录新材料的有效配置时复用 `HistoricalPreparationConfigV1::effective_header`。材料试制工具的成功及失败报告均使用该实际流头；兼容旧标签输入不被拒绝，已有报告和已有记录保持原样。
 
-`HistoricalBacktest` 是准确的模拟调用身份：隐藏路径驱动撮合，公开路径只提供因果观测。它不冒充训练、独立评价或 PAPER 身份。配置中的用途说明用于保留调用方已有授权，不替调用方决定数据集用途。
+`HistoricalBacktest` 是准确的模拟调用身份：隐藏路径驱动撮合，公开路径默认只提供因果观测；显式Gamma政策另接纳成功消费的合格终态，仍等执行前沿闭合才应用经济。它不冒充训练、独立评价或 PAPER 身份。配置中的用途说明用于保留调用方已有授权，不替调用方决定数据集用途。
 
 ## 时序与连续账户
 
@@ -264,3 +264,16 @@ Maker/Taker份数、金额、费读取原executed；笔数按Ledger原trade身�
 BudgetStop、Failure沿原report终止原因区分。CLI硬截止仅覆盖CLI自身；若随后运行机器汇总，必须放在
 同一个外层7h期限内。硬截止只承认最后成功发布代，未输出的stage-timing值为未知。
 本轮具体准备、启动及证据边界见[六小时研究方案](../baseline-mm/docs/research/complementary-pair-six-hour-plan-20261012.md)。
+
+## 新 A 复核显式选择 Gamma 政策
+
+`HistoricalRunConfigV1` 和 `HistoricalPreparedRunConfigV1` 的可选字段
+`gamma_resolution_policy` 默认 `source_time_only`。默认序列化不新增该字段，旧配置和旧检查点保持原义。
+已批准的新 A 复核显式设置 `"gamma_resolution_policy": "qualified_public_consumption"`。
+完整有效配置和 SIM 原输入日志共同保留本次选择；恢复沿原检查点，不重配已开始业务的会话。
+
+新政策只使已成功公开消费的合格 Gamma 终态进入 SIM 的原自动结算链。它保留空平台源时间，
+以该组实际消费的受信逻辑时刻作为最早经济生效依据。宿主继续先推进严格更早义务、消费同毫秒公开组，
+再处理原隐藏桶；Gamma 等到执行前沿闭合后才应用经济，且仍等待原成交和返佣前驱。
+公开盘口、成交和一般市场事实不因此驱动隐藏撮合。旧 WS 时序、保守 Maker、宿主延迟和精确经济公式保持。
+窗口外终态、仅 closed、缺少合格结果、输入耗尽和冲突不能生成回款。本政策不提供策略主动赎回动作。

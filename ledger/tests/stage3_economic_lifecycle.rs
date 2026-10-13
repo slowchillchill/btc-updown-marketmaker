@@ -1113,7 +1113,8 @@ fn rebate_accrual_payment_and_auto_redeem_move_only_owned_buckets() {
         SourceNeutralSettlementLifecycleResultV1::AutoRedeemApplied {
             condition_id: condition(),
             resolution_identity: identity("resolution-redeem"),
-            resolution_source_event_at_utc_ms: 9_000,
+            resolution_source_event_at_utc_ms: Some(9_000),
+            resolution_public_consumed_at_utc_ms: None,
         },
     );
     writer.apply_noe_result(&settlement).unwrap();
