@@ -1,6 +1,6 @@
 mod common;
 use common::*;
-use contracts::*;
+use contracts::{economics::EconomicRational, *};
 use ledger::*;
 use rust_decimal::Decimal;
 use shared_run::*;
@@ -154,6 +154,16 @@ async fn borrowed_input_revalues_same_ledger_and_keeps_owned_snapshot() {
                 numerator: expected.0.into(),
                 denominator: expected.1.into()
             })
+        );
+        assert_eq!(
+            borrowed.action_before.profit_and_equity().1,
+            ExecutionReadValueV1::Known(
+                EconomicRational::try_from(&ExactRationalV1 {
+                    numerator: expected.0.into(),
+                    denominator: expected.1.into()
+                })
+                .unwrap()
+            )
         );
         if let Some(prior) = &first {
             let prior: &StrategyInputV1 = prior;
@@ -508,6 +518,47 @@ async fn frozen_strategy_input_explicit_time_empty_error_exit_and_original_amoun
         .await
         .unwrap();
     assert!(matches!(result,StrategyDispatchV1::Continue {receipts,..} if receipts.is_empty()));
+    assert_eq!(shared.registry().all_commitments().count(), 0);
+    // 健康资格分派的空动作同样零请求；当前观察截止不改写原冻结决定或发送时序。
+    let ledger_seq = shared.ledger().applied_entry_sequence();
+    let original_cutoff = input.action_before.cutoff().clone();
+    let current_cutoff = driver.observation_cutoff().unwrap();
+    assert!(
+        current_cutoff.decision_time().logical_time_utc_ms()
+            > original_cutoff.decision_time().logical_time_utc_ms()
+    );
+    controlled.output = Some(Ok(StrategyOutputV1::Continue {
+        intents: vec![],
+        next_evaluation_at_utc_ms: Some(25_000),
+        diagnostics: (),
+    }));
+    let calculation = input
+        .calculate(&mut controlled, 22_000)
+        .unwrap()
+        .complete(23_000);
+    let mut decision = driver.decision().unwrap();
+    let sent_at = decision.sent_at_utc_ms();
+    let qualified = shared
+        .dispatch_strategy_qualified(&mut decision, &mut controlled, calculation)
+        .await
+        .unwrap();
+    let QualifiedStrategyDispatchV1::Dispatched {
+        dispatch:
+            StrategyDispatchV1::Continue {
+                calculation,
+                sent_at_utc_ms,
+                receipts,
+            },
+        qualification_calls,
+    } = qualified
+    else {
+        panic!("空动作应正常完成")
+    };
+    assert_eq!(qualification_calls, 0);
+    assert!(receipts.is_empty());
+    assert_eq!(sent_at_utc_ms, sent_at);
+    assert_eq!(calculation.calculation.input_cutoff, original_cutoff);
+    assert_eq!(shared.ledger().applied_entry_sequence(), ledger_seq);
     assert_eq!(shared.registry().all_commitments().count(), 0);
     controlled.output = Some(Ok(StrategyOutputV1::Exit { diagnostics: () }));
     let calculation = input

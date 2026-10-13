@@ -120,6 +120,9 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             action_population: Some(ActionPopulation::default()),
         }
     }
+    pub(crate) fn observed_market_count(&self) -> usize {
+        self.markets.len()
+    }
     pub(crate) fn observe_market(&mut self, rules: &Arc<PublicTradingRuleContextV1>) -> bool {
         if let std::collections::btree_map::Entry::Vacant(entry) =
             self.markets.entry(rules.market.condition_id.0.clone())

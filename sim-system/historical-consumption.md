@@ -10,6 +10,8 @@
 
 正常历史范围结束可以调用原 `stop_and_drain` 排空已接纳记录；它不推进业务时间，不领取未来反馈，不产生 `RunSeal`。Exit 直接返回，不调用稳定、排空或完整完成。相关公共宿主与产物含义见 [backtest](../backtest/README.md)。
 
+`PublicConsumptionStateV1::selected_frames_at_observation` 按原有序公开观察定位市场，直接生成所需帧。尚未结束市场身份只从成功消费的公共组登记，并在真实观察时间到期时移出工作集合；预开始市场仍保留。调用方提供的历史义务身份仍须在已消费观察中存在。隐藏预登记规则和领先生产者目录不补造公开输入。恢复从最后已消费组及其观察时间一次性重建身份集合，旧检查点字段保持可读。`frames` 与 `frames_at_observation` 保留完整接口。
+
 ## 历史 Maker 模型与过渡边界
 
 新冻结配置的 `historical_backtest_model = "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1"` 只切换

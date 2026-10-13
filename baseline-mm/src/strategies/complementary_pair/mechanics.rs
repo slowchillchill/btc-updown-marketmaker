@@ -5,41 +5,46 @@ impl ComplementaryPairV1 {
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
+            impl ActionAccountReadV1,
         >,
     ) -> Result<(R, ExecutionReadValueV1<ExactRationalV1>), StrategyErrorV1> {
         Self::profit_and_equity_read(&input.action_before)
     }
     pub(super) fn profit_and_equity_read(
-        read: &ActionBeforeReadV2<impl std::borrow::Borrow<SharedExecutionRegistryV2>>,
+        read: &ActionBeforeReadV2<
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl ActionAccountReadV1,
+        >,
     ) -> Result<(R, ExecutionReadValueV1<ExactRationalV1>), StrategyErrorV1> {
-        let economics = read.economics();
-        let mut unpaid = R::zero();
-        let mut pnl = R::zero();
-        for m in &economics.markets {
-            pnl = pnl.add(&rational(&m.confirmed_net_pnl_pusd)?);
-            for b in &m.rebates {
-                unpaid = unpaid.add(&rational(&b.confirmed_unpaid_pusd)?);
-            }
-        }
-        let equity = match &economics.conservative_nav_pusd {
-            ExecutionReadValueV1::Known(nav) => {
-                ExecutionReadValueV1::Known(rational(nav)?.sub(&unpaid).public())
-            }
-            _ => ExecutionReadValueV1::Unavailable,
-        };
-        Ok((pnl.sub(&unpaid), equity))
+        let (pnl, equity) = read.profit_and_equity();
+        Ok((
+            pnl,
+            match equity {
+                ExecutionReadValueV1::Known(e) => ExecutionReadValueV1::Known(e.public()),
+                _ => ExecutionReadValueV1::Unavailable,
+            },
+        ))
     }
     pub(super) fn profit_bound(
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
+            impl ActionAccountReadV1,
         >,
+        reads: &DecisionReads<'_>,
         a: &ProfitAllocationV1,
     ) -> Result<Option<R>, StrategyErrorV1> {
-        Self::profit_bound_read(&input.action_before, a)
+        Self::profit_bound_with_remaining(
+            &input.action_before,
+            a,
+            reads.request_commitments.get(a.global_request_id.as_str()),
+        )
     }
     pub(super) fn profit_bound_read(
-        read: &ActionBeforeReadV2<impl std::borrow::Borrow<SharedExecutionRegistryV2>>,
+        read: &ActionBeforeReadV2<
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl ActionAccountReadV1,
+        >,
         a: &ProfitAllocationV1,
     ) -> Result<Option<R>, StrategyErrorV1> {
         let mut remaining = R::zero();
@@ -60,6 +65,20 @@ impl ComplementaryPairV1 {
                 unknown = true;
             }
         }
+        Self::profit_bound_with_remaining(read, a, has_commitment.then_some(&(remaining, unknown)))
+    }
+    fn profit_bound_with_remaining(
+        read: &ActionBeforeReadV2<
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl ActionAccountReadV1,
+        >,
+        a: &ProfitAllocationV1,
+        commitment: Option<&(R, bool)>,
+    ) -> Result<Option<R>, StrategyErrorV1> {
+        let has_commitment = commitment.is_some();
+        let (remaining, unknown) = commitment
+            .map(|(q, u)| (q.clone(), *u || a.original_shares.is_none()))
+            .unwrap_or_default();
         let active_request = read.request_funds().any(|r| {
             r.request_identity == &a.reserve_identity
                 && !matches!(
@@ -86,12 +105,14 @@ impl ComplementaryPairV1 {
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
+            impl ActionAccountReadV1,
         >,
+        reads: &DecisionReads<'_>,
     ) -> Result<R, StrategyErrorV1> {
         let mut total = R::zero();
         let mut remove = Vec::new();
         for (id, a) in &self.profit_pending {
-            if let Some(bound) = Self::profit_bound(input, a)? {
+            if let Some(bound) = Self::profit_bound(input, reads, a)? {
                 total = total.add(&bound);
             } else {
                 remove.push(id.clone());
@@ -248,6 +269,7 @@ impl ComplementaryPairV1 {
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
+            impl ActionAccountReadV1,
         >,
         ids: Vec<String>,
     ) -> Vec<String> {

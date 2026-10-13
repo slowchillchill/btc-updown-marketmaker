@@ -372,6 +372,8 @@ pub struct LedgerWriterV1 {
     record_sink: Option<Box<dyn FnMut(self::memory::LedgerRecordMaterialV2)>>,
     funds: self::funds::FundsStateV1,
     economics: self::economics::EconomicsState,
+    #[serde(skip)]
+    necessary_funds: std::sync::OnceLock<BTreeSet<String>>,
 }
 impl LedgerWriterV1 {
     /// 原已提交内存经济前缀；公共关联、资金及 NOE 应用共用原序号。
@@ -442,6 +444,7 @@ impl LedgerWriterV1 {
             record_sink: None,
             funds: self::funds::FundsStateV1::default(),
             economics: self::economics::EconomicsState::default(),
+            necessary_funds: Default::default(),
         }
     }
 
@@ -1811,6 +1814,22 @@ impl LedgerWriterV1 {
     }
 
     fn apply_committed_effect(&mut self, effect: LedgerCommittedEffectV1) {
+        let mut affected_funds = BTreeSet::new();
+        if self.necessary_funds.get().is_some() {
+            if let Some(AccountCommittedPatchV1::Update {
+                market_balance_update: Some(m),
+                ..
+            }) = &effect.account
+            {
+                affected_funds.insert(m.condition_id.0.clone());
+            }
+            if let Some(r) = &effect.reservations {
+                affected_funds.extend(r.markets.keys().cloned());
+            }
+            if let Some(l) = &effect.lifecycle {
+                affected_funds.extend(l.markets.keys().cloned());
+            }
+        }
         if let Some(patch) = effect.economics {
             self.economics.commit(patch);
         }
@@ -1904,6 +1923,19 @@ impl LedgerWriterV1 {
                     &request_identity.0,
                 );
             }
+        }
+        if let Some(mut ids) = self.necessary_funds.take() {
+            for id in affected_funds {
+                if self
+                    .necessary_market_funds(&ConditionId(id.clone()))
+                    .has_obligation()
+                {
+                    ids.insert(id);
+                } else {
+                    ids.remove(&id);
+                }
+            }
+            let _ = self.necessary_funds.set(ids);
         }
         self.current_ledger_entry_seq = effect.transaction.ledger_entry_seq;
     }

@@ -1,4 +1,5 @@
 mod account;
+use account::DecisionReads;
 mod construction;
 mod health;
 pub use health::{SourceHealthFactsV1, source_health_failure_v1, source_health_state_v1};
@@ -104,24 +105,6 @@ fn limit_leg(i: &ModelIntentV1, ordinal: u16) -> Option<(&ConditionId, &BuyLegIn
         } => orders.get(usize::from(ordinal)).map(|l| (condition_id, l)),
         _ => None,
     }
-}
-fn ord_fee(
-    input: &StrategyInputV1<
-        impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-        impl StrategyMarketReadV1,
-    >,
-    id: Option<&::execution_normalization::MemoryLogicalIdentityV1>,
-) -> Result<Option<R>, StrategyErrorV1> {
-    let Some(id) = id else {
-        return Ok(None);
-    };
-    input
-        .action_before
-        .order_funds()
-        .find(|f| f.order_identity == id)
-        .and_then(|f| known(&f.immediate_fee_encumbrance_pusd).cloned())
-        .map(|v| decimal(&v).map(r))
-        .transpose()
 }
 fn platform_id<C>(o: &ExecutionOrderRead<'_, C>) -> String {
     match &o.order_identity.key {
@@ -278,6 +261,31 @@ impl StrategyV1 for ComplementaryPairV1 {
     fn uses_borrowed_input(&self) -> bool {
         true
     }
+    fn selects_relevant_markets(&self) -> bool {
+        true
+    }
+    fn historical_market_requirements(&self) -> Vec<ConditionId> {
+        let mut ids: std::collections::BTreeSet<_> = self
+            .profit_pending
+            .values()
+            .map(|a| a.condition_id.0.clone())
+            .collect();
+        ids.extend(self.continuity.repair_market_ends.keys().cloned());
+        ids.into_iter().map(ConditionId).collect()
+    }
+    fn calculation_market_requirements(
+        &self,
+        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+    ) -> Vec<ConditionId> {
+        match &calculation.output {
+            StrategyOutputV1::Continue { diagnostics, .. } => diagnostics
+                .action_health_dependencies
+                .iter()
+                .map(|d| d.condition_id.clone())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
     fn decide(
         &mut self,
         input: &StrategyInputV1,
@@ -355,11 +363,13 @@ impl ComplementaryPairV1 {
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
+            impl ActionAccountReadV1,
         >,
         now: i64,
     ) -> Result<StrategyOutputV1<ComplementaryPairDiagnosticV1>, StrategyErrorV1> {
         let (pnl, equity) = Self::profit_and_equity(input)?;
-        let occupied = self.reconcile_profit(input)?;
+        let reads = DecisionReads::new(&input.action_before);
+        let occupied = self.reconcile_profit(input, &reads)?;
         let mut profit = pnl.clone().max(R::zero()).sub(&occupied).max(R::zero());
         let mut high =
             rational(&self.continuity.confirmed_high_water_pusd)?.max(r(Decimal::from(2000)));
@@ -372,14 +382,31 @@ impl ComplementaryPairV1 {
         }
         self.continuity.confirmed_high_water_pusd = high.public();
         // 公共观察按token排列，经济池按登记资产排列；业务Up/Down必须按身份连接。
+        let historical: std::collections::BTreeSet<_> = self
+            .historical_market_requirements()
+            .into_iter()
+            .map(|id| id.0)
+            .collect();
         let frames = input
             .markets
             .iter()
+            .filter(|f| {
+                let o = f.observation();
+                let id = &o.market.condition_id;
+                now < o.market.window.end_at_utc_ms
+                    || historical.contains(&id.0)
+                    || reads.commitments.contains_key(id.0.as_str())
+                    || reads.orders_by_market.contains_key(id.0.as_str())
+                    || input.action_before.market_funds(id).has_obligation()
+                    || input.action_before.market_economics(id).is_some_and(|m| {
+                        m.unresolved && m.orphan_shares.iter().any(|q| *q > Decimal::ZERO)
+                    })
+            })
             .map(PairMarketRead::from_read)
             .collect::<Result<Vec<_>, _>>()?;
         let states = frames
             .iter()
-            .map(|f| self.state(input, f))
+            .map(|f| self.state(input, f, &reads))
             .collect::<Result<Vec<_>, _>>()?;
         let mut account_exposure = states.iter().fold(R::zero(), |a, s| {
             a.add(&s.exposure[0].clone().max(s.exposure[1].clone()))
@@ -396,10 +423,8 @@ impl ComplementaryPairV1 {
                     .or_insert(f.observation.market.window.end_at_utc_ms);
             }
         }
-        let economics = input.action_before.economics();
-        let mut cash = decimal(&economics.cash.actual_available_pusd)?
-            .min(decimal(&economics.cash.maker_available_pusd)?)
-            .max(Decimal::ZERO);
+        let (actual_cash, maker_cash) = input.action_before.cash_available();
+        let mut cash = actual_cash.min(maker_cash).max(Decimal::ZERO);
         let mut diagnostic = ComplementaryPairDiagnosticV1 {
             strategy_id: STRATEGY_ID.into(),
             rule_version: RULE_VERSION.into(),
@@ -513,6 +538,7 @@ impl ComplementaryPairV1 {
                 if repair_healthy {
                     self.repair(
                         input,
+                        &reads,
                         f,
                         now,
                         s,
@@ -639,8 +665,9 @@ impl ComplementaryPairV1 {
                                 .flatten()
                         }),
                         repair_token,
-                        business: Self::business_dependency(
+                        business: Self::business_dependency_from_reads(
                             &input.action_before,
+                            &reads,
                             &o.market.condition_id,
                             &[],
                         )

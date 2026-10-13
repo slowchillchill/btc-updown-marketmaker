@@ -245,17 +245,31 @@ impl ComplementaryPairV1 {
             .min()
     }
     pub(super) fn business_dependency(
-        read: &ActionBeforeReadV2<impl std::borrow::Borrow<SharedExecutionRegistryV2>>,
+        read: &ActionBeforeReadV2<
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl ActionAccountReadV1,
+        >,
         condition: &ConditionId,
         batch_ids: &[&str],
     ) -> Option<ActionBusinessDependencyV1> {
-        let market = read
-            .economics()
-            .markets
-            .iter()
-            .find(|m| &m.condition_id == condition)?;
-        let commitments = read
-            .commitments()
+        let reads = DecisionReads::new(read);
+        Self::business_dependency_from_reads(read, &reads, condition, batch_ids)
+    }
+    pub(super) fn business_dependency_from_reads(
+        read: &ActionBeforeReadV2<
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl ActionAccountReadV1,
+        >,
+        reads: &DecisionReads<'_>,
+        condition: &ConditionId,
+        batch_ids: &[&str],
+    ) -> Option<ActionBusinessDependencyV1> {
+        let market = read.market_economics(condition)?;
+        let commitments = reads
+            .commitments
+            .get(condition.0.as_str())
+            .into_iter()
+            .flatten()
             .filter_map(|c| {
                 let (market, _) = limit_leg(c.origin.intent.intent(), c.origin.batch_item_ordinal)?;
                 let request_id = c.origin.intent.global_request_id();
@@ -263,23 +277,33 @@ impl ComplementaryPairV1 {
                     ActionCommitmentDependencyV1 {
                         request_id: request_id.into(),
                         leg_ordinal: c.origin.batch_item_ordinal,
-                        remaining_shares: c.remaining_target_shares,
+                        remaining_shares: c.remaining_target_shares.clone(),
                     }
                 })
             })
             .collect();
-        let unknown_order_ids = read
-            .orders()
+        let unknown_order_ids = reads
+            .orders_by_market
+            .get(condition.0.as_str())
+            .into_iter()
+            .flatten()
+            .map(|i| &reads.orders[*i])
             .filter(|o| o.condition_id == Some(condition) && o.origin.is_none())
-            .map(|o| platform_id(&o))
+            .map(|o| platform_id(o))
             .collect();
         Some(ActionBusinessDependencyV1 {
-            orphan_shares: market.orphan_shares.clone(),
-            orphan_principal: market.unresolved_orphan_principal_cost_pusd.clone(),
-            orphan_fee: known(&market.unpaired_success_fee_pusd).cloned(),
-            success_shares: market.success_shares.clone(),
-            success_principal: market.success_principal_cost_pusd.clone(),
-            actual_fees: std::array::from_fn(|i| market.executed[i].actual_fee_pusd.clone()),
+            orphan_shares: market
+                .orphan_shares
+                .map(|q| ExactDecimal(q.normalize().to_string())),
+            orphan_principal: market.orphan_principal.public(),
+            orphan_fee: known(&market.orphan_fee).map(R::public),
+            success_shares: market
+                .success_shares
+                .map(|q| ExactDecimal(q.normalize().to_string())),
+            success_principal: std::array::from_fn(|i| market.success_principal[i].public()),
+            actual_fees: market
+                .actual_fees
+                .map(|q| ExactDecimal(q.normalize().to_string())),
             commitments,
             unknown_order_ids,
         })
@@ -396,7 +420,11 @@ impl ComplementaryPairV1 {
     }
     pub(super) fn qualify_health(
         &self,
-        input: &StrategyCurrentReadV1<'_, impl std::borrow::Borrow<SharedExecutionRegistryV2>>,
+        input: &StrategyCurrentReadV1<
+            '_,
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl ActionAccountReadV1,
+        >,
         calculation: &StrategyCalculationV1<ComplementaryPairDiagnosticV1>,
         index: usize,
         at: i64,

@@ -112,6 +112,18 @@ impl StrategyV1 for Trace {
     fn uses_borrowed_input(&self) -> bool {
         self.strategy.uses_borrowed_input()
     }
+    fn selects_relevant_markets(&self) -> bool {
+        self.strategy.selects_relevant_markets()
+    }
+    fn historical_market_requirements(&self) -> Vec<ConditionId> {
+        self.strategy.historical_market_requirements()
+    }
+    fn calculation_market_requirements(
+        &self,
+        c: &StrategyCalculationV1<Self::Diagnostics>,
+    ) -> Vec<ConditionId> {
+        self.strategy.calculation_market_requirements(c)
+    }
     fn qualify_intent(
         &mut self,
         input: &StrategyCurrentReadV1<'_>,

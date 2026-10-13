@@ -727,6 +727,25 @@ fn assert_counts(writer: &LedgerWriterV1, open: u64, pending: u64) {
         projection.platform_confirmed_projection.fees_pusd,
         number("0")
     );
+    let read = writer.necessary_read_v1().unwrap();
+    let ids: Vec<_> = read.funds_markets().collect();
+    let value = |v: &ExactDecimal| rust_decimal::Decimal::from_str_exact(&v.0).unwrap();
+    for m in &projection.market_projections {
+        let n = read.market_funds(&m.condition_id);
+        assert_eq!(n.principal, value(&m.principal_encumbrance_pusd));
+        assert_eq!(n.fee, value(&m.immediate_taker_fee_encumbrance_pusd));
+        assert_eq!(n.local_principal, value(&m.local_pending_principal_pusd));
+        assert_eq!(n.local_fee, value(&m.local_pending_immediate_fee_pusd));
+        assert_eq!(
+            n.platform_pending_principal,
+            value(&m.platform_confirmation_pending_economic_principal_pusd)
+        );
+        assert_eq!(
+            n.platform_pending_fee,
+            value(&m.platform_confirmation_pending_economic_immediate_fee_pusd)
+        );
+        assert_eq!(ids.contains(&m.condition_id.0.as_str()), n.has_obligation());
+    }
 }
 #[test]
 fn maker_full_match_closes_open_quantity_once_independent_of_finality_and_recovery() {
