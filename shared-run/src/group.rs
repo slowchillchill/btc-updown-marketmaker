@@ -6,8 +6,9 @@ use sim_system::{
     execution::*,
     public_consumption::{PublicObservationFrameV1, TrustedGroupDecisionCutoffV1},
 };
-use std::sync::Arc;
+use std::{borrow::Borrow, marker::PhantomData, sync::Arc};
 
+#[derive(Clone)]
 struct RequestFunds {
     id: LedgerRequestIdentityV1,
     condition: ConditionId,
@@ -16,6 +17,7 @@ struct RequestFunds {
     fee: ExactDecimal,
     seq: u64,
 }
+#[derive(Clone)]
 struct OrderFunds {
     id: MemoryLogicalIdentityV1,
     principal: ExecutionReadValueV1<ExactDecimal>,
@@ -23,16 +25,19 @@ struct OrderFunds {
     seq: Option<u64>,
 }
 /// 持有同一组必要标量和原Arc引用；后续动作不能改写本组读取。
-pub struct ActionBeforeRead<R> {
+pub struct ActionBeforeRead<R, G = SharedExecutionRegistry<R>> {
     economics: AccountEconomicsReadV2,
     pending_noe_record_count: usize,
     cutoff: TrustedGroupDecisionCutoffV1,
     ledger: LedgerProjectionV2,
-    registry: SharedExecutionRegistry<R>,
+    registry: G,
+    completion: PhantomData<R>,
     requests: Vec<RequestFunds>,
     orders: Vec<OrderFunds>,
 }
-impl<R: Clone + std::fmt::Debug + Eq> ActionBeforeRead<R> {
+impl<R: Clone + std::fmt::Debug + Eq, G: Borrow<SharedExecutionRegistry<R>>>
+    ActionBeforeRead<R, G>
+{
     /// 已领取、因依赖未满足而尚待 Ledger 应用的原记录数；零不证明未来事实已齐。
     pub fn pending_noe_record_count(&self) -> usize {
         self.pending_noe_record_count
@@ -47,13 +52,13 @@ impl<R: Clone + std::fmt::Debug + Eq> ActionBeforeRead<R> {
         &self.ledger
     }
     pub fn orders(&self) -> impl Iterator<Item = ExecutionOrderRead<'_, R>> {
-        self.registry.unfinished_orders()
+        self.registry.borrow().unfinished_orders()
     }
     pub fn commitments(&self) -> impl Iterator<Item = IntentCommitmentReadV1<'_>> {
-        self.registry.all_commitments()
+        self.registry.borrow().all_commitments()
     }
     pub fn cancel_objects(&self) -> ExecutionReadValueV1<Vec<CancelObjectRead<'_, R>>> {
-        self.registry.cancel_objects()
+        self.registry.borrow().cancel_objects()
     }
     pub fn cancel_objects_in<'a>(
         &'a self,
@@ -61,6 +66,7 @@ impl<R: Clone + std::fmt::Debug + Eq> ActionBeforeRead<R> {
         old: &'a [ConditionId],
     ) -> ExecutionReadValueV1<Vec<CancelObjectRead<'a, R>>> {
         self.registry
+            .borrow()
             .cancel_objects_in(current.into_iter().chain(old))
     }
     pub fn request_funds(&self) -> impl Iterator<Item = RequestFundsReadV1<'_>> {
@@ -80,6 +86,19 @@ impl<R: Clone + std::fmt::Debug + Eq> ActionBeforeRead<R> {
             immediate_fee_encumbrance_pusd: r.fee.clone(),
             last_ledger_entry_seq: r.seq,
         })
+    }
+    /// 默认拥有式消费者仍取得完整独立冻结；借用计算不调用此转换。
+    pub fn to_owned_read(&self) -> ActionBeforeRead<R> {
+        ActionBeforeRead {
+            economics: self.economics.clone(),
+            pending_noe_record_count: self.pending_noe_record_count,
+            cutoff: self.cutoff.clone(),
+            ledger: self.ledger.clone(),
+            registry: self.registry.borrow().action_snapshot(),
+            requests: self.requests.clone(),
+            orders: self.orders.clone(),
+            completion: PhantomData,
+        }
     }
 }
 /// 保留缺直接前驱的原领取引用；没有第二业务归约或跳号/超时政策。
@@ -253,10 +272,27 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         cutoff: TrustedGroupDecisionCutoffV1,
         frames: &[PublicObservationFrameV1<'_>],
     ) -> Option<ActionBeforeRead<P::Completion>> {
-        let registry = self.registry.action_snapshot();
+        self.read_action_before(self.registry.action_snapshot(), cutoff, frames)
+    }
+    /// 同步调用期间借用原登记；Rust 借用阻止该范围内推进事实。
+    pub fn borrow_action_before<'a>(
+        &'a self,
+        cutoff: TrustedGroupDecisionCutoffV1,
+        frames: &[PublicObservationFrameV1<'_>],
+    ) -> Option<ActionBeforeRead<P::Completion, &'a SharedExecutionRegistry<P::Completion>>> {
+        self.read_action_before(&self.registry, cutoff, frames)
+    }
+    fn read_action_before<G: Borrow<SharedExecutionRegistry<P::Completion>>>(
+        &self,
+        registry: G,
+        cutoff: TrustedGroupDecisionCutoffV1,
+        frames: &[PublicObservationFrameV1<'_>],
+    ) -> Option<ActionBeforeRead<P::Completion, G>> {
         let funds = self.ledger.funds_read_v1();
-        let ledger = funds.projection()?;
+        let economic = self.ledger.economic_read()?;
+        let ledger = economic.base().clone();
         let required_requests: std::collections::BTreeSet<_> = registry
+            .borrow()
             .unfinished_orders()
             .filter_map(|o| o.origin)
             .filter_map(|origin| {
@@ -284,6 +320,7 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             })
             .collect();
         let orders = registry
+            .borrow()
             .unfinished_orders()
             .filter_map(|o| funds.order(o.order_identity))
             .map(|r| OrderFunds {
@@ -296,12 +333,13 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         Some(ActionBeforeRead {
             pending_noe_record_count: self.pending.len(),
             economics: AccountEconomicsReadV2::from_ledger_and_observations(
-                &self.ledger.economic_read().expect("同组 Ledger 已开户"),
+                &economic,
                 frames.iter().map(|f| f.observation),
             ),
             cutoff,
             ledger,
             registry,
+            completion: PhantomData,
             requests,
             orders,
         })
@@ -412,15 +450,21 @@ pub type SharedExecutionV1 = SharedExecution<sim_system::execution::MeasuredOrde
 pub type SharedExecutionV2 = SharedExecution<sim_system::execution::MeasuredCancellationEvidence>;
 pub type ActionBeforeReadV1 =
     ActionBeforeRead<contracts::execution_normalization::NoCancellationRequestCompletionV0>;
-pub type ActionBeforeReadV2 =
-    ActionBeforeRead<contracts::execution_normalization::CancellationRequestCompletedV1>;
+pub type ActionBeforeReadV2<G = SharedExecutionRegistryV2> =
+    ActionBeforeRead<contracts::execution_normalization::CancellationRequestCompletedV1, G>;
 
-impl ActionBeforeReadV2 {
+impl<G: Borrow<SharedExecutionRegistryV2>> ActionBeforeReadV2<G> {
+    pub fn pending_cancellation_count(
+        &self,
+        scope: Option<&CancellationScopeV1<'_>>,
+    ) -> ExecutionReadValueV1<u64> {
+        self.registry.borrow().pending_cancellation_count(scope)
+    }
     pub fn cancellation_requests(
         &self,
         scope: Option<&CancellationScopeV1<'_>>,
     ) -> CancellationRequestsReadV1<'_> {
-        self.registry.cancellation_requests(scope)
+        self.registry.borrow().cancellation_requests(scope)
     }
 }
 

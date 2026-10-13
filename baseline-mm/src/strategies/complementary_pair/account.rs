@@ -3,7 +3,10 @@ use super::*;
 impl ComplementaryPairV1 {
     pub(super) fn state(
         &self,
-        input: &StrategyInputV1,
+        input: &StrategyInputV1<
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl StrategyMarketReadV1,
+        >,
         f: &PairMarketRead<'_>,
     ) -> Result<MarketState, StrategyErrorV1> {
         let o = &f.observation;
