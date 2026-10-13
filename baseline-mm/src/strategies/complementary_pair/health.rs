@@ -245,7 +245,7 @@ impl ComplementaryPairV1 {
             .min()
     }
     pub(super) fn business_dependency(
-        read: &ActionBeforeReadV2,
+        read: &ActionBeforeReadV2<impl std::borrow::Borrow<SharedExecutionRegistryV2>>,
         condition: &ConditionId,
         batch_ids: &[&str],
     ) -> Option<ActionBusinessDependencyV1> {
@@ -396,7 +396,7 @@ impl ComplementaryPairV1 {
     }
     pub(super) fn qualify_health(
         &self,
-        input: &StrategyCurrentReadV1<'_>,
+        input: &StrategyCurrentReadV1<'_, impl std::borrow::Borrow<SharedExecutionRegistryV2>>,
         calculation: &StrategyCalculationV1<ComplementaryPairDiagnosticV1>,
         index: usize,
         at: i64,

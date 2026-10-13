@@ -1391,15 +1391,15 @@ impl SharedExecutionRegistryV2 {
         }
         totals
     }
-    pub fn cancellation_requests(
+    /// 只读相关在途请求数量，不枚举历史完成响应。
+    pub fn pending_cancellation_count(
         &self,
         scope: Option<&CancellationScopeV1<'_>>,
-    ) -> CancellationRequestsReadV1<'_> {
+    ) -> ExecutionReadValueV1<u64> {
         let mut pending = 0;
         let mut pending_known = true;
         for request in self
-            .intents
-            .values()
+            .cancellation_intents()
             .filter(|r| r.receipt.is_some() && r.completed.is_none())
         {
             let Some(request_scope) = cancellation_scope(request.origin.intent()) else {
@@ -1411,12 +1411,18 @@ impl SharedExecutionRegistryV2 {
                 None => pending_known = false,
             }
         }
+        if pending_known {
+            Known(pending)
+        } else {
+            Unavailable
+        }
+    }
+    pub fn cancellation_requests(
+        &self,
+        scope: Option<&CancellationScopeV1<'_>>,
+    ) -> CancellationRequestsReadV1<'_> {
         let mut read = CancellationRequestsReadV1 {
-            pending_count: if pending_known {
-                Known(pending)
-            } else {
-                Unavailable
-            },
+            pending_count: self.pending_cancellation_count(scope),
             response_counts: [NotApplicable, NotApplicable, NotApplicable],
             latest_response: Known(None),
         };

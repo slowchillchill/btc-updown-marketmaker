@@ -2767,12 +2767,19 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             .unwrap();
         let pending = shared.action_before(&mut driver).unwrap().unwrap();
         assert_eq!(pending.cancellation_requests(None).pending_count, Known(1));
+        assert_eq!(pending.pending_cancellation_count(None), Known(1));
         for _ in 2..5 {
             driver.next_group().unwrap().unwrap();
         }
         let empty = shared.action_before(&mut driver).unwrap().unwrap();
         let response = empty.cancellation_requests(None);
         assert_eq!(response.pending_count, Known(0));
+        assert_eq!(empty.pending_cancellation_count(None), Known(0));
+        assert_eq!(
+            pending.pending_cancellation_count(None),
+            Known(1),
+            "原拥有式冻结不被后续完成改写"
+        );
         assert_eq!(response.response_counts, [Known(0), Known(0), Known(0)]);
         assert!(matches!(response.latest_response, Known(Some(_))));
         let Known(Some(empty_completion)) = response.latest_response else {
@@ -3105,6 +3112,16 @@ async fn v4_cancel_market_relation_keeps_known_unknown_and_closed_order_location
             .await
             .unwrap()
             .unwrap();
+        let pending = shared.action_before(&mut driver).unwrap().unwrap();
+        assert_eq!(pending.pending_cancellation_count(None), Known(1));
+        assert_eq!(
+            pending.pending_cancellation_count(Some(&CancellationScopeV1::Market(&market))),
+            if matching { Known(1) } else { Unavailable }
+        );
+        assert_eq!(
+            pending.pending_cancellation_count(Some(&CancellationScopeV1::Market(&other))),
+            if nonmatching { Known(0) } else { Unavailable }
+        );
         loop {
             assert!(
                 driver.next_group().unwrap().is_some(),

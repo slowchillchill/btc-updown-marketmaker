@@ -4,7 +4,10 @@ impl ComplementaryPairV1 {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn repair(
         &mut self,
-        input: &StrategyInputV1,
+        input: &StrategyInputV1<
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl StrategyMarketReadV1,
+        >,
         f: &PairMarketRead<'_>,
         now: i64,
         s: &MarketState,

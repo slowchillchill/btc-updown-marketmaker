@@ -1069,3 +1069,259 @@ async fn representative_notrade_host_calculation_timing() {
     }
     std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(), serde_json::to_vec_pretty(&json!({"format":"issue185-notrade-timing-v1","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"helper_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rule_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"cells":cells,"sample_count":64,"limits":"fixed real NoTrade prefixes; setup/restore/serialization/comparison outside timing; combined assembly+calculate excludes feed/qualification/send and is not online end-to-end latency"})).unwrap()).unwrap();
 }
+
+/// 正常零目标撤单形成历史；保持866市场和当前两笔策略挂单，比较同版本两种表示。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "#185 D0342 finite cancellation-history probe; sealed inputs and output required"]
+async fn completed_cancel_history_owned_and_borrowed_strategy_inputs() {
+    let finality_bytes = std::fs::read(std::env::var("ISSUE185_FINALITY").unwrap()).unwrap();
+    assert_eq!(hash(&finality_bytes), FINALITY_SHA);
+    let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+        snapshot_path: std::env::var("ISSUE185_RULES").unwrap().into(),
+        expected_file_sha256: Sha256Hex(RULE_SHA.into()),
+        replay_causal_start_utc_ms: BASE,
+    })
+    .unwrap();
+    let finality = Arc::new(TradeFinalityPolicyV2::decode_and_seal(&finality_bytes).unwrap());
+    let package: Value = serde_json::from_slice(include_bytes!(
+        "../configs/strategies/complementary_pair/business-candidates-20261008.json"
+    ))
+    .unwrap();
+    let config: ComplementaryPairConfigV1 = serde_json::from_value(
+        package["folds"][0]["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["identifier"] == "center")
+            .unwrap()["strategy"]
+            .clone(),
+    )
+    .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cells = Vec::new();
+    for history in [1, 128, 512] {
+        println!("prepare_cancel_history: {history}");
+        let root = temp.path().join(format!("history-{history}"));
+        std::fs::create_dir(&root).unwrap();
+        let material = material_for_notrade(&root.join("dpt"), false, true);
+        let (mut execution, observation) = execution(
+            &root.join("sim.jsonl"),
+            &material.core,
+            rules.clone(),
+            finality.clone(),
+            &format!("cancel-history-{history}"),
+        );
+        let mut ledger =
+            LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        execution
+            .bind_ledger_recording_v2(&mut ledger, &root.join("ledger"))
+            .unwrap();
+        let mut shared = SharedExecutionV2::from_opening(ledger, observation)
+            .unwrap()
+            .unwrap();
+        let mut source =
+            RecordedPublicGroupSourceV1::open(&root.join("dpt"), 128, 16 << 20, material.times)
+                .unwrap();
+        source.enable_source_progress();
+        let mut driver =
+            FinitePublicConsumptionV1::new(execution, source, format!("cancel-history-{history}"));
+        driver.enable_finite_recording_wait().unwrap();
+        advance(&mut driver, material.early);
+        // 注册过的旧市场，没有订单；真实平台完成事实仍由原SIM/NOE产生。
+        for n in 0..history {
+            driver.wait_for_recording_capacity().unwrap();
+            shared
+                .execute(
+                    &mut driver.decision().unwrap(),
+                    RequestContextV2 {
+                        global_request_id: format!("history-cancel-{n}"),
+                        caller_correlation_id: None,
+                    },
+                    Some(Arc::new(ModelIntentV1::CancelMarketOrders {
+                        condition_id: ConditionId(condition(2)),
+                    })),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        shared
+            .execute_batch_reserved(
+                &mut driver.decision().unwrap(),
+                &[
+                    buy(&rules, 0, "closed-single-leg", false),
+                    buy(&rules, 1, "closed-resting", true),
+                ],
+            )
+            .await
+            .unwrap();
+        let mut strategy = ComplementaryPairV1::new(
+            config.clone(),
+            rules.clone(),
+            "cancel-history-strategy".into(),
+            StrategyContinuityV1::new_account(),
+        )
+        .unwrap();
+        for &group in &material.history {
+            advance(&mut driver, group);
+            let input = shared
+                .strategy_borrowed_observation_input(&mut driver, false)
+                .unwrap()
+                .unwrap();
+            let at = input
+                .action_before
+                .cutoff()
+                .decision_time()
+                .logical_time_utc_ms();
+            input.calculate_borrowed(&mut strategy, at).unwrap();
+        }
+        let totals = shared.registry().cumulative_request_totals();
+        assert_eq!(totals.completed_receipted_cancellation_requests, history);
+        let owned = shared
+            .strategy_observation_input_with_trade_details(&mut driver, false)
+            .unwrap()
+            .unwrap();
+        let at = owned
+            .action_before
+            .cutoff()
+            .decision_time()
+            .logical_time_utc_ms();
+        let saved = strategy.checkpoint();
+        let mut owned_strategy =
+            ComplementaryPairV1::restore(config.clone(), rules.clone(), saved.clone()).unwrap();
+        let owned_calc = owned.calculate(&mut owned_strategy, at).unwrap();
+        let mut borrowed_strategy =
+            ComplementaryPairV1::restore(config.clone(), rules.clone(), saved).unwrap();
+        let borrowed = shared
+            .strategy_borrowed_observation_input(&mut driver, false)
+            .unwrap()
+            .unwrap();
+        let borrowed_calc = borrowed
+            .calculate_borrowed(&mut borrowed_strategy, at)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&owned_calc).unwrap(),
+            serde_json::to_value(&borrowed_calc).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(owned_strategy.checkpoint()).unwrap(),
+            serde_json::to_value(borrowed_strategy.checkpoint()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(owned.action_before.economics()).unwrap(),
+            serde_json::to_value(borrowed.action_before.economics()).unwrap()
+        );
+        assert_eq!(
+            owned.action_before.pending_cancellation_count(None),
+            borrowed.action_before.pending_cancellation_count(None)
+        );
+        let (_, intents) = diagnostics(&owned_calc.output);
+        assert!(!intents.is_empty());
+        assert!(
+            intents
+                .iter()
+                .any(|i| matches!(i.intent.as_ref(), ModelIntentV1::SubmitPairedBuy { .. }))
+        );
+        drop(borrowed);
+        strategy = borrowed_strategy;
+        let mut decision = driver
+            .send_decision_at(borrowed_calc.input_cutoff.clone(), at + 15)
+            .unwrap();
+        let sent = shared
+            .dispatch_strategy_qualified(
+                &mut decision,
+                &mut strategy,
+                borrowed_calc.complete(at + 15),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            sent,
+            QualifiedStrategyDispatchV1::Dispatched { .. }
+        ));
+        drop(decision);
+        advance(&mut driver, material.follow_up.unwrap());
+        let before = shared
+            .strategy_observation_input_with_trade_details(&mut driver, false)
+            .unwrap()
+            .unwrap();
+        let at = before
+            .action_before
+            .cutoff()
+            .decision_time()
+            .logical_time_utc_ms();
+        let initial_state = strategy.checkpoint();
+        let initial_economics = serde_json::to_value(before.action_before.economics()).unwrap();
+        let current_orders: Vec<_> = before
+            .action_before
+            .orders()
+            .filter(|o| o.condition_id == Some(&ConditionId(condition(CURRENT))))
+            .collect();
+        assert_eq!(current_orders.len(), 2);
+        assert!(current_orders.iter().all(|o| o.accepted.is_some()
+            && o.active_unfilled_shares == ExecutionReadValueV1::Known(ExactDecimal("50".into()))));
+        let initial = before.calculate(&mut strategy, at).unwrap();
+        assert!(diagnostics(&initial.output).1.is_empty());
+        let cutoff = before.action_before.cutoff().clone();
+        let totals = shared.registry().cumulative_request_totals();
+        let mut samples = Vec::new();
+        for n in 0..=32 {
+            let mut a =
+                ComplementaryPairV1::restore(config.clone(), rules.clone(), initial_state.clone())
+                    .unwrap();
+            let mut b =
+                ComplementaryPairV1::restore(config.clone(), rules.clone(), initial_state.clone())
+                    .unwrap();
+            let combined = Instant::now();
+            let begin = Instant::now();
+            let owned = shared
+                .strategy_observation_input_with_trade_details(&mut driver, false)
+                .unwrap()
+                .unwrap();
+            let owned_assembly_ns = begin.elapsed().as_nanos() as u64;
+            let own = owned.calculate(&mut a, at).unwrap();
+            let owned_combined_ns = combined.elapsed().as_nanos() as u64;
+            let combined = Instant::now();
+            let begin = Instant::now();
+            let borrowed = shared
+                .strategy_borrowed_observation_input(&mut driver, false)
+                .unwrap()
+                .unwrap();
+            let borrowed_assembly_ns = begin.elapsed().as_nanos() as u64;
+            let borrow = borrowed.calculate_borrowed(&mut b, at).unwrap();
+            let borrowed_combined_ns = combined.elapsed().as_nanos() as u64;
+            std::hint::black_box(&own);
+            std::hint::black_box(&borrow);
+            assert_eq!(
+                serde_json::to_value(&own).unwrap(),
+                serde_json::to_value(&borrow).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(a.checkpoint()).unwrap(),
+                serde_json::to_value(b.checkpoint()).unwrap()
+            );
+            assert_eq!(borrowed.action_before.cutoff(), &cutoff);
+            assert_eq!(
+                serde_json::to_value(borrowed.action_before.economics()).unwrap(),
+                initial_economics
+            );
+            assert_eq!(
+                serde_json::to_value(owned.action_before.economics()).unwrap(),
+                initial_economics
+            );
+            assert!(diagnostics(&own.output).1.is_empty());
+            if n > 0 {
+                samples.push(json!({"owned_assembly_ns":owned_assembly_ns,"owned_assembly_calculate_ns":owned_combined_ns,"borrowed_assembly_ns":borrowed_assembly_ns,"borrowed_assembly_calculate_ns":borrowed_combined_ns,"classification":"NoTrade"}));
+            }
+        }
+        assert_eq!(
+            shared
+                .registry()
+                .cumulative_request_totals()
+                .completed_receipted_cancellation_requests,
+            totals.completed_receipted_cancellation_requests
+        );
+        cells.push(json!({"zero_target_completed_cancels":history,"completed_cancellation_requests":totals.completed_receipted_cancellation_requests,"active_current_orders":2,"market_count":before.markets.len(),"source_points":material.history.len(),"extra_fresh_prefix":true,"warmup":1,"samples":samples,"actions_equivalence_checked":true,"NoTrade_samples":32}));
+    }
+    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(),serde_json::to_vec_pretty(&json!({"format":"issue185-cancel-history-borrowed-v1","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"helper_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"cells":cells,"limits":"同候选版本owning/borrowed路径对照；owning也复用投影，不是原main实测；准备/恢复/比较在计时外，不分派计时输出，无性能门槛"})).unwrap()).unwrap();
+}

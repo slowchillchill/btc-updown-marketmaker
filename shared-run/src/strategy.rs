@@ -20,16 +20,64 @@ pub struct FrozenMarketReadV1 {
     pub observation: MarketBusinessObservationV1,
     pub rule_context: Arc<PublicTradingRuleContextV1>,
 }
-pub struct StrategyInputV1 {
-    pub action_before: ActionBeforeReadV2,
-    pub markets: Vec<FrozenMarketReadV1>,
+pub trait StrategyMarketReadV1 {
+    fn observation(&self) -> &MarketBusinessObservationV1;
+    fn rule_context(&self) -> &Arc<PublicTradingRuleContextV1>;
+}
+impl StrategyMarketReadV1 for FrozenMarketReadV1 {
+    fn observation(&self) -> &MarketBusinessObservationV1 {
+        &self.observation
+    }
+    fn rule_context(&self) -> &Arc<PublicTradingRuleContextV1> {
+        &self.rule_context
+    }
+}
+impl StrategyMarketReadV1 for PublicObservationFrameV1<'_> {
+    fn observation(&self) -> &MarketBusinessObservationV1 {
+        self.observation
+    }
+    fn rule_context(&self) -> &Arc<PublicTradingRuleContextV1> {
+        &self.rule_context
+    }
+}
+pub struct StrategyInputV1<G = SharedExecutionRegistryV2, M = FrozenMarketReadV1> {
+    pub action_before: ActionBeforeReadV2<G>,
+    pub markets: Vec<M>,
     pub trade_economics: Vec<FrozenTradeEconomicsV1>,
 }
 /// 健康读取借用原公开观察，避免重复克隆盘口；账户来自同一真实 Ledger/Registry。
-pub struct StrategyCurrentReadV1<'a> {
-    pub action_before: ActionBeforeReadV2,
+pub struct StrategyCurrentReadV1<'a, G = SharedExecutionRegistryV2> {
+    pub action_before: ActionBeforeReadV2<G>,
     pub trade_economics: Vec<FrozenTradeEconomicsV1>,
     pub markets: Vec<PublicObservationFrameV1<'a>>,
+}
+pub type BorrowedStrategyInputV1<'a> =
+    StrategyInputV1<&'a SharedExecutionRegistryV2, PublicObservationFrameV1<'a>>;
+pub type BorrowedStrategyCurrentReadV1<'a> =
+    StrategyCurrentReadV1<'a, &'a SharedExecutionRegistryV2>;
+enum CurrentRead<'a> {
+    Owned(StrategyCurrentReadV1<'a>),
+    Borrowed(BorrowedStrategyCurrentReadV1<'a>),
+}
+impl CurrentRead<'_> {
+    fn cutoff(&self) -> &TrustedGroupDecisionCutoffV1 {
+        match self {
+            Self::Owned(r) => r.action_before.cutoff(),
+            Self::Borrowed(r) => r.action_before.cutoff(),
+        }
+    }
+    fn qualify<S: StrategyV1>(
+        &self,
+        strategy: &mut S,
+        calculation: &StrategyCalculationV1<S::Diagnostics>,
+        index: usize,
+        at: i64,
+    ) -> Result<IntentQualificationV1, S::Error> {
+        match self {
+            Self::Owned(r) => strategy.qualify_intent(r, calculation, index, at),
+            Self::Borrowed(r) => strategy.qualify_intent_borrowed(r, calculation, index, at),
+        }
+    }
 }
 /// 每笔新增资金的原腿序号与预留；取消意图没有新增资金项。
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -98,6 +146,31 @@ pub enum QualifiedBatchResultV1 {
 pub trait StrategyV1 {
     type Error;
     type Diagnostics;
+    /// 仅选择同步读取表示；默认仍构造原完整拥有式输入。
+    fn uses_borrowed_input(&self) -> bool {
+        false
+    }
+    fn decide_borrowed(
+        &mut self,
+        input: &BorrowedStrategyInputV1<'_>,
+        at: i64,
+    ) -> Result<StrategyOutputV1<Self::Diagnostics>, Self::Error> {
+        self.decide(&input.to_owned_input(), at)
+    }
+    fn qualify_intent_borrowed(
+        &mut self,
+        input: &BorrowedStrategyCurrentReadV1<'_>,
+        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        index: usize,
+        at: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        let owned = StrategyCurrentReadV1 {
+            action_before: input.action_before.to_owned_read(),
+            markets: input.markets.clone(),
+            trade_economics: input.trade_economics.clone(),
+        };
+        self.qualify_intent(&owned, calculation, index, at)
+    }
     /// 默认保留逐笔冻结；只消费原 owner 费用分配的策略可显式不请求明细。
     fn requires_trade_economics_details(&self) -> bool {
         true
@@ -195,6 +268,33 @@ impl StrategyInputV1 {
         })
     }
 }
+impl BorrowedStrategyInputV1<'_> {
+    pub fn to_owned_input(&self) -> StrategyInputV1 {
+        StrategyInputV1 {
+            action_before: self.action_before.to_owned_read(),
+            markets: self
+                .markets
+                .iter()
+                .map(|f| FrozenMarketReadV1 {
+                    observation: f.observation.clone(),
+                    rule_context: f.rule_context.clone(),
+                })
+                .collect(),
+            trade_economics: self.trade_economics.clone(),
+        }
+    }
+    pub fn calculate_borrowed<S: StrategyV1>(
+        &self,
+        strategy: &mut S,
+        at: i64,
+    ) -> Result<StrategyCalculationV1<S::Diagnostics>, S::Error> {
+        Ok(StrategyCalculationV1 {
+            input_cutoff: self.action_before.cutoff().clone(),
+            calculation_started_at_utc_ms: at,
+            output: strategy.decide_borrowed(self, at)?,
+        })
+    }
+}
 #[derive(Debug)]
 pub struct SentIntentReceiptV1 {
     pub context: RequestContextV2,
@@ -233,6 +333,31 @@ pub enum QualifiedStrategyDispatchV1<D> {
     },
 }
 impl SharedExecutionV2 {
+    /// 先领取/登记同一截止，再只读借用；返回值释放前不能推进SharedExecution或driver。
+    pub fn strategy_borrowed_observation_input<'a>(
+        &'a mut self,
+        driver: &'a mut PublicConsumptionStateV1,
+        details: bool,
+    ) -> Result<Option<BorrowedStrategyInputV1<'a>>, LedgerErrorV1> {
+        self.apply_closed()?;
+        let Some(cutoff) = driver.observation_cutoff() else {
+            return Ok(None);
+        };
+        let frames = driver.frames_at_observation();
+        self.observe_group(&frames);
+        let Some(action_before) = self.borrow_action_before(cutoff, &frames) else {
+            return Ok(None);
+        };
+        Ok(Some(StrategyInputV1 {
+            action_before,
+            trade_economics: if details {
+                self.freeze_trade_economics()
+            } else {
+                Vec::new()
+            },
+            markets: frames,
+        }))
+    }
     pub fn strategy_input(
         &mut self,
         driver: &mut PublicConsumptionStateV1,
@@ -306,6 +431,28 @@ impl SharedExecutionV2 {
                 Vec::new()
             },
         })
+    }
+    fn current_strategy_read<'a>(
+        &'a self,
+        cutoff: TrustedGroupDecisionCutoffV1,
+        frames: Vec<PublicObservationFrameV1<'a>>,
+        details: bool,
+        borrowed: bool,
+    ) -> Option<CurrentRead<'a>> {
+        if borrowed {
+            Some(CurrentRead::Borrowed(StrategyCurrentReadV1 {
+                action_before: self.borrow_action_before(cutoff, &frames)?,
+                trade_economics: if details {
+                    self.freeze_trade_economics()
+                } else {
+                    Vec::new()
+                },
+                markets: frames,
+            }))
+        } else {
+            self.current_read_from_frames(cutoff, frames, details)
+                .map(CurrentRead::Owned)
+        }
     }
     fn freeze_trade_economics(&self) -> Vec<FrozenTradeEconomicsV1> {
         self.ledger()
@@ -385,22 +532,23 @@ impl SharedExecutionV2 {
                     continue;
                 }
                 let input = input.get_or_insert_with(|| {
-                    self.current_read_from_frames(
+                    self.current_strategy_read(
                         frames[0].decision_cutoff.clone(),
                         frames.to_vec(),
                         strategy.requires_trade_economics_details(),
+                        strategy.uses_borrowed_input(),
                     )
                     .expect("原已开户观察")
                 });
                 calls += 1;
                 if let IntentQualificationV1::Invalidated(reason) =
-                    strategy.qualify_intent(input, calculation, index, at)?
+                    input.qualify(strategy, calculation, index, at)?
                 {
                     let result = InvalidatedBatchV1 {
                         sent: vec![],
                         invalidated_intent_index: index,
                         reason,
-                        observed_cutoff: input.action_before.cutoff().clone(),
+                        observed_cutoff: input.cutoff().clone(),
                         detected_at_utc_ms: at,
                         release_errors: vec![],
                     };
@@ -434,14 +582,15 @@ impl SharedExecutionV2 {
                 |execution, current_decision, index, at| {
                     let frames = current_decision.frames_at_observation();
                     let input = execution
-                        .current_read_from_frames(
+                        .current_strategy_read(
                             frames[0].decision_cutoff.clone(),
                             frames,
                             strategy.requires_trade_economics_details(),
+                            strategy.uses_borrowed_input(),
                         )
                         .expect("合法观察与已开户账本");
                     qualification_calls += 1;
-                    strategy.qualify_intent(&input, &calculation.calculation, index, at)
+                    input.qualify(strategy, &calculation.calculation, index, at)
                 },
             )
             .await;

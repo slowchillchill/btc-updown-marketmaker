@@ -1191,33 +1191,59 @@ where
             }
             if pending.is_none() && start_at == Some(at) {
                 start_at = None;
-                let input = if health_enabled {
-                    measure_stage!(
+                let calculation = if health_enabled && strategy.uses_borrowed_input() {
+                    let input = measure_stage!(
                         stages,
                         "strategy_input_assembly",
-                        shared.strategy_observation_input_with_trade_details(
+                        shared.strategy_borrowed_observation_input(
                             &mut driver,
-                            strategy.requires_trade_economics_details(),
+                            strategy.requires_trade_economics_details()
                         )
                     )
+                    .map_err(HistoricalFailureCauseV1::Ledger)?;
+                    input
+                        .map(|input| {
+                            measure_stage!(
+                                stages,
+                                "calculation_including_cutoff_copy_and_decide",
+                                input.calculate_borrowed(strategy, at)
+                            )
+                        })
+                        .transpose()
+                        .map_err(HistoricalFailureCauseV1::Strategy)?
                 } else {
-                    measure_stage!(
-                        stages,
-                        "strategy_input_assembly",
-                        shared.strategy_input_with_trade_details(
-                            &mut driver,
-                            strategy.requires_trade_economics_details(),
+                    let input = if health_enabled {
+                        measure_stage!(
+                            stages,
+                            "strategy_input_assembly",
+                            shared.strategy_observation_input_with_trade_details(
+                                &mut driver,
+                                strategy.requires_trade_economics_details(),
+                            )
                         )
-                    )
-                }
-                .map_err(HistoricalFailureCauseV1::Ledger)?;
-                if let Some(input) = input {
-                    let calculation = measure_stage!(
-                        stages,
-                        "calculation_including_cutoff_copy_and_decide",
-                        input.calculate(strategy, at)
-                    )
-                    .map_err(HistoricalFailureCauseV1::Strategy)?;
+                    } else {
+                        measure_stage!(
+                            stages,
+                            "strategy_input_assembly",
+                            shared.strategy_input_with_trade_details(
+                                &mut driver,
+                                strategy.requires_trade_economics_details(),
+                            )
+                        )
+                    }
+                    .map_err(HistoricalFailureCauseV1::Ledger)?;
+                    input
+                        .map(|input| {
+                            measure_stage!(
+                                stages,
+                                "calculation_including_cutoff_copy_and_decide",
+                                input.calculate(strategy, at)
+                            )
+                        })
+                        .transpose()
+                        .map_err(HistoricalFailureCauseV1::Strategy)?
+                };
+                if let Some(calculation) = calculation {
                     if let Some(counts) = research.as_mut().and_then(|s| s.decisions.as_mut()) {
                         counts.record(&calculation.output);
                     }

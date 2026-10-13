@@ -106,7 +106,10 @@ fn limit_leg(i: &ModelIntentV1, ordinal: u16) -> Option<(&ConditionId, &BuyLegIn
     }
 }
 fn ord_fee(
-    input: &StrategyInputV1,
+    input: &StrategyInputV1<
+        impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+        impl StrategyMarketReadV1,
+    >,
     id: Option<&::execution_normalization::MemoryLogicalIdentityV1>,
 ) -> Result<Option<R>, StrategyErrorV1> {
     let Some(id) = id else {
@@ -196,8 +199,8 @@ struct PairMarketRead<'a> {
     rule_context: &'a PublicTradingRuleContextV1,
 }
 impl<'a> PairMarketRead<'a> {
-    fn from_frozen(f: &'a FrozenMarketReadV1) -> Result<Self, StrategyErrorV1> {
-        let o = &f.observation;
+    fn from_read(f: &'a impl StrategyMarketReadV1) -> Result<Self, StrategyErrorV1> {
+        let o = f.observation();
         let up = o
             .assets
             .iter()
@@ -218,7 +221,7 @@ impl<'a> PairMarketRead<'a> {
                 assets: [up, down],
                 top_asks: Default::default(),
             },
-            rule_context: &f.rule_context,
+            rule_context: f.rule_context(),
         })
     }
 }
@@ -272,11 +275,89 @@ impl StrategyV1 for ComplementaryPairV1 {
         // 只登记真实已发前缀；尚未尝试的利润支持不形成策略占用。
         self.record_profit_allocations(calculation, &result.sent, None);
     }
+    fn uses_borrowed_input(&self) -> bool {
+        true
+    }
     fn decide(
         &mut self,
         input: &StrategyInputV1,
         now: i64,
     ) -> Result<StrategyOutputV1<Self::Diagnostics>, Self::Error> {
+        self.decide_input(input, now)
+    }
+    fn decide_borrowed(
+        &mut self,
+        input: &BorrowedStrategyInputV1<'_>,
+        now: i64,
+    ) -> Result<StrategyOutputV1<Self::Diagnostics>, Self::Error> {
+        self.decide_input(input, now)
+    }
+    fn qualify_intent_borrowed(
+        &mut self,
+        input: &BorrowedStrategyCurrentReadV1<'_>,
+        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        index: usize,
+        at: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        Ok(self.qualify_health(input, calculation, index, at))
+    }
+    fn dispatched(
+        &mut self,
+        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+    ) {
+        let (sent, uncertain) = match result {
+            Ok(receipts) => (receipts.as_slice(), None),
+            Err(e) => (
+                e.sent.as_slice(),
+                (e.failed_request_effect == Some(RequestEffectV1::MayHaveRequestEffect))
+                    .then_some(e.attempted_intent_index)
+                    .flatten(),
+            ),
+        };
+        self.record_profit_allocations(calculation, sent, uncertain);
+    }
+}
+
+impl ComplementaryPairV1 {
+    fn record_profit_allocations(
+        &mut self,
+        calculation: &StrategyCalculationV1<ComplementaryPairDiagnosticV1>,
+        sent: &[SentIntentReceiptV1],
+        uncertain: Option<usize>,
+    ) {
+        let StrategyOutputV1::Continue {
+            diagnostics,
+            intents,
+            ..
+        } = &calculation.output
+        else {
+            return;
+        };
+        for allocation in &diagnostics.profit_allocations {
+            if sent
+                .iter()
+                .any(|receipt| receipt.context.global_request_id == allocation.global_request_id)
+                || uncertain
+                    .and_then(|i| intents.get(i))
+                    .is_some_and(|i| i.context.global_request_id == allocation.global_request_id)
+            {
+                self.profit_pending
+                    .insert(allocation.global_request_id.clone(), allocation.clone());
+            }
+        }
+    }
+}
+
+impl ComplementaryPairV1 {
+    fn decide_input(
+        &mut self,
+        input: &StrategyInputV1<
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl StrategyMarketReadV1,
+        >,
+        now: i64,
+    ) -> Result<StrategyOutputV1<ComplementaryPairDiagnosticV1>, StrategyErrorV1> {
         let (pnl, equity) = Self::profit_and_equity(input)?;
         let occupied = self.reconcile_profit(input)?;
         let mut profit = pnl.clone().max(R::zero()).sub(&occupied).max(R::zero());
@@ -294,7 +375,7 @@ impl StrategyV1 for ComplementaryPairV1 {
         let frames = input
             .markets
             .iter()
-            .map(PairMarketRead::from_frozen)
+            .map(PairMarketRead::from_read)
             .collect::<Result<Vec<_>, _>>()?;
         let states = frames
             .iter()
@@ -584,51 +665,5 @@ impl StrategyV1 for ComplementaryPairV1 {
             next_evaluation_at_utc_ms: next,
             diagnostics: diagnostic,
         })
-    }
-    fn dispatched(
-        &mut self,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
-        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
-    ) {
-        let (sent, uncertain) = match result {
-            Ok(receipts) => (receipts.as_slice(), None),
-            Err(e) => (
-                e.sent.as_slice(),
-                (e.failed_request_effect == Some(RequestEffectV1::MayHaveRequestEffect))
-                    .then_some(e.attempted_intent_index)
-                    .flatten(),
-            ),
-        };
-        self.record_profit_allocations(calculation, sent, uncertain);
-    }
-}
-
-impl ComplementaryPairV1 {
-    fn record_profit_allocations(
-        &mut self,
-        calculation: &StrategyCalculationV1<ComplementaryPairDiagnosticV1>,
-        sent: &[SentIntentReceiptV1],
-        uncertain: Option<usize>,
-    ) {
-        let StrategyOutputV1::Continue {
-            diagnostics,
-            intents,
-            ..
-        } = &calculation.output
-        else {
-            return;
-        };
-        for allocation in &diagnostics.profit_allocations {
-            if sent
-                .iter()
-                .any(|receipt| receipt.context.global_request_id == allocation.global_request_id)
-                || uncertain
-                    .and_then(|i| intents.get(i))
-                    .is_some_and(|i| i.context.global_request_id == allocation.global_request_id)
-            {
-                self.profit_pending
-                    .insert(allocation.global_request_id.clone(), allocation.clone());
-            }
-        }
     }
 }
