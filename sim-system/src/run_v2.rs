@@ -765,6 +765,10 @@ struct UniqueSessionStateV2 {
     next_projection_batch_sequence: u64,
     hidden_platform_frontier: LogicalPathFrontierV2,
     public_visibility_frontier: LogicalPathFrontierV2,
+    #[serde(default)]
+    gamma_resolution_policy: crate::public_consumption::GammaResolutionPolicyV1,
+    #[serde(default)]
+    pending_gamma_resolutions: BTreeMap<String, crate::market::QualifiedMarketResolutionV2>,
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -923,6 +927,8 @@ impl UniqueSessionStateV2 {
             next_projection_batch_sequence,
             hidden_platform_frontier,
             public_visibility_frontier,
+            gamma_resolution_policy,
+            pending_gamma_resolutions,
         } = self;
         let (execution_state, result) = apply(execution_state)?;
         Ok((
@@ -942,6 +948,8 @@ impl UniqueSessionStateV2 {
                 next_projection_batch_sequence,
                 hidden_platform_frontier,
                 public_visibility_frontier,
+                gamma_resolution_policy,
+                pending_gamma_resolutions,
             },
             result,
         ))
@@ -1462,6 +1470,26 @@ fn reduce_actor_input_v2(
                 .execution_state
                 .configure_cancel_scenario(scenario, input_sequence);
 
+            Ok((
+                state,
+                BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2::default()),
+            ))
+        }
+        BusinessInputV2::GammaResolutionPolicy(policy) => {
+            let mut state = state;
+            let Some(session) = state.session.as_mut() else {
+                return Err(unaccepted_business_input_v2(
+                    state,
+                    SimRunActorErrorV2::SessionNotCreated,
+                ));
+            };
+            if session.market_enrollment.business_input_started {
+                return Err(unaccepted_business_input_v2(
+                    state,
+                    SimRunActorErrorV2::CompletionNotReady("Gamma政策须在业务供料前绑定"),
+                ));
+            }
+            session.gamma_resolution_policy = *policy;
             Ok((
                 state,
                 BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2::default()),
@@ -2541,6 +2569,9 @@ where
             BusinessInputV2::CancelScenario(operation)
         }
         LoggedBusinessInputV2::Settlement(operation) => BusinessInputV2::Settlement(operation),
+        LoggedBusinessInputV2::GammaResolutionPolicy(policy) => {
+            BusinessInputV2::GammaResolutionPolicy(policy)
+        }
         LoggedBusinessInputV2::HiddenStepBucket(_) => {
             return Err(SimRunActorErrorV2::CompletionNotReady(
                 "隐藏桶恢复需要原记录读取器",
@@ -5532,7 +5563,17 @@ fn next_required_logical_drive_v2(
         gtd_at_utc_ms: session.execution_state.next_gtd_deadline_at_utc_ms(rules),
         finality_at_utc_ms: session.execution_state.next_scheduled_finality_at_utc_ms(),
         rebate_at_utc_ms: session.execution_state.next_rebate_clock_at_utc_ms(),
-        settlement_at_utc_ms: session.execution_state.next_settlement_clock_at_utc_ms(),
+        settlement_at_utc_ms: session
+            .execution_state
+            .next_settlement_clock_at_utc_ms()
+            .into_iter()
+            .chain(
+                session
+                    .pending_gamma_resolutions
+                    .values()
+                    .filter_map(|r| r.resolution_public_consumed_at_utc_ms),
+            )
+            .min(),
         mutation_at_utc_ms: session
             .mutation_requests
             .pending_actions
@@ -6061,6 +6102,29 @@ pub(crate) fn drive_business_input_at_v2(
         )?;
     }
     state = advance_role_time_at_v2(state, path, drives_execution, logical_at_utc_ms)?;
+    if path == MarketEventPathV1::HiddenPlatform && drives_execution {
+        // 隐藏逻辑已实际到达消费时刻，才接纳这一窄终态；此前的订单/行情状态不前移。
+        let session = state.session.as_mut().unwrap();
+        let hidden = session.hidden_platform_markets.as_mut().unwrap();
+        for (condition, resolution) in &session.pending_gamma_resolutions {
+            let consumed = resolution
+                .resolution_public_consumed_at_utc_ms
+                .expect("待处理Gamma保存真实消费依据");
+            if consumed <= logical_at_utc_ms {
+                hidden
+                    .accept_gamma_resolution(
+                        condition,
+                        &resolution.resolution_event_id,
+                        &resolution.terminal,
+                        resolution.parsed_payouts,
+                        consumed,
+                    )
+                    .map_err(|e| {
+                        BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::MarketEvent(e))
+                    })?;
+            }
+        }
+    }
     if let Some(bucket) = &bucket {
         let (next, effects) = reduce_market_event_slice_v2(
             state,
@@ -6234,7 +6298,71 @@ pub(crate) fn drive_business_input_at_v2(
             }
         }
     }
+    apply_ready_gamma_resolutions_v1(&mut state, finality_policy, &mut output)?;
     Ok((state, BusinessReducerOutputV2::LogicalDrive(output)))
+}
+
+fn apply_ready_gamma_resolutions_v1(
+    state: &mut BusinessReducerStateV2,
+    finality_policy: &TradeFinalityPolicyV2,
+    output: &mut LogicalDriveOutputV2,
+) -> Result<(), BusinessReductionErrorV2> {
+    let session = state.session.as_mut().expect("逻辑驱动已确认会话");
+    let Some(closed) = session.recording_closed_through() else {
+        return Ok(());
+    };
+    let ready: Vec<_> = session
+        .pending_gamma_resolutions
+        .iter()
+        .filter(|(_, r)| {
+            r.resolution_public_consumed_at_utc_ms
+                .is_some_and(|at| at <= closed)
+        })
+        .map(|(condition, _)| condition.clone())
+        .collect();
+    for condition in ready {
+        let resolution = session
+            .pending_gamma_resolutions
+            .remove(&condition)
+            .unwrap();
+        if let Some(hidden) = session.hidden_platform_markets.as_mut() {
+            hidden
+                .accept_gamma_resolution(
+                    &condition,
+                    &resolution.resolution_event_id,
+                    &resolution.terminal,
+                    resolution.parsed_payouts,
+                    resolution
+                        .resolution_public_consumed_at_utc_ms
+                        .expect("Gamma消费依据"),
+                )
+                .map_err(|e| BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::MarketEvent(e)))?;
+        }
+        let execution = session
+            .execution_state
+            .apply_qualified_resolution(&condition, &resolution, closed, finality_policy)
+            .map_err(|e| BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(e)))?;
+        if execution.query_projection_changed() {
+            session.query_state.advance_revision();
+        }
+        output.lifecycle.extend(
+            execution
+                .into_lifecycle_feedback()
+                .map_err(|e| BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(e)))?,
+        );
+        if let Some(terminal) = session
+            .execution_state
+            .redeemed_market_resolution(&condition)
+        {
+            session
+                .public_markets
+                .mark_resolution_terminal_if_qualified(&condition, terminal);
+            if let Some(hidden) = session.hidden_platform_markets.as_mut() {
+                hidden.mark_resolution_terminal_if_qualified(&condition, terminal);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::result_large_err)]
@@ -6309,6 +6437,9 @@ fn reduce_business_input_v2(
                 next_projection_batch_sequence: 1,
                 hidden_platform_frontier: LogicalPathFrontierV2::default(),
                 public_visibility_frontier: LogicalPathFrontierV2::default(),
+                gamma_resolution_policy:
+                    crate::public_consumption::GammaResolutionPolicyV1::default(),
+                pending_gamma_resolutions: BTreeMap::new(),
             });
 
             BusinessReducerOutputV2::CreateSession(CreateSessionControlResultV2 {
@@ -6564,6 +6695,21 @@ fn reduce_normalized_market_slice_v1(
                 })?
         };
 
+        if let Some(reason) = &market_application.resolution_invalidation_reason {
+            if session.gamma_resolution_policy
+                == GammaResolutionPolicyV1::QualifiedPublicConsumption
+            {
+                session
+                    .pending_gamma_resolutions
+                    .remove(&event.market.condition_id.0);
+                if path == MarketEventPathV1::PublicVisibility {
+                    session.execution_state.invalidate_qualified_resolution(
+                        &event.market.condition_id.0,
+                        reason.clone(),
+                    );
+                }
+            }
+        }
         if drives_execution {
             let mut execution = session
                 .execution_state
@@ -6583,7 +6729,12 @@ fn reduce_normalized_market_slice_v1(
                     .execution_state
                     .invalidate_qualified_resolution(&event.market.condition_id.0, reason_code);
             }
-            if let Some(qualified_resolution) = market_application.qualified_resolution {
+            if let Some(qualified_resolution) = market_application.qualified_resolution
+                && qualified_resolution
+                    .resolution_source_event_at_utc_ms
+                    .is_some()
+            {
+                // 已知平台源时间保持原逐记录路径；Gamma等待本毫秒完全闭合。
                 execution.merge(
                     session
                         .execution_state
@@ -8038,6 +8189,8 @@ mod tests {
             next_projection_batch_sequence,
             hidden_platform_frontier,
             public_visibility_frontier,
+            gamma_resolution_policy,
+            pending_gamma_resolutions,
         } = state.session.take().expect("BUY 候选必须拥有唯一会话");
         let (execution_state, disposition) = execution_state
             .apply_buy_order(input, rules, finality_policy)
@@ -8063,6 +8216,8 @@ mod tests {
             next_projection_batch_sequence,
             hidden_platform_frontier,
             public_visibility_frontier,
+            gamma_resolution_policy,
+            pending_gamma_resolutions,
         });
         (state, accepted)
     }
@@ -8090,6 +8245,8 @@ mod tests {
             next_projection_batch_sequence,
             hidden_platform_frontier,
             public_visibility_frontier,
+            gamma_resolution_policy,
+            pending_gamma_resolutions,
         } = state.session.take().expect("返佣时钟候选必须拥有唯一会话");
         let (execution_state, effects) = execution_state
             .advance_next_rebate_clock_at(platform_effective_at_utc_ms)
@@ -8111,6 +8268,8 @@ mod tests {
             next_projection_batch_sequence,
             hidden_platform_frontier,
             public_visibility_frontier,
+            gamma_resolution_policy,
+            pending_gamma_resolutions,
         });
         (state, effects)
     }
@@ -8140,6 +8299,8 @@ mod tests {
             next_projection_batch_sequence,
             hidden_platform_frontier,
             public_visibility_frontier,
+            gamma_resolution_policy,
+            pending_gamma_resolutions,
         } = state.session.take().expect("最终性候选必须拥有唯一会话");
         let (execution_state, effects) = execution_state
             .advance_next_scheduled_finality_at(platform_event_at_utc_ms, finality_policy, rules)
@@ -8164,6 +8325,8 @@ mod tests {
             next_projection_batch_sequence,
             hidden_platform_frontier,
             public_visibility_frontier,
+            gamma_resolution_policy,
+            pending_gamma_resolutions,
         });
         (state, effects)
     }
@@ -19661,7 +19824,7 @@ fn reduce_public_group_v1(
                             MarketEventPathV1::PublicVisibility,
                             at,
                             &[header],
-                            &[normalized],
+                            std::slice::from_ref(&normalized),
                             rules,
                             finality_policy,
                         )
@@ -19699,13 +19862,43 @@ fn reduce_public_group_v1(
                         MarketEventPathV1::PublicVisibility,
                         at,
                         &[header],
-                        &[normalized],
+                        std::slice::from_ref(&normalized),
                         rules,
                         finality_policy,
                     )
                     .map_err(adapt)?;
                     state = next;
                     effects.execution.extend(applied.execution);
+                    let session = state.session.as_mut().unwrap();
+                    if session.gamma_resolution_policy
+                        == GammaResolutionPolicyV1::QualifiedPublicConsumption
+                        && fact.dependency_time.source_event_at_utc_ms.is_none()
+                        && fact.direct_sources.iter().any(|source| {
+                            source.source_kind
+                                == contracts::CanonicalSourceKindV2::PolymarketMarketMetadata
+                        })
+                        && let crate::market::NormalizedMarketEventV2::MarketResolutionTerminal {
+                            terminal,
+                            parsed_payouts,
+                        } = normalized
+                    {
+                        if let Some(qualified) = session
+                            .public_markets
+                            .accept_gamma_resolution(
+                                &market.condition_id.0,
+                                &identity,
+                                terminal,
+                                parsed_payouts,
+                                at,
+                            )
+                            .map_err(fail)?
+                        {
+                            session
+                                .pending_gamma_resolutions
+                                .entry(market.condition_id.0.clone())
+                                .or_insert(qualified);
+                        }
+                    }
                 }
             }
             contracts::PublicBusinessPayloadV1::ReferenceFact(_)
@@ -19846,6 +20039,20 @@ impl PublicSimExecutionV1 {
         }
         Ok(())
     }
+    /// 显式绑定新 Gamma 假设；记录及恢复沿唯一 SIM 输入链。
+    pub fn configure_gamma_resolution_policy_v1(
+        &mut self,
+        policy: GammaResolutionPolicyV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let committed = self
+            .actor
+            .commit_group(vec![BusinessInputV2::GammaResolutionPolicy(policy)])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// 有限模拟场景沿原输入记录持久化；真实业务不从脚本直接写 Ledger。
     pub fn configure_resolution_redeem_v1(
         &mut self,

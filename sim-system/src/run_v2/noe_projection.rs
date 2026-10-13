@@ -1009,6 +1009,7 @@ where
                 condition_id,
                 resolution_event_id,
                 resolution_source_event_at_utc_ms,
+                resolution_public_consumed_at_utc_ms,
                 account_delta,
                 ..
             } => (
@@ -1016,6 +1017,7 @@ where
                     condition_id: condition_id.clone(),
                     resolution_identity: self.entity_resolution(resolution_event_id)?,
                     resolution_source_event_at_utc_ms: *resolution_source_event_at_utc_ms,
+                    resolution_public_consumed_at_utc_ms: *resolution_public_consumed_at_utc_ms,
                 },
                 account_delta.as_ref(),
             ),
@@ -2822,7 +2824,8 @@ mod tests {
                 SettlementLifecycleEventV2::AutoRedeemApplied {
                     condition_id: ConditionId("condition-noe-58".to_owned()),
                     resolution_event_id: "resolution-noe-58".to_owned(),
-                    resolution_source_event_at_utc_ms: 100,
+                    resolution_source_event_at_utc_ms: Some(100),
+                    resolution_public_consumed_at_utc_ms: None,
                     resolution: MarketResolutionTerminalV3::Resolved {
                         winning_asset_id: "token-up-noe-58".to_owned(),
                         winning_outcome: "Up".to_owned(),

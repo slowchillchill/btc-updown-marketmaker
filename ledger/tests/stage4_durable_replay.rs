@@ -437,7 +437,8 @@ fn committed_effect_recovers_without_noe_and_keeps_both_idempotence_domains() {
         SourceNeutralSettlementLifecycleResultV1::AutoRedeemApplied {
             condition_id: ConditionId(MARKET_B.to_owned()),
             resolution_identity: identity("resolution-golden-b"),
-            resolution_source_event_at_utc_ms: 9_000,
+            resolution_source_event_at_utc_ms: Some(9_000),
+            resolution_public_consumed_at_utc_ms: None,
         },
     );
     let redeem = noe.commit_market_transition(

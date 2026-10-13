@@ -746,7 +746,11 @@ pub enum SettlementLifecycleEventV2 {
     AutoRedeemApplied {
         condition_id: ConditionId,
         resolution_event_id: String,
-        resolution_source_event_at_utc_ms: i64,
+        /// 原判定的平台源时间；Gamma仍为None，已知WS仍序列化为原整数。
+        resolution_source_event_at_utc_ms: Option<i64>,
+        /// 仅新Gamma政策记录成功公开消费的逻辑时刻；不是平台源时间或实际平台兑付时间。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution_public_consumed_at_utc_ms: Option<i64>,
         resolution: MarketResolutionTerminalV3,
         redeemed_outcome_balances: Vec<PlatformOutcomeBalanceV1>,
         redeemed_pusd: ExactDecimal,
