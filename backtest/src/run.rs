@@ -752,30 +752,36 @@ where
                 // 无事件小时先读取当前已完成事实，再执行原范围尾部。
                 if let Some(summary) = &mut research {
                     while summary.next_boundary < end {
-                        day_economics.finish_duration(summary.next_boundary);
+                        let boundary = summary.next_boundary;
+                        day_economics.finish_duration(boundary);
                         summary.push(research_snapshot(
                             &driver,
                             &shared,
-                            summary.next_boundary,
+                            boundary,
                             &health_summary,
                             pending.as_ref().map(|p| p.record.clone()),
                             &day_economics,
                         ));
+                        #[cfg(feature = "stage-timing")]
+                        stages.emit_hour(boundary);
                     }
                 }
                 break;
             };
             if let Some(summary) = &mut research {
                 while summary.next_boundary <= at {
-                    day_economics.finish_duration(summary.next_boundary);
+                    let boundary = summary.next_boundary;
+                    day_economics.finish_duration(boundary);
                     summary.push(research_snapshot(
                         &driver,
                         &shared,
-                        summary.next_boundary,
+                        boundary,
                         &health_summary,
                         pending.as_ref().map(|p| p.record.clone()),
                         &day_economics,
                     ));
+                    #[cfg(feature = "stage-timing")]
+                    stages.emit_hour(boundary);
                 }
             }
             let operating = operating_start.is_none_or(|start| at >= start);
@@ -1383,15 +1389,18 @@ where
         }
         if let Some(summary) = &mut research {
             while summary.next_boundary <= end {
-                day_economics.finish_duration(summary.next_boundary);
+                let boundary = summary.next_boundary;
+                day_economics.finish_duration(boundary);
                 summary.push(research_snapshot(
                     &driver,
                     &shared,
-                    summary.next_boundary,
+                    boundary,
                     &health_summary,
                     pending.as_ref().map(|p| p.record.clone()),
                     &day_economics,
                 ));
+                #[cfg(feature = "stage-timing")]
+                stages.emit_hour(boundary);
             }
         }
         day_economics.finish_duration(end);
