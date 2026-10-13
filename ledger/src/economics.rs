@@ -14,6 +14,9 @@ type R = EconomicRational;
 #[path = "economics/read_index.rs"]
 mod read_index;
 use read_index::EconomicReadIndex;
+#[path = "economics/necessary.rs"]
+mod necessary;
+pub use necessary::*;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Pool {
     pub quantity: Decimal,
@@ -87,7 +90,7 @@ pub(crate) struct CashAttribution {
     pub unpaid_taker: Decimal,
     pub unpaid_settlement: Decimal,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 pub(crate) struct EconomicsState {
     pub external_cash: BTreeMap<Identity, bool>,
     pub cash: CashAttribution,
@@ -99,6 +102,33 @@ pub(crate) struct EconomicsState {
     pub unapportioned_trades: BTreeMap<Identity, (bool, Decimal)>,
     #[serde(default)]
     read_index: Option<EconomicReadIndex>,
+}
+impl<'de> Deserialize<'de> for EconomicsState {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Facts {
+            external_cash: BTreeMap<Identity, bool>,
+            cash: CashAttribution,
+            markets: BTreeMap<String, Market>,
+            trades: BTreeMap<Identity, Trade>,
+            days: BTreeMap<(RebateKindV1, i64), RebateDay>,
+            costs: BTreeMap<Identity, Cost>,
+            unapportioned_trades: BTreeMap<Identity, (bool, Decimal)>,
+        }
+        let facts = Facts::deserialize(d)?;
+        let mut state = Self {
+            external_cash: facts.external_cash,
+            cash: facts.cash,
+            markets: facts.markets,
+            trades: facts.trades,
+            days: facts.days,
+            costs: facts.costs,
+            unapportioned_trades: facts.unapportioned_trades,
+            read_index: None,
+        };
+        state.read_index = Some(EconomicReadIndex::from_state(&state));
+        Ok(state)
+    }
 }
 impl Default for EconomicsState {
     fn default() -> Self {
@@ -934,6 +964,50 @@ impl EconomicsState {
         Ok(())
     }
     pub(crate) fn commit(&mut self, patch: EconomicsPatch) {
+        let mut affected = std::collections::BTreeSet::new();
+        if self
+            .read_index
+            .as_ref()
+            .is_some_and(|i| i.account.get().is_some())
+        {
+            affected.extend(patch.markets.iter().map(|(id, _)| id.clone()));
+            affected.extend(
+                patch
+                    .trades
+                    .iter()
+                    .map(|(_, t)| t.fact.condition_id.0.clone()),
+            );
+            let add_day_markets = |affected: &mut std::collections::BTreeSet<String>,
+                                   day: &RebateDay| {
+                if let Some(totals) = &day.contribution_totals {
+                    affected.extend(totals.keys().cloned());
+                } else {
+                    affected.extend(
+                        day.contributions
+                            .iter()
+                            .map(|(_, c)| c.condition_id.0.clone()),
+                    );
+                }
+            };
+            for (key, update) in &patch.day_updates {
+                match update {
+                    RebateDayUpdate::Contributions { additions } => {
+                        affected.extend(additions.iter().map(|(_, c)| c.condition_id.0.clone()));
+                    }
+                    RebateDayUpdate::Existing(day) => {
+                        if let Some(old) = self.days.get(key) {
+                            add_day_markets(&mut affected, old);
+                        }
+                        add_day_markets(&mut affected, day);
+                    }
+                    RebateDayUpdate::Finalized { .. } | RebateDayUpdate::Paid { .. } => {
+                        if let Some(day) = self.days.get(key) {
+                            add_day_markets(&mut affected, day);
+                        }
+                    }
+                }
+            }
+        }
         let mut index = self
             .read_index
             .take()
@@ -1023,6 +1097,11 @@ impl EconomicsState {
                     }
                     *day = previous;
                 }
+            }
+        }
+        if let Some(account) = index.account.get_mut() {
+            for id in affected {
+                account.replace(&id, self);
             }
         }
         self.read_index = Some(index);
@@ -1237,6 +1316,9 @@ impl LedgerEconomicReadV1<'_> {
             }
         }
         ExecutionReadValueV1::Known(fee.public())
+    }
+    pub fn into_base(self) -> crate::projection::LedgerProjectionV2 {
+        self.base
     }
     pub fn base(&self) -> &crate::projection::LedgerProjectionV2 {
         &self.base

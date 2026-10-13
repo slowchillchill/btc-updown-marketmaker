@@ -793,6 +793,13 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
     let mut shared = SharedExecutionV1::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
+    let initial = shared.ledger().necessary_read_v1().unwrap();
+    assert_eq!(initial.account().confirmed_net_pnl.public(), r("0", "1"));
+    assert_eq!(
+        initial.account().confirmed_unpaid_rebate.public(),
+        r("0", "1")
+    );
+    assert_eq!(initial.funds_markets().count(), 0);
     let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
     let mut driver = FinitePublicConsumptionV1::new(execution, source, "rebate".into());
     for _ in 0..8 {
@@ -826,6 +833,19 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
     }
     while driver.next_group().unwrap().is_some() {
         shared.apply_closed().unwrap();
+        // 原完整读取与增量读取必须沿同一经济前缀；初始化在成交前，覆盖日期更新及支付。
+        let totals = shared.ledger().necessary_read_v1().unwrap();
+        let read = shared.ledger().economic_read().unwrap();
+        let mut pnl = EconomicRational::zero();
+        let mut unpaid = EconomicRational::zero();
+        for m in read.market_totals() {
+            pnl = pnl.add(&EconomicRational::try_from(&m.confirmed_net_pnl_pusd).unwrap());
+            for b in m.rebates {
+                unpaid = unpaid.add(&EconomicRational::try_from(&b.confirmed_unpaid_pusd).unwrap());
+            }
+        }
+        assert_eq!(totals.account().confirmed_net_pnl, pnl);
+        assert_eq!(totals.account().confirmed_unpaid_rebate, unpaid);
         if driver
             .decision()
             .unwrap()
@@ -862,9 +882,27 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
         assert_eq!(market.confirmed_net_pnl_pusd, expected);
         assert_eq!(market.rebates[0].confirmed_unpaid_pusd, r("0", "1"));
     }
+    let totals = shared.ledger().necessary_read_v1().unwrap();
+    assert_eq!(totals.account().confirmed_net_pnl.public(), r("1", "1"));
+    assert_eq!(
+        totals.account().confirmed_unpaid_rebate.public(),
+        r("0", "1")
+    );
+    let expected_totals = totals.account().clone();
     let expected_markets: Vec<_> = read.market_totals().collect();
     driver.stop_and_drain().unwrap();
     let restored = LedgerWriterV1::open_durable(temp.path().join("ledger")).unwrap();
+    assert_eq!(
+        restored.necessary_read_v1().unwrap().account(),
+        &expected_totals
+    );
+    let mut checkpoint = Vec::new();
+    restored.write_checkpoint(&mut checkpoint).unwrap();
+    let restored_checkpoint = LedgerWriterV1::restore_checkpoint(checkpoint.as_slice()).unwrap();
+    assert_eq!(
+        restored_checkpoint.necessary_read_v1().unwrap().account(),
+        &expected_totals
+    );
     let read = restored.economic_read().unwrap();
     assert_eq!(read.market_totals().collect::<Vec<_>>(), expected_markets);
     let day = read

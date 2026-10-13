@@ -7,6 +7,7 @@ impl ComplementaryPairV1 {
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
+            impl ActionAccountReadV1,
         >,
         f: &PairMarketRead<'_>,
         now: i64,

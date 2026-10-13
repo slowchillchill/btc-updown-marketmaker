@@ -7,7 +7,9 @@ impl ComplementaryPairV1 {
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
+            impl ActionAccountReadV1,
         >,
+        reads: &DecisionReads<'_>,
         f: &PairMarketRead<'_>,
         now: i64,
         s: &MarketState,
@@ -64,7 +66,7 @@ impl ComplementaryPairV1 {
             })
             .try_fold(R::zero(), |sum, allocation| {
                 Ok::<_, StrategyErrorV1>(
-                    sum.add(&Self::profit_bound(input, allocation)?.unwrap_or_else(R::zero)),
+                    sum.add(&Self::profit_bound(input, reads, allocation)?.unwrap_or_else(R::zero)),
                 )
             })?;
         let existing_quantity = s

@@ -266,6 +266,14 @@ fn material(root: &Path) -> Material {
     material_for_notrade(root, false, false)
 }
 fn material_for_notrade(root: &Path, missing_price: bool, follow_up: bool) -> Material {
+    material_for_history(root, missing_price, follow_up, 863)
+}
+fn material_for_history(
+    root: &Path,
+    missing_price: bool,
+    follow_up: bool,
+    completed: usize,
+) -> Material {
     let mut c = core();
     c.enable_source_progress();
     let mut writer =
@@ -286,7 +294,7 @@ fn material_for_notrade(root: &Path, missing_price: bool, follow_up: bool) -> Ma
         writer.record(ingress, applied).unwrap();
         last
     };
-    for i in 0..866 {
+    for i in (0..completed + 2).chain(std::iter::once(CURRENT)) {
         push(
             &mut c,
             metadata(i, BASE, i != CURRENT && i > 1, i != CURRENT),
@@ -1324,4 +1332,289 @@ async fn completed_cancel_history_owned_and_borrowed_strategy_inputs() {
         cells.push(json!({"zero_target_completed_cancels":history,"completed_cancellation_requests":totals.completed_receipted_cancellation_requests,"active_current_orders":2,"market_count":before.markets.len(),"source_points":material.history.len(),"extra_fresh_prefix":true,"warmup":1,"samples":samples,"actions_equivalence_checked":true,"NoTrade_samples":32}));
     }
     std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(),serde_json::to_vec_pretty(&json!({"format":"issue185-cancel-history-borrowed-v1","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"helper_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"cells":cells,"limits":"同候选版本owning/borrowed路径对照；owning也复用投影，不是原main实测；准备/恢复/比较在计时外，不分派计时输出，无性能门槛"})).unwrap()).unwrap();
+}
+
+/// 固定当前市场与两处真实旧义务，仅增加已结束、无义务历史。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "D0344 finite history-growth probe; explicit sealed inputs/source/output required"]
+async fn relevant_market_history_growth_timing() {
+    let root = std::path::PathBuf::from(std::env::var("ISSUE185_NOTRADE_ROOT").unwrap());
+    std::fs::create_dir_all(&root).unwrap();
+    let finality_bytes = std::fs::read(std::env::var("ISSUE185_FINALITY").unwrap()).unwrap();
+    assert_eq!(hash(&finality_bytes), FINALITY_SHA);
+    let finality = Arc::new(TradeFinalityPolicyV2::decode_and_seal(&finality_bytes).unwrap());
+    let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+        snapshot_path: std::env::var("ISSUE185_RULES").unwrap().into(),
+        expected_file_sha256: Sha256Hex(RULE_SHA.into()),
+        replay_causal_start_utc_ms: BASE,
+    })
+    .unwrap();
+    let package: Value = serde_json::from_slice(include_bytes!(
+        "../configs/strategies/complementary_pair/business-candidates-20261008.json"
+    ))
+    .unwrap();
+    let config: ComplementaryPairConfigV1 = serde_json::from_value(
+        package["folds"][0]["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["identifier"] == "center")
+            .unwrap()["strategy"]
+            .clone(),
+    )
+    .unwrap();
+    let mut cells = Vec::new();
+    for completed in [0, 48, 863] {
+        let cell_root = root.join(completed.to_string());
+        std::fs::create_dir(&cell_root).unwrap();
+        let material = material_for_history(&cell_root.join("dpt"), false, false, completed);
+        let (mut execution, observation) = execution(
+            &cell_root.join("sim.jsonl"),
+            &material.core,
+            rules.clone(),
+            finality.clone(),
+            &format!("relevant-{completed}"),
+        );
+        let mut ledger =
+            LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        execution
+            .bind_ledger_recording_v2(&mut ledger, &cell_root.join("ledger"))
+            .unwrap();
+        let mut shared = SharedExecutionV2::from_opening(ledger, observation)
+            .unwrap()
+            .unwrap();
+        let mut source = RecordedPublicGroupSourceV1::open(
+            &cell_root.join("dpt"),
+            128,
+            16 << 20,
+            material.times.clone(),
+        )
+        .unwrap();
+        source.enable_source_progress();
+        let mut driver =
+            FinitePublicConsumptionV1::new(execution, source, format!("relevant-{completed}"));
+        driver.enable_finite_recording_wait().unwrap();
+        // SIM 规则已提前登记，公开组尚未消费时不能出现策略输入。
+        assert!(
+            driver
+                .selected_frames_at_observation(std::iter::empty())
+                .is_empty()
+        );
+        advance(&mut driver, material.early);
+        let prestart = shared
+            .strategy_selected_observation_input(&mut driver, false, &[])
+            .unwrap()
+            .unwrap();
+        let future = prestart
+            .markets
+            .iter()
+            .find(|f| f.observation.market.condition_id.0 == condition(CURRENT))
+            .unwrap();
+        assert!(
+            prestart
+                .action_before
+                .cutoff()
+                .decision_time()
+                .logical_time_utc_ms()
+                < future.observation.market.window.start_at_utc_ms
+        );
+        drop(prestart);
+        shared
+            .execute_batch_reserved(
+                &mut driver.decision().unwrap(),
+                &[
+                    buy(&rules, 0, "old-orphan", false),
+                    buy(&rules, 1, "old-order", true),
+                ],
+            )
+            .await
+            .unwrap();
+        let mut strategy = ComplementaryPairV1::new(
+            config.clone(),
+            rules.clone(),
+            "history-growth".into(),
+            StrategyContinuityV1::new_account(),
+        )
+        .unwrap();
+        for &group in &material.history {
+            advance(&mut driver, group);
+            let input = shared
+                .strategy_selected_observation_input(
+                    &mut driver,
+                    false,
+                    &strategy.historical_market_requirements(),
+                )
+                .unwrap()
+                .unwrap();
+            let at = input
+                .action_before
+                .cutoff()
+                .decision_time()
+                .logical_time_utc_ms();
+            input.calculate_borrowed(&mut strategy, at).unwrap();
+        }
+        let owned = shared
+            .strategy_observation_input_with_trade_details(&mut driver, false)
+            .unwrap()
+            .unwrap();
+        let at = owned
+            .action_before
+            .cutoff()
+            .decision_time()
+            .logical_time_utc_ms();
+        let state_before = strategy.checkpoint();
+        let mut owned_strategy =
+            ComplementaryPairV1::restore(config.clone(), rules.clone(), state_before.clone())
+                .unwrap();
+        let owned_calculation = owned.calculate(&mut owned_strategy, at).unwrap();
+        let historical = strategy.historical_market_requirements();
+        let selected = shared
+            .strategy_selected_observation_input(&mut driver, false, &historical)
+            .unwrap()
+            .unwrap();
+        assert_eq!(owned.markets.len(), completed + 3);
+        assert_eq!(selected.markets.len(), 3, "当前市场、旧孤腿、旧订单均保留");
+        assert_eq!(
+            selected.to_owned_input().markets.len(),
+            owned.markets.len(),
+            "显式转换仍完整冻结"
+        );
+        let actual = selected.calculate_borrowed(&mut strategy, at).unwrap();
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(&owned_calculation).unwrap()
+        );
+        assert_eq!(
+            selected.action_before.profit_and_equity(),
+            owned.action_before.profit_and_equity()
+        );
+        let selected_count = selected.markets.len();
+        drop(selected);
+        let expected_equity = owned.action_before.profit_and_equity().1;
+        let mut probe = NecessaryReadProbe {
+            expected: expected_equity,
+        };
+        let mut unordered = driver.frames_at_observation();
+        unordered.reverse();
+        assert!(
+            shared
+                .revalidate_calculation(&mut probe, &actual, &unordered, at)
+                .unwrap()
+                .0
+                .is_none()
+        );
+        // 原账本保持不变；已构造的真实观察仅在测试中改变报价可用性。
+        let mut missing: Vec<_> = unordered.iter().map(|f| f.observation.clone()).collect();
+        for o in &mut missing {
+            if o.market.condition_id.0 == condition(0) {
+                for a in &mut o.assets {
+                    a.valuation_best_bid.quality = MarketDataQuality::Stale;
+                }
+            }
+        }
+        let unavailable: Vec<_> = unordered
+            .iter()
+            .zip(&missing)
+            .map(|(f, o)| PublicObservationFrameV1 {
+                observation: o,
+                rule_context: f.rule_context.clone(),
+                receipt: f.receipt.clone(),
+                decision_cutoff: f.decision_cutoff.clone(),
+            })
+            .collect();
+        probe.expected = ExecutionReadValueV1::Unavailable;
+        assert!(
+            shared
+                .revalidate_calculation(&mut probe, &actual, &unavailable, at)
+                .unwrap()
+                .0
+                .is_none()
+        );
+        assert!(
+            matches!(
+                owned.action_before.profit_and_equity().1,
+                ExecutionReadValueV1::Known(_)
+            ),
+            "旧拥有式值保持冻结"
+        );
+        drop(unavailable);
+        drop(unordered);
+        let mut samples = Vec::new();
+        for representation in ["owned_full", "borrowed_relevant"] {
+            for _ in 0..64 {
+                // 每次都从相同策略记忆出发；恢复和后续业务比较不进入计时。
+                let mut sample_strategy = ComplementaryPairV1::restore(
+                    config.clone(),
+                    rules.clone(),
+                    state_before.clone(),
+                )
+                .unwrap();
+                let assemble = Instant::now();
+                let (assembly_ns, calculation_ns) = if representation == "borrowed_relevant" {
+                    let input = shared
+                        .strategy_selected_observation_input(&mut driver, false, &historical)
+                        .unwrap()
+                        .unwrap();
+                    let assembly_ns = assemble.elapsed().as_nanos();
+                    let calculate = Instant::now();
+                    let result = input.calculate_borrowed(&mut sample_strategy, at).unwrap();
+                    let calculation_ns = calculate.elapsed().as_nanos();
+                    assert_eq!(
+                        serde_json::to_value(result).unwrap(),
+                        serde_json::to_value(&actual).unwrap()
+                    );
+                    (assembly_ns, calculation_ns)
+                } else {
+                    let input = shared
+                        .strategy_observation_input_with_trade_details(&mut driver, false)
+                        .unwrap()
+                        .unwrap();
+                    let assembly_ns = assemble.elapsed().as_nanos();
+                    let calculate = Instant::now();
+                    let result = input.calculate(&mut sample_strategy, at).unwrap();
+                    let calculation_ns = calculate.elapsed().as_nanos();
+                    assert_eq!(
+                        serde_json::to_value(result).unwrap(),
+                        serde_json::to_value(&actual).unwrap()
+                    );
+                    (assembly_ns, calculation_ns)
+                };
+                samples.push(json!({"representation":representation,"assembly_ns":assembly_ns,"calculation_ns":calculation_ns}));
+            }
+        }
+        cells.push(json!({"completed_without_obligation":completed,"all_markets":owned.markets.len(),"selected_markets":selected_count,"samples":samples}));
+        driver.stop_and_drain().unwrap();
+    }
+    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(), serde_json::to_vec_pretty(&json!({"format":"issue185-relevant-history-timing-v1","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rule_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"cells":cells,"limits":"same fixed consumed prefixes; setup, serialization, assertions, qualification and feed outside assembly/calculation timers; full owned control uses current strategy diagnostic contract; no four-hour or online-capacity claim"})).unwrap()).unwrap();
+}
+
+struct NecessaryReadProbe {
+    expected: ExecutionReadValueV1<contracts::economics::EconomicRational>,
+}
+impl StrategyV1 for NecessaryReadProbe {
+    type Error = std::convert::Infallible;
+    type Diagnostics = ComplementaryPairDiagnosticV1;
+    fn uses_borrowed_input(&self) -> bool {
+        true
+    }
+    fn requires_trade_economics_details(&self) -> bool {
+        false
+    }
+    fn decide(
+        &mut self,
+        _: &StrategyInputV1,
+        _: i64,
+    ) -> Result<StrategyOutputV1<Self::Diagnostics>, Self::Error> {
+        unreachable!("只检查必要资格读取")
+    }
+    fn qualify_intent_borrowed(
+        &mut self,
+        input: &BorrowedStrategyCurrentReadV1<'_>,
+        _: &StrategyCalculationV1<Self::Diagnostics>,
+        _: usize,
+        _: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        assert_eq!(input.action_before.profit_and_equity().1, self.expected);
+        Ok(IntentQualificationV1::Qualified)
+    }
 }

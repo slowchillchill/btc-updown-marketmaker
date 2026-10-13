@@ -1,28 +1,95 @@
 use super::*;
 
+pub(super) struct DecisionReads<'a> {
+    pub(super) orders: Vec<
+        ExecutionOrderRead<'a, contracts::execution_normalization::CancellationRequestCompletedV1>,
+    >,
+    pub(super) orders_by_id:
+        BTreeMap<&'a ::execution_normalization::MemoryLogicalIdentityV1, usize>,
+    pub(super) orders_by_market: BTreeMap<&'a str, Vec<usize>>,
+    pub(super) request_commitments: BTreeMap<&'a str, (R, bool)>,
+    pub(super) order_fees:
+        BTreeMap<&'a ::execution_normalization::MemoryLogicalIdentityV1, Option<R>>,
+    pub(super) commitments: BTreeMap<&'a str, Vec<IntentCommitmentReadV1<'a>>>,
+}
+impl<'a> DecisionReads<'a> {
+    pub(super) fn new(
+        read: &'a ActionBeforeReadV2<
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl ActionAccountReadV1,
+        >,
+    ) -> Self {
+        let orders: Vec<_> = read.orders().collect();
+        let orders_by_id = orders
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (o.order_identity, i))
+            .collect();
+        let mut orders_by_market: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for (i, o) in orders.iter().enumerate() {
+            if let Some(id) = o.condition_id {
+                orders_by_market.entry(id.0.as_str()).or_default().push(i);
+            }
+        }
+        let mut commitments: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for c in read.commitments() {
+            if let Some((id, _)) = limit_leg(c.origin.intent.intent(), c.origin.batch_item_ordinal)
+            {
+                commitments.entry(id.0.as_str()).or_default().push(c);
+            }
+        }
+        let mut request_commitments: BTreeMap<_, (R, bool)> = BTreeMap::new();
+        for c in commitments.values().flatten() {
+            let (sum, unknown) = request_commitments
+                .entry(c.origin.intent.global_request_id())
+                .or_default();
+            match &c.remaining_target_shares {
+                ExecutionReadValueV1::Known(q) => {
+                    *sum = sum.add(&r(Decimal::from_str_exact(&q.0).expect("原份额")))
+                }
+                _ => *unknown = true,
+            }
+        }
+        let order_fees = read
+            .order_funds()
+            .map(|f| {
+                (
+                    f.order_identity,
+                    known(&f.immediate_fee_encumbrance_pusd)
+                        .map(|q| r(Decimal::from_str_exact(&q.0).expect("原费用"))),
+                )
+            })
+            .collect();
+        Self {
+            orders,
+            orders_by_id,
+            orders_by_market,
+            commitments,
+            request_commitments,
+            order_fees,
+        }
+    }
+}
 impl ComplementaryPairV1 {
     pub(super) fn state(
         &self,
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
+            impl ActionAccountReadV1,
         >,
         f: &PairMarketRead<'_>,
+        reads: &DecisionReads<'_>,
     ) -> Result<MarketState, StrategyErrorV1> {
         let o = &f.observation;
         let condition = &o.market.condition_id;
-        let m = input
-            .action_before
-            .economics()
-            .markets
-            .iter()
-            .find(|m| &m.condition_id == condition);
+        let m = input.action_before.market_economics(condition);
         let mut orphan = [Decimal::ZERO; 2];
         let mut principal = R::zero();
         let mut fee = R::zero();
         let mut unknown = false;
-        if let Some(m) = m
-            && m.settlement_state == EconomicSettlementStateV1::Unresolved
+        if let Some(m) = &m
+            && m.unresolved
         {
             let assets = m
                 .assets
@@ -33,18 +100,22 @@ impl ComplementaryPairV1 {
                     .iter()
                     .position(|a| a == &asset.asset)
                     .ok_or(StrategyErrorV1::Arithmetic("公共持仓资产不一致"))?;
-                orphan[side] = decimal(&m.orphan_shares[i])?;
+                orphan[side] = m.orphan_shares[i];
             }
-            principal = rational(&m.unresolved_orphan_principal_cost_pusd)?;
-            if let Some(orphan_fee) = known(&m.unpaired_success_fee_pusd) {
-                fee = rational(orphan_fee)?;
+            principal = m.orphan_principal.clone();
+            if let Some(orphan_fee) = known(&m.orphan_fee) {
+                fee = orphan_fee.clone();
             } else {
                 unknown |= orphan.iter().any(|q| *q > Decimal::ZERO);
             }
         }
         let mut pending = Vec::new();
-        let orders: Vec<_> = input.action_before.orders().collect();
-        for c in input.action_before.commitments() {
+        for c in reads
+            .commitments
+            .get(condition.0.as_str())
+            .into_iter()
+            .flatten()
+        {
             let Some((condition0, leg)) =
                 limit_leg(c.origin.intent.intent(), c.origin.batch_item_ordinal)
             else {
@@ -82,7 +153,11 @@ impl ComplementaryPairV1 {
                         r(q).mul(&r(*limit_price_pusd_per_share))
                     } else {
                         // 已提交LIMIT可能沿旧tick；本金沿原价，费用读取原公共归属。
-                        let fee = ord_fee(input, c.order_identity)?;
+                        let fee = c
+                            .order_identity
+                            .and_then(|id| reads.order_fees.get(id))
+                            .cloned()
+                            .flatten();
                         if fee.is_none() {
                             is_unknown = true;
                         }
@@ -113,7 +188,7 @@ impl ComplementaryPairV1 {
             };
             let ord = c
                 .order_identity
-                .and_then(|id| orders.iter().find(|o| o.order_identity == id));
+                .and_then(|id| reads.orders_by_id.get(id).map(|i| &reads.orders[*i]));
             pending.push(PendingLeg {
                 token: leg.token_id.clone(),
                 quantity: q,
@@ -124,46 +199,29 @@ impl ComplementaryPairV1 {
             });
         }
         let mut investment = m
-            .map(|m| rational(&m.successful_investment_pusd))
-            .transpose()?
+            .as_ref()
+            .map(|m| m.successful_investment.clone())
             .unwrap_or_else(R::zero);
         let pending_bound = pending.iter().fold(R::zero(), |s, p| s.add(&p.cost));
-        let projection = input
-            .action_before
-            .ledger()
-            .market_projections
-            .iter()
-            .find(|p| &p.condition_id == condition);
-        let funds = if let Some(p) = projection {
-            r(decimal(&p.principal_encumbrance_pusd)?)
-                .add(&r(decimal(&p.immediate_taker_fee_encumbrance_pusd)?))
-                .add(&r(decimal(&p.local_pending_principal_pusd)?))
-                .add(&r(decimal(&p.local_pending_immediate_fee_pusd)?))
-                .add(&r(decimal(
-                    &p.platform_confirmation_pending_economic_principal_pusd,
-                )?))
-                .add(&r(decimal(
-                    &p.platform_confirmation_pending_economic_immediate_fee_pusd,
-                )?))
-        } else {
-            R::zero()
-        };
+        let projection = input.action_before.market_funds(condition);
+        let funds = projection.total();
         investment = investment.add(&pending_bound.clone().max(funds.clone()));
-        if let Some(p) = projection {
-            // 尚未连接原承诺的预留、或待经济归约的平台确认，不能伪装成已无风险。
-            unknown |= (pending.is_empty()
-                && (decimal(&p.local_pending_principal_pusd)? > Decimal::ZERO
-                    || decimal(&p.local_pending_immediate_fee_pusd)? > Decimal::ZERO))
-                || decimal(&p.platform_confirmation_pending_economic_principal_pusd)?
-                    > Decimal::ZERO
-                || decimal(&p.platform_confirmation_pending_economic_immediate_fee_pusd)?
-                    > Decimal::ZERO;
-        }
+        unknown |= (pending.is_empty()
+            && (projection.local_principal > Decimal::ZERO
+                || projection.local_fee > Decimal::ZERO))
+            || projection.platform_pending_principal > Decimal::ZERO
+            || projection.platform_pending_fee > Decimal::ZERO;
 
         // 公共资金可能仍保留原最大费等已知保守余量；大小差异不是信息缺失。
         // 余量仍计入投入，并按两侧潜在暴露计入，不能据此释放资金。
         let additional_encumbrance = funds.sub(&pending_bound).max(R::zero());
-        for o in orders.iter().filter(|o| o.condition_id == Some(condition)) {
+        for o in reads
+            .orders_by_market
+            .get(condition.0.as_str())
+            .into_iter()
+            .flatten()
+            .map(|i| &reads.orders[*i])
+        {
             if o.origin.is_none() {
                 unknown = true;
             }

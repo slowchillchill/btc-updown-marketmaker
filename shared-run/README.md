@@ -47,6 +47,16 @@ Ledger 经济更新按 #107 F1b 使用 `EconomicsPatch.day_updates`：追加新�
 
 该变化影响同步 JSONL 和后台 LedgerV2 交易中的经济补丁字段。同一冷读取入口接受旧 `EconomicsPatch.days` 完整日快照，恢复时直接移动替换，而非重复追加历史贡献；新写入只生成增量更新，不维护另一份完整日副本。旧程序不能读取新 `day_updates` 补丁；NOE V3／V4 的来源接线保持原版本。
 
+## 同步按需账户与市场读取（D-0344）
+
+`ActionBeforeReadV2` 默认仍使用完整拥有式账户数据。`ActionAccountReadV1` 区分完整数据与同步借用表示；借用表示直接读取 Ledger 的精确数值，资金和经济事实来自相同已应用前缀。`cash_available`、`profit_and_equity`、`market_economics` 和 `market_funds` 不先构造全市场投影。`economics`、`ledger` 和 `to_owned_read` 是显式完整读取；借用期间首次请求完整数据才生成独立冻结，其后沿同一借用范围复用。
+
+策略可通过 `selects_relevant_markets` 显式选择 `strategy_selected_observation_input` 与当前观察入口。公共层合并已公开且尚未结束市场、Ledger 的实际资金义务和孤腿估值市场、原 Registry 的订单与承诺，以及策略提供的必要历史身份。`historical_market_requirements` 携带策略私有修复和利润责任；`calculation_market_requirements` 携带冻结动作依赖。包装器须委托这些选择方法。当前资格读取继续使用本次实际账户和报价，冻结动作参数保持原值。
+
+Ledger 原经济读取索引维护账户已确认净损益、未支付返佣和固定净值部分。已提交经济事件更新受影响贡献，返佣日期支付也更新该日市场；资金义务按原账户、预留和生命周期提交更新。索引从恢复事实重建，不依赖默认零。孤腿估值每次读取当前公开报价，可用空买盘为已知零，缺失或质量不可用仍为未知。B 与通用消费者默认完整读取路径保持；此接口不承担 B 的目标环境验收。
+
+首次接入或跳组后的公共规则登记会补齐已消费市场元数据，正常读取只接纳本组新增登记。首次登记仍解除原待应用反馈的重试抑制。显式完整报告和恢复的全量工作保留；公共生产者仍生成完整组。
+
 ## PAPER 运行入口（#109 任务 7）
 
 `cargo run -p shared-run --bin paper --locked --offline -- <显式配置.json>` 启动独立消费者。二进制仅调用原固定官方 HTTPS 冷启动规则加载器，随后调用 `paper::run_paper_v1`，不启动或管理采集器。此命令描述接口，本轮未执行真实在线业务。受控测试通过原历史加载器得到合法封存规则后调用同一个装配/运行函数，不存在生产历史测试模式、外部每组时钟或任意 HTTP 端点。

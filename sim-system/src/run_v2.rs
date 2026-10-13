@@ -20068,6 +20068,7 @@ impl PublicSimExecutionV1 {
 
 /// 有限与持续入口共用的唯一消费状态；不拥有来源或独立业务状态。
 pub struct PublicConsumptionStateV1 {
+    unfinished_public_markets: BTreeMap<String, i64>,
     execution: PublicSimExecutionV1,
     consumption_sequence_ref: String,
     last_receipt: Option<PublicGroupAppliedReceiptV1>,
@@ -20104,6 +20105,7 @@ impl PublicConsumptionStateV1 {
             last_receipt: None,
             last_cutoff: None,
             last_prepared: None,
+            unfinished_public_markets: BTreeMap::new(),
             rules,
             close_pending: false,
             drive_position: 0,
@@ -20174,6 +20176,26 @@ impl PublicConsumptionStateV1 {
         self.last_receipt = Some(receipt.clone());
         let cutoff = self.execution.decision_cutoff(receipt.clone());
         self.last_cutoff = Some(cutoff.clone());
+        for record in prepared.group.records.iter() {
+            if let contracts::PublicBusinessPayloadV1::MarketFact { market, .. } = &record.payload {
+                if market.window.end_at_utc_ms > at {
+                    self.unfinished_public_markets
+                        .insert(market.condition_id.0.clone(), market.window.end_at_utc_ms);
+                }
+            }
+        }
+        // 首组可直接读取完整已消费观察；后续登记沿该组真实市场事实。
+        if self.last_prepared.is_none() {
+            for o in &prepared.group.observations {
+                if o.market.window.end_at_utc_ms > at {
+                    self.unfinished_public_markets.insert(
+                        o.market.condition_id.0.clone(),
+                        o.market.window.end_at_utc_ms,
+                    );
+                }
+            }
+        }
+        self.unfinished_public_markets.retain(|_, end| *end > at);
         self.last_prepared = Some(prepared);
         Ok((receipt, cutoff))
     }
@@ -20283,6 +20305,7 @@ impl PublicConsumptionStateV1 {
         &mut self,
         at: i64,
     ) -> Result<Option<TrustedGroupDecisionCutoffV1>, SimRunActorErrorV2> {
+        self.unfinished_public_markets.retain(|_, end| *end > at);
         let time = self.time(at);
         self.execution.observe_time(time.clone())?;
         self.drive_position += 1;
@@ -20354,6 +20377,68 @@ impl PublicConsumptionStateV1 {
             return Vec::new();
         };
         self.frames_with_cutoff(&cutoff)
+    }
+    /// 首次登记仍使用本组公开事实；只读规则映射不用于提前创建输入。
+    pub fn newly_public_rule_contexts(&self) -> Vec<Arc<contracts::PublicTradingRuleContextV1>> {
+        let Some(prepared) = &self.last_prepared else {
+            return Vec::new();
+        };
+        let ids: std::collections::BTreeSet<_> = prepared
+            .group
+            .records
+            .iter()
+            .filter_map(|r| {
+                if let contracts::PublicBusinessPayloadV1::MarketFact { market, .. } = &r.payload {
+                    Some(market.condition_id.0.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| self.rules.get(id).cloned())
+            .collect()
+    }
+    /// 仅供首次读取或跳过若干组后的规则登记追赶；不创建全市场观察帧。
+    pub fn public_rule_contexts(
+        &self,
+    ) -> impl Iterator<Item = &Arc<contracts::PublicTradingRuleContextV1>> {
+        self.observations_at_current_prefix()
+            .iter()
+            .map(|o| &self.rules[&o.market.condition_id.0])
+    }
+    /// 当前已成功消费的公开观察；此有序切片由公共核心按 condition 生成，检查点保持原序。
+    pub fn observations_at_current_prefix(&self) -> &[contracts::MarketBusinessObservationV1] {
+        self.last_prepared
+            .as_ref()
+            .map_or(&[], |p| p.group.observations.as_slice())
+    }
+    /// 尚未结束市场加实际消费者义务；按原观察顺序定位，不创建全市场帧。
+    pub fn selected_frames_at_observation<'a, 'b>(
+        &'a self,
+        historical: impl IntoIterator<Item = &'b str>,
+    ) -> Vec<PublicObservationFrameV1<'a>> {
+        let Some(cutoff) = self.observation_cutoff() else {
+            return Vec::new();
+        };
+        let mut ids: std::collections::BTreeSet<String> =
+            self.unfinished_public_markets.keys().cloned().collect();
+        ids.extend(historical.into_iter().map(str::to_owned));
+        let observations = self.observations_at_current_prefix();
+        ids.into_iter()
+            .filter_map(|id| {
+                let i = observations
+                    .binary_search_by(|o| o.market.condition_id.0.as_str().cmp(&id))
+                    .ok()?;
+                let observation = &observations[i];
+                Some(PublicObservationFrameV1 {
+                    observation,
+                    rule_context: self.rules[&observation.market.condition_id.0].clone(),
+                    receipt: self.last_receipt.as_ref().unwrap().clone(),
+                    decision_cutoff: cutoff.clone(),
+                })
+            })
+            .collect()
     }
     fn frames_with_cutoff(
         &self,
@@ -20940,6 +21025,9 @@ impl PublicGroupDecisionV1<'_> {
     pub fn frames_at_observation(&self) -> Vec<PublicObservationFrameV1<'_>> {
         self.driver.frames_at_observation()
     }
+    pub fn observation_driver(&self) -> &PublicConsumptionStateV1 {
+        self.driver
+    }
     /// 显式已批准的模拟外部现金事实，不是模型动作。
     pub fn apply_external_cash_fact_v1(
         &mut self,
@@ -21186,13 +21274,30 @@ impl PublicConsumptionStateV1 {
             })
             .transpose()?;
         let last_receipt = last_cutoff.as_ref().map(|c| c.receipt.clone());
+        let last_prepared = saved.last_prepared.map(|g| g.restore()).transpose()?;
+        let now = last_cutoff
+            .as_ref()
+            .map(|c| c.decision_time.logical_time_utc_ms());
+        let unfinished_public_markets = last_prepared
+            .as_ref()
+            .into_iter()
+            .flat_map(|p| p.group.observations.iter())
+            .filter(|o| now.is_some_and(|t| o.market.window.end_at_utc_ms > t))
+            .map(|o| {
+                (
+                    o.market.condition_id.0.clone(),
+                    o.market.window.end_at_utc_ms,
+                )
+            })
+            .collect();
         Ok((
             Self {
                 execution: PublicSimExecutionV1 { actor },
                 consumption_sequence_ref: saved.consumption_sequence_ref,
                 last_receipt,
                 last_cutoff,
-                last_prepared: saved.last_prepared.map(|g| g.restore()).transpose()?,
+                last_prepared,
+                unfinished_public_markets,
                 rules: saved.rules,
                 close_pending: saved.close_pending,
                 drive_position: saved.drive_position,

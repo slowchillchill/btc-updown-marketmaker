@@ -40,21 +40,28 @@ impl StrategyMarketReadV1 for PublicObservationFrameV1<'_> {
         &self.rule_context
     }
 }
-pub struct StrategyInputV1<G = SharedExecutionRegistryV2, M = FrozenMarketReadV1> {
-    pub action_before: ActionBeforeReadV2<G>,
+pub struct StrategyInputV1<
+    G = SharedExecutionRegistryV2,
+    M = FrozenMarketReadV1,
+    A = OwnedActionAccountV1,
+> {
+    pub action_before: ActionBeforeReadV2<G, A>,
     pub markets: Vec<M>,
     pub trade_economics: Vec<FrozenTradeEconomicsV1>,
 }
 /// 健康读取借用原公开观察，避免重复克隆盘口；账户来自同一真实 Ledger/Registry。
-pub struct StrategyCurrentReadV1<'a, G = SharedExecutionRegistryV2> {
-    pub action_before: ActionBeforeReadV2<G>,
+pub struct StrategyCurrentReadV1<'a, G = SharedExecutionRegistryV2, A = OwnedActionAccountV1> {
+    pub action_before: ActionBeforeReadV2<G, A>,
     pub trade_economics: Vec<FrozenTradeEconomicsV1>,
     pub markets: Vec<PublicObservationFrameV1<'a>>,
 }
-pub type BorrowedStrategyInputV1<'a> =
-    StrategyInputV1<&'a SharedExecutionRegistryV2, PublicObservationFrameV1<'a>>;
+pub type BorrowedStrategyInputV1<'a> = StrategyInputV1<
+    &'a SharedExecutionRegistryV2,
+    PublicObservationFrameV1<'a>,
+    BorrowedActionAccountV1<'a>,
+>;
 pub type BorrowedStrategyCurrentReadV1<'a> =
-    StrategyCurrentReadV1<'a, &'a SharedExecutionRegistryV2>;
+    StrategyCurrentReadV1<'a, &'a SharedExecutionRegistryV2, BorrowedActionAccountV1<'a>>;
 enum CurrentRead<'a> {
     Owned(StrategyCurrentReadV1<'a>),
     Borrowed(BorrowedStrategyCurrentReadV1<'a>),
@@ -149,6 +156,18 @@ pub trait StrategyV1 {
     /// 仅选择同步读取表示；默认仍构造原完整拥有式输入。
     fn uses_borrowed_input(&self) -> bool {
         false
+    }
+    fn selects_relevant_markets(&self) -> bool {
+        false
+    }
+    fn historical_market_requirements(&self) -> Vec<ConditionId> {
+        Vec::new()
+    }
+    fn calculation_market_requirements(
+        &self,
+        _calculation: &StrategyCalculationV1<Self::Diagnostics>,
+    ) -> Vec<ConditionId> {
+        Vec::new()
     }
     fn decide_borrowed(
         &mut self,
@@ -273,7 +292,11 @@ impl BorrowedStrategyInputV1<'_> {
         StrategyInputV1 {
             action_before: self.action_before.to_owned_read(),
             markets: self
-                .markets
+                .action_before
+                .account
+                .driver
+                .map(|d| d.frames_at_observation())
+                .unwrap_or_else(|| self.markets.clone())
                 .iter()
                 .map(|f| FrozenMarketReadV1 {
                     observation: f.observation.clone(),
@@ -345,7 +368,9 @@ impl SharedExecutionV2 {
         };
         let frames = driver.frames_at_observation();
         self.observe_group(&frames);
-        let Some(action_before) = self.borrow_action_before(cutoff, &frames) else {
+        let Some(action_before) =
+            self.borrow_necessary_action_before(cutoff, &frames, Some(driver))
+        else {
             return Ok(None);
         };
         Ok(Some(StrategyInputV1 {
@@ -357,6 +382,77 @@ impl SharedExecutionV2 {
             },
             markets: frames,
         }))
+    }
+    pub fn strategy_selected_observation_input<'a>(
+        &'a mut self,
+        driver: &'a mut PublicConsumptionStateV1,
+        details: bool,
+        historical: &[ConditionId],
+    ) -> Result<Option<BorrowedStrategyInputV1<'a>>, LedgerErrorV1> {
+        self.apply_closed()?;
+        let Some(cutoff) = driver.observation_cutoff() else {
+            return Ok(None);
+        };
+        self.observe_public_rules(driver);
+        let frames = self.selected_observations(driver, historical);
+        self.observe_group(&frames);
+        let Some(action_before) =
+            self.borrow_necessary_action_before(cutoff, &frames, Some(driver))
+        else {
+            return Ok(None);
+        };
+        Ok(Some(StrategyInputV1 {
+            action_before,
+            markets: frames,
+            trade_economics: if details {
+                self.freeze_trade_economics()
+            } else {
+                Vec::new()
+            },
+        }))
+    }
+    fn selected_observations<'a>(
+        &self,
+        driver: &'a PublicConsumptionStateV1,
+        historical: &[ConditionId],
+    ) -> Vec<PublicObservationFrameV1<'a>> {
+        let mut ids = std::collections::BTreeSet::new();
+        ids.extend(historical.iter().map(|id| id.0.clone()));
+        if let Some(read) = self.ledger().necessary_read_v1() {
+            ids.extend(
+                read.marked_markets()
+                    .chain(read.funds_markets())
+                    .map(str::to_owned),
+            );
+        }
+        ids.extend(
+            self.registry()
+                .unfinished_orders()
+                .filter_map(|o| o.condition_id)
+                .map(|id| id.0.clone()),
+        );
+        ids.extend(self.registry().all_commitments().filter_map(
+            |c| match c.origin.intent.intent() {
+                ModelIntentV1::SubmitSingleBuy { condition_id, .. }
+                | ModelIntentV1::SubmitPairedBuy { condition_id, .. } => {
+                    Some(condition_id.0.clone())
+                }
+                _ => None,
+            },
+        ));
+        // 身份集合只用于本次选择；返回观察借用原 driver，不借用临时集合。
+        driver.selected_frames_at_observation(ids.iter().map(String::as_str))
+    }
+    pub fn strategy_selected_current_observations<'a>(
+        &mut self,
+        driver: &'a PublicConsumptionStateV1,
+        historical: &[ConditionId],
+    ) -> Result<Vec<PublicObservationFrameV1<'a>>, LedgerErrorV1> {
+        self.apply_closed()?;
+        self.observe_public_rules(driver);
+        let frames = self.selected_observations(driver, historical);
+        self.observe_group(&frames);
+        Ok(frames)
     }
     pub fn strategy_input(
         &mut self,
@@ -441,7 +537,7 @@ impl SharedExecutionV2 {
     ) -> Option<CurrentRead<'a>> {
         if borrowed {
             Some(CurrentRead::Borrowed(StrategyCurrentReadV1 {
-                action_before: self.borrow_action_before(cutoff, &frames)?,
+                action_before: self.borrow_necessary_action_before(cutoff, &frames, None)?,
                 trade_economics: if details {
                     self.freeze_trade_economics()
                 } else {
@@ -572,7 +668,10 @@ impl SharedExecutionV2 {
             });
         };
         let sent_at_utc_ms = decision.sent_at_utc_ms();
-        let cutoff = decision.frames_at_observation()[0].decision_cutoff.clone();
+        let cutoff = decision
+            .observation_driver()
+            .observation_cutoff()
+            .expect("当前受信观察截止");
         let mut qualification_calls = 0;
         let result = self
             .execute_batch_qualified(
@@ -580,7 +679,18 @@ impl SharedExecutionV2 {
                 intents,
                 Some(&cutoff),
                 |execution, current_decision, index, at| {
-                    let frames = current_decision.frames_at_observation();
+                    let frames = if strategy.selects_relevant_markets() {
+                        let mut historical = strategy.historical_market_requirements();
+                        historical.extend(
+                            strategy.calculation_market_requirements(&calculation.calculation),
+                        );
+                        execution.selected_observations(
+                            current_decision.observation_driver(),
+                            &historical,
+                        )
+                    } else {
+                        current_decision.frames_at_observation()
+                    };
                     let input = execution
                         .current_strategy_read(
                             frames[0].decision_cutoff.clone(),

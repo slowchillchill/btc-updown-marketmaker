@@ -13,3 +13,6 @@ pub mod paper;
 
 mod strategy;
 pub use strategy::*;
+
+mod necessary;
+pub use necessary::{ActionAccountReadV1, BorrowedActionAccountV1, OwnedActionAccountV1};

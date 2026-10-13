@@ -956,7 +956,18 @@ where
                 measure_stage!(
                     stages,
                     "current_public_observation_assembly",
-                    shared.strategy_current_observations(&driver)
+                    if strategy.selects_relevant_markets() {
+                        let mut historical = strategy.historical_market_requirements();
+                        if let Some(p) = pending.as_ref() {
+                            historical.extend(
+                                strategy
+                                    .calculation_market_requirements(&p.calculation.calculation),
+                            );
+                        }
+                        shared.strategy_selected_current_observations(&driver, &historical)
+                    } else {
+                        shared.strategy_current_observations(&driver)
+                    }
                 )
                 .map_err(HistoricalFailureCauseV1::Ledger)?
             } else {
@@ -1201,10 +1212,18 @@ where
                     let input = measure_stage!(
                         stages,
                         "strategy_input_assembly",
-                        shared.strategy_borrowed_observation_input(
-                            &mut driver,
-                            strategy.requires_trade_economics_details()
-                        )
+                        if strategy.selects_relevant_markets() {
+                            shared.strategy_selected_observation_input(
+                                &mut driver,
+                                strategy.requires_trade_economics_details(),
+                                &strategy.historical_market_requirements(),
+                            )
+                        } else {
+                            shared.strategy_borrowed_observation_input(
+                                &mut driver,
+                                strategy.requires_trade_economics_details(),
+                            )
+                        }
                     )
                     .map_err(HistoricalFailureCauseV1::Ledger)?;
                     input
