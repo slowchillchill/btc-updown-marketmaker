@@ -421,7 +421,10 @@ mod tests {
         execution.activate_session("activate".into()).unwrap();
         assert_eq!(observation.accepted_through(), 1);
         assert!(
-            observation.result_references().is_empty(),
+            observation
+                .result_references()
+                .expect("读取已接纳结果引用")
+                .is_empty(),
             "Finish 前没有耐久引用"
         );
         execution

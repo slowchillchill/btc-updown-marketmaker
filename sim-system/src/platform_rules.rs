@@ -258,6 +258,10 @@ impl SealedProcessRuleSnapshotV3 {
     }
 
     #[must_use]
+    pub fn maker_model_version_for(&self, role: contracts::SimCallerRoleV1) -> &str {
+        self.snapshot.maker_model_version_for(role)
+    }
+
     pub(crate) fn snapshot(&self) -> &PlatformRuleSnapshotV3 {
         &self.snapshot
     }
@@ -396,6 +400,18 @@ pub struct DocumentedPlatformRulesV1 {
 #[serde(deny_unknown_fields)]
 pub struct L2QueueModelRuleV1 {
     pub model_version: String,
+    /// 缺省字段属于旧快照；不能在恢复时自动换成新撮合。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub historical_backtest_model: Option<HistoricalMakerModelV1>,
+    /// D-0339：仅新B派生快照写入；旧快照中的历史角色字段不能改变训练角色。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_train_model: Option<HistoricalMakerModelV1>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistoricalMakerModelV1 {
+    #[serde(rename = "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1")]
+    PublicTradeConservativeFifoV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -554,6 +570,19 @@ pub(crate) struct PlatformRuleSnapshotV3 {
 /// 已冻结规则的版本区分；未知/历史标记保持原读取语义，不新增装载拒绝门。
 pub(crate) const GTD_EFFECTIVE_EXPIRY_VERSION: &str = "POLYMARKET_GTD_EFFECTIVE_EXPIRY_V1";
 impl PlatformRuleSnapshotV3 {
+    /// 同一进程的双模型由冻结快照和实际调用方共同选定。
+    pub fn maker_model_version_for(&self, role: contracts::SimCallerRoleV1) -> &str {
+        let rule = &self.project_account_rules.l2_queue_model.value;
+        if role == contracts::SimCallerRoleV1::HistoricalBacktest
+            && rule.historical_backtest_model.is_some()
+            || role == contracts::SimCallerRoleV1::ModelTrain && rule.model_train_model.is_some()
+        {
+            "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1"
+        } else {
+            &rule.model_version
+        }
+    }
+
     pub(crate) fn effective_gtd_expiration_ms(&self, encoded_at_ms: i64) -> i64 {
         let rule = &self.documented_platform_rules.gtd_timing;
         if rule.evidence.version != GTD_EFFECTIVE_EXPIRY_VERSION {
@@ -1074,6 +1103,58 @@ pub fn load_historical_process_snapshot_v3(
         });
     }
     Ok(Arc::new(loaded))
+}
+
+/// 为新历史运行显式派生 Maker 项目假设，保留所有平台观测和其他冻结规则。
+/// 旧文件及其恢复身份保持不变；目标使用已有不覆盖封存入口。
+pub fn derive_historical_maker_snapshot_v3(
+    source: HistoricalProcessSnapshotRequestV1,
+    target_path: PathBuf,
+    implementation_identity: ImplementationIdentityV1,
+) -> Result<Arc<SealedProcessRuleSnapshotV3>, RuleSnapshotError> {
+    let loaded = load_historical_process_snapshot_v3(source)?;
+    validate_implementation_identity(&implementation_identity)?;
+    let mut snapshot = loaded.snapshot().clone();
+    snapshot.project_account_rules.l2_queue_model = parse_config(PLATFORM_RULE_CONFIG_BYTES)?
+        .project_account_rules
+        .l2_queue_model;
+    snapshot
+        .project_account_rules
+        .l2_queue_model
+        .evidence
+        .source
+        .push_str(&format!(
+            "; frozen-platform-source-sha256:{}",
+            loaded.file_sha256().0
+        ));
+    snapshot.provenance.implementation_identity = implementation_identity;
+    let (file_sha256, path, _) = seal_snapshot(&target_path, &snapshot, MAX_RULE_SNAPSHOT_BYTES)?;
+    Ok(Arc::new(SealedProcessRuleSnapshotV3 {
+        path,
+        file_sha256,
+        access_mode: SnapshotAccessMode::HistoricalAsOf,
+        snapshot,
+    }))
+}
+
+/// 新B运行显式派生项目模型；原冻结平台事实及旧文件保持不变。
+pub fn derive_model_train_maker_snapshot_v3(
+    source: HistoricalProcessSnapshotRequestV1,
+    target_path: PathBuf,
+    implementation_identity: ImplementationIdentityV1,
+) -> Result<Arc<SealedProcessRuleSnapshotV3>, RuleSnapshotError> {
+    let loaded = load_historical_process_snapshot_v3(source)?;
+    validate_implementation_identity(&implementation_identity)?;
+    let mut snapshot = loaded.snapshot().clone();
+    snapshot.project_account_rules.l2_queue_model.value.model_train_model =
+        Some(HistoricalMakerModelV1::PublicTradeConservativeFifoV1);
+    snapshot.project_account_rules.l2_queue_model.evidence.source.push_str(&format!(
+        "; D-0339 new ModelTrain; frozen-platform-source-sha256:{}", loaded.file_sha256().0));
+    snapshot.provenance.implementation_identity = implementation_identity;
+    let (file_sha256, path, _) = seal_snapshot(&target_path, &snapshot, MAX_RULE_SNAPSHOT_BYTES)?;
+    Ok(Arc::new(SealedProcessRuleSnapshotV3 {
+        path, file_sha256, access_mode: SnapshotAccessMode::HistoricalAsOf, snapshot,
+    }))
 }
 
 pub fn recover_process_snapshot_v3(
@@ -2853,6 +2934,117 @@ pub(crate) mod tests {
         assert_eq!(recovered.access_mode(), SnapshotAccessMode::Recovery);
         assert_eq!(recovered.snapshot(), sealed.snapshot());
         assert_eq!(server.request_count(), request_count);
+    }
+
+    #[test]
+    fn model_train_maker_derivation_keeps_old_roles_and_snapshot_identity() {
+        use contracts::SimCallerRoleV1 as R;
+        let bytes = include_bytes!("../tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
+        let original: PlatformRuleSnapshotV3 = serde_json::from_slice(bytes).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("old.json");
+        std::fs::write(&source, bytes).unwrap();
+        let mut historical = original.clone();
+        historical.project_account_rules.l2_queue_model.value.historical_backtest_model =
+            Some(HistoricalMakerModelV1::PublicTradeConservativeFifoV1);
+        assert_eq!(historical.maker_model_version_for(R::ModelTrain), "L2_BOOK_DELTA_FIFO_ESTIMATE_V1");
+        assert!(!serde_json::to_value(&original).unwrap()["project_account_rules"]["l2_queue_model"]["value"]
+            .as_object().unwrap().contains_key("model_train_model"));
+        let new = derive_model_train_maker_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: source.clone(), expected_file_sha256: sha256_hex(bytes),
+            replay_causal_start_utc_ms: original.provenance.rules_observed_at_utc_ms,
+        }, directory.path().join("new.json"), test_implementation_identity()).unwrap();
+        assert_eq!(std::fs::read(source).unwrap(), bytes);
+        assert_eq!(new.snapshot.synchronized_platform_rules, original.synchronized_platform_rules);
+        assert_eq!(new.snapshot.documented_platform_rules, original.documented_platform_rules);
+        assert_eq!(new.snapshot.project_account_rules.rebate_settlement, original.project_account_rules.rebate_settlement);
+        assert_eq!(new.maker_model_version_for(R::ModelTrain), "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1");
+        for role in [R::HistoricalBacktest,R::Paper,R::OfflineEvaluation] {
+            assert_eq!(new.maker_model_version_for(role),original.maker_model_version_for(role));
+        }
+        let recovered = recover_process_snapshot_v3(RecoveryProcessSnapshotRequestV1 {
+            snapshot_path:new.path().to_owned(),expected_file_sha256:new.file_sha256().clone(),
+            expected_implementation_identity:test_implementation_identity(),
+        }).unwrap();
+        assert_eq!(recovered.snapshot(),new.snapshot());
+    }
+
+    #[test]
+    fn historical_maker_derivation_preserves_platform_facts_and_old_identity() {
+        use contracts::SimCallerRoleV1 as R;
+        let bytes = include_bytes!("../tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
+        let original: PlatformRuleSnapshotV3 = serde_json::from_slice(bytes).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("old.json");
+        std::fs::write(&source, bytes).unwrap();
+        let new = derive_historical_maker_snapshot_v3(
+            HistoricalProcessSnapshotRequestV1 {
+                snapshot_path: source.clone(),
+                expected_file_sha256: sha256_hex(bytes),
+                replay_causal_start_utc_ms: original.provenance.rules_observed_at_utc_ms,
+            },
+            directory.path().join("new.json"),
+            test_implementation_identity(),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        assert_ne!(new.file_sha256(), &sha256_hex(bytes));
+        assert_eq!(
+            new.snapshot.synchronized_platform_rules,
+            original.synchronized_platform_rules
+        );
+        assert_eq!(
+            new.snapshot.documented_platform_rules,
+            original.documented_platform_rules
+        );
+        assert_eq!(
+            new.snapshot
+                .project_account_rules
+                .lifecycle_account_behavior,
+            original.project_account_rules.lifecycle_account_behavior
+        );
+        assert_eq!(
+            new.snapshot.project_account_rules.rebate_settlement,
+            original.project_account_rules.rebate_settlement
+        );
+        let mut expected_provenance = original.provenance.clone();
+        expected_provenance.implementation_identity = test_implementation_identity();
+        assert_eq!(new.snapshot.provenance, expected_provenance);
+        assert_eq!(
+            new.maker_model_version_for(R::HistoricalBacktest),
+            "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1"
+        );
+        for role in [R::Paper, R::ModelTrain, R::OfflineEvaluation] {
+            assert_eq!(
+                new.maker_model_version_for(role),
+                "L2_BOOK_DELTA_FIFO_ESTIMATE_V1"
+            );
+        }
+        let old = recover_process_snapshot_v3(RecoveryProcessSnapshotRequestV1 {
+            snapshot_path: source,
+            expected_file_sha256: sha256_hex(bytes),
+            expected_implementation_identity: original.provenance.implementation_identity.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            old.maker_model_version_for(R::HistoricalBacktest),
+            "L2_BOOK_DELTA_FIFO_ESTIMATE_V1"
+        );
+        assert!(
+            recover_process_snapshot_v3(RecoveryProcessSnapshotRequestV1 {
+                snapshot_path: new.path.clone(),
+                expected_file_sha256: old.file_sha256().clone(),
+                expected_implementation_identity: test_implementation_identity(),
+            })
+            .is_err()
+        );
+        let reloaded = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: new.path.clone(),
+            expected_file_sha256: new.file_sha256().clone(),
+            replay_causal_start_utc_ms: original.provenance.rules_observed_at_utc_ms,
+        })
+        .unwrap();
+        assert_eq!(new, reloaded);
     }
 
     #[test]

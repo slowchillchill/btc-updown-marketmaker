@@ -86,6 +86,36 @@ class EvidenceBank:
             if getattr(self,field.name).ndim==2 else torch.cat([getattr(self,field.name),getattr(incoming,field.name)])
             for field in fields(self) if field.name!='declared_schemas'},declared_schemas=declaration)
 
+    def reserve(self,incoming,addition):
+        """本次设备消费者的物理尾区；未使用行不属于发布的bank。"""
+        from dataclasses import fields
+        values={}
+        for field in fields(self):
+            if field.name=='declared_schemas':continue
+            old,new=getattr(self,field.name),getattr(incoming,field.name)
+            if old.ndim==2:
+                width=max(old.size(1),new.size(1));old=torch.nn.functional.pad(old,(0,width-old.size(1)))
+            values[field.name]=torch.cat((old,torch.zeros((addition,*old.shape[1:]),dtype=old.dtype,device=old.device)))
+        declared=None if self.declared_schemas is None or incoming.declared_schemas is None else self.declared_schemas|incoming.declared_schemas
+        return EvidenceBank(**values,declared_schemas=declared)
+
+    def write_reserved(self,offset,incoming):
+        """纯候选按本自然批实际基址写行，沿原record[root]次序。"""
+        from dataclasses import fields
+        rows=offset+torch.arange(incoming.kinds.numel(),device=self.kinds.device)
+        values={}
+        for field in fields(self):
+            if field.name=='declared_schemas':continue
+            old,new=getattr(self,field.name),getattr(incoming,field.name)
+            if old.ndim==2:new=torch.nn.functional.pad(new,(0,old.size(1)-new.size(1)))
+            values[field.name]=old.index_copy(0,rows,new)
+        return EvidenceBank(**values,declared_schemas=self.declared_schemas)
+
+    def used_prefix(self,count):
+        from dataclasses import fields
+        return EvidenceBank(**{field.name:getattr(self,field.name)[:count].clone()
+            for field in fields(self) if field.name!='declared_schemas'},declared_schemas=self.declared_schemas)
+
 
 @dataclass(frozen=True)
 class NormalizedBatch:
@@ -114,6 +144,18 @@ class Normalizer:
         addition=incoming.kinds.numel()
         return Normalizer(bank,torch.nn.functional.pad(self.logical_rows,(0,addition),value=-1),
             torch.nn.functional.pad(self.economic_rows,(0,addition),value=-1),self.fault)
+
+    def reserve(self,incoming,addition):
+        return Normalizer(self.bank.reserve(incoming,addition),
+            torch.nn.functional.pad(self.logical_rows,(0,addition),value=-1),
+            torch.nn.functional.pad(self.economic_rows,(0,addition),value=-1),self.fault)
+
+    def write_reserved(self,offset,incoming):
+        return Normalizer(self.bank.write_reserved(offset,incoming),self.logical_rows,self.economic_rows,self.fault)
+
+    def used_prefix(self,count):
+        return Normalizer(self.bank.used_prefix(count),self.logical_rows[:,:count].clone(),
+            self.economic_rows[:,:count].clone(),self.fault.clone())
 
     def prepare(self, rows, enabled):
         """纯候选；按原输入重试不会接纳半批，旧成功前缀不回滚。

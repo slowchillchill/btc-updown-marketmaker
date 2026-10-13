@@ -286,7 +286,7 @@ Chainlink spot、TWAP30、TWAP60。每次完整组应用后，只有原可见值
 | `price_indices`、`price_fee_features` | `int64[P]`、`float32[D,P]` | P为同合法区间批次的真实价格数，最多999；索引k−1，精确费用先于评分 |
 | family/quantity/variant/price/cancel 的分数和支持 | `float32[D,6/16/2/P/K]`、同形 `bool` | 支持由公共精确GPU函数生成；非法/补齐不参加分布，唯一合法项无随机消费 |
 | `action_path_offsets`、`action_path` | `int64[D+1]`、`int64[A]` | 所有实际全局选择，包含唯一项；数量循环长度可变，未完成行保留stage和精确区间 |
-| Critic输出 | `float32[D]` | 使用同一fast/slow/book/GRU状态，经独立价值头；不消费hidden事实 |
+| Critic输出 | 有目标为 `float32[D]`，state-only为 `None` | 使用同一fast/slow/book/GRU状态，独立价值头仅另读两列根目标时间；不消费hidden事实 |
 
 `B`可以包含同一观察的当前/下一市场两行，但同市场有依赖观察不能当作独立行并行递推。
 MAIN市场编码输入为 `626+576=1202`，BASELINE为 `626+576+433=1635`；
@@ -367,14 +367,18 @@ delivery序，不能由source private最大值代替。
 市场维护。慢字段433共享原根读取，仅93／94表达市场行角色。`ContextOnly` 在前递推，
 原 Actor／取消／发送材料只给 `DecisionRequired`，热身不调用 Actor 或提交 RNG。
 市场开市承接原隐藏状态；旧冻结消费结束后才释放原身份槽和缓存，经济事实不随之删除。
+D-0339的新Maker模型只改变SIM的成交判定和必要排位；观察仍从实际已提交公开前缀
+冻结，PublicTrade hidden执行列不成为Actor/GRU输入。新规则和v2 typed执行列属于新运行，
+旧规则／v1材料保留原身份，不对旧冻结或活动检查点换模。
 失败冻结不推进已接纳观察前沿，来源和记忆沿原物理需求续接；首窗未安装端点的合法
 全未知零缓存与 `None` 都表示未接纳端点，已有端点的有效位、身份、值和故障位保持。
 同账户双市场非零来源、边界资格、跨结束积压及整根资源续接的有限实际验证见训练设计
 “当前市场交易与下一市场热身的有限装配”。该代表不替代完整根、经济尾段或活动恢复。
 
 
-连续宿主现在以显式交易窗口边界停止新增100ms冻结。已接纳的旧观察仍按原根模型队列
-消费；完成和实际发送不因窗口结束取消。经济尾段沿同一来源、SIM时钟、首次公开领取与
+连续宿主以同一个显式交易窗口边界停止新增100ms冻结和新模型开始。原根模型队列仅
+保留开始下界 max(Ck,last_completed_at) 严格早于边界的排队根；下界已达边界的根退役，
+不调用策略或产生NoTrade。截止前已开始的计算和实际发送不因窗口结束取消。经济尾段沿同一来源、SIM时钟、首次公开领取与
 原 Ledger waiting 继续，不制造新模型输入或热身行，也不推动 GRU/RNG 来领取返佣。
 `advance_before` 保持 Ck 与发送的开放端点；尾段专用 `advance_through` 处理真实同刻事件
 后关闭公开领取门。同根同刻先完成原模型事件及发送，再消费尾段经济事件，不能让 Sk
@@ -489,3 +493,47 @@ prefix，成功后才开放观察。资源退出保原需求／时刻，较早ho
 bank行号是本次物理布局；跨领取必须指同一真实行，不能要求某个固定数字。
 本次双市场、倒序／28NOE后验及窗口尾段适用范围见训练设计“已准备根的单账户连续装配”。
 完整跨UTC／15-3日入口、多账户冷宿主、PPO／恢复及正式容量尚未交付。
+
+
+有限目标价值接口 `finite_goal_value_100ms_v1` 不改State100ms输入。生产Root显式传
+`goal_until`，以任务冻结Ck及自有row_roots形成 `S((T_goal-Ck)/1000)`、
+`S((T_trade-Ck)/1000)` 两列，只进入Critic。延后开始仍使用原Ck；无目标明确不评估Critic，
+发送工厂保留 `value=None`。burn-in只重建全部层hidden；目标条件不回喂Actor或RNG。
+本组件不把T_goal当业务终止或材料覆盖证明，也未接完整轨迹、奖励区间、PPO或恢复。
+
+
+### 原Root的经济区间累计与端点训练分
+
+`ContinuousActorRoot` 可显式接收 `reward_a_pusd`；None时不维护奖励，与
+`goal_until` 独立。首个成功接纳观察以同Ledger前缀的WCM与E建立
+`RewardIntervalMemory`。原receiver只执行一次，随后用实际返回的Ledger候选
+和当前 `public_visible_at` 积分旧E并安装新E。资源不足时已成功的前缀也须承接；
+Numbers资源重算仅包纯奖励计算，不重放经济事件。
+
+`read_interval_reward` 沿原运行器推进开放端点，再真实领取原NOE。它返回
+起点至端点的累计训练分、dt、present、known及fault，不安装close的重置memory。
+同端点重复读取一致，后续端点继续从原起点累计；推进后不能回读旧端点。
+WCM、现金及应收以pUSD表示，区间结果称训练分。付款只将已确认应收转为现金，
+不重复收益；若E仍非零，两个付款端点之间仍产生原暴露时间成本。
+
+有限奖励代表显式使用a_pusd=1/50，将原C1300的发送延后改为20ms：
+计算1414完成、1434发送，用真实发送前领取检验C1400与C1500间E变化。
+其他代表保原120ms。原实际请求重新产生CPU后验，资金比较仍限pre-tail；
+有限目标3000不覆盖87000000返佣付款，不能据目标配置、队列空或WCM已知
+生成target_end或声称收益封口。该段描述当时的区间组件阶段；后续有限Root已接入
+逐决定端点、当前批消费释放和完整联合PPO，完整恢复仍未交付。
+
+
+当前有限学习消费者随成功冻结保存Ck同前缀WCM、累计E面积与known/fault，
+字段 `FrozenActorObservation.reward_endpoint` 只由启用学习的Root产生。
+它属于当前未消费逻辑批和在途真实消费者，不是全天轨迹缓存。真实start交接全层h_in，
+publish交接原完整路径；ContextOnly保留循环输入但不增加决定人口。更新只暂停新start，
+原冻结网格与业务时钟继续，下一未开始冻结仍按自己的row_roots/身份首次绑定新v。
+Root/策略更新接口及当前批内burn-in范围见 `100ms-gpu-training.md` §7.2、§7.3与
+“当前有限Root的采集、联合PPO与续采”。完整恢复与跨UTC实际验收仍未交付。
+
+学习消费者不能用账户代表行的数量判断真实决定。它沿原Actor代表行读取frozen.role==1，
+纯ContextOnly完成即保存循环状态，无发送器、无策略损失，也不增加批决定人口。
+原队列用冻结duration、FIFO、实际公开前沿及T_trade只读求合法后继；临时bootstrap和
+恢复后真实开始复用这一资格。截止外后继不作bootstrap，最后转移只沿声明目标尾段。
+已确定不能开始的stage0在不用事件索引的安全点退役，不修改在途动作/时刻或真实hidden。

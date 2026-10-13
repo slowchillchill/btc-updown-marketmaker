@@ -17,6 +17,14 @@ def _take(value, index):
     return ExactInt(value.words[index], value.sign[index], value.fault[index])
 
 
+def _put(value, index, incoming):
+    width = max(value.words.shape[1], incoming.words.shape[1])
+    value, incoming = value.with_capacity(width), incoming.with_capacity(width)
+    return ExactInt(value.words.index_copy(0, index, incoming.words),
+                    value.sign.index_copy(0, index, incoming.sign),
+                    value.fault.index_copy(0, index, incoming.fault))
+
+
 def _repeat(value, count):
     return ExactInt(value.words.repeat_interleave(count, 0), value.sign.repeat_interleave(count),
                     value.fault.repeat_interleave(count))
@@ -24,7 +32,7 @@ def _repeat(value, count):
 
 def _columns(values):
     width = max(value.words.shape[1] for value in values)
-    words = [torch.nn.functional.pad(value.words, (0, width-value.words.shape[1])) for value in values]
+    words = [value.with_capacity(width).words for value in values]
     return ExactInt(torch.stack(words, 1).flatten(0, 1), torch.stack([value.sign for value in values], 1).flatten(),
                     torch.stack([value.fault for value in values], 1).flatten())
 
@@ -73,6 +81,7 @@ class PriceQueueBatch:
     account_remaining: object
     debt: object  # ExactInt[rows]
     fault: torch.Tensor
+    conservative: object = None
 
     @property
     def rows(self):
@@ -114,7 +123,8 @@ class PriceQueueBatch:
         return replace(self, kind=torch.nn.functional.pad(self.kind, (0,padding)),
                        order_ids=torch.nn.functional.pad(self.order_ids, (0,padding), value=-1),
                        total_base=enlarged(self.total_base),total_quote=enlarged(self.total_quote),
-                       consumed_base=enlarged(self.consumed_base),account_remaining=enlarged(self.account_remaining))
+                       consumed_base=enlarged(self.consumed_base),account_remaining=enlarged(self.account_remaining),
+                       conservative=None if self.conservative is None else self.conservative.resized(capacity))
 
     def append_empty_rows(self, price):
         """为新合法报价建立空FIFO；旧行坐标、段与债务都不移动。"""
@@ -126,7 +136,17 @@ class PriceQueueBatch:
         return replace(self,price=ExactRational(integer(self.price.numerator,price.numerator),integer(self.price.denominator,price.denominator)),
             kind=torch.cat((self.kind,empty.kind)),order_ids=torch.cat((self.order_ids,empty.order_ids)),
             **{name:integer(getattr(self,name),getattr(empty,name)) for name in
-               ('total_base','total_quote','consumed_base','account_remaining','debt')},fault=torch.cat((self.fault,empty.fault)))
+               ('total_base','total_quote','consumed_base','account_remaining','debt')},fault=torch.cat((self.fault,empty.fault)),
+            conservative=self._append_rank_rows(empty))
+
+    def _append_rank_rows(self,empty):
+        if self.conservative is None:return None
+        from conservative_rank import ConservativeRank
+        rank=self.conservative;tail=ConservativeRank.empty(empty)
+        width=max(rank.remaining.words.size(1),tail.remaining.words.size(1))
+        a,b=rank.remaining.with_capacity(width),tail.remaining.with_capacity(width)
+        return ConservativeRank(torch.cat((rank.kind,tail.kind)),torch.cat((rank.order_ids,tail.order_ids)),
+            ExactInt(torch.cat((a.words,b.words)),torch.cat((a.sign,b.sign)),torch.cat((a.fault,b.fault))))
 
     def _compact(self, enabled=None):
         if enabled is None:
@@ -183,7 +203,19 @@ class PriceQueueBatch:
         return self._append(quantity)
 
     def append_account(self, order_ids, quantity):
-        return self._append(quantity,order_ids)
+        if self.conservative is None:return self._append(quantity,order_ids)
+        rank=self.conservative
+        fault=self.fault|quantity.fault|(quantity.sign<0).to(torch.int32)
+        fault|=((quantity.sign>0)&(order_ids<0)).to(torch.int32)
+        fault|=((rank.kind==2)&(rank.order_ids==order_ids[:,None])).any(1).to(torch.int32)*(quantity.sign>0).to(torch.int32)
+        quantity=quantity.select(fault==0,quantity.constant(0))
+        seed=quantity.constant(0)
+        for c in range(self.capacity):
+            seed=seed+(self._at(self.total_base,c)-self._at(self.consumed_base,c)).select(self.kind[:,c]==1,seed.constant(0))
+        seed=seed.select((quantity.sign>0)&~(rank.kind==2).any(1),seed.constant(0))
+        rank,first=rank.append(seed)
+        rank,required=rank.append(quantity,order_ids)
+        return replace(self,conservative=rank,fault=fault|seed.fault|_row_fault(rank.remaining,self.rows,self.capacity)),torch.maximum(first,required)
 
     def clear_external(self, enabled):
         clear = enabled[:,None]&(self.kind==1)
@@ -196,9 +228,13 @@ class PriceQueueBatch:
         clear = enabled[:, None]
         return replace(self, kind=torch.where(clear, 0, self.kind),
                        order_ids=torch.where(clear, -1, self.order_ids),
-                       debt=self.debt.constant(0).select(enabled, self.debt))
+                       debt=self.debt.constant(0).select(enabled, self.debt),
+                       conservative=None if self.conservative is None else self.conservative.clear(enabled))
 
     def cancel(self, order_ids):
+        if self.conservative is not None:
+            rank,total,found=self.conservative.cancel(order_ids)
+            return replace(self,conservative=rank),total,found
         selected = (self.kind==2)&(self.order_ids==order_ids[:,None])
         zero = self.debt.constant(0)
         total = zero
@@ -359,7 +395,7 @@ class PriceQueueBatch:
             debt=next_debt.select(enabled, self.debt), fault=roots_fault)
         return candidate.finish_taker_plan(enabled)
 
-    def apply_level_transition(self, before, after):
+    def apply_level_transition(self, before, after, *, fifo_loop=None):
         """原减少先抵taker debt，再逐段耗尽；增加永远追加尾段，绝不合并原B/Q。"""
         zero = before.constant(0)
         relation = after.compare(before)
@@ -370,26 +406,81 @@ class PriceQueueBatch:
         debt = self.debt-offset
         roots_fault = self.fault | before.fault | after.fault | relation.fault
         roots_fault = roots_fault | (before.sign<0).to(torch.int32) | (after.sign<0).to(torch.int32)
-        consumed_columns = []
-        account_columns = []
-        maker_columns = []
-        for column in range(self.capacity):
-            base = self._at(self.total_base,column)
-            consumed = self._at(self.consumed_base,column)
-            account = self._at(self.account_remaining,column)
-            kind = self.kind[:,column]
-            available = (base-consumed).select(kind==1,account.select(kind==2,zero))
-            take = _minimum(available,remaining)
-            remaining = remaining-take
-            consumed_columns.append((consumed+take).select(kind==1,consumed))
-            account_columns.append((account-take).select(kind==2,account))
-            maker_columns.append(take.select(kind==2,zero))
+        columns = self.capacity
+        eager = not Numbers.device_batch_active() and self.rows > 0
+        if eager and fifo_loop is not None:
+            positions = torch.arange(self.capacity, device=self.kind.device)[None, :]
+            limit = torch.where(self.kind != 0, positions + 1, 0).max()
+            live = (positions < limit).expand(self.rows, self.capacity).flatten()
+            kind = self.kind.flatten()
+            flat_zero = _repeat(zero, self.capacity)
+            # 全局有效prefix不变；死尾在算术前屏蔽，输出仍保留原完整字段。
+            consumed = self.consumed_base.select(live, flat_zero)
+            account = self.account_remaining.select(live, flat_zero)
+            base = self.total_base.select(live, flat_zero)
+            available = (base - consumed).select(kind == 1, account.select(kind == 2, flat_zero))
+            safe_suffix = ((available.sign >= 0) & (available.fault == 0)).all()
+            taken, remaining = fifo_loop.take(available, remaining, limit, safe_suffix,
+                rows=self.rows, capacity=self.capacity)
+            consumed_after = (consumed + taken).select(live & (kind == 1), self.consumed_base)
+            account_after = (account - taken).select(live & (kind == 2), self.account_remaining)
+            maker = taken.select(live & (kind == 2), flat_zero)
+        elif eager:
+            # 空尾槽的take恒零；仅eager省算术，不改变物理列或原FIFO顺序。
+            positions = torch.arange(self.capacity,device=self.kind.device) + 1
+            columns = int(torch.where(self.kind != 0,positions[None,:],0).max().cpu())
+            consumed_after, account_after = self.consumed_base, self.account_remaining
+            maker = _repeat(zero,self.capacity)
+            if columns:
+                row_axis = torch.arange(self.rows,device=self.kind.device)
+                indices = (row_axis[:,None]*self.capacity +
+                           torch.arange(columns,device=self.kind.device)[None,:]).flatten()
+                consumed, account = _take(self.consumed_base,indices), _take(self.account_remaining,indices)
+                kind = self.kind[:,:columns].flatten()
+                flat_zero = _repeat(zero,columns)
+                available = (_take(self.total_base,indices)-consumed).select(
+                    kind==1,account.select(kind==2,flat_zero))
+                zero_suffix = ((available.sign >= 0) & (available.fault == 0)).all().cpu().item()
+                takes = []
+                for column in range(columns):
+                    if zero_suffix and not remaining.sign.any().cpu().item():
+                        # 原零后缀仍携带逐行fault和共同字宽；前缀真实take保留。
+                        remaining = remaining.with_capacity(max(available.words.shape[1], remaining.words.shape[1]))
+                        takes.extend([remaining] * (columns-column))
+                        break
+                    take = _minimum(_take(available,row_axis*columns+column),remaining)
+                    remaining = remaining-take
+                    # 保存各列当时的fault，不能用末尾remaining.fault回填前列。
+                    takes.append(take)
+                taken = _columns(takes)
+                consumed_after = _put(consumed_after,indices,(consumed+taken).select(kind==1,consumed))
+                account_after = _put(account_after,indices,(account-taken).select(kind==2,account))
+                maker = _put(maker,indices,taken.select(kind==2,flat_zero))
+        else:
+            consumed_columns, account_columns, maker_columns = [], [], []
+            for column in range(columns):
+                base = self._at(self.total_base,column)
+                consumed = self._at(self.consumed_base,column)
+                account = self._at(self.account_remaining,column)
+                kind = self.kind[:,column]
+                available = (base-consumed).select(kind==1,account.select(kind==2,zero))
+                take = _minimum(available,remaining)
+                remaining = remaining-take
+                consumed_columns.append((consumed+take).select(kind==1,consumed))
+                account_columns.append((account-take).select(kind==2,account))
+                maker_columns.append(take.select(kind==2,zero))
+            consumed_after, account_after = _columns(consumed_columns), _columns(account_columns)
+            maker = _columns(maker_columns)
         roots_fault = roots_fault | remaining.fault | debt.fault | (remaining.sign>0).to(torch.int32)
-        state = replace(self,consumed_base=_columns(consumed_columns),account_remaining=_columns(account_columns),
-                        debt=debt,fault=roots_fault)._compact()
+        state = replace(self,consumed_base=consumed_after,account_remaining=account_after,
+                        debt=debt,fault=roots_fault)
         state,required = state.append_external(added)
-        maker = _columns(maker_columns)
         roots_fault = roots_fault | state.fault | _row_fault(maker,self.rows,self.capacity)
+        if self.conservative is not None:
+            ranked=(self.conservative.kind==2).any(1)
+            rank,rank_required=self.conservative.append(added.select(ranked,zero))
+            state=replace(state,conservative=rank)
+            required=torch.maximum(required,rank_required)
         effects = QueueEffects(self.order_ids,maker,zero,torch.zeros_like(self.fault,dtype=torch.bool),required,roots_fault)
         return state,effects
 

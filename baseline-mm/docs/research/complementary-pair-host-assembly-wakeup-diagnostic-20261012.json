@@ -1,0 +1,1908 @@
+{
+  "base_head": "1e8eeda3059ca0203898afb4b55b50571006124d",
+  "candidates_sha256": "35017b5563398ef2f8d019f78b817312d3791f9978fcd21a3d6ec500e17c4936",
+  "finality_sha256": "b98102f86cbd2e0d635bdc5074dcb1d7c1fb1a84de61d419d07a475c2e8533ef",
+  "format": "issue185-host-assembly-diagnostic-v3",
+  "history_points": 301,
+  "history_span_ms": 300000,
+  "markets": 866,
+  "rules_sha256": "4397d7b3a102616c93484892a1cdb5bfa1a6de23c9383e52a04bbb1d480ae422",
+  "sample_count": 96,
+  "samples_per_cell": 32,
+  "source_identity_sha256": "e6ba6c3397e7c70bf399a68014c0df2c1e91ec83eec91137e6bb8d5ee0e2684a",
+  "timed_path": "separate complete assembly and pure decide; six independent same-state public diagnostics, not additive decomposition",
+  "warmup_per_cell": 1,
+  "cells": [
+    {
+      "assembly_nearest_rank": {
+        "max_ns": 10136975,
+        "p50_ns": 8865762,
+        "p95_ns": 10049079
+      },
+      "assembly_samples_ns": [
+        8612815,
+        9164284,
+        10049079,
+        8865762,
+        8972482,
+        10136975,
+        8452283,
+        9060187,
+        8437636,
+        8874739,
+        8573582,
+        8946023,
+        8740045,
+        8493380,
+        8597867,
+        9212995,
+        8423028,
+        9277988,
+        9164715,
+        8657028,
+        8569053,
+        8564404,
+        8618916,
+        8925514,
+        8630499,
+        9745147,
+        8746297,
+        8949109,
+        8985076,
+        9341928,
+        8729926,
+        9333733
+      ],
+      "candidate": "center",
+      "closed_diagnostics": [
+        {
+          "choice": "Wait",
+          "comparison": null,
+          "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "maximum_repair_price": null,
+          "probability": {
+            "Unavailable": "MarketEnded"
+          },
+          "source_health": [
+            {
+              "failure": "ReceiveSilence",
+              "scope": {
+                "asset_or_symbol": "1000",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "source": "PolymarketBook"
+              }
+            },
+            {
+              "failure": "ReceiveSilence",
+              "scope": {
+                "asset_or_symbol": "1001",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "source": "PolymarketBook"
+              }
+            }
+          ],
+          "source_health_states": [
+            {
+              "scope": {
+                "asset_or_symbol": "btc/usd",
+                "condition_id": null,
+                "source": "ChainlinkSpot"
+              },
+              "state": "Normal"
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "BTCUSDT",
+                "condition_id": null,
+                "source": "BinanceAggregateTrade"
+              },
+              "state": "Normal"
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "1000",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "source": "PolymarketBook"
+              },
+              "state": {
+                "Exceeded": "ReceiveSilence"
+              }
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "1001",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "source": "PolymarketBook"
+              },
+              "state": {
+                "Exceeded": "ReceiveSilence"
+              }
+            }
+          ],
+          "unavailable": [],
+          "urgency": {
+            "active_path_ms": 0,
+            "binance_innovation_usd": null,
+            "free_cash_pusd": "1996.16337",
+            "information_age_ms": null,
+            "maker_path_ms": 0,
+            "orphan_cost_pusd": {
+              "denominator": "100000",
+              "numerator": "283663"
+            },
+            "repair_ask_depth_shares": "100",
+            "settlement_window_start_utc_ms": null,
+            "standardized_distance": null,
+            "trading_remaining_ms": -301002,
+            "uncertainty_usd": null,
+            "unresolved_commitment_count": 0,
+            "window_remaining_ms": 0
+          }
+        },
+        {
+          "choice": "Wait",
+          "comparison": null,
+          "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+          "maximum_repair_price": null,
+          "probability": {
+            "Unavailable": "MarketEnded"
+          },
+          "source_health": [
+            {
+              "failure": "ReceiveSilence",
+              "scope": {
+                "asset_or_symbol": "1002",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                "source": "PolymarketBook"
+              }
+            },
+            {
+              "failure": "ReceiveSilence",
+              "scope": {
+                "asset_or_symbol": "1003",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                "source": "PolymarketBook"
+              }
+            }
+          ],
+          "source_health_states": [
+            {
+              "scope": {
+                "asset_or_symbol": "btc/usd",
+                "condition_id": null,
+                "source": "ChainlinkSpot"
+              },
+              "state": "Normal"
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "BTCUSDT",
+                "condition_id": null,
+                "source": "BinanceAggregateTrade"
+              },
+              "state": "Normal"
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "1002",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                "source": "PolymarketBook"
+              },
+              "state": {
+                "Exceeded": "ReceiveSilence"
+              }
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "1003",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                "source": "PolymarketBook"
+              },
+              "state": {
+                "Exceeded": "ReceiveSilence"
+              }
+            }
+          ],
+          "unavailable": [],
+          "urgency": {
+            "active_path_ms": 0,
+            "binance_innovation_usd": null,
+            "free_cash_pusd": "1996.16337",
+            "information_age_ms": null,
+            "maker_path_ms": 0,
+            "orphan_cost_pusd": {
+              "denominator": "1",
+              "numerator": "0"
+            },
+            "repair_ask_depth_shares": null,
+            "settlement_window_start_utc_ms": null,
+            "standardized_distance": null,
+            "trading_remaining_ms": -301002,
+            "uncertainty_usd": null,
+            "unresolved_commitment_count": 1,
+            "window_remaining_ms": 0
+          }
+        }
+      ],
+      "current_diagnostic": {
+        "choice": "NewPair",
+        "comparison": null,
+        "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+        "maximum_repair_price": null,
+        "probability": {
+          "Known": {
+            "approximate_window_integral": false,
+            "binance_innovation_usd": 0.0,
+            "information_age_ms": 2,
+            "mean_usd": 64999.0,
+            "sigma_usd_per_sqrt_second": 3.1480152477394387,
+            "standardized_distance": -0.018463702098932874,
+            "temporary_reference": false,
+            "uncertainty_usd": 54.16031923835014,
+            "up": 0.49263446707758857
+          }
+        },
+        "source_health": [],
+        "source_health_states": [
+          {
+            "scope": {
+              "asset_or_symbol": "btc/usd",
+              "condition_id": null,
+              "source": "ChainlinkSpot"
+            },
+            "state": "Normal"
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "BTCUSDT",
+              "condition_id": null,
+              "source": "BinanceAggregateTrade"
+            },
+            "state": "Normal"
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "2730",
+              "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+              "source": "PolymarketBook"
+            },
+            "state": "Normal"
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "2731",
+              "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+              "source": "PolymarketBook"
+            },
+            "state": "Normal"
+          }
+        ],
+        "unavailable": [],
+        "urgency": {
+          "active_path_ms": 0,
+          "binance_innovation_usd": 0.0,
+          "free_cash_pusd": "1996.16337",
+          "information_age_ms": 2,
+          "maker_path_ms": 0,
+          "orphan_cost_pusd": {
+            "denominator": "1",
+            "numerator": "0"
+          },
+          "repair_ask_depth_shares": null,
+          "settlement_window_start_utc_ms": 1787615400000,
+          "standardized_distance": -0.018463702098932874,
+          "trading_remaining_ms": 295998,
+          "uncertainty_usd": 54.16031923835014,
+          "unresolved_commitment_count": 0,
+          "window_remaining_ms": 0
+        }
+      },
+      "decide_nearest_rank": {
+        "max_ns": 4907619,
+        "p50_ns": 4196351,
+        "p95_ns": 4442745
+      },
+      "decide_samples_ns": [
+        4095100,
+        4251064,
+        4215727,
+        4442745,
+        4228681,
+        4356101,
+        3978280,
+        4214485,
+        4001804,
+        4204877,
+        4058130,
+        4187163,
+        4090111,
+        3999840,
+        4091012,
+        4304224,
+        4078539,
+        4145395,
+        4210006,
+        4080793,
+        4092254,
+        4343026,
+        4091673,
+        4249751,
+        4016943,
+        4303502,
+        4196351,
+        4089369,
+        4256825,
+        4907619,
+        4406216,
+        4428387
+      ],
+      "independent_diagnostic_nearest_rank": {
+        "account_economics_from_existing_read": {
+          "max_ns": 5399666,
+          "p50_ns": 4956301,
+          "p95_ns": 5295660
+        },
+        "calculate_same_pre_decide_state": {
+          "max_ns": 5640930,
+          "p50_ns": 4745635,
+          "p95_ns": 5113467
+        },
+        "economic_read_including_projection": {
+          "max_ns": 7043,
+          "p50_ns": 5219,
+          "p95_ns": 6833
+        },
+        "freeze_action_before": {
+          "max_ns": 5979237,
+          "p50_ns": 5635350,
+          "p95_ns": 5873388
+        },
+        "frozen_market_vector_clone": {
+          "max_ns": 2252471,
+          "p50_ns": 1952827,
+          "p95_ns": 2209460
+        },
+        "funds_projection": {
+          "max_ns": 16511,
+          "p50_ns": 12894,
+          "p95_ns": 16231
+        }
+      },
+      "independent_diagnostic_samples_ns": {
+        "account_economics_from_existing_read": [
+          5004101,
+          4780681,
+          4846755,
+          4836035,
+          4791121,
+          4931445,
+          4908551,
+          4828210,
+          4810096,
+          4966541,
+          5215469,
+          5252509,
+          5158332,
+          4863517,
+          5120581,
+          5046621,
+          5096195,
+          4761305,
+          4816879,
+          4718033,
+          5157981,
+          4956301,
+          4951762,
+          5119729,
+          5399666,
+          4677617,
+          4735796,
+          5032134,
+          5113908,
+          5295660,
+          5185553,
+          5160766
+        ],
+        "calculate_same_pre_decide_state": [
+          4716740,
+          4360540,
+          4400645,
+          4694378,
+          4778105,
+          4281581,
+          4755102,
+          4379025,
+          4830965,
+          4347826,
+          4902460,
+          4878735,
+          5113467,
+          4907138,
+          4744623,
+          4343899,
+          4877102,
+          4836225,
+          4326816,
+          4745635,
+          4663760,
+          4771443,
+          4464255,
+          4769910,
+          5070095,
+          4339039,
+          4302881,
+          4897630,
+          4351292,
+          5640930,
+          4790909,
+          4901257
+        ],
+        "economic_read_including_projection": [
+          4318,
+          6653,
+          6693,
+          7043,
+          5270,
+          5250,
+          4068,
+          4789,
+          4809,
+          5280,
+          6763,
+          5190,
+          4628,
+          4308,
+          5590,
+          5200,
+          4779,
+          5219,
+          5150,
+          4057,
+          5240,
+          4439,
+          5390,
+          4839,
+          6012,
+          4118,
+          5650,
+          6222,
+          6552,
+          6713,
+          4939,
+          6833
+        ],
+        "freeze_action_before": [
+          5701484,
+          5510896,
+          5762790,
+          5789830,
+          5659375,
+          5582290,
+          5426807,
+          5544268,
+          5532075,
+          5512588,
+          5763742,
+          5635350,
+          5722504,
+          5555269,
+          5681186,
+          5659175,
+          5603961,
+          5486218,
+          5721642,
+          5335425,
+          5873388,
+          5471642,
+          5556341,
+          5624710,
+          5979237,
+          5601486,
+          5608109,
+          5641031,
+          5757029,
+          5783118,
+          5645909,
+          5792355
+        ],
+        "frozen_market_vector_clone": [
+          1987172,
+          1912611,
+          1875010,
+          1966412,
+          1863849,
+          1899466,
+          2252471,
+          1886201,
+          2141472,
+          1810539,
+          1995196,
+          2034440,
+          1830376,
+          2011877,
+          1968757,
+          1796462,
+          2076029,
+          1952827,
+          1817292,
+          1889508,
+          1918832,
+          2021877,
+          1789269,
+          2015224,
+          2068565,
+          1925946,
+          1868718,
+          2180275,
+          1863218,
+          2209460,
+          2097560,
+          2018440
+        ],
+        "funds_projection": [
+          8676,
+          14447,
+          12233,
+          13406,
+          12744,
+          7564,
+          5210,
+          12834,
+          12894,
+          14297,
+          16010,
+          14307,
+          13455,
+          7865,
+          16231,
+          14307,
+          13586,
+          11942,
+          7664,
+          4469,
+          14146,
+          8185,
+          13876,
+          13726,
+          16511,
+          5180,
+          6613,
+          11682,
+          12884,
+          13265,
+          14017,
+          14507
+        ]
+      },
+      "intents": [
+        "CancelOrders { platform_order_ids: [\"sim-2\"] }",
+        "SubmitPairedBuy { condition_id: ConditionId(\"0x0000000000000000000000000000000000000000000000000000000000000362\"), orders: [BuyLegIntentV1 { token_id: TokenId(\"2730\"), order: GtcLimit { limit_price_pusd_per_share: 0.48, size_shares: 50, post_only: true } }, BuyLegIntentV1 { token_id: TokenId(\"2731\"), order: GtcLimit { limit_price_pusd_per_share: 0.49, size_shares: 50, post_only: true } }] }"
+      ],
+      "output_counts": {
+        "Actions": 32
+      },
+      "requires_trade_economics_details": false,
+      "state": "empty"
+    },
+    {
+      "assembly_nearest_rank": {
+        "max_ns": 9551653,
+        "p50_ns": 9145789,
+        "p95_ns": 9515315
+      },
+      "assembly_samples_ns": [
+        9145789,
+        9427419,
+        8696804,
+        9289319,
+        8945211,
+        9454460,
+        8826157,
+        9551653,
+        8912970,
+        9103379,
+        8950922,
+        8909624,
+        8868286,
+        9158282,
+        9225909,
+        9483475,
+        8968806,
+        9058665,
+        9303155,
+        9297575,
+        9172449,
+        9369329,
+        8892913,
+        9124198,
+        8858548,
+        9108349,
+        9295150,
+        9405027,
+        9312453,
+        9515315,
+        8862556,
+        9348570
+      ],
+      "candidate": "center",
+      "closed_diagnostics": [
+        {
+          "choice": "Wait",
+          "comparison": null,
+          "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "maximum_repair_price": null,
+          "probability": {
+            "Unavailable": "MarketEnded"
+          },
+          "source_health": [
+            {
+              "failure": "ReceiveSilence",
+              "scope": {
+                "asset_or_symbol": "1000",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "source": "PolymarketBook"
+              }
+            },
+            {
+              "failure": "ReceiveSilence",
+              "scope": {
+                "asset_or_symbol": "1001",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "source": "PolymarketBook"
+              }
+            }
+          ],
+          "source_health_states": [
+            {
+              "scope": {
+                "asset_or_symbol": "btc/usd",
+                "condition_id": null,
+                "source": "ChainlinkSpot"
+              },
+              "state": "Normal"
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "BTCUSDT",
+                "condition_id": null,
+                "source": "BinanceAggregateTrade"
+              },
+              "state": "Normal"
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "1000",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "source": "PolymarketBook"
+              },
+              "state": {
+                "Exceeded": "ReceiveSilence"
+              }
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "1001",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "source": "PolymarketBook"
+              },
+              "state": {
+                "Exceeded": "ReceiveSilence"
+              }
+            }
+          ],
+          "unavailable": [],
+          "urgency": {
+            "active_path_ms": 0,
+            "binance_innovation_usd": null,
+            "free_cash_pusd": "1995.16337",
+            "information_age_ms": null,
+            "maker_path_ms": 0,
+            "orphan_cost_pusd": {
+              "denominator": "100000",
+              "numerator": "283663"
+            },
+            "repair_ask_depth_shares": "100",
+            "settlement_window_start_utc_ms": null,
+            "standardized_distance": null,
+            "trading_remaining_ms": -301002,
+            "uncertainty_usd": null,
+            "unresolved_commitment_count": 0,
+            "window_remaining_ms": 0
+          }
+        },
+        {
+          "choice": "Wait",
+          "comparison": null,
+          "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+          "maximum_repair_price": null,
+          "probability": {
+            "Unavailable": "MarketEnded"
+          },
+          "source_health": [
+            {
+              "failure": "ReceiveSilence",
+              "scope": {
+                "asset_or_symbol": "1002",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                "source": "PolymarketBook"
+              }
+            },
+            {
+              "failure": "ReceiveSilence",
+              "scope": {
+                "asset_or_symbol": "1003",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                "source": "PolymarketBook"
+              }
+            }
+          ],
+          "source_health_states": [
+            {
+              "scope": {
+                "asset_or_symbol": "btc/usd",
+                "condition_id": null,
+                "source": "ChainlinkSpot"
+              },
+              "state": "Normal"
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "BTCUSDT",
+                "condition_id": null,
+                "source": "BinanceAggregateTrade"
+              },
+              "state": "Normal"
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "1002",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                "source": "PolymarketBook"
+              },
+              "state": {
+                "Exceeded": "ReceiveSilence"
+              }
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "1003",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                "source": "PolymarketBook"
+              },
+              "state": {
+                "Exceeded": "ReceiveSilence"
+              }
+            }
+          ],
+          "unavailable": [],
+          "urgency": {
+            "active_path_ms": 0,
+            "binance_innovation_usd": null,
+            "free_cash_pusd": "1995.16337",
+            "information_age_ms": null,
+            "maker_path_ms": 0,
+            "orphan_cost_pusd": {
+              "denominator": "1",
+              "numerator": "0"
+            },
+            "repair_ask_depth_shares": null,
+            "settlement_window_start_utc_ms": null,
+            "standardized_distance": null,
+            "trading_remaining_ms": -301002,
+            "uncertainty_usd": null,
+            "unresolved_commitment_count": 1,
+            "window_remaining_ms": 0
+          }
+        }
+      ],
+      "current_diagnostic": {
+        "choice": "NewPair",
+        "comparison": null,
+        "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+        "maximum_repair_price": null,
+        "probability": {
+          "Known": {
+            "approximate_window_integral": false,
+            "binance_innovation_usd": 0.0,
+            "information_age_ms": 2,
+            "mean_usd": 64999.0,
+            "sigma_usd_per_sqrt_second": 3.1480152477394387,
+            "standardized_distance": -0.018463702098932874,
+            "temporary_reference": false,
+            "uncertainty_usd": 54.16031923835014,
+            "up": 0.49263446707758857
+          }
+        },
+        "source_health": [],
+        "source_health_states": [
+          {
+            "scope": {
+              "asset_or_symbol": "btc/usd",
+              "condition_id": null,
+              "source": "ChainlinkSpot"
+            },
+            "state": "Normal"
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "BTCUSDT",
+              "condition_id": null,
+              "source": "BinanceAggregateTrade"
+            },
+            "state": "Normal"
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "2730",
+              "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+              "source": "PolymarketBook"
+            },
+            "state": "Normal"
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "2731",
+              "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+              "source": "PolymarketBook"
+            },
+            "state": "Normal"
+          }
+        ],
+        "unavailable": [],
+        "urgency": {
+          "active_path_ms": 0,
+          "binance_innovation_usd": 0.0,
+          "free_cash_pusd": "1995.16337",
+          "information_age_ms": 2,
+          "maker_path_ms": 0,
+          "orphan_cost_pusd": {
+            "denominator": "1",
+            "numerator": "0"
+          },
+          "repair_ask_depth_shares": null,
+          "settlement_window_start_utc_ms": 1787615400000,
+          "standardized_distance": -0.018463702098932874,
+          "trading_remaining_ms": 295998,
+          "uncertainty_usd": 54.16031923835014,
+          "unresolved_commitment_count": 1,
+          "window_remaining_ms": 0
+        }
+      },
+      "decide_nearest_rank": {
+        "max_ns": 5433690,
+        "p50_ns": 5042574,
+        "p95_ns": 5342718
+      },
+      "decide_samples_ns": [
+        4997067,
+        5018288,
+        4909283,
+        5081868,
+        4989434,
+        5108277,
+        4937386,
+        5082419,
+        5007388,
+        5197996,
+        4987179,
+        4904924,
+        5061309,
+        5113958,
+        5067390,
+        5051541,
+        4942495,
+        4904954,
+        5145537,
+        5226991,
+        5040791,
+        5342718,
+        4894375,
+        4972321,
+        4961020,
+        5138975,
+        5042574,
+        5134677,
+        5065697,
+        5170013,
+        4921505,
+        5433690
+      ],
+      "independent_diagnostic_nearest_rank": {
+        "account_economics_from_existing_read": {
+          "max_ns": 5458848,
+          "p50_ns": 5129678,
+          "p95_ns": 5435674
+        },
+        "calculate_same_pre_decide_state": {
+          "max_ns": 6326291,
+          "p50_ns": 5641131,
+          "p95_ns": 6019924
+        },
+        "economic_read_including_projection": {
+          "max_ns": 7614,
+          "p50_ns": 5620,
+          "p95_ns": 7054
+        },
+        "freeze_action_before": {
+          "max_ns": 6512040,
+          "p50_ns": 5770634,
+          "p95_ns": 6021076
+        },
+        "frozen_market_vector_clone": {
+          "max_ns": 2341428,
+          "p50_ns": 1998042,
+          "p95_ns": 2244716
+        },
+        "funds_projection": {
+          "max_ns": 19697,
+          "p50_ns": 16131,
+          "p95_ns": 18264
+        }
+      },
+      "independent_diagnostic_samples_ns": {
+        "account_economics_from_existing_read": [
+          4892351,
+          4887392,
+          5179701,
+          5435674,
+          5161898,
+          5110772,
+          5122755,
+          5053905,
+          4904273,
+          5136781,
+          5206663,
+          4963174,
+          4859148,
+          4827549,
+          5142712,
+          4915505,
+          5354140,
+          5031944,
+          5195622,
+          5129678,
+          5176776,
+          5191314,
+          5225348,
+          5068984,
+          5064605,
+          4930062,
+          5204980,
+          5231910,
+          5272567,
+          5108167,
+          5458848,
+          5178820
+        ],
+        "calculate_same_pre_decide_state": [
+          5492491,
+          5092056,
+          5771646,
+          5987713,
+          5277165,
+          5367396,
+          5820147,
+          5178690,
+          5627815,
+          5995037,
+          5597839,
+          5632194,
+          5554277,
+          5748884,
+          5244494,
+          5209488,
+          5623547,
+          6326291,
+          5362175,
+          5753342,
+          5802905,
+          5710581,
+          5641641,
+          6008603,
+          5641131,
+          6019924,
+          5398524,
+          5696434,
+          5803316,
+          5245996,
+          5795511,
+          5873398
+        ],
+        "economic_read_including_projection": [
+          4950,
+          4819,
+          7614,
+          6442,
+          5872,
+          5601,
+          5620,
+          5350,
+          5731,
+          5540,
+          5660,
+          5881,
+          5360,
+          5751,
+          5610,
+          5510,
+          5340,
+          5951,
+          7054,
+          5611,
+          5951,
+          5851,
+          5660,
+          5680,
+          5660,
+          5390,
+          5680,
+          5471,
+          5460,
+          5320,
+          5530,
+          5801
+        ],
+        "freeze_action_before": [
+          5701354,
+          5578423,
+          5978195,
+          5875892,
+          5755075,
+          5667109,
+          5629378,
+          5648735,
+          5689632,
+          5805841,
+          5923392,
+          5476621,
+          5840946,
+          5889748,
+          5732673,
+          5672029,
+          5797445,
+          5529721,
+          5807503,
+          5758231,
+          6512040,
+          5717104,
+          5790882,
+          6021076,
+          5770634,
+          5874480,
+          5835917,
+          5735668,
+          5837721,
+          5766236,
+          5847069,
+          5914054
+        ],
+        "frozen_market_vector_clone": [
+          1989515,
+          1929081,
+          2000456,
+          2176538,
+          1892173,
+          1937037,
+          2244095,
+          1872996,
+          1906820,
+          2015384,
+          1998042,
+          1974878,
+          1978164,
+          1990588,
+          1870651,
+          1898574,
+          1993974,
+          2163183,
+          1859892,
+          2341428,
+          2076790,
+          2244716,
+          2041594,
+          2153394,
+          2039169,
+          2014172,
+          1929002,
+          2027247,
+          2005656,
+          1926747,
+          2037937,
+          1998182
+        ],
+        "funds_projection": [
+          7303,
+          5871,
+          16160,
+          19697,
+          16962,
+          16932,
+          16131,
+          15429,
+          16030,
+          15600,
+          16191,
+          13656,
+          14407,
+          14647,
+          15008,
+          14287,
+          17103,
+          15930,
+          17362,
+          15088,
+          17183,
+          17804,
+          17734,
+          18264,
+          16591,
+          13366,
+          16571,
+          16401,
+          16211,
+          15739,
+          17503,
+          15970
+        ]
+      },
+      "intents": [
+        "CancelOrders { platform_order_ids: [\"sim-2\"] }",
+        "SubmitPairedBuy { condition_id: ConditionId(\"0x0000000000000000000000000000000000000000000000000000000000000362\"), orders: [BuyLegIntentV1 { token_id: TokenId(\"2730\"), order: GtcLimit { limit_price_pusd_per_share: 0.2, size_shares: 50, post_only: true } }, BuyLegIntentV1 { token_id: TokenId(\"2731\"), order: GtcLimit { limit_price_pusd_per_share: 0.49, size_shares: 50, post_only: true } }] }"
+      ],
+      "output_counts": {
+        "Actions": 32
+      },
+      "requires_trade_economics_details": false,
+      "state": "resting"
+    },
+    {
+      "assembly_nearest_rank": {
+        "max_ns": 10899059,
+        "p50_ns": 9252229,
+        "p95_ns": 10277349
+      },
+      "assembly_samples_ns": [
+        9295651,
+        9150538,
+        8847347,
+        9264041,
+        9194180,
+        9527617,
+        9028158,
+        9252229,
+        9089062,
+        9132724,
+        9203858,
+        10169696,
+        9098089,
+        9531405,
+        9763151,
+        10277349,
+        10899059,
+        9299669,
+        9051041,
+        9391231,
+        9085345,
+        9579696,
+        9298427,
+        9353670,
+        9137834,
+        9378447,
+        9202696,
+        9160216,
+        9196344,
+        9291012,
+        9180985,
+        9401781
+      ],
+      "candidate": "center",
+      "closed_diagnostics": [
+        {
+          "choice": "Wait",
+          "comparison": null,
+          "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "maximum_repair_price": null,
+          "probability": {
+            "Unavailable": "MarketEnded"
+          },
+          "source_health": [
+            {
+              "failure": "ReceiveSilence",
+              "scope": {
+                "asset_or_symbol": "1000",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "source": "PolymarketBook"
+              }
+            },
+            {
+              "failure": "ReceiveSilence",
+              "scope": {
+                "asset_or_symbol": "1001",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "source": "PolymarketBook"
+              }
+            }
+          ],
+          "source_health_states": [
+            {
+              "scope": {
+                "asset_or_symbol": "btc/usd",
+                "condition_id": null,
+                "source": "ChainlinkSpot"
+              },
+              "state": "Normal"
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "BTCUSDT",
+                "condition_id": null,
+                "source": "BinanceAggregateTrade"
+              },
+              "state": "Normal"
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "1000",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "source": "PolymarketBook"
+              },
+              "state": {
+                "Exceeded": "ReceiveSilence"
+              }
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "1001",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "source": "PolymarketBook"
+              },
+              "state": {
+                "Exceeded": "ReceiveSilence"
+              }
+            }
+          ],
+          "unavailable": [],
+          "urgency": {
+            "active_path_ms": 0,
+            "binance_innovation_usd": null,
+            "free_cash_pusd": "1993.32674",
+            "information_age_ms": null,
+            "maker_path_ms": 0,
+            "orphan_cost_pusd": {
+              "denominator": "100000",
+              "numerator": "283663"
+            },
+            "repair_ask_depth_shares": "100",
+            "settlement_window_start_utc_ms": null,
+            "standardized_distance": null,
+            "trading_remaining_ms": -301002,
+            "uncertainty_usd": null,
+            "unresolved_commitment_count": 0,
+            "window_remaining_ms": 0
+          }
+        },
+        {
+          "choice": "Wait",
+          "comparison": null,
+          "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+          "maximum_repair_price": null,
+          "probability": {
+            "Unavailable": "MarketEnded"
+          },
+          "source_health": [
+            {
+              "failure": "ReceiveSilence",
+              "scope": {
+                "asset_or_symbol": "1002",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                "source": "PolymarketBook"
+              }
+            },
+            {
+              "failure": "ReceiveSilence",
+              "scope": {
+                "asset_or_symbol": "1003",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                "source": "PolymarketBook"
+              }
+            }
+          ],
+          "source_health_states": [
+            {
+              "scope": {
+                "asset_or_symbol": "btc/usd",
+                "condition_id": null,
+                "source": "ChainlinkSpot"
+              },
+              "state": "Normal"
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "BTCUSDT",
+                "condition_id": null,
+                "source": "BinanceAggregateTrade"
+              },
+              "state": "Normal"
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "1002",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                "source": "PolymarketBook"
+              },
+              "state": {
+                "Exceeded": "ReceiveSilence"
+              }
+            },
+            {
+              "scope": {
+                "asset_or_symbol": "1003",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                "source": "PolymarketBook"
+              },
+              "state": {
+                "Exceeded": "ReceiveSilence"
+              }
+            }
+          ],
+          "unavailable": [],
+          "urgency": {
+            "active_path_ms": 0,
+            "binance_innovation_usd": null,
+            "free_cash_pusd": "1993.32674",
+            "information_age_ms": null,
+            "maker_path_ms": 0,
+            "orphan_cost_pusd": {
+              "denominator": "1",
+              "numerator": "0"
+            },
+            "repair_ask_depth_shares": null,
+            "settlement_window_start_utc_ms": null,
+            "standardized_distance": null,
+            "trading_remaining_ms": -301002,
+            "uncertainty_usd": null,
+            "unresolved_commitment_count": 1,
+            "window_remaining_ms": 0
+          }
+        }
+      ],
+      "current_diagnostic": {
+        "choice": "MakerRepair",
+        "comparison": {
+          "active_value_per_share": null,
+          "maker_value_per_share": 0.026852232284305694,
+          "paired_net_per_share": {
+            "denominator": "500000",
+            "numerator": "1337"
+          },
+          "premium_per_share": {
+            "denominator": "2500000000000000000000000000",
+            "numerator": "-193413832306028443674961181"
+          },
+          "retain_value_per_share": -0.0236610683538,
+          "wait_value_per_share": -0.0236610683538
+        },
+        "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+        "maximum_repair_price": "0.43",
+        "probability": {
+          "Known": {
+            "approximate_window_integral": false,
+            "binance_innovation_usd": 0.0,
+            "information_age_ms": 2,
+            "mean_usd": 64999.0,
+            "sigma_usd_per_sqrt_second": 3.1480152477394387,
+            "standardized_distance": -0.018463702098932874,
+            "temporary_reference": false,
+            "uncertainty_usd": 54.16031923835014,
+            "up": 0.49263446707758857
+          }
+        },
+        "source_health": [],
+        "source_health_states": [
+          {
+            "scope": {
+              "asset_or_symbol": "btc/usd",
+              "condition_id": null,
+              "source": "ChainlinkSpot"
+            },
+            "state": "Normal"
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "BTCUSDT",
+              "condition_id": null,
+              "source": "BinanceAggregateTrade"
+            },
+            "state": "Normal"
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "2730",
+              "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+              "source": "PolymarketBook"
+            },
+            "state": "Normal"
+          },
+          {
+            "scope": {
+              "asset_or_symbol": "2731",
+              "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000362",
+              "source": "PolymarketBook"
+            },
+            "state": "Normal"
+          }
+        ],
+        "unavailable": [],
+        "urgency": {
+          "active_path_ms": 0,
+          "binance_innovation_usd": 0.0,
+          "free_cash_pusd": "1993.32674",
+          "information_age_ms": 2,
+          "maker_path_ms": 0,
+          "orphan_cost_pusd": {
+            "denominator": "100000",
+            "numerator": "283663"
+          },
+          "repair_ask_depth_shares": "100",
+          "settlement_window_start_utc_ms": 1787615400000,
+          "standardized_distance": -0.018463702098932874,
+          "trading_remaining_ms": 295998,
+          "uncertainty_usd": 54.16031923835014,
+          "unresolved_commitment_count": 0,
+          "window_remaining_ms": 0
+        }
+      },
+      "decide_nearest_rank": {
+        "max_ns": 5003379,
+        "p50_ns": 4206750,
+        "p95_ns": 4992059
+      },
+      "decide_samples_ns": [
+        4288534,
+        4137440,
+        4084120,
+        4377572,
+        4261262,
+        4401807,
+        4140184,
+        5003379,
+        4178958,
+        4085331,
+        4180802,
+        4762066,
+        4159962,
+        4384535,
+        4992059,
+        4850592,
+        4607083,
+        4193255,
+        4177675,
+        4454005,
+        4112913,
+        4380297,
+        4235254,
+        4207321,
+        4206750,
+        4269137,
+        4096863,
+        4114597,
+        4151226,
+        4175271,
+        4125688,
+        4315765
+      ],
+      "independent_diagnostic_nearest_rank": {
+        "account_economics_from_existing_read": {
+          "max_ns": 5607016,
+          "p50_ns": 5080555,
+          "p95_ns": 5582320
+        },
+        "calculate_same_pre_decide_state": {
+          "max_ns": 5941506,
+          "p50_ns": 4575605,
+          "p95_ns": 5573994
+        },
+        "economic_read_including_projection": {
+          "max_ns": 7914,
+          "p50_ns": 6282,
+          "p95_ns": 6893
+        },
+        "freeze_action_before": {
+          "max_ns": 6313887,
+          "p50_ns": 5791424,
+          "p95_ns": 6046133
+        },
+        "frozen_market_vector_clone": {
+          "max_ns": 2506920,
+          "p50_ns": 1923562,
+          "p95_ns": 2315589
+        },
+        "funds_projection": {
+          "max_ns": 19607,
+          "p50_ns": 15129,
+          "p95_ns": 18535
+        }
+      },
+      "independent_diagnostic_samples_ns": {
+        "account_economics_from_existing_read": [
+          5480999,
+          5173000,
+          5150106,
+          5393394,
+          5476250,
+          5220919,
+          5333942,
+          5040219,
+          4986798,
+          5105482,
+          5005764,
+          5115882,
+          5058193,
+          5006646,
+          5607016,
+          5544169,
+          5067721,
+          5047964,
+          5332330,
+          5012316,
+          5080355,
+          5043005,
+          5582320,
+          4986178,
+          4987941,
+          5095694,
+          4984815,
+          5088611,
+          4987560,
+          5080555,
+          5125961,
+          4984484
+        ],
+        "calculate_same_pre_decide_state": [
+          4428277,
+          4882702,
+          4575605,
+          5941506,
+          4805067,
+          4369426,
+          4476578,
+          4656386,
+          4406807,
+          4643623,
+          4290758,
+          4744342,
+          4745955,
+          4297902,
+          5306621,
+          5573994,
+          4483872,
+          4380768,
+          4771984,
+          4348567,
+          4271782,
+          4322698,
+          5094472,
+          4432165,
+          4622272,
+          4707663,
+          4288624,
+          4672598,
+          4255301,
+          5065597,
+          4616101,
+          4405705
+        ],
+        "economic_read_including_projection": [
+          6132,
+          6472,
+          6462,
+          6191,
+          7914,
+          6472,
+          6272,
+          6782,
+          6062,
+          6022,
+          6372,
+          6261,
+          5741,
+          5771,
+          6693,
+          6732,
+          6433,
+          6282,
+          6111,
+          6212,
+          5881,
+          6312,
+          6893,
+          5951,
+          6011,
+          6452,
+          6593,
+          6362,
+          6562,
+          6513,
+          6281,
+          6242
+        ],
+        "freeze_action_before": [
+          5964169,
+          5655939,
+          5797284,
+          5856747,
+          6046133,
+          5763331,
+          5923853,
+          5816722,
+          5874690,
+          5691075,
+          5705492,
+          5993103,
+          5709349,
+          5791424,
+          6313887,
+          6041825,
+          6032808,
+          5745076,
+          5706253,
+          5767949,
+          5750968,
+          5742171,
+          6033619,
+          5637824,
+          5923512,
+          5608820,
+          5793297,
+          5726852,
+          5843221,
+          5810991,
+          5727714,
+          5740809
+        ],
+        "frozen_market_vector_clone": [
+          1866815,
+          1985118,
+          1921628,
+          2506920,
+          2007209,
+          1823353,
+          1872906,
+          1952195,
+          1840625,
+          1923562,
+          1814807,
+          1973616,
+          1937207,
+          1825877,
+          2254976,
+          2315589,
+          1998502,
+          1830667,
+          2050480,
+          1882274,
+          1840535,
+          1843000,
+          2266387,
+          1881041,
+          1943159,
+          1955712,
+          1798135,
+          1933870,
+          1820839,
+          2204771,
+          1980269,
+          1834012
+        ],
+        "funds_projection": [
+          15449,
+          16090,
+          15480,
+          13585,
+          16190,
+          15789,
+          17233,
+          16291,
+          13635,
+          15439,
+          13706,
+          16150,
+          14467,
+          12343,
+          19607,
+          16692,
+          15268,
+          14788,
+          16281,
+          13025,
+          15129,
+          14357,
+          18535,
+          12574,
+          14057,
+          14537,
+          15198,
+          16541,
+          14277,
+          13906,
+          14447,
+          13505
+        ]
+      },
+      "intents": [
+        "CancelOrders { platform_order_ids: [\"sim-2\"] }",
+        "SubmitSingleBuy { condition_id: ConditionId(\"0x0000000000000000000000000000000000000000000000000000000000000362\"), order: BuyLegIntentV1 { token_id: TokenId(\"2731\"), order: GtcLimit { limit_price_pusd_per_share: 0.43, size_shares: 5, post_only: true } } }"
+      ],
+      "output_counts": {
+        "Actions": 32
+      },
+      "requires_trade_economics_details": false,
+      "state": "single_leg"
+    }
+  ],
+  "empty_hub_observation": {
+    "empty_observation_requested_ms": 200,
+    "format": "issue185-empty-hub-waits-v1",
+    "limits": "test-only counters; wait wall includes lock reacquire, not CPU; no minimum wake count gate or extrapolated savings",
+    "observations": [
+      {
+        "returned_waits": 68102,
+        "wait_calls": 68102,
+        "wait_wall_including_lock_reacquire_ns": 169770994
+      },
+      {
+        "returned_waits": 68102,
+        "wait_calls": 68102,
+        "wait_wall_including_lock_reacquire_ns": 169671538
+      }
+    ],
+    "sources": [
+      "public",
+      "hidden"
+    ],
+    "termination": "original ProductionV1::Ended + notify_all",
+    "wall_ns": 200671936
+  },
+  "old_stage_rows": [
+    {
+      "scope": "candidate:issue185-six-hour-f0-2026-09-12-center",
+      "stage": "calculation_including_cutoff_copy_and_decide",
+      "count": "484680",
+      "total_ns": "117045924482",
+      "mean_ns_exact": "117045924482/484680",
+      "mean_ms_rounded6": "0.241491",
+      "max_ns": "3550528",
+      "max_ms_rounded6": "3.550528",
+      "scope_wall_ns": "22387432631764"
+    },
+    {
+      "scope": "candidate:issue185-six-hour-f0-2026-09-12-center",
+      "stage": "strategy_input_assembly",
+      "count": "484680",
+      "total_ns": "11517069620991",
+      "mean_ns_exact": "11517069620991/484680",
+      "mean_ms_rounded6": "23.762213",
+      "max_ns": "160814164",
+      "max_ms_rounded6": "160.814164",
+      "scope_wall_ns": "22387432631764"
+    },
+    {
+      "scope": "day_producer",
+      "stage": "producer_backpressure_wait",
+      "count": "1047422624",
+      "total_ns": "15294903828833",
+      "mean_ns_exact": "15294903828833/1047422624",
+      "mean_ms_rounded6": "0.014602",
+      "max_ns": "13541627",
+      "max_ms_rounded6": "13.541627",
+      "scope_wall_ns": "22390880943640"
+    }
+  ],
+  "actual_commands_results": {
+    "build": {
+      "exit_code": 0,
+      "wall_seconds": 42.33185821199913,
+      "started_utc": "2026-10-12T06:03:15.218200+00:00",
+      "ended_utc": "2026-10-12T06:03:57.550083+00:00"
+    },
+    "build-fixed": {
+      "exit_code": 0,
+      "wall_seconds": 3.907144421000339,
+      "started_utc": "2026-10-12T06:08:20.842387+00:00",
+      "ended_utc": "2026-10-12T06:08:24.749554+00:00"
+    },
+    "host": {
+      "exit_code": 101,
+      "wall_seconds": 24.91498202299954,
+      "started_utc": "2026-10-12T06:05:10.963796+00:00",
+      "ended_utc": "2026-10-12T06:05:35.878809+00:00",
+      "source_unchanged": true
+    },
+    "host-fixed": {
+      "exit_code": 0,
+      "wall_seconds": 33.438265300999774,
+      "started_utc": "2026-10-12T06:08:55.335690+00:00",
+      "ended_utc": "2026-10-12T06:09:28.773984+00:00",
+      "source_unchanged": true
+    },
+    "wait": {
+      "exit_code": 0,
+      "wall_seconds": 0.203750773000138,
+      "started_utc": "2026-10-12T06:09:28.873147+00:00",
+      "ended_utc": "2026-10-12T06:09:29.076914+00:00",
+      "source_unchanged": true
+    },
+    "static-0": {
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "baseline-mm",
+        "--test",
+        "host_timing",
+        "-p",
+        "backtest",
+        "--lib",
+        "--tests",
+        "--locked",
+        "--offline",
+        "-j",
+        "32"
+      ],
+      "started_utc": "2026-10-12T06:10:17.533426+00:00",
+      "ended_utc": "2026-10-12T06:10:42.841125+00:00",
+      "wall_seconds": 25.30771463199926,
+      "exit_code": 0
+    },
+    "static-1": {
+      "argv": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "baseline-mm/tests/host_timing.rs",
+        "backtest/src/day_state.rs"
+      ],
+      "started_utc": "2026-10-12T06:10:42.841533+00:00",
+      "ended_utc": "2026-10-12T06:10:42.869480+00:00",
+      "wall_seconds": 0.027958257000136655,
+      "exit_code": 0
+    },
+    "static-2": {
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "started_utc": "2026-10-12T06:10:42.869655+00:00",
+      "ended_utc": "2026-10-12T06:10:42.969483+00:00",
+      "wall_seconds": 0.09985122000034607,
+      "exit_code": 0
+    }
+  },
+  "limits": [
+    "independent diagnostics are not additive decomposition",
+    "all96 outputsActions; no measuredNoTrade",
+    "test-only200ms emptyHub; wait wall includes mutex reacquire, not CPU",
+    "base plus helper diff; not committed source only; historical model and A1/15ms unchanged",
+    "first empty32 and resting32 (64total) belong to failed earlier pass; failure in single_leg feed; not merged into final96",
+    "Bcurrent candidate compatibility not assessed; noB/server work"
+  ],
+  "first_failed_pass_summary": {
+    "completed_samples_by_state": {
+      "empty": 32,
+      "resting": 32
+    },
+    "completed_samples": 64,
+    "failure_state": "single_leg",
+    "failure_phase": "feed via advance/next_group",
+    "error": "RecordingBackpressured",
+    "source_log": "logs/host.stdout.log + logs/host.stderr.log",
+    "final_96_only_from_successful_pass": true
+  },
+  "consumer_boundaries": {
+    "day_state": "public day replay implementation; current main confirmed A production consumer; no B invocation found; B uncommitted candidate not assessed",
+    "economics": "native-inputs consumes freeze_action_before public economic composition",
+    "frozen_market_vector_clone": "native-inputs borrows PublicObservationFrameV1 for encoding, does not call input_from_frames/FrozenMarketRead vector clone; possible ownership/contract change impact is distinct from direct clone consumers"
+  }
+}

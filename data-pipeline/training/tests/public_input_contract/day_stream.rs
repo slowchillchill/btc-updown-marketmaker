@@ -220,6 +220,8 @@ fn original_parquet_day_keeps_head_order_private_quantities_and_complete_buckets
     let second = producer.next_applied().unwrap().unwrap();
     assert_eq!(second.input.input_position, 1);
     assert!(second.hidden.is_empty());
+    let order_path = tmp.path().join("source-order.cbor");
+    producer.ingress.persist_order_index(&order_path).unwrap();
     let mut core_state = Vec::new();
     producer.core.write_checkpoint(&mut core_state).unwrap();
     let mut source_state = Vec::new();
@@ -256,6 +258,25 @@ fn original_parquet_day_keeps_head_order_private_quantities_and_complete_buckets
         ));
     }
     assert_eq!(resumed, remainder);
+    // 解码后的尾部也属于发布摘要；损坏索引必须在恢复供料前拒绝。
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&order_path)
+        .unwrap()
+        .write_all(b"tail")
+        .unwrap();
+    assert!(
+        DayProducerV1::restore(
+            PublicObservationCoreV1::read_checkpoint(core_state.as_slice()).unwrap(),
+            &files,
+            source_state.as_slice(),
+            1,
+            1 << 20,
+            RECEIVED - 1..RECEIVED + 1000,
+        )
+        .is_err()
+    );
 
     assert_eq!(applied, 5);
     assert!(
@@ -415,6 +436,49 @@ fn day_initialization_and_prior_twap_follow_original_visible_reference_selection
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(selected.len(), 1);
+    // 两份正式清单定位同一canonical文件；相同事实保留首次来源绑定。
+    let first_manifest = &initial.files[0].manifest_path;
+    let duplicate_manifest = first_manifest
+        .parent()
+        .unwrap()
+        .join("duplicate-manifest.json");
+    let raw = fs::read(first_manifest).unwrap();
+    let mut duplicate_raw = raw.clone();
+    duplicate_raw.push(b'\n');
+    fs::write(&duplicate_manifest, duplicate_raw).unwrap();
+    let mut overlapping = initial.clone();
+    overlapping
+        .files
+        .push(MetadataInitializationFileSelectionV1 {
+            manifest_path: duplicate_manifest.clone(),
+            relative_paths: initial.files[0].relative_paths.clone(),
+        });
+    let reused = MetadataInitializationSelectionV1::open(&overlapping, 1, 1 << 20).unwrap();
+    assert_eq!(reused.files.len(), 1);
+    let duplicate_selected = reused
+        .read(1, 1 << 20)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&duplicate_selected).unwrap(),
+        serde_json::to_value(&selected).unwrap()
+    );
+    assert_eq!(
+        reused.files[0].manifest_sha256,
+        selection.files[0].manifest_sha256
+    );
+    // 矛盾SHA仍来自同一有效清单schema，不能因为路径重复而跳过声明核对。
+    let mut conflicting: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    conflicting["files"][0]["sha256"] = json!("0".repeat(64));
+    fs::write(
+        &duplicate_manifest,
+        serde_json::to_vec(&conflicting).unwrap(),
+    )
+    .unwrap();
+    let error = MetadataInitializationSelectionV1::open(&overlapping, 1, 1 << 20)
+        .err()
+        .expect("矛盾清单必须拒绝");
+    assert!(error.to_string().contains("清单事实互相矛盾"), "{error}");
     let limits = crate::gate_a_formal_canonical_config();
     let mut merge = prepare_historical_files_with_initialization_and_progress_v1(
         &tmp.path().join("old"),
@@ -510,4 +574,230 @@ fn day_initialization_and_prior_twap_follow_original_visible_reference_selection
         )
         .unwrap()
     );
+}
+
+#[test]
+fn day_quantity_projection_keeps_original_binding_hidden_buckets_and_pm_asks() {
+    use data_collect::source_hourly_layout::{
+        BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION, BinanceDepthSnapshotHourlyRow,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let mut row = common_metadata();
+    row.condition_id = ID.into();
+    row.clob_market_id = "3195576".into();
+    let metadata = polymarket_market_metadata_v6_rows_to_batch(
+        polymarket_market_metadata_v6_schema(),
+        &[PolymarketMarketMetadataV6Row::Existing(
+            PolymarketMarketMetadataV5Row::from_common(row, None, None),
+        )],
+    )
+    .unwrap();
+    let depth_root = tmp.path().join("depth");
+    let depth_day = depth_root.join("2026-07-30/typed_raw/utc_day=2026-07-30");
+    let mut writer = TypedParquetSegmentWriter::create_for_current_source(
+        &depth_day,
+        "binance_depth_snapshot_00",
+        "binance_depth_snapshot",
+    )
+    .unwrap();
+    writer
+        .write_binance_depth_snapshot_rows(&[BinanceDepthSnapshotHourlyRow {
+            timestamp_received: RECEIVED + 10,
+            snapshot_fetch_start_utc: RECEIVED + 9,
+            last_update_id: 100,
+            bids: r#"[["64100","0.7"]]"#.into(),
+            asks: r#"[["64200","0.4"]]"#.into(),
+            symbol: "BTCUSDT".into(),
+            source_endpoint: "https://api.binance.com/api/v3/depth".into(),
+            snapshot_status: "complete".into(),
+            source_sequence_epoch_id: Some("depth-a".into()),
+            connection_generation: Some(1),
+            depth_ingress_sequence: Some(1),
+            collector_admission_sequence: Some(1),
+            collector_admission_time_utc_ms: Some(RECEIVED + 11),
+            collector_host_id: "collector-1".into(),
+            collector_region: "hk".into(),
+            schema_version: BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION.into(),
+        }])
+        .unwrap();
+    let segment = finalize_with_fact(
+        writer,
+        "binance_depth_snapshot",
+        BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+        1,
+    );
+    let manifests = [
+        write(
+            &tmp.path().join("meta"),
+            METADATA_SOURCE,
+            POLYMARKET_MARKET_METADATA_SCHEMA_V6,
+            vec![metadata],
+            0,
+        ),
+        manifest_for(
+            &depth_root,
+            &segment,
+            "binance_depth_snapshot",
+            BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+            true,
+        ),
+        write(
+            &tmp.path().join("pm"),
+            "polymarket_market",
+            POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+            vec![
+                polymarket_orderbook_v3_messages_to_batch(&[pm(1, RECEIVED + 100, book("100"))])
+                    .unwrap(),
+            ],
+            0,
+        ),
+    ];
+    let admissions = manifests
+        .iter()
+        .map(|m| crate::validate_public_source_daily_manifest_admission_v1(m).unwrap())
+        .collect::<Vec<_>>();
+    let files = admissions
+        .iter()
+        .flat_map(|a| a.files())
+        .collect::<Vec<_>>();
+    let run = |requirements| {
+        let ingress = DayIngressV1::open(
+            &files,
+            "day-test".into(),
+            1,
+            1 << 20,
+            RECEIVED - 1..RECEIVED + 1000,
+            vec![],
+            crate::gate_a_formal_canonical_config().max_epoch_count_per_source,
+        )
+        .unwrap();
+        let mut producer = DayProducerV1::new(
+            ingress,
+            header(),
+            Sha256Hex("a".repeat(64)),
+            "hidden-test".into(),
+        )
+        .unwrap();
+        producer.core.set_observation_requirements(requirements);
+        let mut groups = Vec::new();
+        let mut buckets = Vec::new();
+        while let Some(next) = producer.next_applied().unwrap() {
+            groups.extend(next.applied.closed_groups);
+            buckets.extend(next.hidden);
+        }
+        (groups, serde_json::to_value(buckets).unwrap())
+    };
+    let (full, full_hidden) = run(PublicObservationRequirementsV1::FULL);
+    let (compact, compact_hidden) = run(PublicObservationRequirementsV1 {
+        binance_depth_quantities: false,
+    });
+    assert_eq!(
+        full_hidden, compact_hidden,
+        "私有数量与桶来源绑定不受观察投影影响"
+    );
+    assert!(!full_hidden.as_array().unwrap().is_empty());
+    assert_eq!(full.len(), compact.len());
+    let mut depth_facts = 0;
+    for (a, b) in full.iter().zip(&compact) {
+        assert_eq!(
+            (
+                a.group_id.clone(),
+                a.group_position,
+                a.closed_at_input_position
+            ),
+            (
+                b.group_id.clone(),
+                b.group_position,
+                b.closed_at_input_position
+            )
+        );
+        assert_eq!(a.records.len(), b.records.len());
+        for (old, new) in a.records.iter().zip(b.records.iter()) {
+            if matches!(
+                old.payload,
+                PublicBusinessPayloadV1::ReferenceFact(
+                    CanonicalReferenceEventPayloadV2::BinanceDepthState(_)
+                )
+            ) {
+                depth_facts += 1;
+                let PublicBusinessPayloadV1::BinanceDepthReference(binding) = &new.payload else {
+                    panic!("完整事实改为同来源引用")
+                };
+                assert_eq!(binding.position, new.position);
+                let mut expected = old.clone();
+                expected.payload = new.payload.clone();
+                assert_eq!(expected, *new);
+            } else {
+                assert_eq!(old, new);
+            }
+        }
+        for (old, new) in a.observations.iter().zip(&b.observations) {
+            let mut expected = old.clone();
+            if expected.binance_depth.value.is_some() {
+                assert!(old.binance_depth.value.as_ref().unwrap().full().is_some());
+                let mut depth = (*expected.binance_depth).clone();
+                depth.value = Some(BinanceDepthObservationV1::NotMaterialized);
+                expected.binance_depth = std::sync::Arc::new(depth);
+            }
+            expected.group_events = new.group_events.clone();
+            assert_eq!(expected, *new, "质量/锚点/依赖/PM逐档数量保持");
+            assert!(std::sync::Arc::ptr_eq(&b.records, &new.group_events));
+        }
+    }
+    assert_eq!(depth_facts, 1);
+    let last = compact.last().unwrap();
+    let up = last.observations[0]
+        .assets
+        .iter()
+        .find(|a| a.asset.token_id.0 == "1")
+        .unwrap();
+    assert_eq!(
+        up.asks.value.as_ref().unwrap()[0].quantity_shares,
+        ExactDecimal("80".into())
+    );
+}
+
+#[test]
+fn gamma_initial_transition_uses_original_identity_and_predecessor_binding() {
+    use crate::historical_initialization::*;
+    use data_pipeline_core::public_input::validate_metadata_initial_identity_v1;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut initial = common_metadata();
+    initial.condition_id = ID.into();
+    initial.metadata_row_kind = serde_json::from_value(json!("market_state_transition")).unwrap();
+    initial.metadata_origin = serde_json::from_value(json!("local_market_state_timer")).unwrap();
+    let mut next = initial.clone();
+    next.timestamp_received += 200;
+    next.collector_admission_time_utc_ms += 200;
+    next.collector_admission_sequence += 1;
+    next.source_evidence_payload_json = None;
+    next.outcomes_raw = None;
+    let batch = polymarket_market_metadata_v6_rows_to_batch(polymarket_market_metadata_v6_schema(),
+        &[initial, next].into_iter().map(|row| PolymarketMarketMetadataV6Row::Existing(
+            PolymarketMarketMetadataV5Row::from_common(row, None, None))).collect::<Vec<_>>()).unwrap();
+    let manifest = write(tmp.path(), METADATA_SOURCE, POLYMARKET_MARKET_METADATA_SCHEMA_V6, vec![batch], 0);
+    let admitted = crate::validate_public_source_daily_manifest_admission_v1(&manifest).unwrap();
+    let file = &admitted.files()[0];
+    let rows = open_validated_public_input_parquet_v1(file, 1).unwrap()
+        .flat_map(|batch| batch.unwrap()).collect::<Vec<_>>();
+    assert!(validate_metadata_initial_identity_v1(&rows[0]).unwrap());
+    assert!(!validate_metadata_initial_identity_v1(&rows[1]).unwrap());
+    let facts = PublicFiniteFileV1 {path:file.file_path().into(),source_kind:file.source_kind().into(),
+        schema_version:file.schema_version().into(),bytes:file.bytes(),rows:file.rows(),sha256:file.sha256().into()};
+    let from_first = select_prefix_initialization_config_v1(&[facts.clone()], &manifest,
+        RECEIVED, RECEIVED+1000, 1, 1<<20).unwrap();
+    assert!(from_first.markets.is_empty());
+    let selected = select_prefix_initialization_config_v1(&[facts], &manifest,
+        RECEIVED+100, RECEIVED+1000, 1, 1<<20).unwrap();
+    let source = data_pipeline_core::public_reference::source_evidence_v3_from_typed_raw_v2(&rows[0]).unwrap();
+    assert_eq!(selected.markets[0].snapshot_source_message_id, source.source_message_id);
+    let reader = MetadataInitializationSelectionV1::open(&selected, 1, 1<<20).unwrap();
+    let prefix = reader.read(1, 1<<20).collect::<std::result::Result<Vec<_>,_>>().unwrap();
+    assert_eq!(prefix.len(), 1);
+    assert_eq!(prefix[0].1.as_ref().unwrap().source_message_id, source.source_message_id);
+    let mut damaged = rows[0].clone();
+    let TypedRawRowV2::PolymarketMarketMetadataV6(row) = &mut damaged else {panic!("metadata")};
+    let PolymarketMarketMetadataV6Input::Existing(row) = row.as_mut() else {panic!("existing")};
+    row.source_evidence_payload_json = Some("{}".into());
+    assert!(validate_metadata_initial_identity_v1(&damaged).is_err());
 }

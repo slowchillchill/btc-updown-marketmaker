@@ -50,30 +50,46 @@ class BaseSimRuntime:
             ready=enabled&(reference>=0)&~obligations.pending[:,market].any(1)&(
                 world.calendars.maker.market_result[:,market]>=0)&~obligations.auto_redeemed[:,market]
             if not bool(ready.any().cpu()):continue
-            sources=world.auto_redemption_sources
-            assets,tokens,payouts,error=sources.gather(reference)
-            fault=obligations.fault|world.account.fault|world.calendars.maker.fault|torch.where(ready,error,0)
-            # 原ResolutionConflict只在前驱齐备时失败，不提前提交销仓/回款。
-            fault |= (ready & obligations.invalidated_by_quality[:,market]).to(torch.int32)
-            account,delta=world.account.redeem_outcomes(assets,payouts,ready&(fault==0))
-            fault |= account.fault
-            identity=sources.columns.fields[reference.clamp(0,sources.columns.fields.size(0)-1),3]
-            source_at=world.source_resolutions.source_times[:,market]
-            projected,batch=projection.auto_redeem(sampler,world.calendars.maker.market_ids[:,market],identity,
-                source_at,assets,tokens,delta,at,ready&(fault==0),fault,preceding=preceding)
-            fault |= batch.fault
-            valid=fault==0
-            account=account.coordinate_result(world.account,fault)
-            complete=ready&valid
-            selected=(torch.arange(markets,device=at.device)[None,:]==market)&complete[:,None]
-            obligations=replace(obligations,auto_redeemed=obligations.auto_redeemed|selected,fault=fault)
-            world=replace(world,account=account,resolution_obligations=obligations)
-            projection=projected
+            world,projection,batch,_=world.prepare_auto_market(at,ready,market,projection,sampler,
+                context=projection.auto_batch_context(preceding,at))
             preceding=(() if preceding is None else preceding)+(batch,)
-            batches.append(replace(batch,emitted=batch.emitted&valid[:,None],
-                economic_enabled=batch.economic_enabled&valid[:,None],fault=fault))
+            batches.append(batch)
+            fault=batch.fault
             if bool(fault.any().cpu()):break
         return world,projection,tuple(batches)
+
+    def auto_market_ready(self,enabled):
+        obligations=self.resolution_obligations
+        return enabled[:,None]&(obligations.reference_indices>=0)&~obligations.pending.any(2)&(
+            self.calendars.maker.market_result>=0)&~obligations.auto_redeemed
+
+    def prepare_auto_market(self,at,ready,market,projection,sampler,*,context):
+        """原单市场Auto纯候选；market可为固定设备index，不读取设备人口。"""
+        def column(value):
+            if isinstance(market,int):return value[:,market]
+            return value.index_select(1,market.reshape(1)).squeeze(1)
+        obligations=self.resolution_obligations
+        reference=column(obligations.reference_indices)
+        sources=self.auto_redemption_sources
+        assets,tokens,payouts,error=sources.gather(reference)
+        fault=obligations.fault|self.account.fault|self.calendars.maker.fault|torch.where(ready,error,0)
+        fault |= (ready & column(obligations.invalidated_by_quality)).to(torch.int32)
+        account,delta=self.account.redeem_outcomes(assets,payouts,ready&(fault==0))
+        fault |= account.fault
+        identity=sources.columns.fields[reference.clamp(0,sources.columns.fields.size(0)-1),3]
+        source_at=column(self.source_resolutions.source_times)
+        projected,batch=projection.auto_redeem(sampler,column(self.calendars.maker.market_ids),identity,
+            source_at,assets,tokens,delta,at,ready&(fault==0),fault,context=context)
+        fault |= batch.fault
+        valid=fault==0
+        account=account.coordinate_result(self.account,fault)
+        complete=ready&valid
+        selected=(torch.arange(obligations.reference_indices.size(1),device=at.device)[None,:]==market)&complete[:,None]
+        obligations=replace(obligations,auto_redeemed=obligations.auto_redeemed|selected,fault=fault)
+        world=replace(self,account=account,resolution_obligations=obligations)
+        output=replace(batch,emitted=batch.emitted&valid[:,None],
+            economic_enabled=batch.economic_enabled&valid[:,None],fault=fault)
+        return world,projected,output,context.after(batch)
 
     def install_order_query_history(self,history):
         if self.order_query_history is not None:
@@ -365,7 +381,7 @@ class BaseSimRuntime:
         return replace(self,hidden_frontier=self.hidden_frontier.step_applied(index,committed,fault))
 
     def apply_hidden_selected(self, choice, indices, condition_by_asset, selected_paths,
-                              fee_rate, fee_exponent, taker_rate, source_assets, level_sides):
+                              fee_rate, fee_exponent, taker_rate, source_assets, level_sides, *, fifo_loop=None, maker_loop=None):
         """每根本轮只读取一个原源步；固定类型候选都使用同一进入游标。"""
         from account_state import grouped_fault
         from hidden_market import rational_take
@@ -398,23 +414,35 @@ class BaseSimRuntime:
         level_choice = replace(choice, present=level_enabled & (source_fault == 0))
         candidate, effect = self.hidden_base(level_choice, queue_rows,
             block._values(rows[:, 3]), block._values(rows[:, 4]), block._values(rows[:, 2]),
-            conditions, rows[:, 9] != 0, selected_paths, level_roots, fee_rate, fee_exponent, taker_rate)
+            conditions, rows[:, 9] != 0, selected_paths, level_roots, fee_rate, fee_exponent, taker_rate,
+            fifo_loop=fifo_loop,maker_loop=maker_loop)
         hidden = candidate.hidden
-        snapshot_enabled = assets & (permitted & (tags == 1))[owner]
-        active_snapshot = snapshot_enabled & ~hidden.book_closed
-        snapshot_roots = torch.zeros(roots, dtype=torch.int32, device=owner.device).scatter_reduce(
-            0, owner, active_snapshot.to(torch.int32), reduce='amax') != 0
-        quantities, snapshot_counts, snapshot_fault = block.snapshot_values(
-            hidden, indices, rows, owner, source_assets, level_sides, snapshot_roots)
-        tick = rational_take(block._values(rows[:, 5]), owner)
-        hidden, snapshot_required = hidden.initial_snapshot(snapshot_enabled, quantities, tick, rows[owner, 10])
-        snapshot_fault = snapshot_fault | grouped_fault(hidden._asset_fault((snapshot_counts > 1).to(torch.int32)), owner, roots)
-        hidden = replace(hidden, fault=hidden.fault | snapshot_fault[owner] * active_snapshot.to(torch.int32))
+        # eager纯Level已经沿原FIFO做完整append/compact及报价fault归并。
+        # 其它类型、空启用人口、故障及固定设备候选仍走原完整类型布局。
+        eager_level = not Numbers.device_batch_active() and bool((enabled.any() &
+            ((~enabled) | (present & (tags == 2))).all() &
+            ((source_fault | effect.fault) == 0).all()).cpu())
+        if eager_level:
+            # 禁用Snapshot仍有原close职责；段需求按同一已压紧候选人口保留。
+            hidden = hidden._close_active_book()
+            snapshot_required = (hidden.queues.kind != 0).sum(1)
+        else:
+            snapshot_enabled = assets & (permitted & (tags == 1))[owner]
+            active_snapshot = snapshot_enabled & ~hidden.book_closed
+            snapshot_roots = torch.zeros(roots, dtype=torch.int32, device=owner.device).scatter_reduce(
+                0, owner, active_snapshot.to(torch.int32), reduce='amax') != 0
+            quantities, snapshot_counts, snapshot_fault = block.snapshot_values(
+                hidden, indices, rows, owner, source_assets, level_sides, snapshot_roots)
+            tick = rational_take(block._values(rows[:, 5]), owner)
+            hidden, snapshot_required = hidden.initial_snapshot(snapshot_enabled, quantities, tick, rows[owner, 10])
+            snapshot_fault = snapshot_fault | grouped_fault(hidden._asset_fault((snapshot_counts > 1).to(torch.int32)), owner, roots)
+            hidden = replace(hidden, fault=hidden.fault | snapshot_fault[owner] * active_snapshot.to(torch.int32))
         tick_enabled = assets & (permitted & (tags == 3))[owner]
         hidden = hidden.tick_change(tick_enabled, rational_take(block._values(rows[:, 6]), owner),
                                     rows[owner, 8] != 0, rational_take(block._values(rows[:, 7]), owner))
-        quality_enabled = assets & (permitted & (tags == 4))[owner]
-        hidden = hidden.quality_boundary(quality_enabled, rows[owner, 11], rows[owner, 12], rows[owner, 13] != 0)
+        if not eager_level:
+            quality_enabled = assets & (permitted & (tags == 4))[owner]
+            hidden = hidden.quality_boundary(quality_enabled, rows[owner, 11], rows[owner, 12], rows[owner, 13] != 0)
         fault = grouped_fault(hidden.fault, owner, roots) | source_fault | effect.fault
         hidden = hidden.coordinate_result(self.hidden, owner, fault)
         candidate = replace(candidate, hidden=hidden)
@@ -499,7 +527,9 @@ class BaseSimRuntime:
             self.hidden.queues,self.account,self.fills,terms,ask_rows,fee_rate,fee_exponent,
             selected_paths,taker_rate,row_roots,result_refs,calendars=self.calendars,enabled=choice.enabled(5))
         return replace(self,requests=requests,orders=orders,hidden=replace(self.hidden,queues=queue),
-            account=account,fills=fills,calendars=effects.calendars),effects
+            account=account,fills=fills,calendars=effects.calendars,
+            resolution_obligations=None if self.resolution_obligations is None else
+                self.resolution_obligations.resized(fills.capacity)),effects
 
     def post_pending(self,choice,intents,rule,codec,ask_rows,selected_paths,taker_rate,row_roots,
                      result_refs,projection,sampler,asset_tokens):
@@ -562,7 +592,9 @@ class BaseSimRuntime:
             economic_rows=torch.where(committed[:,None],normalizer.economic_rows,original_economic),fault=fault)
         projected=replace(projected,emitter=emitter,normalizer=normalizer)
         return replace(self,requests=requests,orders=orders,hidden=replace(self.hidden,queues=queue),account=account,
-            fills=fills,calendars=calendars,post_results=results),projected,batch,replace(effects,fault=fault)
+            fills=fills,calendars=calendars,post_results=results,
+            resolution_obligations=None if self.resolution_obligations is None else
+                self.resolution_obligations.resized(fills.capacity)),projected,batch,replace(effects,fault=fault)
 
     def cancel_base(self, choice, target, row_roots, result_refs):
         self._source(choice)
@@ -602,12 +634,15 @@ class BaseSimRuntime:
             emitted=batch.emitted&valid[:,None],economic_enabled=batch.economic_enabled&valid[:,None],fault=fault),effects
 
     def hidden_base(self, choice, rows, before, after, source_price, condition, resync_inference,
-                    selected_paths, row_roots, fee_rate, fee_exponent, taker_rate):
+                    selected_paths, row_roots, fee_rate, fee_exponent, taker_rate, *, fifo_loop=None, maker_loop=None):
         self._source(choice)
         hidden,orders,account,fills,calendars,effects=run_hidden_base_transition(self.hidden,self.orders,
             self.account,self.fills,self.calendars,rows,before,after,source_price,condition,choice.at,
-            choice.enabled(4),resync_inference,selected_paths,row_roots,fee_rate,fee_exponent,taker_rate)
-        return replace(self,hidden=hidden,orders=orders,account=account,fills=fills,calendars=calendars),effects
+            choice.enabled(4),resync_inference,selected_paths,row_roots,fee_rate,fee_exponent,taker_rate,
+            fifo_loop=fifo_loop,maker_loop=maker_loop)
+        return replace(self,hidden=hidden,orders=orders,account=account,fills=fills,calendars=calendars,
+            resolution_obligations=None if self.resolution_obligations is None else
+                self.resolution_obligations.resized(fills.capacity)),effects
 
     def finality(self, choice, maker_rate, taker_rate, market_end):
         self._source(choice)

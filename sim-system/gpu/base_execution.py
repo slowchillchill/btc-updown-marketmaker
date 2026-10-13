@@ -137,6 +137,24 @@ def prepare_buy_order(queue, account, ask_rows, accepted_base, accepted_quote, m
         taker_bases=fill_base,taker_quotes=fill_quote,fault=fault,rejection_reason=rejection)
 
 
+def collect_base_fills(prepared, selected_paths):
+    """原完整规划之后稳定收集正base列；动态形状只在此物理出口回宿主。
+
+    保原费用分配和根fault；同列跨根保留，包括正base零quote。
+    空成交留一个原零槽。返回路径只归本次候选，不覆盖外层重试矩阵。
+    """
+    roots=prepared.requested.numel();width=prepared.maximum_fills
+    if selected_paths.shape!=(roots,width) or selected_paths.dtype!=torch.int64 or selected_paths.device!=prepared.requested.device:
+        raise TypeError('逐原fill选定路径须同设备int64矩阵')
+    columns=torch.nonzero((prepared.taker_bases.sign.reshape(roots,width)>0).any(0),as_tuple=False).flatten()
+    if columns.numel()==0:columns=torch.zeros(1,dtype=torch.int64,device=selected_paths.device)
+    indices=(torch.arange(roots,device=selected_paths.device)[:,None]*width+columns[None,:]).flatten()
+    return replace(prepared,taker_bases=_take(prepared.taker_bases,indices),
+        taker_quotes=_take(prepared.taker_quotes,indices),taker_prices=take_ratio(prepared.taker_prices,indices),
+        fee=replace(prepared.fee,per_fill_micro=_take(prepared.fee.per_fill_micro,indices)),
+        maximum_fills=columns.numel()),selected_paths.index_select(1,columns)
+
+
 def reduce_order_maker(quantity, queue_effects, order_ids):
     """按原账户段身份接入实际maker depletion；不丢掉QueueEffects。"""
     roots = order_ids.numel()

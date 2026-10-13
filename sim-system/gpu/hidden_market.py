@@ -45,8 +45,10 @@ class HiddenAssetState:
     fault: torch.Tensor  # int32[assets]，错误候选不可提交到活动状态。
     level_sides: torch.Tensor | None = None  # 同一FIFO物理行的BID=0/ASK=1；旧调用者仍显式供给。
 
+    maker_model: str = "L2_BOOK_DELTA_FIFO_ESTIMATE_V1"
+
     @classmethod
-    def empty(cls, level_assets, prices, asset_markets, markets, *, segment_capacity=4,level_sides=None):
+    def empty(cls, level_assets, prices, asset_markets, markets, *, segment_capacity=4,level_sides=None,maker_model="L2_BOOK_DELTA_FIFO_ESTIMATE_V1"):
         assets = asset_markets.numel()
         if level_assets.dtype != torch.int64 or not level_assets.is_cuda:
             raise TypeError('价位所属资产须为设备int64列')
@@ -62,13 +64,17 @@ class HiddenAssetState:
         tick_zero = ExactInt.from_i64_tensor(torch.zeros(assets, dtype=torch.int64, device=device))
         populations = torch.zeros(markets, dtype=torch.int64, device=device).scatter_add(
             0, asset_markets, torch.ones_like(asset_markets))
+        queue=PriceQueueBatch.empty(prices,segment_capacity)
+        if maker_model=="PUBLIC_TRADE_CONSERVATIVE_FIFO_V1":
+            from conservative_rank import ConservativeRank
+            queue=replace(queue,conservative=ConservativeRank.empty(queue))
         return cls(safe_assets, asset_markets, populations, torch.zeros(assets, dtype=torch.bool, device=device),
                    torch.full((assets,), 3, dtype=torch.int64, device=device),
                    ExactRational.ratio(tick_zero, tick_zero.constant(1)),
                    torch.zeros(assets, dtype=torch.bool, device=device),
                    torch.zeros(assets, dtype=torch.bool, device=device),
                    torch.zeros(assets, dtype=torch.bool, device=device), zeros(prices),
-                   PriceQueueBatch.empty(prices, segment_capacity), fault,level_sides)
+                   queue, fault,level_sides,maker_model)
 
     def _mask(self, enabled):
         if enabled.dtype != torch.bool or enabled.shape != self.initialized.shape or enabled.device != self.quality.device:
@@ -164,7 +170,8 @@ class HiddenAssetState:
         valid = enabled & (fault == 0)
         level_valid = valid[self.level_assets]
         quantities = amounts.select(level_valid & ~self.matching_closed[self.level_assets], amounts.constant(0))
-        queues, required = self.queues.append_external(quantities)
+        queue=self.queues if self.queues.conservative is None else self.queues.clear_matching(level_valid)
+        queues, required = queue.append_external(quantities)
         queue_fault = self._asset_fault(queues.fault)
         fault = fault | queue_fault
         valid = valid & (fault == 0)

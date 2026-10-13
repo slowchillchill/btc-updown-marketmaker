@@ -353,7 +353,7 @@ async fn accepted_only_zero_gap_keeps_original_actor_support() {
         }
     }
     h.driver.stabilize_recording().unwrap();
-    let result_references=observation.result_references();
+    let result_references=observation.result_references().unwrap();
     let raw=result_references.iter().map(|reference| {
         serde_json::to_value(::execution_normalization::read_noe_result_v4(reference).unwrap().record).unwrap()
     }).collect::<Vec<_>>();
@@ -2638,7 +2638,7 @@ async fn device_fok_target_and_public_registry_prefixes() {
         h.native.consume(&mut h.shared,&mut h.driver).unwrap().unwrap();
     }
     advance(&mut h,processing+1);h.driver.stabilize_recording().unwrap();
-    let raw=observation.result_references().iter().map(|r|serde_json::to_value(::execution_normalization::read_noe_result_v4(r).unwrap().record).unwrap()).collect::<Vec<_>>();
+    let raw=observation.result_references().unwrap().iter().map(|r|serde_json::to_value(::execution_normalization::read_noe_result_v4(r).unwrap().record).unwrap()).collect::<Vec<_>>();
     let accepted=raw.iter().filter_map(|r| {
         let body=r.get("Evidence")?;let direct=body["source_reference"]["record"].get("DirectResponse")?;
         (direct["association"]["SubmissionItem"]["global_request_id"]=="quote-registry").then(||direct["response_received_at_utc_ms"].as_i64().unwrap())

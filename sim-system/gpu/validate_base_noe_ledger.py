@@ -81,8 +81,17 @@ def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=Fa
         state=run(lambda:state.append_batch(noe.normalizer.bank,batch))
     cutoff=tensor([source['prior_closed_at']])
     gates=ReceiveGates.unset(1).set_receive(cutoff,active).set_public(cutoff,active)
-    state,delivery=run(lambda:state.receive(noe.normalizer.bank,gates,
-        torch.ones_like(state.ledger.columns.enabled)))
+    if source.get('maker_exhaustion',False):
+        from ledger_drain import PublicLedgerReceiver
+        # 同一已发射Maker人口沿生产首次领取与固定存储扫描；不再冷装账户。
+        state,delivery=run(lambda:state.receive_first(noe.normalizer.bank,gates))
+        receiver=PublicLedgerReceiver()
+        state,ready=receiver(state,delivery,active)
+        assert ready.cpu().tolist()==[True] and receiver.captured is not None
+        assert receiver.captured.resources_fit.cpu().item()
+    else:
+        state,delivery=run(lambda:state.receive(noe.normalizer.bank,gates,
+            torch.ones_like(state.ledger.columns.enabled)))
     assert delivery.fault.cpu().tolist()==[0]
     if state.cancellation_target_history is not None:
         assert state.cancellation_target_history.targets.received.shape==(1,0)
@@ -102,6 +111,15 @@ def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=Fa
     assert check_funds(state.ledger,source['cancel_ledger_before'])
     assert check_markets(state.ledger,source['cancel_ledger_before'],source['initial'][0]['market']['condition_id'])
     check_market_account(state.ledger,source['cancel_ledger_before'],source['initial'][0]['market']['condition_id'])
+    if source.get('maker_exhaustion',False):
+        from queues import _take
+        at,present,error=run(lambda:state.ledger.orders.lookup(order.sequence))
+        assert present.cpu().tolist()==[True] and not error.any().cpu().item()
+        assert state.ledger.orders.submission_open_known[0,at].cpu().tolist()==[True]
+        assert values(_take(state.ledger.orders.submission_open_base_units,at))==[3_999_999]
+        assert values(_take(state.ledger.orders.maker_matched_base_units,at))==[3_999_999]
+        assert state.ledger.orders.closed[0,at].cpu().tolist()==[True]
+        assert state.ledger.orders.flags[0,at].cpu().tolist()==[False]
     # 本场景订单来源与receipt来自实际设备请求/接纳，不从oracle派生承诺初始化。
     intents=FrozenIntentOrders(order.present[:,None],order.sequence,active[:,None],target,
         torch.zeros((1,1),dtype=torch.bool,device='cuda'),(receipt.registered|receipt.duplicate)[:,None])
@@ -135,7 +153,8 @@ def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=Fa
         assert torch.equal(torch.nn.functional.pad(actual,(0,width-actual.size(1))),
             torch.nn.functional.pad(semantic,(0,width-semantic.size(1))))
         row_reference[row]=reference
-    assert len(row_reference)==4
+    assert len(row_reference)==len(source['cancel_records'])
+    assert len(row_reference)==(2 if source.get('maker_exhaustion',False) else 4)
     state=run(lambda:state.append_batch(noe.normalizer.bank,cancel_batch))
     if source.get('joint_public') is not None:
         from dataclasses import replace
@@ -150,7 +169,7 @@ def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=Fa
         history=state.cancellation_target_history
         assert history.targets.received.cpu().tolist()==[[True]]
         assert history.targets.scopes.order_members.cpu().tolist()==[[[True]]]
-        assert history.targets.outcomes.cpu().tolist()==[[0]]
+        assert history.targets.outcomes.cpu().tolist()==[[int(source.get('maker_exhaustion',False))]]
         assert values(history.targets.requests)==[1]
         old_width=history.targets.received.shape[1]
         before_targets=history.targets.received.clone();before_outcomes=history.targets.outcomes.clone()
@@ -193,5 +212,6 @@ def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=Fa
         'actual_NOE_population':len(source['prior_records']),
         'device_ledger_attempt_order_from_original_reference':False,
         'dynamic_cancel_request_to_same_account_and_old_freeze_checked':True,
-        'dynamic_cancel_NOE_population':4,
+        'dynamic_cancel_NOE_population':len(source['cancel_records']),
+        'maker_exhaustion_before_cancel_checked':source.get('maker_exhaustion',False),
         'original_public_closure_frontier_supplied':True}

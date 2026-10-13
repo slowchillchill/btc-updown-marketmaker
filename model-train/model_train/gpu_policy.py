@@ -31,27 +31,45 @@ class State100ms(nn.Module):
         return self.core(torch.cat((fast, self.book(book_levels, book_mask)), dim=-1), slow, hidden)
 
 
+def finite_value_context(cutoff, goal_until, trading_until):
+    """原UTC整数差先成秒，再投影为Critic专属的两个有符号时间条件。"""
+    remaining=torch.stack((goal_until-cutoff,trading_until-cutoff),dim=-1).to(torch.float32)/1000
+    return remaining.sign()*torch.log1p(remaining.abs())
+
+
+class FiniteGoalCritic(nn.Module):
+    def __init__(self, hidden):
+        super().__init__()
+        self.norm=AlignedLayerNorm(hidden)
+        self.head=nn.Sequential(nn.Linear(hidden+2,hidden//2),nn.SiLU(),nn.Linear(hidden//2,1))
+
+    def forward(self, state, value_context):
+        return self.head(torch.cat((self.norm(state),value_context.to(state.dtype)),dim=-1))
+
+
 class Policy100ms(nn.Module):
     """共享状态z，Actor保持原参数头，Critic独立且不回喂Actor。随机种子由批准profile提供。"""
     input_version = 'native_inputs_100ms_v1'
+    value_version = 'finite_goal_value_100ms_v1'
 
-    def __init__(self, shape: ModelShape100ms):
+    def __init__(self, shape: ModelShape100ms, *, propagation=None):
         super().__init__()
         self.shape = shape
+        self.propagation = propagation
         self.state = State100ms(shape)
         self.action = ActionDecoder(shape.hidden)
-        self.critic = nn.Sequential(AlignedLayerNorm(shape.hidden),
-                                    nn.Linear(shape.hidden, shape.hidden // 2), nn.SiLU(),
-                                    nn.Linear(shape.hidden // 2, 1))
+        self.critic = FiniteGoalCritic(shape.hidden)
+        # 训练专属；Actor/GRU前向及支持集不读取未来标签或此头。
+        self.propagation_head = None if propagation is None else nn.Linear(shape.hidden,2)
 
     def stages(self):
         return action_stages(self.action)
 
-    def state_and_value(self, fast, slow, book_levels, book_mask, hidden):
+    def state_and_value(self, fast, slow, book_levels, book_mask, hidden, *, value_context):
         z, next_hidden = self.state(fast, slow, book_levels, book_mask, hidden)
-        return z, next_hidden, self.critic(z).squeeze(-1)
+        return z, next_hidden, None if value_context is None else self.critic(z,value_context).squeeze(-1)
 
-    def frozen_state_and_value(self, frozen, hidden, identities, policy_version):
+    def frozen_state_and_value(self, frozen, hidden, identities, policy_version, *, value_context):
         """实际自有冻结输入开始计算时绑定版本；不替代Actor合法域或轨迹屏障。
 
         identities是这份hidden对应的完整根/账户/市场键，不能按行号混合市场。
@@ -67,12 +85,12 @@ class Policy100ms(nn.Module):
         fault|=(policy_version<0).to(torch.int32)
         ready=frozen.resources_fit&frozen.provided.all(1)&(fault==0)
         active=ready&(frozen.role>=0)
-        state,candidate,value=self.state_and_value(*frozen.model_inputs(),hidden)
+        state,candidate,value=self.state_and_value(*frozen.model_inputs(),hidden,value_context=value_context)
         return FrozenPolicyEvaluation(torch.where(active[:,None],state,0.0),
-            torch.where(active,value,0.0),torch.where(active[None,:,None],candidate,hidden),
+            None if value is None else torch.where(active,value,0.0),torch.where(active[None,:,None],candidate,hidden),
             policy_version.clone(),ready,fault)
 
-    def unroll(self, inputs, hidden, advance_mask):
+    def unroll(self, inputs, hidden, advance_mask, *, value_context):
         """固定时间轴推进全部层；advance_mask只表示实际状态行，ContextOnly须为真。
 
         root/market/冻结观察绑定由采集器提供。缺行保持原hidden，不伪造状态行；
@@ -81,20 +99,21 @@ class Policy100ms(nn.Module):
         fast, slow, books, book_mask = inputs
         states, values = [], []
         for step in range(fast.shape[0]):
-            z, candidate, value = self.state_and_value(fast[step], slow[step], books[step], book_mask[step], hidden)
+            z, candidate, value = self.state_and_value(fast[step], slow[step], books[step], book_mask[step], hidden,
+                value_context=None if value_context is None else value_context[step])
             active = advance_mask[step]
             hidden = torch.where(active[None, :, None], candidate, hidden)
             states.append(torch.where(active[:, None], z, 0.0))
-            values.append(torch.where(active, value, 0.0))
-        return torch.stack(states), torch.stack(values), hidden
+            if value is not None:values.append(torch.where(active, value, 0.0))
+        return torch.stack(states), None if value_context is None else torch.stack(values), hidden
 
-    def learning_unroll(self, burn_inputs, burn_mask, learning_inputs, learning_mask, hidden):
+    def learning_unroll(self, burn_inputs, burn_mask, learning_inputs, learning_mask, hidden, *, value_context):
         """每次当前参数学习重算burn-in；burn-in no_grad，学习起点全部层detach。"""
         if burn_inputs[0].shape[0]:
             with torch.no_grad():
-                _, _, hidden = self.unroll(burn_inputs, hidden, burn_mask)
+                _, _, hidden = self.unroll(burn_inputs, hidden, burn_mask,value_context=None)
         hidden = hidden.detach()
-        return self.unroll(learning_inputs, hidden, learning_mask)
+        return self.unroll(learning_inputs, hidden, learning_mask,value_context=value_context)
 
 
 @dataclass(frozen=True)

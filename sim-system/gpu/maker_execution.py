@@ -9,6 +9,25 @@ from queues import Numbers
 from fill_pool import FillPoolTransition
 
 
+def maker_column(orders, account, fills, maker, fault, order_slot, amount,
+                 assets, condition, source_price, at, selected_path, active,
+                 fee_rate, fee_exponent, taker_rate):
+    """一列原FIFO encounter的共同纯候选；设备循环与原固定循环共用。"""
+    live = active & (amount.sign > 0)
+    read = orders.read(order_slot)
+    association = ~read.present | (read.assets != assets) | (read.conditions != condition)
+    fault = fault | read.fault | torch.where(live, amount.fault | association.to(torch.int32), 0)
+    quantity, depletion = read.quantity.maker_depletion(amount, live & (fault == 0))
+    fault = fault | depletion.fault * live.to(torch.int32)
+    orders = orders.update(read, quantity, live & (fault == 0), at)
+    fills, account, maker, transition, allocation, demand = start_maker_fill(
+        fills, account, maker, read, depletion.base, depletion.quote, condition,
+        source_price, at, selected_path, depletion.emitted & (fault == 0),
+        fee_rate, fee_exponent, taker_rate)
+    fault = fault | allocation.fault | demand.fault | orders.fault
+    return orders, account, fills, maker, fault, transition, allocation, demand
+
+
 def start_maker_fill(pool, account, maker, order, base, quote, condition, source_price,
                      matched_at, selected_path, enabled, fee_rate, fee_exponent, taker_rate):
     """订单目录真实read、原depletion价和选定路径进入原fill/账户/日桶。"""

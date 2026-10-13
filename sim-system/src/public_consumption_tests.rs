@@ -386,9 +386,31 @@ mod gpu_hidden_tests {
 pub(super) fn gpu_compact_hidden_for_order_fixture(
     initial: &[ExecutionMarketEventV3], events: &[ExecutionMarketEventV3], empty_initial: bool,
 ) -> (tempfile::TempDir, serde_json::Value) {
+    gpu_compact_hidden_for_order_fixture_with_terminal(initial,events,empty_initial,false)
+}
+
+#[cfg(feature = "shared-execution")]
+pub(super) fn gpu_compact_hidden_for_order_fixture_with_terminal(
+    initial: &[ExecutionMarketEventV3], events: &[ExecutionMarketEventV3], empty_initial: bool, terminal: bool,
+) -> (tempfile::TempDir, serde_json::Value) {
+    gpu_compact_hidden_for_order_fixture_selected(initial,events,empty_initial,terminal,None)
+}
+
+#[cfg(feature = "shared-execution")]
+pub(super) fn gpu_compact_hidden_for_order_fixture_with_received_range(
+    initial: &[ExecutionMarketEventV3], events: &[ExecutionMarketEventV3], terminal: bool, received: std::ops::Range<i64>,
+) -> (tempfile::TempDir, serde_json::Value) {
+    gpu_compact_hidden_for_order_fixture_selected(initial,events,false,terminal,Some(received))
+}
+
+#[cfg(feature = "shared-execution")]
+fn gpu_compact_hidden_for_order_fixture_selected(
+    initial: &[ExecutionMarketEventV3], events: &[ExecutionMarketEventV3], empty_initial: bool,
+    terminal: bool, received: Option<std::ops::Range<i64>>,
+) -> (tempfile::TempDir, serde_json::Value) {
     use data_pipeline_training::{compact_hidden_material::{prepare_compact_hidden_material_v1,CompactHiddenMaterialReaderV1},
         compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1,gpu_initial_sort::GpuInitialRunOrderV1};
-    let (directory,public)=gpu_public_for_order_fixture(initial,events,empty_initial);
+    let (directory,public)=gpu_public_for_order_fixture_selected(initial,events,empty_initial,terminal,received);
     let public_path=directory.path().join("public");
     let hidden_path=directory.path().join("hidden");
     let mut assets=Vec::new();
@@ -403,9 +425,17 @@ pub(super) fn gpu_compact_hidden_for_order_fixture(
         Path::new(&std::env::var("B_GPU_SORT_WORKER").unwrap())).unwrap());
     prepare_compact_hidden_material_v1(&public_path,&hidden_path,1<<20,&sort,order,"gpu-order-hidden".into(),None,|_,_,_,_| {}).unwrap();
     let mut reader=CompactHiddenMaterialReaderV1::open(&hidden_path,&public_path,1,1<<20,1<<20,|_,_,_,_| {}).unwrap();
-    let mut buckets=Vec::new();
-    while let Some(bucket)=next_compact_hidden_gpu_bucket_v1(&mut reader).unwrap() {buckets.push(bucket);}
-    (directory,serde_json::json!({"buckets":buckets,"assets":assets,
+    let mut buckets=Vec::new();let mut terminal_facts=Vec::new();
+    while let Some(bucket)=next_compact_hidden_gpu_bucket_v1(&mut reader).unwrap() {
+        if terminal {
+            for position in &bucket.bucket.reference_positions {
+                let (_,fact)=reader.reference_fact_with_market(*position).unwrap();
+                if let Some(fact)=fact {terminal_facts.push(serde_json::json!({"at":bucket.bucket.bucket_time_utc_ms,"fact":fact}));}
+            }
+        }
+        buckets.push(bucket);
+    }
+    (directory,serde_json::json!({"buckets":buckets,"assets":assets,"terminal_facts":terminal_facts,
         "source_binding":{"binary":std::env::var("B_GPU_HIDDEN_CLI").unwrap(),"hidden":hidden_path,"public":public_path,
             "rows":1,"bytes":1<<20,"max_batch_bytes":1<<20}}))
 }
@@ -414,6 +444,21 @@ pub(super) fn gpu_compact_hidden_for_order_fixture(
 #[cfg(feature = "shared-execution")]
 pub(super) fn gpu_public_for_order_fixture(
     initial: &[ExecutionMarketEventV3], events: &[ExecutionMarketEventV3], empty_initial: bool,
+) -> (tempfile::TempDir, PublicObservationCoreV1) {
+    gpu_public_for_order_fixture_with_terminal(initial,events,empty_initial,false)
+}
+
+#[cfg(feature = "shared-execution")]
+fn gpu_public_for_order_fixture_with_terminal(
+    initial: &[ExecutionMarketEventV3], events: &[ExecutionMarketEventV3], empty_initial: bool, terminal: bool,
+) -> (tempfile::TempDir, PublicObservationCoreV1) {
+    gpu_public_for_order_fixture_selected(initial,events,empty_initial,terminal,None)
+}
+
+#[cfg(feature = "shared-execution")]
+fn gpu_public_for_order_fixture_selected(
+    initial: &[ExecutionMarketEventV3], events: &[ExecutionMarketEventV3], empty_initial: bool,
+    terminal: bool, received_range: Option<std::ops::Range<i64>>,
 ) -> (tempfile::TempDir, PublicObservationCoreV1) {
     use data_pipeline_training::compact_public::PublicCompactWriterV1;
     let directory=tempfile::tempdir().unwrap();
@@ -454,16 +499,77 @@ pub(super) fn gpu_public_for_order_fixture(
                 asset_id:v.asset.token_id.0.clone(),best_bid:v.best_bid_pusd_per_share.as_ref().map(|v|v.0.clone()),
                 best_ask:v.best_ask_pusd_per_share.as_ref().map(|v|v.0.clone()),spread:None,
             },
-            _=>panic!("这个夹具只重编码原Book、PriceChange与BestBidAsk的源值，不抄before"),
+            ExecutionMarketEventPayloadV3::PublicTrade(v)=>PolymarketOrderbookEvent::LastTradePrice {
+                asset_id:v.asset.token_id.0.clone(),price:v.price_pusd_per_share.0.clone(),size:Some(v.quantity_shares.0.clone()),
+                side:Some(if v.aggressor_side==contracts::TradeSide::Buy {PolymarketSide::Buy}else{PolymarketSide::Sell}),
+                fee_rate_bps:v.fee_rate_bps.as_ref().map(|v|v.0.clone()),
+            },
+            _=>panic!("这个夹具只重编码原Book、PriceChange、BestBidAsk与PublicTrade源值，不抄before"),
         };
         let source=event.time.source_event_at_utc_ms.expect("原PM须有真实源时刻");
         let mut pm=row("epoch-1",inputs.len() as u64,source,event.time.received_at_utc_ms,payload);
         pm.market=event.market.condition_id.0.clone();
         inputs.push(record(inputs.len() as u64,TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(pm))));
     }
+    if terminal && std::env::var_os("B_GPU_AUTO_TWO_MARKETS").is_some() {
+        let mut seen=std::collections::BTreeSet::new();
+        for event in initial {
+            let market=&event.market;
+            if !seen.insert(&market.condition_id.0) {continue;}
+            let assets=initial.iter().filter(|event|event.market==*market).map(|event|match &event.payload {
+                ExecutionMarketEventPayloadV3::InitialL2Snapshot(book)=>book.asset.clone(),_=>unreachable!(),
+            }).collect::<Vec<_>>();
+            assert_eq!(assets.len(),2);
+            let at=market.window.end_at_utc_ms+9000;
+            let mut metadata=terminal_metadata_row(market);
+            let mut ws=terminal_orderbook_row(market);
+            metadata.timestamp_received=at+1;metadata.collector_admission_time_utc_ms=at+3;
+            metadata.collector_admission_sequence+=seen.len() as u64;
+            metadata.source_evidence_received_at_utc=Some(at+1);
+            metadata.row_evidence_validation_completed_at_utc=Some(at+2);
+            metadata.lifecycle_applied_at_utc=Some(at+3);metadata.runtime_role_applied_at_utc=Some(at+3);
+            metadata.ws_platform_timestamp_utc=Some(at);metadata.ws_platform_timestamp_raw=Some(at.to_string());
+            metadata.asset_ids=serde_json::to_string(&assets.iter().map(|v|&v.token_id.0).collect::<Vec<_>>()).unwrap();
+            metadata.winning_asset_id=Some(assets[0].token_id.0.clone());metadata.winning_outcome=Some(assets[0].outcome.label.clone());
+            ws.timestamp=Some(at);ws.timestamp_received=at+1;ws.collector_admission_time_utc_ms=at+3;
+            ws.collector_admission_sequence+=seen.len() as u64;
+            metadata.ws_claimant_collector_admission_sequence=Some(ws.collector_admission_sequence);
+            let PolymarketOrderbookEvent::MarketResolved {asset_ids,winning_asset_id,winning_outcome,..}=&mut ws.event else {unreachable!()};
+            *asset_ids=assets.iter().map(|v|v.token_id.0.clone()).collect();
+            *winning_asset_id=assets[0].token_id.0.clone();*winning_outcome=assets[0].outcome.label.clone();
+            inputs.push(record(inputs.len() as u64,TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata)))));
+            inputs.push(record(inputs.len() as u64,TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(ws))));
+        }
+        assert_eq!(seen.len(),2);
+    } else if terminal {
+        let market=&initial[0].market;
+        let assets=initial.iter().map(|event| match &event.payload {
+            ExecutionMarketEventPayloadV3::InitialL2Snapshot(book)=>book.asset.clone(),_=>unreachable!(),
+        }).collect::<Vec<_>>();
+        // 原两行WS终态模板；仅替换本场景的完整市场/资产身份，保source/received/admission。
+        let mut metadata=terminal_metadata_row(market);
+        metadata.asset_ids=serde_json::to_string(&assets.iter().map(|asset|&asset.token_id.0).collect::<Vec<_>>()).unwrap();
+        metadata.winning_asset_id=Some(assets[0].token_id.0.clone());metadata.winning_outcome=Some(assets[0].outcome.label.clone());
+        let mut ws=terminal_orderbook_row(market);
+        let PolymarketOrderbookEvent::MarketResolved {asset_ids,winning_asset_id,winning_outcome,..}=&mut ws.event else {unreachable!()};
+        *asset_ids=assets.iter().map(|asset|asset.token_id.0.clone()).collect();
+        *winning_asset_id=assets[0].token_id.0.clone();*winning_outcome=assets[0].outcome.label.clone();
+        inputs.push(record(inputs.len() as u64,TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata)))));
+        inputs.push(record(inputs.len() as u64,TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(ws))));
+    }
+    if let Some(range)=&received_range {
+        inputs.retain(|input| match &input.ingress {
+            DptIngressV1::Message {source_evidence,..}=>range.contains(&source_evidence.received_at_utc_ms),
+            _=>true,
+        });
+        for (position,input) in inputs.iter_mut().enumerate() {input.input_position=position as u64;}
+    }
     inputs.push(end(inputs.len() as u64));
     let mut public=core();
-    let mut writer=PublicCompactWriterV1::create(&public_path,public.header().clone()).unwrap();
+    let mut writer=match received_range {
+        Some(range)=>PublicCompactWriterV1::create_for_received_range(&public_path,public.header().clone(),range),
+        None=>PublicCompactWriterV1::create(&public_path,public.header().clone()),
+    }.unwrap();
     for input in inputs {
         let prepared=prepare_public_ingress_v1(&public,&input,&BTreeMap::new(),&[]).unwrap();
         let applied=public.push_facts(&prepared).unwrap();
@@ -3997,4 +4103,212 @@ async fn paper_send_samples_clock_at_request_instead_of_capability_acquisition()
     driver.observe().unwrap();
     assert!(completed_post_response(&driver.execution.actor, "paper-time").is_some());
     driver.stop_and_drain().unwrap();
+}
+
+#[test]
+fn shared_day_observation_encoding_preserves_eight_markets_and_lagging_groups() {
+    let mut core = core();
+    let mut deliveries = Vec::new();
+    let mut inputs = vec![meta(0)];
+    for i in 2..=8_u64 {
+        let mut row = metadata_snapshot_row();
+        row.condition_id = format!("0x{}", format!("{i:x}").repeat(64));
+        row.clob_market_id = (3_195_575 + i).to_string();
+        row.asset_ids = format!("[\"{}\",\"{}\"]", 20 + 2 * i, 21 + 2 * i);
+        row.collector_admission_sequence = i;
+        inputs.push(record(
+            i - 1,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(row))),
+        ));
+    }
+    let level = |price: &str, quantity: &str| DepthLevel {
+        price: price.into(),
+        quantity: quantity.into(),
+    };
+    inputs.push(record(
+        8,
+        TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(BinanceDepthSnapshotRow {
+            timestamp_received: 13_000,
+            snapshot_fetch_start_utc: 12_000,
+            last_update_id: 100,
+            bids: vec![level("64000", "0.5"), level("64100", "0.7")],
+            asks: vec![level("64300", "0.3"), level("64200", "0.4")],
+            symbol: "BTCUSDT".into(),
+            source_endpoint: "https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000"
+                .into(),
+            snapshot_status: "complete".into(),
+            source_sequence_epoch_id: "depth-a".into(),
+            connection_generation: 1,
+            depth_ingress_sequence: 1,
+            collector_admission_sequence: 1,
+            collector_admission_time_utc_ms: 13_001,
+            collector_host_id: "collector-1".into(),
+            collector_region: "eu-west-1".into(),
+            schema_version: "binance_depth_snapshot_v3".into(),
+        })),
+    ));
+    inputs.extend([
+        pm(9, 1, 21_000, book("100")),
+        pm(
+            10,
+            2,
+            21_001,
+            PolymarketOrderbookEvent::BestBidAsk {
+                asset_id: UP_TOKEN_ID.into(),
+                best_bid: Some("0.5".into()),
+                best_ask: Some("0.6".into()),
+                spread: Some("0.1".into()),
+            },
+        ),
+        pm(
+            11,
+            3,
+            21_002,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![change(Some("80"))],
+            },
+        ),
+    ]);
+    for input in inputs {
+        let first_canonical_position = core.next_canonical_position();
+        let prepared = prepare_public_ingress_v1(&core, &input, &BTreeMap::new(), &[]).unwrap();
+        let applied = core.push(&prepared).unwrap().into_owned();
+        let prepared_pm = match prepared.current {
+            PreparedCanonicalInputV1::PolymarketMessage(pm) => Some(pm),
+            _ => None,
+        };
+        let contexts = applied
+            .applied
+            .closed_groups
+            .iter()
+            .flat_map(|g| &g.observations)
+            .filter_map(|o| {
+                core.prepared_pm_context(&o.market.condition_id.0)
+                    .map(|c| (o.market.condition_id.0.clone(), c))
+            })
+            .collect();
+        let mut day = data_pipeline_training::day_producer::DayAppliedV1 {
+            input,
+            applied: applied.applied,
+            first_canonical_position,
+            prepared_pm,
+            contexts,
+            initialization_binding: None,
+            hidden: vec![],
+        };
+        deliveries.extend(PreparedPublicGroupV1::from_day(&mut day));
+    }
+    assert_eq!(deliveries.len(), 12);
+    let group = |i: usize| &deliveries[i].prepared.group;
+    let up = |group: &ClosedBusinessGroupV1| {
+        group.observations[0]
+            .assets
+            .iter()
+            .position(|asset| asset.asset.token_id.0 == UP_TOKEN_ID)
+            .unwrap()
+    };
+    let depth = &group(8).observations[0].binance_depth;
+    assert_eq!(
+        depth.value.as_ref().unwrap().full().unwrap().bids[0]
+            .quantity_btc
+            .0,
+        "0.7"
+    );
+    let PublicBusinessPayloadV1::ReferenceFact(
+        CanonicalReferenceEventPayloadV2::BinanceDepthState(fact_depth),
+    ) = &group(8).records[0].payload
+    else {
+        panic!("正式深度事实")
+    };
+    let Some(BinanceDepthObservationV1::Full(observed_depth)) = &depth.value else {
+        panic!("默认完整深度")
+    };
+    assert!(Arc::ptr_eq(fact_depth, observed_depth));
+    assert!(Arc::ptr_eq(
+        &group(9).observations[0].assets[up(group(9))].asks,
+        &group(10).observations[0].assets[up(group(10))].asks
+    ));
+    assert!(!Arc::ptr_eq(
+        &group(10).observations[0].assets[up(group(10))].bids,
+        &group(11).observations[0].assets[up(group(11))].bids
+    ));
+    assert_eq!(
+        group(9).observations[0].assets[up(group(9))]
+            .bids
+            .value
+            .as_ref()
+            .unwrap()[0]
+            .quantity_shares
+            .0,
+        "100"
+    );
+    assert_eq!(
+        group(11).observations[0].assets[up(group(11))]
+            .bids
+            .value
+            .as_ref()
+            .unwrap()[0]
+            .quantity_shares
+            .0,
+        "80"
+    );
+    let mut original = Vec::new();
+    ciborium::into_writer(
+        &deliveries
+            .iter()
+            .map(|d| &d.prepared.group)
+            .collect::<Vec<_>>(),
+        &mut original,
+    )
+    .unwrap();
+    let saved = checkpoint::DeliveryBatch::capture(deliveries.iter());
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&saved, &mut bytes).unwrap();
+    let restored: checkpoint::DeliveryBatch = ciborium::from_reader(bytes.as_slice()).unwrap();
+    let restored = restored.restore().unwrap();
+    for (a, b) in deliveries.iter().zip(&restored) {
+        assert_eq!(a.prepared.reference, b.prepared.reference);
+        assert_eq!(a.delivered_at_utc_ms, b.delivered_at_utc_ms);
+        assert_eq!(a.prepared.group, b.prepared.group);
+        for o in &b.prepared.group.observations {
+            assert!(Arc::ptr_eq(&o.group_events, &b.prepared.group.records));
+        }
+    }
+    assert!(Arc::ptr_eq(
+        &restored[9].prepared.group.observations[0].assets[up(&restored[9].prepared.group)].asks,
+        &restored[10].prepared.group.observations[0].assets[up(&restored[10].prepared.group)].asks
+    ));
+    assert!(Arc::ptr_eq(
+        &restored[8].prepared.group.observations[0].binance_depth,
+        &restored[11].prepared.group.observations[7].binance_depth
+    ));
+    let encoded: ciborium::Value = ciborium::from_reader(bytes.as_slice()).unwrap();
+    let pool = encoded
+        .as_map()
+        .unwrap()
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("pool"))
+        .unwrap()
+        .1
+        .as_map()
+        .unwrap();
+    let count = |name| {
+        pool.iter()
+            .find(|(k, _)| k.as_text() == Some(name))
+            .unwrap()
+            .1
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(count("depth_values"), 1, "共享数量及组事实仅编码一次");
+    println!(
+        "day_shared_encoding markets=8 groups={} ordinary_group_bytes={} shared_delivery_bytes={} books={} depth_values={} event_sets={}",
+        deliveries.len(),
+        original.len(),
+        bytes.len(),
+        count("books"),
+        count("depth_values"),
+        count("events")
+    );
 }

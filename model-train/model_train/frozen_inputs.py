@@ -47,7 +47,7 @@ class FrozenPolicyInputs100ms:
 @dataclass(frozen=True)
 class FrozenPolicyEvaluation:
     state: torch.Tensor
-    value: torch.Tensor
+    value: torch.Tensor | None
     hidden: torch.Tensor
     policy_version: torch.Tensor
     ready: torch.Tensor

@@ -186,7 +186,7 @@ pub fn bind_reference_reduction_v1(
                 CanonicalReferenceEventPayloadV2::ChainlinkBtcUsd(value)
             }
             CanonicalReferenceEventPayloadV1::BinanceDepthState(value) => {
-                CanonicalReferenceEventPayloadV2::BinanceDepthState(value)
+                CanonicalReferenceEventPayloadV2::BinanceDepthState(value.into())
             }
             CanonicalReferenceEventPayloadV1::BinanceAggregateTrade(value) => {
                 CanonicalReferenceEventPayloadV2::BinanceAggregateTrade(value)
@@ -338,6 +338,12 @@ pub fn materialize_public_reduction_v1(
     let mut bindings = Vec::with_capacity(batch.facts.len());
     for fact in batch.facts.iter() {
         let (record, event_id) = match &fact.payload {
+            PublicBusinessPayloadV1::BinanceDepthReference(_) => {
+                return Err(ContractError::InvalidField {
+                    field: "public_reduction".into(),
+                    reason: "深度正文须从原输入重建".into(),
+                });
+            }
             PublicBusinessPayloadV1::PolymarketMessage(message) => {
                 let id = message.event_id.clone();
                 (

@@ -215,9 +215,8 @@ class ExactInt:
     def select(self, mask, other):
         """同一批次的设备条件选择；mask为真取self，无标量回传。"""
         width = max(self.words.shape[1], other.words.shape[1])
-        pad = torch.nn.functional.pad
-        a = pad(self.words, (0, width - self.words.shape[1]))
-        b = pad(other.words, (0, width - other.words.shape[1]))
+        a = self.with_capacity(width).words
+        b = other.with_capacity(width).words
         return ExactInt(torch.where(mask[:, None], a, b),
                         torch.where(mask, self.sign, other.sign),
                         torch.where(mask, self.fault, other.fault))

@@ -69,6 +69,8 @@ async fn gpu_mutation_registration_preserves_original_pending_and_first_receipt(
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "AutoDL同提交合法接单→真实行情maker→撤单设备纵向验证"]
 async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
+    // 同一真实5份GTC：可选一次档位减少耗尽初始Taker后的3.999999份余量。
+    let maker_exhaustion = std::env::var_os("B_GPU_MAKER_EXHAUSTION").is_some();
     let saved = Rc::new(RefCell::new(None));
     let capture = Rc::clone(&saved);
     let normalization = Rc::new(RefCell::new(Vec::new()));
@@ -141,9 +143,10 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     }
     let maker_at = processing_at + 50;
     let mut events = vec![decoded_maker_level_event(BookSide::Ask, "0.2", "1.000001", "0", maker_at, maker_at+1, 10)];
-    for cycle in 0..3_u64 {
-        events.push(decoded_maker_level_event(BookSide::Bid, "0.3", "0", "0.000001", maker_at, maker_at+2+cycle as i64*2, 11+cycle*2));
-        events.push(decoded_maker_level_event(BookSide::Bid, "0.3", "0.000001", "0", maker_at, maker_at+3+cycle as i64*2, 12+cycle*2));
+    let maker_amount = if maker_exhaustion { "3.999999" } else { "0.000001" };
+    for cycle in 0..if maker_exhaustion { 1 } else { 3_u64 } {
+        events.push(decoded_maker_level_event(BookSide::Bid, "0.3", "0", maker_amount, maker_at, maker_at+2+cycle as i64*2, 11+cycle*2));
+        events.push(decoded_maker_level_event(BookSide::Bid, "0.3", maker_amount, "0", maker_at, maker_at+3+cycle as i64*2, 12+cycle*2));
     }
     for (ordinal, event) in events.iter().enumerate() {
         let (next, effect) = reduce_market_event_slice_v2(state, MarketEventPathV1::HiddenPlatform, maker_at,
@@ -225,6 +228,12 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         previous = waiting;
     }
     let cancel_ledger_before = gpu_ledger_reservation_checkpoint(&ledger, "cancel_before");
+    if maker_exhaustion {
+        let remaining = snapshot(&state)["quantities"]["Base"]["open_base_units"].clone();
+        assert_eq!(remaining, serde_json::json!(0), "真实Maker后SIM余量耗尽");
+        assert_eq!(cancel_ledger_before["projection"]["market_projections"][0]["open_order_count"],
+            serde_json::json!(0), "CPU同批NOE在取消前已关闭公开订单");
+    }
     let next_private = state.session.as_ref().unwrap().next_private_feedback_sequence;
     let next_batch = state.session.as_ref().unwrap().next_projection_batch_sequence;
     let (state, canceled) = advance_mutation_candidate_with_outputs(&actor.opened, actor.scenario.initial_market_directory(),
@@ -267,7 +276,8 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         assert!(matches!(ledger.apply_noe_memory_v2(record).unwrap(), ledger::LedgerMemoryApplyOutcomeV1::Applied(ledger::LedgerApplyOutcomeV1::AlreadyApplied {..})));
     }
     assert_eq!(gpu_ledger_reservation_checkpoint(&ledger, "cancel_after"), cancel_ledger_after);
-    assert_eq!(cancel_records.len(), 4, "CallerCanceled、真实释放、Target与Completed");
+    assert_eq!(cancel_records.len(), if maker_exhaustion { 2 } else { 4 },
+        "耗尽后只有NoEffect Target与Completed；部分成交仍有CallerCanceled和真实释放");
     assert!(observation.take_closed_records().is_empty());
     checkpoints.push(serde_json::json!({"stage":"canceled", "state":snapshot(&state)}));
     let rebate_tail = std::env::var_os("B_GPU_REBATE_DAY_RESOURCE").is_some();
@@ -340,6 +350,22 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         "next_private":next_private,"next_batch":next_batch,"session_seed":session_seed,
         "order_queries":order_queries});
     input["rebate_tail_reference"]=serde_json::to_value(if rebate_tail {Some(rebate_tail_reference)} else {None}).unwrap();
+    input["maker_exhaustion"]=serde_json::json!(maker_exhaustion);
+    if std::env::var_os("B_GPU_GTC_POSTERIOR_SOURCE").is_some() {
+        let opening = observation.opening_record().unwrap();
+        // 两次真实领取所引用的最大原批，不从期望账本推导发布人口。
+        let accepted_through = [&prior_records, &cancel_records].iter().map(|records|
+            records.iter().map(|record|&record["position"]["source_watermark"])
+                .max_by_key(|watermark|watermark["projection_batch_sequence"].as_u64().unwrap())
+                .unwrap().clone()).collect::<Vec<_>>();
+        input["cpu_posterior"] = serde_json::json!({
+            "context":opening.context(),"opening_position":opening.position(),"opening_record":opening.record(),
+            "batches":normalization.borrow().iter().filter(|v|v["name"]=="actual_source")
+                .map(|v|v["input"].clone()).collect::<Vec<_>>(),
+            "accepted_through":accepted_through,
+            "deliveries":[[prefix_at,prefix_at],[closed_at,closed_at]],
+        });
+    }
     input["tail_public"]=serde_json::to_value(if rebate_tail {Some(std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap()).join("public-compact"))} else {None}).unwrap();
     input["joint_public"]=serde_json::to_value(joint_public.as_ref().filter(|_|std::env::var_os("B_GPU_JOINT_FREEZE").is_some()).map(|_|serde_json::json!({
         "compact":std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap()).join("public-compact"),

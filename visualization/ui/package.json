@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test:browser": "node tests/browser.mjs"
+    "test:browser": "node tests/browser.mjs",
+    "test:i18n": "node tests/i18n.mjs",
+    "test:snapshot-values": "node tests/snapshot-values.mjs",
+    "test:snapshots": "node tests/snapshot-browser.mjs"
   },
   "dependencies": {
     "@tanstack/react-table": "8.21.3",
@@ -14,9 +17,11 @@
     "@xyflow/react": "12.12.0",
     "decimal.js": "10.6.0",
     "echarts": "6.1.0",
+    "i18next": "26.4.3",
     "lossless-json": "4.3.1",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "react-i18next": "17.0.16"
   },
   "devDependencies": {
     "@types/react": "19.2.14",

@@ -143,6 +143,22 @@ impl ComplementaryPairV1 {
         );
         sources
     }
+    pub(super) fn source_health_state(
+        &self,
+        o: &MarketBusinessObservationV1,
+        scope: &SourceStreamScopeV1,
+        at: i64,
+    ) -> SourceHealthStateV1 {
+        // Core 有序产出；合法旧夹具可无序，未命中仍走原查找。
+        let progress = o
+            .source_progress
+            .binary_search_by(|p| p.scope.cmp(scope))
+            .ok()
+            .map(|i| &o.source_progress[i])
+            .or_else(|| o.source_progress.iter().find(|p| &p.scope == scope));
+        let facts = progress.map(SourceHealthFactsV1::from);
+        source_health_state_v1(facts.as_ref(), self.config.health.limits(scope.source), at)
+    }
     pub(super) fn health_states(
         &self,
         o: &MarketBusinessObservationV1,
@@ -151,20 +167,9 @@ impl ComplementaryPairV1 {
     ) -> Vec<SourceHealthStatusV1> {
         sources
             .iter()
-            .map(|scope| {
-                let facts = o
-                    .source_progress
-                    .iter()
-                    .find(|p| &p.scope == scope)
-                    .map(SourceHealthFactsV1::from);
-                SourceHealthStatusV1 {
-                    scope: scope.clone(),
-                    state: source_health_state_v1(
-                        facts.as_ref(),
-                        self.config.health.limits(scope.source),
-                        at,
-                    ),
-                }
+            .map(|scope| SourceHealthStatusV1 {
+                scope: scope.clone(),
+                state: self.source_health_state(o, scope, at),
             })
             .collect()
     }
@@ -186,7 +191,7 @@ impl ComplementaryPairV1 {
     }
     pub(super) fn health_deadline(
         &self,
-        input: &StrategyCurrentReadV1<'_>,
+        input: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
         calculation: Option<&StrategyCalculationV1<ComplementaryPairDiagnosticV1>>,
         at: i64,
     ) -> Option<i64> {
@@ -199,7 +204,6 @@ impl ComplementaryPairV1 {
             })
             .unwrap_or(&[]);
         input
-            .markets
             .iter()
             .filter(|f| f.observation.market.window.end_at_utc_ms > at)
             .flat_map(|f| {
@@ -242,7 +246,6 @@ impl ComplementaryPairV1 {
     }
     pub(super) fn business_dependency(
         read: &ActionBeforeReadV2,
-        trades: &[FrozenTradeEconomicsV1],
         condition: &ConditionId,
         batch_ids: &[&str],
     ) -> Option<ActionBusinessDependencyV1> {
@@ -273,15 +276,123 @@ impl ComplementaryPairV1 {
         Some(ActionBusinessDependencyV1 {
             orphan_shares: market.orphan_shares.clone(),
             orphan_principal: market.unresolved_orphan_principal_cost_pusd.clone(),
-            orphan_fee: Self::orphan_fee(trades, condition)
-                .ok()
-                .and_then(|(fee, unknown)| (!unknown).then(|| fee.public())),
+            orphan_fee: known(&market.unpaired_success_fee_pusd).cloned(),
             success_shares: market.success_shares.clone(),
             success_principal: market.success_principal_cost_pusd.clone(),
             actual_fees: std::array::from_fn(|i| market.executed[i].actual_fee_pusd.clone()),
             commitments,
             unknown_order_ids,
         })
+    }
+    pub(super) fn qualify_public_group(
+        &self,
+        group: &ClosedBusinessGroupV1,
+        calculation: &StrategyCalculationV1<ComplementaryPairDiagnosticV1>,
+        index: usize,
+        at: i64,
+    ) -> IntentQualificationV1 {
+        let StrategyOutputV1::Continue {
+            intents,
+            diagnostics,
+            ..
+        } = &calculation.output
+        else {
+            return IntentQualificationV1::Qualified;
+        };
+        let item = &intents[index];
+        if matches!(item.intent.as_ref(), ModelIntentV1::CancelOrders { .. }) {
+            return IntentQualificationV1::Qualified;
+        }
+        let Some(dependency) = diagnostics
+            .action_health_dependencies
+            .iter()
+            .find(|d| d.global_request_id == item.context.global_request_id)
+        else {
+            return IntentQualificationV1::Invalidated(IntentInvalidationReasonV1 {
+                reason_code: "action_dependency_unavailable".into(),
+                scopes: vec![],
+            });
+        };
+        let observation = group
+            .observations
+            .binary_search_by(|o| o.market.condition_id.0.cmp(&dependency.condition_id.0))
+            .ok()
+            .map(|i| &group.observations[i])
+            .or_else(|| {
+                group
+                    .observations
+                    .iter()
+                    .find(|o| o.market.condition_id == dependency.condition_id)
+            });
+        let Some(o) = observation else {
+            return IntentQualificationV1::Invalidated(IntentInvalidationReasonV1 {
+                reason_code: "market_unavailable".into(),
+                scopes: dependency.sources.clone(),
+            });
+        };
+        self.qualify_public_observation(o, item.intent.as_ref(), dependency, at)
+    }
+    fn qualify_public_observation(
+        &self,
+        o: &MarketBusinessObservationV1,
+        intent: &ModelIntentV1,
+        dependency: &ActionHealthDependencyV1,
+        at: i64,
+    ) -> IntentQualificationV1 {
+        let reject = |code: &str, scopes| {
+            IntentQualificationV1::Invalidated(IntentInvalidationReasonV1 {
+                reason_code: code.into(),
+                scopes,
+            })
+        };
+        if at >= o.market.window.end_at_utc_ms
+            || value(&o.accepting_orders) != Some(&true)
+            || value(&o.closed) == Some(&true)
+        {
+            return reject("market_not_trading", dependency.sources.clone());
+        }
+        if dependency
+            .sources
+            .iter()
+            .any(|scope| self.source_health_state(o, scope, at).failure().is_some())
+        {
+            let issues = self.health_issues(o, &dependency.sources, at);
+            return reject(
+                "source_health",
+                issues.into_iter().map(|i| i.scope).collect(),
+            );
+        }
+        if let Some(token) = &dependency.independent_held_token
+            && o.assets
+                .iter()
+                .find(|a| &a.asset.token_id == token)
+                .and_then(|a| value(&a.valuation_best_bid))
+                .is_none()
+        {
+            return reject("repair_held_mark_unavailable", dependency.sources.clone());
+        }
+        let legs: &[BuyLegIntentV1] = match intent {
+            ModelIntentV1::SubmitSingleBuy { order, .. } => std::slice::from_ref(order),
+            ModelIntentV1::SubmitPairedBuy { orders, .. } => orders,
+            _ => return reject("unsupported_buy_action", vec![]),
+        };
+        for leg in legs {
+            if o.assets
+                .iter()
+                .find(|a| a.asset.token_id == leg.token_id)
+                .is_none_or(|a| {
+                    value(&a.tick).is_none()
+                        || (matches!(leg.order, BuyOrderIntentV1::FakMarket { .. })
+                            && value(&a.asks).is_none())
+                })
+            {
+                return reject(
+                    "action_book_or_tick_unavailable",
+                    dependency.sources.clone(),
+                );
+            }
+        }
+        IntentQualificationV1::Qualified
     }
     pub(super) fn qualify_health(
         &self,
@@ -329,60 +440,16 @@ impl ComplementaryPairV1 {
             .iter()
             .map(|i| i.context.global_request_id.as_str())
             .collect();
-        if Self::business_dependency(
-            &input.action_before,
-            &input.trade_economics,
-            &dependency.condition_id,
-            &batch_ids,
-        )
-        .as_ref()
+        if Self::business_dependency(&input.action_before, &dependency.condition_id, &batch_ids)
+            .as_ref()
             != Some(&dependency.business)
         {
             return reject("action_business_facts_changed", vec![]);
         }
 
-        if at >= o.market.window.end_at_utc_ms
-            || value(&o.accepting_orders) != Some(&true)
-            || value(&o.closed) == Some(&true)
-        {
-            return reject("market_not_trading", dependency.sources.clone());
-        }
-        let issues = self.health_issues(o, &dependency.sources, at);
-        if !issues.is_empty() {
-            return reject(
-                "source_health",
-                issues.into_iter().map(|i| i.scope).collect(),
-            );
-        }
-        if let Some(token) = &dependency.independent_held_token
-            && o.assets
-                .iter()
-                .find(|a| &a.asset.token_id == token)
-                .and_then(|a| value(&a.valuation_best_bid))
-                .is_none()
-        {
-            return reject("repair_held_mark_unavailable", dependency.sources.clone());
-        }
-        let legs: Vec<_> = match item.intent.as_ref() {
-            ModelIntentV1::SubmitSingleBuy { order, .. } => vec![order],
-            ModelIntentV1::SubmitPairedBuy { orders, .. } => orders.iter().collect(),
-            _ => return reject("unsupported_buy_action", vec![]),
-        };
-        for leg in legs {
-            if o.assets
-                .iter()
-                .find(|a| a.asset.token_id == leg.token_id)
-                .is_none_or(|a| {
-                    value(&a.tick).is_none()
-                        || (matches!(leg.order, BuyOrderIntentV1::FakMarket { .. })
-                            && value(&a.asks).is_none())
-                })
-            {
-                return reject(
-                    "action_book_or_tick_unavailable",
-                    dependency.sources.clone(),
-                );
-            }
+        let public = self.qualify_public_observation(o, item.intent.as_ref(), dependency, at);
+        if matches!(public, IntentQualificationV1::Invalidated(_)) {
+            return public;
         }
         if diagnostics.profit_allocations.iter().any(|a| {
             a.global_request_id == item.context.global_request_id

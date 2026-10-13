@@ -1,6 +1,6 @@
 """已提交NOE记录的紧凑共享传输布局。
 
-设备稳定压紧真实人口；宿主只在物理分配边界读一个最大人口标量，不决定
+设备稳定压紧真实人口；物理出口读取单批标量或整阶段尺寸向量，不决定
 事实、领取、前驱或业务状态。原bank行、batch/record/private身份均保持。
 """
 from dataclasses import dataclass, replace
@@ -26,6 +26,50 @@ def append_root_fields(left, right, roots, left_width, right_width, *, fields=1)
         return torch.cat([left.reshape(roots,left_width,fields),
             right.reshape(roots,right_width,fields)],dim=1).flatten()
     raise TypeError('共享记录字段须为原精确数值或张量')
+
+
+def select_root_fields(value, order, width, *, fields=1):
+    """本次固定容量的[root,record,field]选择；不读取设备人口。"""
+    roots=order.size(0)
+    rows=(torch.arange(roots,device=order.device)[:,None]*width+order).flatten()
+    positions=(rows[:,None]*fields+torch.arange(fields,device=order.device)).flatten()
+    if isinstance(value,ExactRational):
+        return ExactRational(_take(value.numerator,positions),_take(value.denominator,positions))
+    if isinstance(value,ExactInt):return _take(value,positions)
+    return value.reshape(-1)[positions]
+
+
+def concatenate_root_fields(values,roots,widths,*,fields=1):
+    result=values[0];width=widths[0]
+    for incoming,extra in zip(values[1:],widths[1:],strict=True):
+        result=append_root_fields(result,incoming,roots,width,extra,fields=fields);width+=extra
+    return result
+
+
+@dataclass(frozen=True)
+class StageBatchLayout:
+    batches: tuple
+    widths: torch.Tensor
+    offsets: torch.Tensor
+    order: torch.Tensor
+
+
+def stage_batch_layout(batches):
+    """各自然批稳定选列并写入设备前缀；物理上界只取原批张量宽。"""
+    roots=batches[0].rows.size(0);device=batches[0].rows.device
+    selected=tuple(select_batch_columns(batch,(~batch.emitted).to(torch.int64).argsort(dim=1,stable=True))
+        for batch in batches)
+    widths=torch.stack([batch.emitted.to(torch.int64).sum(1).max() for batch in batches])
+    offsets=widths.cumsum(0)-widths
+    live=torch.cat([torch.arange(batch.rows.size(1),device=device)<width
+        for batch,width in zip(batches,widths,strict=True)])
+    # 各批实际列写入offset[j]；未使用物理列仅留在本次临时尾区。
+    targets=torch.cat([offset+torch.arange(batch.rows.size(1),device=device)
+        for batch,offset in zip(batches,offsets,strict=True)])
+    targets=torch.where(live,targets,widths.sum()+(~live).to(torch.int64).cumsum(0)-1)
+    order=torch.empty_like(targets).scatter(0,targets,torch.arange(targets.numel(),device=device))
+    order=order[None,:].expand(roots,-1)
+    return StageBatchLayout(selected,widths,offsets,order)
 
 
 def take_record_list(value, rows):

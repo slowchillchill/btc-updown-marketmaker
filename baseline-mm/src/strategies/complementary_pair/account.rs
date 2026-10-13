@@ -1,35 +1,10 @@
 use super::*;
 
 impl ComplementaryPairV1 {
-    pub(super) fn orphan_fee(
-        trades: &[FrozenTradeEconomicsV1],
-        condition: &ConditionId,
-    ) -> Result<(R, bool), StrategyErrorV1> {
-        let mut fee = R::zero();
-        let mut unknown = false;
-        for trade in trades.iter().filter(|t| {
-            &t.fact.condition_id == condition && t.success_applied && t.economic_applied
-        }) {
-            if let Some(quantity) = known(&trade.unpaired_contribution_shares) {
-                let quantity = rational(quantity)?;
-                let original = r(decimal(&trade.fact.base_quantity_shares)?);
-                if !original.is_zero() {
-                    fee = fee.add(
-                        &r(decimal(&trade.actual_net_fee_pusd)?)
-                            .mul(&quantity)
-                            .divided_by(&original),
-                    );
-                }
-            } else {
-                unknown = true;
-            }
-        }
-        Ok((fee, unknown))
-    }
     pub(super) fn state(
         &self,
         input: &StrategyInputV1,
-        f: &FrozenMarketReadV1,
+        f: &PairMarketRead<'_>,
     ) -> Result<MarketState, StrategyErrorV1> {
         let o = &f.observation;
         let condition = &o.market.condition_id;
@@ -58,9 +33,11 @@ impl ComplementaryPairV1 {
                 orphan[side] = decimal(&m.orphan_shares[i])?;
             }
             principal = rational(&m.unresolved_orphan_principal_cost_pusd)?;
-            let (orphan_fee, fee_unknown) = Self::orphan_fee(&input.trade_economics, condition)?;
-            fee = orphan_fee;
-            unknown |= fee_unknown && orphan.iter().any(|q| *q > Decimal::ZERO);
+            if let Some(orphan_fee) = known(&m.unpaired_success_fee_pusd) {
+                fee = rational(orphan_fee)?;
+            } else {
+                unknown |= orphan.iter().any(|q| *q > Decimal::ZERO);
+            }
         }
         let mut pending = Vec::new();
         let orders: Vec<_> = input.action_before.orders().collect();
@@ -143,14 +120,10 @@ impl ComplementaryPairV1 {
                 unknown: is_unknown,
             });
         }
-        let mut investment = R::zero();
-        for t in input.trade_economics.iter().filter(|t| {
-            &t.fact.condition_id == condition && t.success_applied && t.economic_applied
-        }) {
-            investment = investment
-                .add(&r(decimal(&t.fact.quote_amount_pusd)?))
-                .add(&r(decimal(&t.actual_net_fee_pusd)?));
-        }
+        let mut investment = m
+            .map(|m| rational(&m.successful_investment_pusd))
+            .transpose()?
+            .unwrap_or_else(R::zero);
         let pending_bound = pending.iter().fold(R::zero(), |s, p| s.add(&p.cost));
         let projection = input
             .action_before

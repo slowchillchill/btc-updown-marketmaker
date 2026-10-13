@@ -46,6 +46,30 @@ class IntervalReward:
 
 
 @dataclass(frozen=True)
+class RewardEndpoint:
+    at_ms: torch.Tensor
+    nav: ExactRational
+    area_pusd_ms: ExactRational
+    nav_known: torch.Tensor
+    area_known: torch.Tensor
+    fault: torch.Tensor
+
+
+def interval_between(left,right,a_pusd,present):
+    """同一原累计记忆的两个真实公开端点；不重新积分或修改端点。"""
+    _check_time(right.at_ms,left.at_ms);_check_mask(present,left.at_ms)
+    _check_amount(a_pusd,left.at_ms)
+    dt=ExactInt.from_i64_tensor(right.at_ms)-ExactInt.from_i64_tensor(left.at_ms)
+    exact=ExactRational(dt.constant(10000),dt.constant(2000))*(right.nav-left.nav-
+        a_pusd*(right.area_pusd_ms-left.area_pusd_ms)*ExactRational(dt.constant(1),dt.constant(6_000_000)))
+    value,error=exact.project();seconds,time_error=dt.project(dt.constant(1000))
+    fault=left.fault|right.fault|torch.where(present,dt.fault|exact.fault|error|time_error|a_pusd.fault|
+        (dt.sign<0).to(torch.int32)|(a_pusd.numerator.sign<=0).to(torch.int32),0)
+    known=present&left.nav_known&right.nav_known&left.area_known&right.area_known&(fault==0)
+    return IntervalReward(exact,value,seconds,present.clone(),known,fault)
+
+
+@dataclass(frozen=True)
 class RewardIntervalMemory:
     opened_at_ms: torch.Tensor
     last_at_ms: torch.Tensor
@@ -96,8 +120,18 @@ class RewardIntervalMemory:
         return replace(integrated,exposure=_select(exposure.amount,commit,self.exposure),
             exposure_known=torch.where(commit,exposure.known,self.exposure_known))
 
+    def endpoint(self,at_ms,portfolio,enabled):
+        """冻结同前缀端点前积分至真实Ck；只拥有当前未消费批需要的事实。"""
+        _check_portfolio(portfolio,self.last_at_ms)
+        integrated,_=self._integrate(at_ms,enabled,portfolio.fault)
+        endpoint=RewardEndpoint(at_ms.clone(),_owned(portfolio.amounts[0]),_owned(integrated.area_pusd_ms),
+            portfolio.known[:,0].clone(),integrated.area_known.clone(),integrated.fault.clone()|portfolio.fault)
+        return integrated,endpoint
+
     def close(self,at_ms,portfolio,a_pusd,enabled):
-        """仅在真实决定奖励区间闭合时归属；静默尾段仍积分。
+        """纯计算区间训练分及可选后继memory；调用者决定是否安装后继。
+
+        计算本身不归属学习样本；静默尾段仍积分。
 
         C0=2000固定。a是显式正pUSD参数，无正式默认。先精确结合ΔN与
         a*面积/(100pUSD*60s)，再一次末端投影；不裁剪或分别标准化两项。

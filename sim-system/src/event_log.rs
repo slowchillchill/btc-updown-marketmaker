@@ -340,6 +340,7 @@ pub(crate) struct SimEventLogV2 {
     durability_role: RunDurabilityRoleV2,
     projection_version: BusinessProjectionVersionV1,
     byte_count: u64,
+    last_synced_byte_count: u64,
     next_input_sequence: u64,
     max_group_bytes: usize,
     #[cfg(feature = "measurement")]
@@ -399,6 +400,7 @@ impl SimEventLogV2 {
             durability_role: opened.durability_role,
             projection_version: opened.projection_version,
             byte_count: saved.byte_count,
+            last_synced_byte_count: saved.byte_count,
             next_input_sequence: saved.next_input_sequence,
             max_group_bytes,
             #[cfg(feature = "measurement")]
@@ -475,6 +477,7 @@ impl SimEventLogV2 {
             durability_role: opened.durability_role,
             projection_version: opened.projection_version,
             byte_count: 0,
+            last_synced_byte_count: 0,
             next_input_sequence: 1,
             max_group_bytes,
             #[cfg(feature = "measurement")]
@@ -633,6 +636,9 @@ impl SimEventLogV2 {
         &mut self,
         #[cfg(feature = "measurement")] context: MeasurementContext,
     ) -> Result<(), SimEventLogErrorV2> {
+        if self.last_synced_byte_count == self.byte_count {
+            return Ok(());
+        }
         #[cfg(test)]
         record_sync_attempt_for_tests();
         #[cfg(test)]
@@ -647,6 +653,7 @@ impl SimEventLogV2 {
         self.file
             .sync_data()
             .map_err(|error| io_error("同步单一事件日志", error))?;
+        self.last_synced_byte_count = self.byte_count;
         #[cfg(feature = "measurement")]
         self.measurement_probe
             .record(context, MeasurementPhase::LogSync, elapsed_ns(started));
@@ -691,6 +698,12 @@ impl SimEventLogRecoveryV2 {
             .write(true)
             .open(path)
             .map_err(|error| io_error("打开单一事件日志", error))?;
+        Self::from_file(file, max_group_bytes)
+    }
+    fn from_file(
+        file: File,
+        max_group_bytes: usize,
+    ) -> Result<(RunOpenedV2, Self), SimEventLogErrorV2> {
         let mut reader = BufReader::new(file);
         let is_day = reader
             .fill_buf()
@@ -870,6 +883,7 @@ impl SimEventLogRecoveryV2 {
             durability_role: self.durability_role,
             projection_version: self.projection_version,
             byte_count: self.last_complete_offset,
+            last_synced_byte_count: 0, // 原PAPER恢复需先稳定可能截断的文件。
             next_input_sequence: self.next_input_sequence,
             max_group_bytes: self.max_group_bytes,
             #[cfg(feature = "measurement")]
@@ -1116,6 +1130,65 @@ mod tests {
             };
             groups.push(group);
         }
+    }
+
+    // #185 窄只读辅助：复用日布局解码器，只读取三笔成交所在的早期SIM前缀。
+    #[test]
+    #[ignore = "explicit old SIMDAY01 path, end time and new evidence path required"]
+    fn issue185_readonly_early_day_requests() {
+        let path = std::env::var("ISSUE185_OLD_SIM").unwrap();
+        let end: i64 = std::env::var("ISSUE185_TRACE_END_MS")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let output = std::env::var("ISSUE185_SIM_TRACE_OUTPUT").unwrap();
+        let (opened, mut reader) =
+            SimEventLogRecoveryV2::from_file(File::open(path).unwrap(), 16 << 20).unwrap();
+        assert!(reader.historical_day_binding_for_tests().is_some());
+        let mut requests = Vec::new();
+        let mut buckets = Vec::new();
+        let mut count = 0u64;
+        let mut last_at = None;
+        loop {
+            let (next, group) = reader.next_group().unwrap();
+            reader = next;
+            let Some(group) = group else {
+                break;
+            };
+            count += 1;
+            for input in group {
+                match input {
+                    LoggedBusinessInputV2::PublicRequest {
+                        send_time,
+                        cutoff,
+                        request,
+                    } => {
+                        requests.push(serde_json::json!({"send_time":send_time,"cutoff":cutoff.into_trusted(),"request":request}));
+                    }
+                    LoggedBusinessInputV2::DayHiddenStepBucket(bucket) => {
+                        last_at = Some(bucket.bucket_time_utc_ms);
+                        buckets.push(serde_json::json!({"applied_input_position":bucket.applied_input_position,"bucket_time_utc_ms":bucket.bucket_time_utc_ms,"index_start":bucket.index_start,"index_end":bucket.index_end,"closure":bucket.closure}));
+                    }
+                    LoggedBusinessInputV2::PublicObserveTime(at) => {
+                        last_at = Some(at.logical_time_utc_ms);
+                    }
+                    _ => (),
+                }
+            }
+            if last_at.is_some_and(|at| at > end) {
+                break;
+            }
+        }
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output)
+            .unwrap();
+        serde_json::to_writer_pretty(file, &serde_json::json!({"opened":opened,"groups_read":count,"last_at":last_at,"bytes_read_through":reader.last_complete_offset,"requests":requests,"hidden_buckets":buckets})).unwrap();
+        println!(
+            "readonly_sim_groups={count} bytes_through={} last_at={last_at:?}",
+            reader.last_complete_offset
+        );
     }
 
     fn day_binding() -> crate::public_consumption::HistoricalDayLogBindingV1 {
@@ -1812,7 +1885,9 @@ impl BackgroundEventLogV1 {
                                 .0;
                             for batch in group.noe {
                                 crate::run_v2::noe_projection::BackgroundNoeWriterV1::stage(
-                                    &mut noe, batch,
+                                    &mut noe,
+                                    batch,
+                                    matches!(log.layout, SimLogLayoutV1::HistoricalDayV1(_)),
                                 )
                                 .map_err(SimEventLogErrorV2::Noe)?;
                             }
@@ -1821,7 +1896,9 @@ impl BackgroundEventLogV1 {
                                 ledger.accept(group.ledger)?;
                                 if ledger.pending.front().is_some_and(
                                     ledger::LedgerRecordMaterialV2::waiting_for_noe_stability,
-                                ) {
+                                ) && (matches!(log.layout, SimLogLayoutV1::JsonV2)
+                                    || noe.as_ref().is_some_and(|n| n.needs_stability()))
+                                {
                                     #[cfg(feature = "measurement")]
                                     log.sync_data(MeasurementContext::CommitGroup)?;
                                     #[cfg(not(feature = "measurement"))]

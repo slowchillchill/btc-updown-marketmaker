@@ -226,6 +226,54 @@ Rust负责初始化、文件与控制面；CUDA算子读取设备句柄，PyTorc
 不能推断TickSizeChange、LevelExecutionTransition或Terminal也已通过。沿新GPU输入的
 实际公共反例定位必要修复，保留原错误，不恢复旧exact-003全窗CPU诊断。
 
+B100ms后续新建训练和适用开发验证沿D-0339采用 `PUBLIC_TRADE_CONSERVATIVE_FIFO_V1`。
+原冷入口为ModelTrain派生独立冻结规则，使用 `model_train_model` 显式选择；
+`historical_backtest_model` 仅影响HistoricalBacktest。缺字段／None的旧规则仍按原模型解释，
+None不写入序列化，不改变旧规则身份。旧作业、材料和检查点不迁移；PAPER保持旧模型。
+
+新模型分开保存实际可执行深度与保守Maker排位。实际深度继续使用原B/Q/c；
+保守排位只保存段种类、订单槽和剩余份数。盘口净减不产Maker，未知撤单和质量重建
+不改善前方量，新外部增加排在已有账户单后。账户撤单移除自己的排位，最后账户段
+消失后释放该价位排位；Taker只消费实际深度，不能使用已撤盘口量。
+
+规范PublicTrade沿原有序步骤消费：SELL取同资产买队列，BUY取互补资产买队列的1−价格。
+同一条成交按价格优先和FIFO共享数量；未挂本方订单的更优价位只扣该条预算，
+不修改实际簿或保存供未来订单消费的成交。原订单累计量化保留正base零quote pending，
+后续公开确认可包含该pending。原Maker、最终性、费用、返佣、Auto、NOE/Ledger和训练分数
+消费者保持原算法；精度或物理资源重算仍基于同一未提交输入，原阶段共同安装不变。
+
+`PublicTradeDeviceLoop`复用原`DeviceConditionalSequenceLoop`，在设备内依次执行价位准备、
+保守FIFO单列、实际外部深度单列、共享预算与Maker准备、Maker单列及价位协调。
+保守排位的准备／收尾和Level的Maker准备／协调由原所属函数共用；原Level入口继续使用
+原Maker消费者。业务fault仍按原顺序处理后续价位，精度需求累计所有阶段的最大值。
+冷捕获在原Numbers资源上下文退出后完成，不提前安装SIM、来源前沿或经济反馈。
+实际外部深度在每条公开成交的每次重算中按原列次序累计一次，包含全部队列行及其fault。
+首次价位的FIFO结束后完成该累计，后续价位复用同次值；每次重放重新清零并累计，
+不跨公开成交缓存、不并行归约，也不提前把未选中行的fault并入所有价位。
+
+每价位反馈保留原0／完整队列容量的物理人口，包括disabled帧，整条公开成交交出
+独立拥有的原 `SimFeedbackSnapshot`。三项池需求和实际物理帧总数N在设备汇总，
+随同一物理资源出口回传，不逐价位回读count。原MakerProjection在同一次私有候选中
+连续处理外层价位和内层物理帧：先检查effect故障，再按原列顺序消费，最后按页末故障
+决定是否继续下一价位，交回原成功自然批前缀和实际停止effect。全N=0仍处理effect故障；
+零价位保持原空结果。原单页Level复用同一帧消费者，不合并原自然批、采样输入或序号。
+真实单页count=0直接返回原Projection、空自然批和独立零fault，保持已有图／key／字宽；
+count>0但无发射仍消费原物理帧。该入口仍回读一次count，不改变外层阶段或故障门。
+Maker捕获对象只在冷构造中使用局部页读取函数，不持久保存反向引用自身的闭包，
+避免旧图留至后继捕获期间析构；原布局替换、精度续接及检查点缓存重建责任保持。
+
+原 `reserve_records` 只预留N×4×roots行，N包含disabled物理帧，使用原实际行基址、
+设备rows_used和used_prefix交出有效前缀，不预留价位数×队列容量的乘积上界。
+EvidenceBank每行占8×(L+E+S+K+7)+4字节（L/E/S/K为四个编码列宽），两张Normalizer
+索引另占16×roots字节；初始候选、状态、独立输出、index_copy临时量和反馈页也占内存。
+不能由bank行数或小场景推断任意规模均可一次容纳。精度不足从原进入Projection和同一
+不可变页重算。输入和旧输出不被后续重放覆盖。
+图只复制本次改变的排位、订单、账户、成交池、Maker日历及协调fault，其他行情列和
+只读目录借用原输入；布局、字宽、借用对象或流改变时冷重建。物理池需求沿原三项最大值
+回传、增长并重算同一输入。图和scratch不进检查点，恢复后由原PublicTrade执行对象
+冷重建。外层PublicTrade类型分派、send_clock阶段和Actor kind仍有CPU边界，本切片不代表
+完整设备宿主已经闭合，也不从短场景成本推算完整跨UTC或正式训练速度。
+
 ### 6.2 数值ABI与范围
 
 采用32位字（limb，存一个整数的32个二进制位）的设备多字表示。`ExactDecimal`只对原
@@ -284,11 +332,27 @@ SIM金额买入保留最小正Decimal价格10^-28导出的份额上界，而非�
 新的模型任务，但继续按原调度推进所有已经绑定v的模型完成事件。跨过的每个100ms
 观察仍冻结并排队，尚未开始的队列项保持未绑定，不能因更新门漏网格或自动NoTrade。
 
-最后已开始任务的声明完成事件应用后，学习器停在这个准确公共frontier。待发送时刻比
-该frontier更晚的动作保留，不为排空而推进到任意未来；已到时的发送/反馈沿原顺序处理。
-下一学习片段从最早未开始的合法冻结观察起，不使用该frontier最新可变账户替换旧快照。
-这个起点作为本批最后转移的bootstrap材料；仅用保存h的副本作v的值预测，不提交下一
-GRU、Actor或随机消费，临时h不写回活动记忆。更新后该起点首次正式递推仍恰好一次。
+按[D-0336](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6111806768)，
+最后旧版本任务完成时若已有下一真实冻结决定，停在原完成frontier；若没有，原宿主
+继续至最早可闭合点，观察网格及到期发送/反馈仍照序。例如C0在20ms完成后仍须冻结
+C100；40ms发送照常发生，140ms发送在C100处保持在途，不能为排空推进未来。
+下一学习片段从最早未开始的合法冻结观察起，不以最新账户替换旧快照。使用v与全部层
+h副本，按原市场身份递推中间尚未开始的ContextOnly，再预测下一决定价值；不提交活动
+hidden、不调用Actor、不消耗业务随机流。更新后这些任务才首次绑定v+1并正式递推一次。
+无下一合法决定只沿已声明有限目标尾段闭合最后转移，不能凭队列空设置target_end。
+
+真实决定由原Actor的账户代表行中 `frozen.role==1` 的行确定。账户代表行非空不表示
+有策略决定；纯ContextOnly任务仍保存全层h_in并在真实完成时交接状态，不等待发送器，
+不增加决定人口或路径损失。真正NoTrade仍是决定。
+原ActorModelQueue只读推演FIFO后继：开始下界为冻结Ck、真实last_completed_at及原clock
+已提交公开前沿的最大值，再逐项加入已冻结计算时长，首次开始必须严格早于T_trade。
+bootstrap仅沿这份合法计划递推前序ContextOnly，不把越过截止的后继当成下一决定。
+恢复后的真正start读同一公开前沿，不改last_completed_at、旧冻结Ck或旧动作发送时刻。
+开放horizon返回的安全点也退役已确定不可能开始的stage0；stage1/2保持原完成/发送。
+这不是“每个horizon必须空队列”的规则。旧懒退役会在下次next_event清理，首轮有限
+截止代表返回时非空本身不证明资格算法错误；此次安全点接线使不用再调用模型事件的
+消费者也能释放已失效计算对象及其热行引用。
+
 
 下例仅说明算法，声明每次完成需160ms且发送立即，不设置正式延迟profile：
 
@@ -331,6 +395,12 @@ bootstrap的位置。进入更新前用已保存的相邻合法观察经济前�
 同截止精确上下文和原路径计算new_log_prob，old_log_prob来自theta_v当时实际采样。
 起始h是条件状态的一部分，不要求学习重算把整个根历史恢复成当前参数的hidden。
 
+当前 `LogicalBatchConfig.burn_in` 定义为**当前逻辑批内可用前缀的上限**。首个TBPTT片
+没有本批前缀，实际burn-in为0；后续片取已有前缀末端至多K行，从该前缀首行采集的
+真实全层h_in重算。所有有效决定仍各学习一次，不丢弃前K行。此接口选择不表示
+已经交付跨批/跨参数版本历史库；它不把原裁决解释为必须留存无人消费的历史。
+
+
 保存h使不同TBPTT切片无需从根首回放，也使跨版本数值衔接完全明确。这是截断梯度的
 方法，不证明模型已学会跨日记忆；长期记忆仍以真实时长和业务行为验收。首个合法市场h
 初始化/热身/退役按第4节，burn-in不得读取根前史或未来标签。
@@ -351,18 +421,38 @@ bootstrap的位置。进入更新前用已保存的相邻合法观察经济前�
 适配100ms真实决定位置及因果可见前缀。未来标签不进入当时输入、交易奖励或动作支持；
 辅助头不作为Actor输入，生产导出移除辅助头。采用该任务已确定；首轮孤腿时间成本
 系数已按[用户选择A](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6074806152)确定，见下文。
-预测时距、辅助权重、其余学习参数及正式训练投入仍待逐项明确；不自动继承#5其他损失
-或参数，不自动增加搜索或对照训练。公共后端和无学习的工程接线不等待这些参数选择。
+`Policy100ms` 已提供训练专属 `Linear(H,2)` 传播头。`LogicalBatch` 从真实决定的原
+冻结盘口保存起点；prepare 按页合并读取 `Ck+h` 严格之前的完整公共组，不推进运行
+reader/current 游标。Up、Down 各腿用自己的精确 bid/ask 中间价差作标签，线性投影为
+pUSD/份的变化量；不用 best_bid_ask 旁证、`1-Up` 或输入特征的逆变换。
+终点受本根已消费前沿、市场窗口及原材料选源范围约束。v5 compact manifest保存
+准备器实际选择的 `received_range_utc_ms`；起点须不早于start，终点须不晚于end。
+end相等仍读取严格之前的状态。received范围不替代Core原因果组时间，EOF后的经济
+时钟推进也不扩大材料覆盖。v2/v3/v4仍可读取，v4参考选择能力保留；没有可信范围的
+旧材料只屏蔽无法证明的辅助标签，不拒绝Root或删PPO决定。缺腿、未成熟、越市场或
+材料范围只屏蔽对应辅助腿；保留合法零变化及反向标签，不等待或跨批补训。
 
-GAE用实际相邻奖励区间时长 `dt`，以声明的时间基准定义
-`gamma(dt)=exp(-dt/tau_gamma)`、`lambda(dt)=exp(-dt/tau_lambda)`；若选离散参数，
-必须显式记录基准100ms及 `gamma_100^(dt/100ms)` 等等价形式。真正经济终止置零自举，
-市场关闭和rollout截断不置零；未判定经济读取保留原未知状态，不将其填零后训练。
-rollout步数/秒数、序列长度/burn-in/TBPTT、PPO轮数/minibatch、学习率/clip、时间常数
-与奖励系数是训练profile字段，必须运行前完整记录；正式取值与投入仍按 #181 批准。
-工程短验证使用显式的短profile并标明仅验证接线，不借它新增正式根、种子或预算。
+原学习段重算z后计算辅助MSE，按全部根的合法腿误差和/合法腿总数归约。
+`Ltotal=Lppo+eta*Lprop` 由唯一optimizer更新；z不detach，辅助头与共享编码器/GRU均
+接收梯度。零合法标签的辅助贡献为0，合法数量另计，不能把未观测预测误差说成0。
+本批labels/masks供各epoch复用，随原consume释放；未来标签不进入Actor/GRU输入、
+支持集、Critic交易目标或奖励。头在optimizer构造前安装，启用配置随完整点恢复。
+有限双根代表采用 `h=100ms, eta=1`，只证明原尺度、接线和恢复，不是正式默认或搜索。
+正式预测时距、辅助权重、其余学习参数及训练投入仍待明确；不自动继承#5其他参数。
 
-复用现有GRU、BookEncoder、条件Actor和概率重算数学，新增共享z后的独立Critic头。
+[D-0319](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6075769880)
+规定同金额价差与Maker/Taker返佣等权，不因等待额外折价；它未指定新的GAE算法。
+有限收益目标及 `gamma=lambda=1` 是沿[#181后续授权](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6076909188)
+形成并由本批实现、验证的工程选择，不以很大的时间常数近似。
+真实相邻奖励区间时长 `dt` 仍保留；时间暴露成本由原 `RewardIntervalMemory`
+积分一次，不在优势层额外折价。普通逻辑批末保留该有限目标的Critic自举。
+显式 `target_end` 表示有限目标结束，剩余价值为零；它不改账户的经济终止标记。
+真正经济终止同样不自举，市场关闭自身不等于上述两个终止。
+rollout步数/秒数、序列长度/burn-in/TBPTT、PPO轮数/minibatch、学习率/clip
+与奖励系数须运行前完整记录；本组件不选这些正式取值、种子或投入。
+工程短验证使用有限材料并标明仅验证接线，不借它新增正式根或预算。
+
+复用现有GRU、BookEncoder、条件Actor和概率重算数学，新增共享z后的独立Critic头。价值接口为 `finite_goal_value_100ms_v1`。
 训练采集使用 `torch.no_grad()` 保存数值与不可变上下文，学习时重新计算图；ContextOnly
 推进记忆但不产生策略/价值/熵损失，不把它包装为NoTrade转移。Critic/辅助输出不再喂Actor。
 
@@ -371,23 +461,38 @@ rollout步数/秒数、序列长度/burn-in/TBPTT、PPO轮数/minibatch、学习
 实际决定mask；Actor分布适配器在原冻结上下文/路径上返回完整动作联合log_prob，
 ClipPPOLoss只对联合比率裁剪一次，关闭其默认熵分支。既有独立完整动作样本的熵替代
 梯度单独接入，不逐头裁剪，也不使用条件熵和冒充联合熵。
-GAE使用TorchRL `generalized_advantage_estimate` 基础函数，输入各根有序决定的
-`value/next_value/reward/done/terminated: [R,T,1]`，gamma/lambda按dt形成同形设备张量。
-其候选版本[实际源码](https://github.com/pytorch/rl/blob/v0.13.3/torchrl/objectives/value/functional.py)
-以逐位置折扣乘法和反向递推消费这些张量，不经scalar/item路径；目标机再核对锁版本行为。
-时间轴仅含真实决定，ContextOnly仍在循环重算序列中；没有状态行的时间计入dt，不填造转移。
-截断令done切断后续GAE但terminated为假保留bootstrap，真正经济终止terminated才为真。
-优势按完整更新有效决定一次总体标准化，minibatch不重新标准化；补齐不参加均值。
-`model_train/dt_advantages.py` 提供本节的生产数学函数，显式消费真实奖励区间
-`dt_seconds` 与必传 `tau_gamma_seconds/tau_lambda_seconds`，没有正式取值默认。
-`present` 只区分真实决定与补齐；`reward_known` 和所需 `bootstrap_known` 不缩小
-真实决定人口。任何真实区间未知、原来源故障或时间倒退都令整次更新设备 `ready`
-为假；未知/补齐可用计算占位，但不能取得学习资格。合法零间隔折扣为1。真正终止
-不要求未使用的bootstrap已知；非经济终止的截断仍需bootstrap。优势与价值目标不带
-采集图，标准化使用整批真实决定的总体方差，minibatch仅索引这份结果。
-本组件消费奖励区间的known，但尚未提供完整轨迹绑定或optimizer门。后继更新入口必须
-在协调边界阻止not-ready批次的 `optimizer.step()`；零loss不是该门，优化器仍可能
-改变momentum、权重衰减与step计数。有限GPU数学样本不代表联合PPO或活动恢复。
+GAE使用锁定TorchRL 0.13.3的 `generalized_advantage_estimate` 基础函数，输入各根有序
+决定的 `value/next_value/reward/done/terminated: [R,T,1]`，取 `gamma=lambda=1`。
+[实际源码](https://github.com/pytorch/rl/blob/v0.13.3/torchrl/objectives/value/functional.py)
+按设备张量反向递推；本次目标机确认该锁定版本。时间轴仅含真实决定，ContextOnly
+仍在循环重算序列中；没有状态行的时间计入dt，不填造转移。
+原done切断递推，非terminated的普通批末仍保bootstrap；目标结束用单独的
+`target_end` 形成临时GAE终止张量，不修改原done、terminated、奖励或账户状态。
+
+`model_train/dt_advantages.py` 提供此B数学入口。物理块在同一逻辑批内从右向左计算，
+右块首优势A及对应known、fault、present随 `AdvantageContinuation` 交接。
+价值目标仍由各块的 `AdvantageBatch.value_target` 返回，不复制到边界对象。
+左块只在原连续边界把右首优势加入临时末端奖励，并暂时切断该处GAE递推；保留
+原next_value，所以即使它与右首value不相等，仍与整段原GAE公式一致。
+当相邻值一致时，这等价于承接右首回报G；不能各块改用近似V截断。
+原done、真正终止、目标结束和补齐均切断本应切断的依赖。
+
+块返回原始优势/价值目标及有效决定的count、mean、M2（离均值平方和）、valid。
+count在设备上以int64求和和合并；仅在浮点权重/均值/方差计算处转为模型统计dtype，
+不让FP32计数漏掉第 `2^24+1` 个决定，也不先相乘整数计数造成整型乘积溢出。
+`AdvantageStatistics.merge` 在设备上合并同一逻辑批统计，再由
+`normalize_advantages` 统一标准化；minibatch仅索引这份结果。全padding块不污染
+其他有效块，整逻辑批总count为零才not-ready。补齐原fault保留但不进入有效资格。
+`present` 不因Unknown缩小。任何真实奖励/所需bootstrap未知、来源fault或负dt都
+阻止整批更新；右块依赖的known/fault回传，目标末端或经济终止不要求未使用的bootstrap。
+合法dt=0保留，优势与价值目标detach，float32/float64及CUDA capture/replay按有限样本核对。
+
+当前优势组件的真实消费者包括 `LogicalBatch.prepare/_replay`；两个原验证脚本
+仍保留组件数学证据。同一Root已接连续奖励区间、Critic有限目标条件、真实采集、
+更新屏障和完整动作联合PPO；`JointLearner` 统一多根统计及optimizer，活动恢复见§9.4。
+真实Unknown/fault批阻止整次 `optimizer.step()` 并保留人口和材料；零loss不是该门，
+优化器仍可改变momentum、权重衰减与step计数。MLflow已接入当前真实共同学习器，
+报告成功消费后的实际结果，见本节下文。完整正式profile、容量和跨UTC验收仍开放；不改变逐帧#5或恢复撤回参数。
 `shared-run/gpu/exposure.py` 在同一已提交账本读确认份额暴露 `E`：每个尚未因果可见
 合格判定的市场先取净确认两腿份额差的绝对值，再跨全账户市场相加，按1pUSD/份
 计量。公共 `net_success` 提供确认份额和实际兑付后的净读面；`Unresolved` 筛选仍由
@@ -417,9 +522,10 @@ GAE使用TorchRL `generalized_advantage_estimate` 基础函数，输入各根有
 账本；下一capture不得覆盖已发布起点、上一暴露或累计面积。所有精确运算复用
 `Numbers.device_exact_batch` 的 `fits/required_words`；调用者共同接纳状态与奖励，
 容量不足保留原状态并按同一输入增长重试，不将其作业务拒绝或丢弃历史面积。
-本切片提供公共暴露读取和区间数学，尚未接上每条连续Ledger提交的奖励积分器、
-完整决定归属/轨迹消费或学习器屏障；两个原账户冷来源与有限数学输入序列不代表
-自然采集轨迹、联合PPO或完整根恢复。
+上述区间组件的早期验证只覆盖公共暴露读取和有限区间数学。当前Root在原Receiver
+实际公开领取后积分，真实冻结决定保存累计端点；逻辑批消费者按端点差形成奖励，
+随后统一PPO并释放，见§7.2和§9.4。早期两个冷来源数学序列本身仍不是这些后续接线
+的验证证据，完整跨UTC及正式训练仍未验收。
 
 组件用法依据[TorchRL PPO说明](https://docs.pytorch.org/rl/0.13/reference/generated/torchrl.objectives.PPOLoss.html)
 及[GAE说明](https://docs.pytorch.org/rl/0.13/reference/generated/torchrl.objectives.value.GAE.html)，
@@ -433,9 +539,39 @@ MLflow传递依赖databricks-sdk要求protobuf<7，因此共同protobuf由7.36.2
 实际Policy100ms的GRU/Actor family/Critic已接TensorDict、GAE及一次ClipPPOLoss反向更新，
 MLflow写入和读回也已验证。该工程夹具使用合成观察、合成奖励和仅family分布，
 不替代本节的完整合法动作联合概率、独立联合熵、物理时间优势或正式profile；
-完整业务轨迹、PPO采集屏障及活动恢复仍未交付。
-MLflow写训练profile、版本、准备成本、更新/学习/经济/资源结果及完整checkpoint引用，
-不作为恢复唯一来源。
+这项早期依赖夹具不证明完整业务轨迹、采集屏障或活动恢复；当前真实有限Root、
+完整联合PPO和活动恢复另由§7.2及§9.4的生产链代表验证。
+`training_report.MLflowReport` 是可选报告出口，使用锁定MLflow3.15.2和数据盘SQLite及
+artifact目录。未启用时不创建数据库或连接。唯一 `JointLearner.update` 在原prepare阶段
+归约实际IntervalReward的小摘要；每epoch取原拼接ClipPPOLoss、辅助误差/合法腿数及
+实际反传总量，全部epoch和Root消费成功后才同步批量写出。step直接使用consumed_batches。
+全局loss按实际epoch算术均值报告，并保最后epoch及逐epoch值；不按根副本重复求和，
+也不冒称用最终权重重新评价。零合法辅助腿贡献0，预测误差JSON为null、metric为NaN。
+Unknown/not-ready不step、不制造成功报告、不删除原材料。
+
+小配置直接读取当前owner：模型形状、输入/价值接口、辅助与各根学习配置、Adam超参数
+（不含params）、精确奖励系数和Ttrade/Tgoal。SIM时延hash单列latency_profile_sha256，
+不能代替训练profile。准备成本、源码/实际制品与材料来源保留实际引用，不复制权重或
+完整轨迹到MLflow。Root经济报告沿同一已提交前缀复用原WCM/E/资金和全账户NAV读口，
+不推进时钟/领取/结算；精确值、known/fault、时刻、单位和估值口径在小JSON保留。
+经济metric使用学习器原roots稳定顺序，结束根不令其他账户重编号；两个NAV各保known。
+现金变化不称实际利润，训练分不称pUSD，浮点曲线不替代精确报告。
+
+报告失败明确返回“更新已完成，报告失败”，保权重/Adam/版本/消费事实及单份pending。
+仅write_pending补写，不重跑optimizer。完整点发布时，若尚有未写update，将点引用附到
+同一摘要再补写，不替换或排队。成功即释放pending。SDK客户端不入检查点；实际tracking_uri、
+run_id和待写小摘要随原owner保存，恢复重新建立客户端。补写项标replayed_from_checkpoint，
+后续新项标restored_from；不把补写说成重新训练。只有完整manifest/latest发布后才记点引用。
+引用报告失败不撤销点；DB/MLflow latest不是业务恢复资格，不以日志跳过学习。
+原两完整点/唯一最终点保留规则不变；跨存储不承诺恰好一次，同step历史重复保留。
+
+本轮真实双根更新/保存282.847187秒、新进程恢复58.603341秒，原v2/1721业务与模型对照
+通过。独立h1000零标签报告47.896499秒，使用单独run，不冒称原h100无改恢复。
+点发布至补写及读回断言阶段约0.050871秒，不称纯DB耗时。CUDA峰值是当前进程allocator
+自外部上次reset的口径，与原长跑共卡，不是独占吞吐或整卡峰值。首轮新增摘要对标量
+TensorDict错误迭代失败保留，使用keys纠正；未改变原loss或业务判据。上述新进程证据在
+稳定根序号/NAV known/补写来源的纯报告修正前完成；后者沿小型映射补验，不称最终源码
+逐字重跑了整套恢复。正式参数/预算/训练、完整跨UTC与626导出仍未验收。
 
 ## 8. 完整工作集预算与当前单卡安排
 
@@ -521,11 +657,16 @@ CPU起始计划为40GiB只读缓存、8GiB解码、8GiB pinned双缓冲、12GiB 
 | 输入 | 材料/成员/DPT/规则版本摘要、公共/hidden前沿、块/组/组内已提交位置、未提交当前bucket/页引用、原source epoch/admission；不复制全部历史 |
 | 公共行情 | 全部活动/仍引用盘口页、字段所选事实/直接锚点/缺失质量、初始化/资格/市场生命周期及引用表 |
 | SIM/Bridge | 会话/账户身份、完整订单余量/队列、逻辑开放毫秒与到期队列、冻结延迟profile、请求/回执/发送/到达/执行位置、未完成结算返佣及场景状态 |
-| NOE/Ledger/共享执行 | 领取/发布/应用水位、稳定身份去重、待前驱经济事实、现金/份额/成本池/固定配对/贡献/尾差、预留/承诺/Registry、结算与请求状态；开放事务成功前缀 |
+| NOE/Ledger/共享执行 | 领取/发布/应用水位、稳定身份去重、待前驱经济事实、现金/份额、SuccessPools成功份额/成本聚合及固定配对结算归属、真实rebate_contributions和适用尾差、预留/承诺/Registry、结算与请求状态；开放事务成功前缀 |
 | 窗口/模型记忆 | 100ms网格和下一观察、当前精确累积/路径/history16/端点基线、完整冻结C及输入页、各市场全层h/产生版本/退役等待 |
 | 在途模型/动作 | 已冻结观察的策略归属及队列序、完成状态、原动作阶段/路径/精确区间、待发送原意图/身份/发送时刻/已完成前缀；边界上GPU内核已结束，无裸设备指针 |
 | 轨迹 | 尚未消费的完整轨迹和开放转移、奖励累计/末端价值、原log_prob/支持引用、h与策略版本、已消费批位置；已经训练的批不再训练 |
 | 报告 | 已应用经济结果和MLflow run/step位置，必要写出位置；可重建报告不作为恢复业务依据 |
+
+本节不要求保存D-0327已撤销的无消费者逐fill剩余利润贡献派生。实际返佣贡献仍有
+Ledger/准入消费者，不能因该撤销删除。上述覆盖最终启用配置所需状态；当前共同学习器和
+全部所属Root的已实现范围见§9.4。启用传播任务时保原配置、头和Adam；未启用的
+辅助配置、scaler和MLflow不造占位状态。
 
 所有设备句柄写成快照内相对偏移/稳定身份，恢复时重建arena和引用计数，不保存失效地址。
 只读材料通过准确成员及位置重读；尚未提交的输入不前进，已提交组不再次apply。
@@ -546,6 +687,83 @@ checkpoint目录；最后原子替换 `latest` 指向。读端只接受完整发
 实际GPU链在完整更新后做一次中断恢复，对照后续输入位置、精确账户/SIM/NOE/Ledger、
 冻结观察/待发送动作、未消费轨迹、随机流/策略/优化器；核对无重复或遗漏。未发布完整点
 时只能沿原合法边界重算，不承诺随时停机。模型保存加载样板不计为本项验收。
+
+### 9.4 当前共同学习器与活动Root恢复
+
+`active_checkpoint.py` 已实现 `joint_actor_checkpoint_v1`。保存点是共同学习器全部epoch
+成功、唯一版本和消费位置推进、全部所属根消费完成后，调用方尚未再次推进根的边界。
+已目标结束的根仍随同一学习器保存；已消费批不恢复为待学材料。未开始冻结和旧版本
+已发布待发送动作保留。此接口不支持半次更新或任意事件点保存。
+
+载荷仅使用受限张量和基础类型，通过 `weights_only=True` 在CPU加载，再由原owner安装。
+可变CPU/GPU存储先复制成独立主存快照，节点引用和storage/view关系保留；真实NOE的
+`declared_schemas`保留frozenset成员及None区别。身份SQLite由原owner备份，恢复到新进程
+自有临时库，关闭临时库不会删除已发布成员。只读公共/hidden材料按原成员摘要及位置
+重新连接，不重复应用已提交组，不重新分配history16身份。
+
+恢复不调用冷开户。原 `actor_opening.load_actor_ledger_platform` 为冷装配和恢复提供
+同一固定账本类型；原类型文件和实际未提交候选、配置、实际Native/CUDA扩展保持兼容绑定。
+全仓source_map及DPT材料生产制品摘要保留审计，不作为恢复资格；恢复只读原合格材料，
+不要求未调用的DPT命令仍存在。实际已导入运行模块、恢复/续采/换页/动作的明确延后
+导入模块、扩展构建输入和依赖锁按仓库相对路径及内容核对，不以旧源码绝对目录作身份。
+人工文档变化不拒绝恢复；实际运行代码、状态模式、依赖版本或加载制品不匹配仍拒绝。
+同一policy/optimizer、全部根的SIM/NOE/Ledger、请求/前沿/窗口、全层h、奖励记忆和
+实际随机位置按原共享关系安装。新模型的实际规则身份、保守排位和实际深度随原owner保存；
+恢复不从最新盘口重建排位。PublicTrade价位排序和图缓存仅为可重建缓存，由原执行owner
+重新创建，不保存裸地址。原执行对象及回调显式重接，图和纯物理scratch重新创建。
+已有owned动作候选沿原发送消费路径使用，不加载旧权重重抽，不保存任意类、闭包或CUDA图。
+
+有限双根验证在共同v1保存后，一支不中断推进A到v2及开放端点1721；独立新进程仅从
+该完整点和相同只读材料恢复，再走同一续采。两支均实际发送C1300的旧动作于1720，
+已结束B不重复参与。直接读取原source/hidden前沿、公开组原引用及精确输入序号、
+SIM/NOE/Ledger/资金/waiting、请求、全层h/随机位置和policy/optimizer进行完整对照：
+精确业务状态相等，浮点模型沿 `rtol=atol=1e-4` 比较。oracle不使用检查点导出器作唯一依据。
+
+`checkpoint-4`完整命令262.997098秒、独立`restore-2`为55.701802秒，均exit0，与原run11
+共卡，不是独占性能。中断代表发生于全部成员写完并fsync后、manifest/latest尚未发布时；
+latest保持旧完整点，不声称验证了成员只写一半。首轮frozenset保存、只读来源oracle和
+动态类型装配失败及各次源码绑定保留。该r8代表当时未启用传播任务；当前启用配置的
+头及Adam恢复由下面的r9代表补验；当时MLflow尚未启用，本轮报告与恢复接线见§7.4。
+最终完整训练配置仍须后续汇合；
+本代表不替代完整跨UTC、容量、正式导出或正式训练验收。后续兼容读口补验只验证
+文档变化、同内容源码换位置及真实代码/制品不匹配；原业务载荷与安装未改变，沿上述
+1721证据复用。旧点没有新增兼容元数据，不声称旧点已用新读口再次端到端恢复。
+
+传播任务启用后，保存真实 `horizon_ms/eta` 配置和原policy/Adam状态；新进程先按同一
+配置构造头，再strict加载权重。已消费labels不恢复为待学材料；旧未启用点不自动补
+随机头，也不声称旧r8点已在新运行源码下再次加载。材料覆盖范围仍由已绑定原manifest读取，
+`public_material` 恢复沿原reader重建；不增加Root范围副本或给旧manifest补范围。
+覆盖补验从原有限生产入口实际选择900..1450，最后原公共事件1350（因果可见1351）。
+同一冷Root真实C1300决定、EOF后时钟2000：1400静默及1450右开端点标签有效，1500
+越范围标签无效，来源/current页、账本、账户订单、全层h和RNG不因查询改变。
+原reader构造读口重建范围一致；这项读口补验不冒称再次完成共同学习器端到端恢复。
+正常传播共同更新代表也由原生产者显式选择900..87010000，并以同一范围筛选及发布。
+900来自市场start1000的原metadata前置；87010000是事前声明的有限目标，未由最后事件推算。
+新v5材料保留原L2和Terminal；原13/3、2/2逐腿人口、共同更新、保存及1720旧动作发送
+已重新通过。此轮未再次运行独立新进程恢复，原恢复证据只按未改状态与装配范围复用。
+
+
+r9有限双根使用独立新材料的原TypedRaw Level链：Up真实bid移位产生 `+.01/-.01` 标签，
+同刻终点组严格排除；Down真实缺ask屏蔽对应腿，恢复后合法零标签仍保留。查询跨页，
+原reader/source、账本和RNG不变。两次更新分别有13/3和2/2条合法/屏蔽腿，真实Unknown
+仍全体零step、不清批；合法腿MSE、辅助头/共享编码器梯度及消费后引用释放均通过。
+普通根和目标根保持自己的前沿，原旧1720动作不重抽。原成功运行还直接核对h200末
+标签超出本根已消费前沿、h1000越市场窗口，全程未推进reader或账本；这些探针不等于
+正常h100报告中的缺盘口mask。
+
+独立 `auxiliary-zero-label-1` 从真实v1点准备A的新批，显式h1000使两个决定的4腿均
+越窗口而屏蔽。辅助贡献为0，预测误差记为不适用；原PPO仍真实step一次并推进v2，
+消费释放，B不重参与，命令44.094796秒。它是另一个工程边界代表，不冒称原h100配置
+的无改恢复，也不把零合法标签称为完美预测。
+
+`auxiliary-checkpoint-3`为272.470301秒，独立`auxiliary-restore-1`为55.777840秒，均exit0。
+新点v1恢复后续采到v2/1721，与不中断分支直接读取的头/Adam/随机位置及精确业务状态
+相符，浮点模型沿原1e-4政策。原run11共卡，耗时不是独占基准。首轮新Level冷坐标遗漏
+及次轮误用log投影失败保留；分别经真实Level坐标补齐及原线性ratio接口纠正，不改
+SIM/NOE或标签期望。新增行情经原公共和SIM链消费，本代表的经济对照来自同一材料的
+不中断分支，不能用旧CPU后验冒充新请求的后验。该r9代表当时未启用MLflow，当前真实
+报告/恢复接线见§7.4；完整626生产导出移除辅助头、正式参数/配置、剩余CPU kind/phase
+设备化及完整跨UTC验收仍未完成。
 
 ## 10. 实现依赖、验证与跨路线边界
 
@@ -730,7 +948,7 @@ hidden 同 codec 的接口为 `data-pipeline/gpu/hidden_device_page.py`。一次
 原 `--gpu-pm-source` 冷装箱仍收集全部完整桶；运行时分页不等于冷准备有界。
 随后保存步骤/tag、快照 ragged、参考分派、完整桶时间/offset/closure 与完整 u64 index 列。
 资产/价位目录、精确 bank、完整 Terminal/canonical ID 及原完整桶身份字节 bank
-共享；不持久化逐事件全盘口。hidden列布局仍为 `hidden_device_columns_v1`，
+共享；不持久化逐事件全盘口。新hidden列布局为 `hidden_device_columns_v2`，
 通过实际 public/hidden 来源路径核对两份原 manifest 关联，再验成员、布局、offset
 和字典域；删除额外独立发布 binding 参数及凭据文件，合格旧列材料可继续读取。
 
@@ -741,14 +959,23 @@ hidden 同 codec 的接口为 `data-pipeline/gpu/hidden_device_page.py`。一次
 Terminal 候选、执行义务、NOE 和 Ledger 使用同源稳定参考 ID。
 
 新的 hidden 完整桶块输出入口为 `build_hidden_device_pages(assets, slots, destination,
-source_binding, buckets_per_part=...)`，产物为 `hidden_device_pages_v1`。
-根所属子块使用内部格式 `hidden_device_columns_part_v1`。旧公开
-`PreparedHiddenMaterial` 只接受 `hidden_device_columns_v1` 完整材料，不能把末子块
+source_binding, buckets_per_part=...)`，产物为 `hidden_device_pages_v2`。
+根所属子块使用内部格式 `hidden_device_columns_part_v2`。
+v2事件列为15列：原14列保留原坐标，最后一列保存PublicTrade精确数量字典索引；
+tag5沿原资产、方向、精确价格和步骤身份交给SIM。旧v1的14列及tag域继续读取，
+保持原PublicTrade不作用撮合的旧语义；新模型使用重新装配的v2执行列，不重标旧页。
+`PreparedHiddenMaterial` 接受相应完整v1/v2材料，不能把末子块
 单独视为完整来源。根读取器核验目录后，经内部入口复用原成员、来源和闭桶检查。
 原 `dpt-compact-hidden --gpu-pm-pages` 在严格 reader 完成原来源目录核验后输出目录，
 随后仍按原顺序输出完整桶；最终核验完成及子进程成功后才发布根 manifest。
 准备器只装配当前完整桶块，不把所有桶、步骤或事件数字搬入另一个全量容器。
 块大小是物理选择；一个完整桶不拆分，不因块预算增加业务拒绝。
+新冷装配按Native返回的实际Maker型号选择执行材料。Native冷开户只读取原固定目录，
+尚未消费hidden业务；`open_actor_root`在GPU状态和来源安装前，经原材料owner取得同源v2。
+已准备的完整v2直接复用；遇旧v1时，`PreparedHiddenPages.for_public_trade`从其已核
+`source_binding`和固定assets/slots调用原 `build_hidden_device_pages`，发布本次独立目录。
+它重装当前声明compact来源，不重做公开观察、不覆盖旧页，也不补造trade数量或身份。
+旧规则＋v1继续原模型。准备失败保留原材料和失败现场；活动恢复不再冷开户或重装材料。
 
 `PreparedHiddenPages.page(begin,end)` 沿同一根目录载入当前物理块。
 每块保留原完整桶正文、canonical ID、closure 与完整 u64 index；原桶坐标连续。
@@ -1952,6 +2179,16 @@ FOK按原QuoteBudget完整预算跨档规划，随后逐原fill计算实际费�
 SDK audit base；audit base不作为实际成交目标。Base和QuoteBudget共用原订单身份、
 订单目录、账户、成交池、最终性日历及Query读面，不建立另一套FOK权威。
 
+完整ask×队列容量的规划、数量、费用分配和根fault确定后，原Base接纳按
+`base.sign>0` 的跨根列并集稳定收集成交列，保原价位／段顺序。同一索引收集
+base、quote、来源价格、已分配逐fill费用及已选路径；正base零quote仍保留。
+没有正base时保一个原零槽。后续接纳、PostResults和Projection只处理这次短列，
+原完整队列计划、总费用、拒绝原因及共同提交条件不变。
+`torch.nonzero` 在该动态物理输出边界有一次宿主同步，不宣称全设备执行。
+外层资源续接仍保原完整路径矩阵，池或队列增长后从同一未提交输入重算，
+不缓存收集索引，也不让短路径覆盖重试输入。检查点仍使用原字段和实际张量布局；
+本次减少零槽装箱，未消除完整规划／费用计算的成本，不代表全规模OOM已解决。
+
 每个当前pending项的接纳、队列、账户、订单、fill、逐项Post正文与反馈共同提交。
 物理容量不足保同一进入前缀，按需求增长后重算该项；已经成功的前一腿不回滚。
 `PostResults` 保各腿真实完整结果，最后一项按原ordinal封口Submission响应。
@@ -2228,8 +2465,9 @@ PPO或活动恢复仍未交付。
 原公开 `SettlementCoordinator` 决定请求或查询，SIM 不复制公开资格、兑付或幂等算法。
 
 `ContinuousActorRun.trading_until` 明确停止新增100ms观察的交易窗口边界。调用者按已批准
-窗口传入该边界；它不是每页或每日的默认截断。队列仍消费已接纳观察，完成已有模型计算、
-发布选择并按原逻辑时刻发送。尾段从同一 `BoundedSendClock` 取得下一真实 SIM、完整组或
+窗口传入该边界；它不是每页或每日的默认截断。同一边界也传给模型队列，首次开始必须
+严格早于该时刻。队列按 max(Ck,last_completed_at) 判断开始下界，退役已无法及时开始的
+排队根；已开始计算仍完成、发布选择并按原逻辑时刻发送。None保留原无截止行为。尾段从同一 `BoundedSendClock` 取得下一真实 SIM、完整组或
 未领取反馈时刻。`advance_through` 在该时刻处理事件并关闭公开领取门；观察及发送仍沿
 原 `advance_before` 的开放端点。同根同刻先处理已有模型开始、完成和发送，再处理尾段
 经济事件；发送时的公开预留不能使用恰在 Sk 到达的新增资金。同刻事实不提前进入 Ck，
@@ -2491,7 +2729,7 @@ Auto生命周期使用schema28，经济事实使用schema29。纯输家虽现金
 成功池仍按同condition累计，配对与赢家孤腿的现金和成本归属复用原归约，应收只消除一次；
 没有恢复逐成交剩余贡献维护。Auto完成标记用于零持仓／零现金的公开结算状态，不依赖赎回请求。
 
-连续宿主停止新增观察后继续已接纳模型任务、实际发送及原SIM／NOE义务。Auto尾段不装公开赎回
+连续宿主停止新增观察后继续截止前已开始的模型任务、实际发送及原SIM／NOE义务。Auto尾段不装公开赎回
 协调器、不发送赎回请求；反馈仍按真实可见时刻领取，原物理容量退出续接与合法前驱等待保持区分。
 收益确认、应收与现金到账仍是不同事实，Maker／Taker返佣等权，不因次日付款扣分。
 
@@ -2686,3 +2924,391 @@ received／consumed和首次可用。第二轮49.85秒通过；最终市场目�
 复用既有证据；新Ledger增长装配的所有目录类型不以本次有限入口宣称逐项覆盖。
 真实跨UTC材料与初始化闭包、完整15／3日工作集、第二账户、奖励／PPO／MLflow、活动恢复、
 完整容量和正式训练仍待后续交付。本批未扫描或准备18日材料。
+
+### T_trade 的模型开始截止
+
+连续生产根将同一个 trading_until 交给观察宿主和 ActorModelQueue。排队任务的开始下界
+为 max(Ck,last_completed_at,clock.public_visible_at)；§7.2 的 FIFO 后继计划还累计前序冻结计算时长，
+仅严格满足 start<T_trade 才能开始，下界达到截止才退役；advance 的 horizon 本身不决定退役。
+已开始任务跨截止继续完成及发送。未开始的任务不调用策略、GRU或动作RNG，不构造
+NoTrade或模型完成；稳定RequestContext槽不回收。列表在事件下标使用前或当前方法完成后
+稳定移除，完成原方法的根仍沿原窄交接释放冻结与热行。
+
+此前表中C1900于2084开始、2198完成的窗口记录属于修正前证据，不证明开始截止。
+本次有限窗口仍为2000：C1800在1870开始并于2084完成，C1900只排队，随后退役。
+原同刻Sk现金样本改由1870已经开始的C1800承载长计算，保持同刻发送先于经济领取；
+该时延是有限验证配置。完整跨UTC仍未验收；当前有限Root学习闭环见后文，条件价值组件自身不替代该闭环。
+
+
+### 有限目标的条件价值组件
+
+`ContinuousActorRoot` 显式接收 `goal_until`；`None` 表示只计算State／Actor，价值为
+`None` 且不调用Critic。有限目标沿同一 `trading_until` 使用两个原UTC边界。队列在
+模型真正开始时，以该任务自有冻结的Ck和row_roots选根；延迟开始不把Ck换成开始或完成时刻。
+Critic输入仅为 `S((T_goal-Ck)/1000)` 和 `S((T_trade-Ck)/1000)`，先求整数差再转秒；
+`S(x)=sign(x)*log1p(abs(x))`。第二列的符号表达交易阶段，不另设phase列。
+两列只与独立归一化后的z在Critic分支拼接，不进入fast626、slow433、盘口、共享z、
+全部GRU或Actor参数头。原冻结资格、fault与资源共同决定hidden接纳。
+
+`state_and_value`、冻结评估、整段／切片unroll及learning_unroll显式传入条件。
+burn-in只重建hidden；普通bootstrap只计算候选，不提交hidden。当前任务评估随原队列退役，
+不保未来学习副本。新权重使用strict state_dict往返，旧价值头形状不能以strict=False冒充新接口。
+组件验证使用有限目标3000／交易截止2000；该取值不是正式训练参数。真实窗口代表以原h_in
+在on_started即时核冻结Ck条件、状态、全层hidden与价值，比较后释放引用。
+无目标的发送及跨UTC验证调用明确state-only；原长跑加载旧源码，不受此次改动。
+
+依赖接线的ValueOperator和Critic ONNX均显式消费第二输入。合成family PPO仍只是原依赖
+组件验证，原合成gamma／lambda不代表本路线正式目标。配置T_goal不生成target_end，也不证明
+材料、场景或收益已封口。正式T_goal、奖励开放区间及尾段归因、批末bootstrap、连续采集、
+Critic目标时间已接当前有限Root学习；正式PPO训练／MLflow及活动恢复仍未交付。
+
+
+### 原Root的经济区间累计与端点训练分
+
+`ContinuousActorRoot` 可显式接收 `reward_a_pusd`；None时不维护奖励，与
+`goal_until` 独立。首个成功接纳观察以同Ledger前缀的WCM与E建立
+`RewardIntervalMemory`。原receiver只执行一次，随后用实际返回的Ledger候选
+和当前 `public_visible_at` 积分旧E并安装新E。资源不足时已成功的前缀也须承接；
+Numbers资源重算仅包纯奖励计算，不重放经济事件。
+
+`read_interval_reward` 沿原运行器推进开放端点，再真实领取原NOE。它返回
+起点至端点的累计训练分、dt、present、known及fault，不安装close的重置memory。
+同端点重复读取一致，后续端点继续从原起点累计；推进后不能回读旧端点。
+WCM、现金及应收以pUSD表示，区间结果称训练分。付款只将已确认应收转为现金，
+不重复收益；若E仍非零，两个付款端点之间仍产生原暴露时间成本。
+
+有限奖励代表显式使用a_pusd=1/50，将原C1300的发送延后改为20ms：
+计算1414完成、1434发送，用真实发送前领取检验C1400与C1500间E变化。
+其他代表保原120ms。原实际请求重新产生CPU后验，资金比较仍限pre-tail；
+有限目标3000不覆盖87000000返佣付款，不能据目标配置、队列空或WCM已知
+生成target_end或声称收益封口。当前有限Root的逐决定归属、消费屏障与联合PPO见下文；活动恢复仍未交付。
+
+
+### 当前有限Root的采集、联合PPO与续采
+
+[D-0336](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6111806768)
+由 `ContinuousActorRoot`、`LogicalBatch` 和原事件循环实际接线。每次成功冻结Ck，
+唯一 `RewardIntervalMemory` 积分至Ck，再保存同前缀的精确WCM、累计E面积和known/fault。
+相邻真实决定用 `interval_between` 读取端点差；不另维护奖励账本或累计未知时长。
+真正start即时交接所有GRU层h_in与v；成功publish交接原owned完整动作路径、joint旧ell、
+业务RNG与实际时刻。当前批按根Ck学习，不按发送/退役顺序排列。ContextOnly保留递推，
+没有策略/价值/熵损失；真实NoTrade仍是决定，未开始退役不生成转移。
+
+批决定人口达到显式工程配置后，只暂停新start。原网格继续冻结，旧v任务与到期发送/
+反馈按原序处理。有合格下一决定时停实际完成frontier；否则推进到真实冻结点。
+20ms完成与100ms网格的代表实际等到下一冻结；旧动作仍可在更新后按原时间发送。
+bootstrap从活动h的临时副本按稳定市场身份递推排队ContextOnly及下一决定，只用旧v
+Critic，不Actor、不业务RNG、不提交h。更新后未开始项首次绑定v+1，真正递推一次。
+
+学习复用 `Policy100ms.learning_unroll`、一次性 `ReplaySchedule.for_update` 和原
+`replay_action` 的完整精确支持。TorchRL0.13.3 `ClipPPOLoss` 接收一项联合概率比率，
+只裁剪一次；默认熵关闭，显式非零配置接既有独立完整动作样本熵梯度。GAE物理块从右
+向左承接，整个逻辑批统一标准化。真实奖励或所需bootstrap Unknown/fault时保留人口
+与材料，not-ready且不step，不清批绕过。实际optimizer step后版本增长，释放本批
+图/样本引用并同账户续采；学习重算不写活动h。
+
+有限工程代表使用decisions=2、TBPTT=1、burn_in=1、epochs=1、AdamW lr=1e-4、
+clip=0.2、critic系数0.5、entropy=0，均非正式默认。同参数第一次step前比较采集与
+重算完整joint ell/价值；参数改变后的PPO轮不要求等于旧概率。原单市场夹具C1300
+在1320完成、1720延后发送，C1400后等真正C1500冻结才更新；旧动作在新版本动作
+之后发送，正文/身份/v/RNG不重抽。最后C1900真实决定使用事前声明目标87010000
+的原Terminal/最终性/Auto/返佣经济尾段闭合，目标批bootstrap为0；不由空队列推断结束。
+双市场代表用原T−30的role[1,0]与稳定身份，同一Critic条件下验证临时全层递推与更新后
+首次真实递推。生产按角色分批计算，学习按物理块合批，两种FP32布局不保证逐字相同；
+同参数联合ell与价值按原有效FP32精度核对。
+
+上述单根代表验证有界闭环；当前两个独立Root的共同学习接线见后文。完整跨UTC验收、
+正式626导出、MLflow、辅助任务、恢复及正式训练仍未交付。事件kind/phase仍由CPU选择，
+不称完整公共GPU循环。
+目标参数不证明场景收入完整；声明有限目标的材料覆盖仍由实际入口和同源后验核对。
+
+本次有限修订代表保留真实TypedRaw/Core入口。两个完整5min窗口错开300ms，批暂停后
+C301000、C301100、C301200均为纯ContextOnly；在公开前沿301300恢复，各80ms计算
+使C301300决定实际在301540开始，v1及全层GRU正式推进一次。T_trade=301500时该
+后继不能bootstrap，未消费批保留且optimizer不step。另一个原单市场目标代表证明
+C1800在1870开始、2084完成，C1900不开始，沿事前声明87010000目标完成最后批update。
+这些是工程夹具。没有新增完整跨UTC、正式训练或新请求集的独立CPU撮合后验结论。
+
+### 当前两个独立Root的共同学习
+
+`JointLearner` 唯一拥有policy、optimizer、version与共同批消费位置。每个
+`LogicalBatch` 仍拥有其Root的有界采集、端点、bootstrap、GAE物理块与按稳定身份的
+unroll/replay。Root各自拥有SIM、NOE、Ledger、clock、public/hidden读者、全层h、奖励
+状态、业务RNG和在途动作。两次原冷开户创建独立Session/账户；仅复用不可变材料。
+本地根/账户/市场身份不跨Root合成一个目录，也不把一根推进到另一根UTC。
+
+调用者先分别 `prepare_learning_batch`，再调用一次共同 `JointLearner.update`。
+所有未结束参与根都须准备完成；任一真实奖励、bootstrap、路径或资源不合格，所有根
+零step并保留真实人口、状态、路径与消费位置。GAE不跨根递推，只合并所有根/物理块的
+`AdvantageStatistics`，以全体有效决定统一标准化。每epoch在同一theta下重算全部根，
+然后拼接全部有效决定，复用原联合 `ClipPPOLoss` 一次step；不是各根均值再平均。
+显式启用的独立动作熵也按全部决定归约。优化字段归共同配置，决定人口/TBPTT/burn-in
+归各根配置。所有epochs成功后一次版本/消费推进，各根释放自己的已消费样本与图。
+若已step后后续路径失败，保留真实权重和未完成批并停止；不能伪装为未更新重试。
+
+单根 `enable_learning/update_learning_batch` 也走这个共同学习器，不保留另一套更新算法。
+普通根沿自己的合法前沿续采；目标批已消费根退出后续参与人口，不重复学习或造空样本。
+`target_end=True` 由声明有限场景的驱动选择，只用于真实最后批；参数本身不证明没有
+尚可合法开始的下一决定。共同学习器不自动选择目标或推进经济尾段。
+
+有限双根工程代表共享同一参数，首批A有2决定且非零bootstrap，B有6决定且真实到
+事前目标87010000。两根T_trade均2000；A计算20ms，C1300延后400ms发送。B计算
+114ms、C1800计算214ms，后者在1870开始、2084完成，因此C1900不能开始。
+共同统计/联合loss以8决定核对，首次step前同参数joint ell与价值沿原FP32容差比较。
+实际Unknown经济读面阻止两根step并保留材料；恢复验证注入后才更新v1。A随后单独
+续采2决定并更新v2，B不再消费；旧A动作仍按1720发送、路径/身份/RNG不重抽。
+单根原间隔代表同时核连续三项ContextOnly、全层h继承和新决定于301540正式开始。
+这些配置不是正式默认，新双根请求集没有独立CPU撮合/完整目标后验声明。
+
+本代表暴露并修复原FillPool增长接缝：BaseSimRuntime的接单/Level增长返回候选，对
+已安装ResolutionObligations复用原resized承接物理槽。原市场绑定与完整序号不变，
+新槽不加入旧判定义务；未安装路径仍为None。原SIM/Projection/clock共同fault提交门
+保持。实际FillPool1→4之后，同源Terminal/Auto/成熟经济尾段已走通。
+
+本批不发布恢复schema，不实现aux、MLflow、剩余CPU事件选择的设备闭环、完整容量
+或正式626导出。原完整跨UTC及完整CPU后验仍待验收，不由双根短代表替代。
+
+### 原完整公开组消费的设备循环（当前增量）
+
+`BoundedSendClock` 在同一已安装公共页内，用 `PublicGroupDeviceLoop` 连续消费完整组。
+设备循环只复制私有来源位置和原 `InputCommitFrontier` 的序号／收据张量，调用原
+`public_group/commit`；不处理SIM订单、资金、日历或NOE。组时间和提交人口复用
+`PublicGroupSource` 原读口。原SIM选择在这一段不变，循环使用未按首个公开组屏蔽的
+选择。公开组须严格早于同刻SIM；`before` 保持严格小于，`through` 保持包含端点。
+页、hidden下界或调用方端点不足时交还原宿主，不关闭门、不冻结模型、不领取反馈。
+
+首个真实收据仍可沿原冷入口形成。原 `input_frontier=None` 和CPU入口保持原行为。
+每组保原全体根共同提交：任一根序号fault或物理字宽不足时，当前组的位置和序号不消费，
+已成功前缀保留。私有循环累计最大精确字需求，物理不足时从失败组增长续接，
+不重放已成功组；本次实际故障代表是原u64序号溢出，不能把它记为实测字宽增长。
+返回的收据、位置和需求具有独立所有权。每个时钟／流只保一个可重建布局；
+文件、换页安装、history承接和冷图构建仍由CPU负责。
+
+完整活动检查点只保存原权威来源位置、序号和收据，排除这一图缓存。
+恢复由原owner重建缓存，并沿原回调安装页。有限验证先复用原普通双根代表，
+它的v1到1721公开源合法静默，因此不要求位置增长或图存在。随后复用原传播代表的
+真实L2材料：A在v1时位置14，1511和1711两组尚未消费；独立恢复到1721实际到位置16，
+B已到目标且不重参与。原1720待发动作、正文、身份、提交前缀及原直接读面中的SIM、
+Ledger、hidden、RNG、policy和Adam与不中断分支相同。通用恢复验证仅在原不中断
+分支确有位置增长时要求消费证据，静默段仍核完整oracle。
+
+有限同页验证实际连续消费两组，并核同刻SIM优先、开放端点、全根序号fault回退、
+页末非EOF、None前沿及旧收据／旧输出不被后续replay覆盖。生产双根入口还实际经过
+跨公共／hidden页、原非空订单、Terminal／Auto和经济尾段。所有时间与原run11共卡：
+同页命令54.744034秒（含独立扩展构建），首次冷建／拷贝／循环／独立输出同步合计
+0.084046秒；普通双根保存330.238077秒，传播双根保存273.398370秒，新进程恢复
+54.025181秒。原阶段日志另保冷建和拷贝／重放／提交区间，不把区间当纯kernel时间。
+
+这只移除了连续公开组之间的CPU条件往返。SIM的phase调用、模型事件kind、反馈领取、
+冷安装和其他控制仍有CPU接缝。此增量不证明完整GPU宿主、完整跨UTC验收、15／3日
+工作集、626导出或正式训练配置已交付。
+
+### 同桶非Terminal引用的设备循环（当前增量）
+
+`ContinuousExecution.hidden` 用私有 `HiddenReferenceDeviceLoop` 连续调用原
+`BaseSimRuntime.apply_hidden_reference`。物理索引只属于本次候选；原
+`HiddenBucketFrontier.next_reference` 仍是唯一已应用引用前沿。遇到Terminal，
+循环交还准确索引，由原Terminal与Auto消费者处理，再按实际新world重绑后续引用。
+只复制本处理器改变的资产tick／质量／队列列、市场控制、义务失效位和引用前沿／fault；
+资产映射、价位、来源和已登记义务只读借用，账户、订单、成交池及NOE不另复制。
+
+每轮设备精确批归约最大字需求。物理不足的当前引用不安装到私有前缀，冷增长后
+从该索引续接；业务fault不额外提前结束原物理顺序。禁用引用仍调用原函数，保其
+队列表示整理。返回值独立拥有；图只产生阶段候选，后续step／Maker、闭桶、Auto、
+Projection和原时钟的提交／故障出口保持。当前布局按实际只读绑定、形状、字宽和流
+重建，只保一个布局。完整检查点排除这份缓存，由原执行owner重新连接。
+
+原TWAP短材料经新生产handler连续处理两条引用，与原逐条候选核完整精确words、
+sign、fault和死尾；原输入、旧输出及禁用物理调用保持。局部Numbers故障注入在第二
+列追加真实128位乘法，只为测精度需求，不是业务材料自然触发增长：4字需5，保首列
+成功前缀；8字从第二列继续，需求0。原验证器其余CapturedHiddenBuckets的Terminal
+组件断言仍属原路径，不能冒称它们已使用新引用循环。另以原非空Maker／Terminal／
+Auto连续消费者核正常经济尾段及冲突共同回退，资金、份数、NOE和原CPU金额断言保持。
+
+双根有限代表保原v1保存、v2／1721及旧1720发送对照，再让A沿合法FIFO完成
+C1700／C1800普通批并更新v3，C1900于1900开始、1920完成；B已结束不重复参与。
+到2001确认无合法后继后，原Root纯端点读推进至31004，实际执行原31000 Terminal
+之后的Lifecycle4，前沿1→2，新判定present及义务reference借用直接核对。独立新进程
+从同一v1点恢复，1721／v2与31004／v3分别和不中断原owner读面比较。最后C1900的
+一个决定仍未消费，`target_end=false`；31004不是完整经济目标或完整跨UTC验收。
+
+本次完整命令：原Reference入口8.664220秒；第一双根入口300.193448秒失败于新增
+验证helper把正常完成也要求扩容，未到31004。按原completion-first顺序纠正后，新点
+及双根入口299.439439秒通过，独立恢复101.135877秒；正常／冲突尾段分别
+12.897377／10.684727秒。原短材料成本记录6.160385秒，实际5次冷建、7次replay，
+逐项原数组另存；首个完整handler约0.076230秒，诊断同步区间不是纯kernel时间。
+以上作业在原run11自然退出后运行，不称仍与run11共卡，也不视为独占性能基准。
+
+原跨UTC验证回调曾把 `FrozenActorObservation.cutoff`（GroupDecisionCutoff）当作
+Tensor，原长跑首次入队时退出。当前验证器四回调统一读原 `account.cutoff` 的根Ck，
+保策略buy集合、calculation／dispatch查询和开始／完成摘要键。短代表在真实冻结任务
+上核这四种用途及延迟开始；不改旧运行制品、不重启长跑，不把短核说成完整跨UTC通过。
+本增量仍有Terminal、外层SIM phase、模型kind、反馈人口和领取等CPU接缝；
+其余共同设备事务、完整跨UTC／CPU尾段、工作集容量、626及正式投入仍未交付。
+
+### 引用图的相邻桶固定输入（当前增量）
+
+`HiddenReferenceDeviceLoop` 将原 `next_bucket/applying` 与资产的
+`initialized/matching_closed/book_closed` 作为五列私有固定输入，每次replay复制当前值。
+缓存按这五列的布局匹配，不因原begin／finish／协调器换Tensor对象而重新捕获。
+输出仍从本次world安装独立候选；五列私有输入不返回为权威状态，也不进入检查点。
+来源页、只读资产／价位映射、价格、账户归属、源判定与已登记义务继续按实际绑定重建。
+没有改动原引用处理器、队列算法、Terminal经济反馈或阶段共同提交门。
+
+原TypedRaw／Core材料在真实GTC接纳后增加24000、25000两条TWAP，真实FIFO形状
+为 `[1,2]`、一个账户槽。实际 `ContinuousExecution.hidden` 消费相邻不同桶，同页
+同布局仅捕获一次；完整纯引用处理器、五列当前值、原输入和旧输出对照成立。
+新建owner同样首次冷建、随后复用。另沿同一材料的原prepared页及
+`load_next/handoff` 核页末非EOF、完整已提交index保持和新页冷重绑；原连续尾段实际
+核Terminal后Lifecycle的源判定／义务重绑及Maker／Auto／NOE／Ledger金额。
+精度／禁用／fault代表继续保4字需5、未执行第二列与8字续接；额外乘法仍是局部
+Numbers故障注入，不是材料自然触发增长。
+
+本批首轮完整命令21.234393秒，原精度入口6.504847秒，换页及尾段补核13.763333秒，
+三项均退出0；原始日志和未舍入数组另存。同页两个handler约34.086／2.619ms；首次冷捕获约25.477ms，
+含五列／状态／choice复制、replay及自有输出的区间约1.834／1.409ms。
+这是当前小型非空FIFO的冷／热诊断，不是改动前源码实测、纯kernel成本或规模吞吐。
+本批没有原run11背景负载；不据此外推2612×2048队列或完整跨UTC成本。
+持久字段和缓存重建接口不变，原完整新进程恢复证据按此范围复用；本批新建owner
+补核只证明缓存重建，不另称完整新进程恢复通过。
+
+### 单条Level的Maker反馈页归一化（当前增量）
+
+原 `MakerDeviceLoop` 在生产连续入口返回独立拥有的设备反馈页。私有
+`MakerProjectionDeviceLoop` 按设备count逐槽调用同一个 `coordinate_maker_frame`、
+`Projection.fill_from_origin`、finality和 `Normalizer.prepare`。页内不再逐frame读count、
+装Python对象或读fault。正base零quote仍保原pending；原全页有反馈时，未发射物理槽
+仍调用原算术并累计精度需求。空反馈不制造业务记录，fault保原出口。
+
+Normalizer只为本次调用预留原每frame四条记录的物理尾区。原自然批的真实行基址
+进入column映射，保private／batch／source ordinal／record ordinal、received_at和原采样。
+输出只交实际使用前缀，不把预留尾区或无意义空batch作为事实。返回后仍沿原阶段、
+公开追加与send_clock共同提交；精度不足从原进入输入重算，不提前安装SIM或Projection。
+页输出、Normalizer和批返回值独立拥有，后续replay不覆盖旧结果。
+
+缓存只保当前布局。账户asset_roots按实际值复制到私有固定输入，同布局换Tensor对象
+不再单独触发冷建；原账户零值布局／fault及Maker日历读取仍复用原函数，不持有整Runtime。
+Projection bank／目录与真实页布局变化仍会冷建，不能据图存在声称长期摊销收益。
+完整点不保存图和scratch，原ContinuousExecution恢复后重新建立这份缓存。
+
+原GTC连续尾段直接走新生产入口，与原逐frame纯候选比较完整SIM、自然批、NOE和
+Ledger金额。四个int64正文编码列仅按共同宽度尾补零后全内容严格比较，长度token、
+标签、符号与尾部均保留；不是按长度忽略正文。原Projection fault共同回退和清除后
+原位续行成立。独立Numbers机制探针4字需8／fits=false、8字需0／fits=true，核不足页
+不发布、原输入及前次输出不变；它不是业务材料自然触发增长。
+
+真实双根代表使用原TypedRaw／Core新生成的Down/token2、0.39 Level，时刻为
+1740／1741／1780／1790。A仍T_trade=2000、T_goal=87010000；本代表B预声明
+T_goal=89110000，覆盖原Maker日成熟89100000，未改变交易窗、时延或seed。
+更新后的A实际订单量重新读出；1741零quote留pending，1790真实产生两个自然批。
+B日结果实际应计16653/500000 pUSD，成熟／日结成立；因不足原1 pUSD付款门槛，
+payable和locked为0、paid=false，现金不变。日桶occupied不等于一定付款。
+
+同源完整v1点保存后，不中断分支和独立新进程均续到v2／1721，核原1720待发动作、
+正文、身份和提交前缀，再沿A普通端点1801实际消费后继Maker页。两分支完整原owner
+读面一致，含SIM／队列／日历、NOE／Ledger、全层h、RNG及policy／Adam；B不重复参与。
+1801仍 `target_end=false`，不把该端点称完整经济目标。活动任务GroupDecisionCutoff
+的全部五字段和原公共收据引用直接核对，来源身份／成员／进度不复制为业务状态。
+
+当前同源保存入口318.006202秒、独立恢复70.387983秒；完整1801端点分别
+11.704591／11.822408秒，含SIM、预留／复制、循环、自有输出、公开追加及领取。
+逐页observer约0.05至0.30秒只覆盖Maker反馈消费区间，不包含整条公开追加链。
+资源／共同fault入口16.993023秒，同布局两次27000消费均复用缓存。
+这些有限工作量与独立run12共卡，不是隔离吞吐基准或规模加速结论。原始未舍入
+数组、全部失败与修正源码另存。最终文档修订不改已验证生产源，也不改旧point绑定。
+
+这只闭合Level的Maker页到原归一化候选。公开追加物理装箱、Terminal及外层phase／kind
+仍有CPU边界；完整跨UTC／CPU尾段、15／3日工作集、626导出和正式训练仍待交付。
+
+### 整阶段公开追加容量候选（当前增量）
+
+`PublicLedgerState.append_batches` 在设备按每个原自然批计算
+`k[j]=max_root(sum(emitted[j]))` 和前缀offset，稳定选择各批原列，写入本次输入张量
+物理上界。原Pending、Economic和Lifecycle接口准备精确字段、编码／解码及原位置，
+不领取、不归约或推进时钟。动态类型出口一次读取尺寸向量，仅交出实际使用前缀；
+自然批仍分别保留身份、record/private/batch序号、来源、received_at和原projection_batches。
+未使用尾槽不发布，零宽批不添加历史批，但保原fault传播时机。
+
+单批入口复用同实现。Ledger各目录保持原增长规则：订单目录取原orders／order_funds
+较大容量加本阶段新增宽；成交及成功成本目录取原trades／trade_success／position_costs／
+trade_bound较大容量加新增宽。order_funds自身人口、记录关联、返佣与可选结算／现金
+目录分别沿原规则增长，不统一缩到一个尺寸，不缩已安装的缓存。
+
+原send_clock先保handler_fault的既有失败返回；仅成功handler准备完整公开候选，再执行
+原frontier提交，最后共同安装SIM、Projection和公开状态。追加精度不足由原Numbers纯批
+按同一进入输入重算，期间不安装三者或frontier，也不重抽请求／随机或重复经济效果。
+公开候选的解码fault按原领取／消费时机保留，不新增提前拒绝阶段的门。
+本切片未建新的长期缓存、bank或游标，也未改变检查点持久字段。
+
+验证使用修改前Git tree中的原append_batch源码逐自然批对照，不由新整阶段入口生成
+期望。核完整Pending／Economic／Lifecycle、目录容量与关联、waiting、批列及精确资金；
+原领取顺序、Ledger、Terminal／Auto与Maker尾段金额断言保留。原空批fault混入同阶段
+仍保持。首轮退出101／72.120216秒，失败定位在lifecycle.fault；新增选列误把原
+`fault[roots,records]`当成根级位而未同order选择。首轮没有保存两侧值，不追称已观测其
+具体差值。按原返回形状作一行纠正，并在后续断言前保存完整shape／值；原GTC代表
+退出0／20.729771秒。
+
+机制探针使用原ExactInt乘法要求8字。实际4字required=8／fits=false到8字required=0／
+fits=true，两次准备中原handler进入的SIM／Projection／public／frontier均未安装，
+旧输入和旧输出保持；这不是行情自然触发的字宽增长。原真实33000阶段两自然批宽度
+为3／2；原Actor1790两批公开追加使用宽度为1／1，共新增2条记录，身份与原行引用保持。
+
+同源码新双根完整点入口退出0／343.353808秒；独立新进程恢复退出0／75.594330秒。
+两分支核v2／1721旧1720发送，再在A普通1801实际消费后继Maker页并追加两个自然批，
+完整原状态对照成立；B已结束不重复参与。保原Down材料、B89110000工程目标和不足
+1pUSD无付款规则，未把它改成正式训练参数或新的资格限制。
+
+完整1801端点分别15.042805／14.180366秒，含原SIM、反馈归一化、容量准备、编码／
+解码、复制、原目录增长、前缀交出、公开追加及后继领取。原始各阶段区间和未舍入
+数组另存。追加observer同步区间只测追加候选，不包含独立对照和整个端点；全命令
+含装配／验证成本。所有测量与固定run12共卡，不是隔离吞吐或加速结论。
+
+当前仍使用本材料已声明的Level耗损撮合模型，只证明该模型下的追加／恢复工程语义。
+后继PublicTrade公共模型尚未组合到本候选；不会把这些GTC代表称为已满足新模型合同。
+本批只移除各自然批的人口往返，动态出口、领取、外层phase／kind仍有CPU接缝。
+上述r6运行的任务双亲为fb65+c5b45，当时未含dc714757主线。后续组合保留fb65祖先，
+纳入固定dc714757的19个可视化路径；组合树17项可视化Rust测试通过，B运行源码未改。
+完整跨UTC／CPU尾段、工作集、626和正式训练前置仍开放。
+
+### Auto逐市场设备循环（当前增量）
+
+原`ContinuousExecution`的各handler和Terminal后Auto现在交同一个私有设备循环。
+`BaseSimRuntime.prepare_auto_market`保原资格、账户兑换、义务和规范化纯候选；旧逐市场
+兼容入口也调用它。循环按原市场顺序选择合格项，逐实际发射更新临时自然批上下文，
+保private/batch/record坐标、原source时刻及采样。出现原fault即停止后续市场。
+Normalizer的预留行写入工具归原Projection，Maker和Auto共用；只交实际使用前缀。
+
+图只拥有账户、Auto位／fault、Projection及本次批上下文，借用原只读资格和来源。
+它不复制订单、FIFO、请求或来源前沿。入口仍有一次合格人口读回，动态出口仍读实际
+尺寸；本切片仅移除逐市场资格／fault往返。精度不足从同一未提交输入重算，独立输出
+不被下一replay覆盖。共同安装仍沿handler→Auto→公开追加候选→frontier→三者安装，
+不提前领取或改资金规则。检查点不保存图或私有上下文；原owner恢复后重新建立图。
+
+原修改前Git tree的逐市场入口独立对照账户、义务、完整Projection和NOE。原非空GTC
+尾段通过，资源机制探针实际4字required8／fits=false到8字required0／fits=true；
+输入、序号及已拥有输出保持。这是额外乘法探针，不是行情自然触发增长。真实Invalid
+后Auto fault1的原冲突代表保原共同不安装。pair／loser／empty复用原CPU事实进入新
+设备owner，核纯输家零现金终结、空库存Lifecycle、原领取与重复不兑付；不是新GPU撮合。
+
+双市场代表沿原TypedRaw／Core生产两个有效Terminal，保一个真实账户、T_trade301900
+和原11次模型开始；工程尾段事前定为640001，goal为None。市场0在310000执行，
+private16／batch11／record1，仅发Lifecycle；市场1在610000执行，private20／batch13／
+record3、4，发Cash与Lifecycle。实际received为310016、610011。尾端Ledger entry43、
+platform prefix10、Auto位均true、现金201167167/100000pUSD；重复调用无付款。
+两市场沿原事件顺序分别就绪，每次仅一个合格；不声称同次两个市场均执行，也不新增
+同时就绪的业务门。完整尾段12.960971秒包含SIM、公开追加及领取；Auto子段
+0.170959／0.205275秒含冷建、copy、循环和自有输出，分别因实际来源／布局冷重绑。
+
+新同源双根v1完整点保存后，两分支保原v2／1721全状态对照及旧1720发送，再按原
+合法普通续采完成v3／consume3。A最后C1900仍为未消费决定，B已结束不重复参与。
+两分支实际在31000执行Auto，private38／batch21／record5、6，received31009；
+64001的完整SIM／Projection／NOE／Ledger、前沿、全层h、RNG、policy／Adam读面一致，
+恢复后的Auto图首次冷建并实际消费，重复不兑付。64001仍target_end=false，不称完整
+目标尾段。原`active_restore_complete`标记1721／v2；新增64001／v3另有真实oracle及
+`post_checkpoint_auto_received`。保存入口371.004540秒、独立恢复137.999670秒；
+31004→64001领取区间20.586878／19.260231秒不包含此前31000的Auto计算。
+
+所有未舍入原始计时、故障及修正源码独立留存；有限验证与固定run12共卡，非隔离
+吞吐或长窗口加速结论。上述Auto运行双亲为fb65+dc714；当时未组合／采用后来
+PublicTrade主线，原Level撮合证据不冒称新模型验收。其余phase／kind、完整跨UTC／CPU后验、
+15／3日工作集、626和正式训练条件继续开放。

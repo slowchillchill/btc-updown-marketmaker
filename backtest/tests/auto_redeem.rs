@@ -223,7 +223,7 @@ async fn original_auto_redeem_allocates_pair_and_orphan_once_and_preserves_pendi
             let mut confirmed = Vec::new();
             let mut autos = Vec::new();
             let mut auto_cash_deltas = Vec::new();
-            for reference in feedback.result_references() {
+            for reference in feedback.result_references().unwrap() {
                 let view =
                     ::execution_normalization::read_durable_noe_record_v1(&reference).unwrap();
                 match view.record() {

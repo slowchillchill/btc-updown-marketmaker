@@ -1030,20 +1030,23 @@ async fn late_success_updates_old_account_without_reviving_hidden() {
             assert!(group.rows.is_empty());
             assert!(group.pre_frame_hidden_ops.is_empty());
             let read = shared.ledger().economic_read().unwrap();
-            let m = read.market_totals().next().unwrap();
-            let quantity = &m.success_shares[m
-                .assets
-                .as_ref()
-                .unwrap()
-                .iter()
-                .position(|a| a.token_id.0 == UP_TOKEN_ID)
-                .unwrap()]
-            .0;
-            if quantity == "0" {
-                saw_pending_old = true;
-            } else {
-                assert_eq!(quantity, "5");
-                saw_success_old = true;
+            // 自动兑付会清除剩余持仓；迟到成功由原成交事实证明，
+            // 不能要求旧市场在兑现后仍保留五股。
+            for trade in read.trades().filter(|trade| {
+                trade.fact.condition_id.0 == CONDITION_ID && trade.fact.token_id.0 == UP_TOKEN_ID
+            }) {
+                assert_eq!(trade.fact.base_quantity_shares.0, "5");
+                if trade.success_applied {
+                    assert_eq!(
+                        trade.fact.economic_disposition,
+                        contracts::execution_normalization::SourceNeutralTradeEconomicDispositionV1::FinalSuccess
+                    );
+                    saw_success_old = true;
+                } else {
+                    saw_pending_old = true;
+                }
+            }
+            if saw_success_old {
                 break;
             }
         }

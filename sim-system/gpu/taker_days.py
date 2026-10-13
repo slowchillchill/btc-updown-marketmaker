@@ -58,6 +58,8 @@ class TakerDayResult:
 
 
 def coordinate_calendar(candidate, original, committed, fault):
+    if candidate is original:
+        return replace(original, fault=fault)
     roots = committed.numel()
     updates = {}
     for field in fields(candidate):

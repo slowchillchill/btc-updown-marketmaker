@@ -9,7 +9,7 @@ use sim_system::{
 };
 use std::{
     collections::VecDeque,
-    io::{BufWriter, Write},
+    io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
 };
@@ -30,9 +30,10 @@ pub(crate) struct CandidateProgressV1 {
     pub cursor: CandidateCursorV1,
     pub active: bool,
     pub waiting: bool,
-    pub ready: Option<u64>,
+    pub ready: Option<(u64, String)>,
     pub complete: Option<serde_json::Value>,
     pub source_health: Option<bool>,
+    pub requirements: Option<contracts::PublicObservationRequirementsV1>,
     pub runtime_started: bool,
 }
 pub(crate) struct DayBufferV1 {
@@ -43,6 +44,9 @@ pub(crate) struct DayBufferV1 {
     pub candidates: Vec<CandidateProgressV1>,
     pub production: ProductionV1,
     pub requested: Option<u64>,
+    pub research_summary: bool,
+    pub budget_stop_requested: bool,
+    pub budget_stopped: bool,
     pub generation: u64,
     pub failure: Option<String>,
 }
@@ -72,11 +76,15 @@ impl DayHubV1 {
                         ready: None,
                         complete: None,
                         source_health: None,
+                        requirements: None,
                         runtime_started: false,
                     })
                     .collect(),
                 production: ProductionV1::Running,
                 requested: None,
+                research_summary: false,
+                budget_stop_requested: false,
+                budget_stopped: false,
                 generation: 0,
                 failure: None,
             }),
@@ -115,7 +123,9 @@ impl DayHubV1 {
         let (mut buffer, cv) = (self.0.0.lock().unwrap(), &self.0.1);
         buffer.candidates[index].active = false;
         if let Ok(result) = result {
-            buffer.candidates[index].complete = Some(result.report.clone());
+            if result.report["end_reason"] != "BudgetStop" {
+                buffer.candidates[index].complete = Some(result.report.clone());
+            }
         } else if let Err(error) = result {
             buffer.failure = Some(error.to_string());
         }
@@ -180,9 +190,15 @@ impl Iterator for DayPublicSourceV1 {
                 }
                 ProductionV1::Running => {}
             }
-            buffer.candidates[self.index].waiting = true;
-            self.hub.0.1.notify_all();
+            if !buffer.candidates[self.index].waiting {
+                buffer.candidates[self.index].waiting = true;
+                self.hub.0.1.notify_all();
+            }
+            #[cfg(test)]
+            let observed_wait = tests::empty_wait_started();
             buffer = self.hub.0.1.wait(buffer).unwrap();
+            #[cfg(test)]
+            tests::empty_wait_returned(observed_wait);
         }
     }
 }
@@ -228,17 +244,27 @@ impl Iterator for DayHiddenSourceV1 {
                 }
                 ProductionV1::Running => {}
             }
-            buffer.candidates[self.index].waiting = true;
-            self.hub.0.1.notify_all();
+            if !buffer.candidates[self.index].waiting {
+                buffer.candidates[self.index].waiting = true;
+                self.hub.0.1.notify_all();
+            }
+            #[cfg(test)]
+            let observed_wait = tests::empty_wait_started();
             buffer = self.hub.0.1.wait(buffer).unwrap();
+            #[cfg(test)]
+            tests::empty_wait_returned(observed_wait);
         }
     }
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CandidateCheckpointV1<D> {
+    #[serde(with = "checkpoint_bytes")]
     driver: Vec<u8>,
+    #[serde(with = "checkpoint_bytes")]
     ledger: Vec<u8>,
+    #[serde(with = "checkpoint_bytes")]
     shared: Vec<u8>,
+    #[serde(with = "checkpoint_bytes")]
     strategy: Vec<u8>,
     state: RuntimeLoopCheckpointV1<D>,
     pub prefetched: Option<checkpoint::Delivery>,
@@ -277,6 +303,12 @@ where
     S: CheckpointStrategyV1,
     S::Diagnostics: Serialize + serde::de::DeserializeOwned,
 {
+    fn research_enabled(&self) -> bool {
+        self.hub.0.0.lock().unwrap().research_summary
+    }
+    fn budget_stopped(&self) -> bool {
+        self.hub.0.0.lock().unwrap().budget_stopped
+    }
     fn started(&mut self) {
         let mut buffer = self.hub.0.0.lock().unwrap();
         buffer.candidates[self.index].runtime_started = true;
@@ -341,9 +373,13 @@ where
                 buffer.requested = Some(buffer.generation);
                 self.hub.0.1.notify_all();
             }
-            buffer
-                .requested
-                .filter(|g| buffer.candidates[self.index].ready != Some(*g))
+            buffer.requested.filter(|g| {
+                buffer.candidates[self.index]
+                    .ready
+                    .as_ref()
+                    .map(|(g, _)| *g)
+                    != Some(*g)
+            })
         };
         let Some(generation) = generation else {
             return Ok(());
@@ -358,9 +394,13 @@ where
         strategy.write_strategy_checkpoint(&mut strategy_state)?;
         #[derive(Serialize)]
         struct Saved<'a, D> {
+            #[serde(with = "checkpoint_bytes")]
             driver: Vec<u8>,
+            #[serde(with = "checkpoint_bytes")]
             ledger: Vec<u8>,
+            #[serde(with = "checkpoint_bytes")]
             shared: Vec<u8>,
+            #[serde(with = "checkpoint_bytes")]
             strategy: Vec<u8>,
             state: RuntimeLoopCheckpointRefV1<'a, D>,
             prefetched: Option<checkpoint::Delivery>,
@@ -382,9 +422,9 @@ where
             .root
             .join(format!("checkpoint-{generation:020}"))
             .join(format!("candidate-{:06}.cbor", self.index));
-        write_cbor(&path, &saved)?;
+        let sha256 = write_cbor(&path, &saved)?;
         let mut buffer = self.hub.0.0.lock().unwrap();
-        buffer.candidates[self.index].ready = Some(generation);
+        buffer.candidates[self.index].ready = Some((generation, sha256));
         self.hub.0.1.notify_all();
         while buffer.requested == Some(generation) && buffer.failure.is_none() {
             buffer = self.hub.0.1.wait(buffer).unwrap();
@@ -397,21 +437,55 @@ where
     }
 }
 #[derive(Serialize, Deserialize)]
-pub(crate) struct DayCheckpointV1 {
+pub(crate) struct DayCheckpointV1<C = HistoricalRuntimeCatalogV1> {
     pub format: String,
     pub identity: String,
     pub generation: u64,
     pub applied: u64,
-    pub core: Vec<u8>,
-    pub producer: Vec<u8>,
-    pub catalog: HistoricalRuntimeCatalogV1,
-    pub public_base: usize,
-    pub public: Vec<checkpoint::Delivery>,
-    pub hidden_base: usize,
-    pub hidden: Vec<HiddenBucketCheckpointV1>,
-    pub cursors: Vec<CandidateCursorV1>,
+    pub state: DayCheckpointStateV2<C>,
     pub completed: Vec<Option<serde_json::Value>>,
 }
+/// 只有所有候选完成才省略运行状态；部分完成仍保留各个消费前沿。
+#[derive(Serialize, Deserialize)]
+pub(crate) enum DayCheckpointStateV2<C = HistoricalRuntimeCatalogV1> {
+    Running {
+        #[serde(with = "checkpoint_bytes")]
+        core: Vec<u8>,
+        #[serde(with = "checkpoint_bytes")]
+        producer: Vec<u8>,
+        catalog: C,
+        public_base: usize,
+        public: checkpoint::DeliveryBatch,
+        hidden_base: usize,
+        hidden: Vec<HiddenBucketCheckpointV1>,
+        cursors: Vec<CandidateCursorV1>,
+    },
+    Complete,
+}
+/// 内部 CBOR 模块字节，不改变所属模块的正式编码。
+mod checkpoint_bytes {
+    use serde::{Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(value)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        struct Bytes;
+        impl<'de> serde::de::Visitor<'de> for Bytes {
+            type Value = Vec<u8>;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("模块检查点字节")
+            }
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                Ok(value.to_vec())
+            }
+            fn visit_byte_buf<E: serde::de::Error>(self, value: Vec<u8>) -> Result<Self::Value, E> {
+                Ok(value)
+            }
+        }
+        deserializer.deserialize_byte_buf(Bytes)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CheckpointFileV1 {
     pub path: String,
@@ -424,18 +498,35 @@ pub(crate) struct CheckpointPublicationV1 {
     pub generation: u64,
     pub files: Vec<CheckpointFileV1>,
 }
-pub(crate) const DAY_CHECKPOINT_FORMAT: &str = "original-parquet-day-checkpoint-v1";
-pub(crate) fn write_cbor(path: &Path, value: &impl Serialize) -> Result<(), MaterialError> {
+pub(crate) const DAY_CHECKPOINT_FORMAT: &str = "original-parquet-day-checkpoint-v2";
+struct DigestWriter<W> {
+    inner: W,
+    digest: Sha256,
+}
+impl<W: Write> Write for DigestWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(bytes)?;
+        self.digest.update(&bytes[..n]);
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+pub(crate) fn write_cbor(path: &Path, value: &impl Serialize) -> Result<String, MaterialError> {
     std::fs::create_dir_all(path.parent().unwrap())?;
     let file = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(path)?;
-    let mut writer = BufWriter::new(file);
+    let mut writer = BufWriter::new(DigestWriter {
+        inner: file,
+        digest: Sha256::new(),
+    });
     ciborium::ser::into_writer(value, &mut writer)?;
     writer.flush()?;
-    writer.get_ref().sync_all()?;
-    Ok(())
+    writer.get_ref().inner.sync_all()?;
+    Ok(format!("{:x}", writer.get_ref().digest.clone().finalize()))
 }
 pub(crate) fn hash_file(path: &Path) -> Result<String, MaterialError> {
     use std::io::Read;
@@ -451,10 +542,44 @@ pub(crate) fn hash_file(path: &Path) -> Result<String, MaterialError> {
     }
     Ok(format!("{:x}", digest.finalize()))
 }
+/// 摘要只累计实际读入字节。解码后继续读至EOF，再允许恢复任何写入owner。
+struct DigestReader<R> {
+    inner: R,
+    digest: Sha256,
+}
+impl<R: Read> Read for DigestReader<R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(bytes)?;
+        self.digest.update(&bytes[..n]);
+        Ok(n)
+    }
+}
+fn read_verified_cbor<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    expected: &str,
+) -> Result<T, MaterialError> {
+    let mut reader = BufReader::new(DigestReader {
+        inner: std::fs::File::open(path)?,
+        digest: Sha256::new(),
+    });
+    let value = ciborium::de::from_reader(&mut reader)?;
+    std::io::copy(&mut reader, &mut std::io::sink())?;
+    if format!("{:x}", reader.get_ref().digest.clone().finalize()) != expected {
+        return Err("完整日检查点文件身份不符".into());
+    }
+    Ok(value)
+}
 pub(crate) fn read_publication(
     root: &Path,
     identity: &str,
-) -> Result<Option<(CheckpointPublicationV1, DayCheckpointV1)>, MaterialError> {
+) -> Result<
+    Option<(
+        CheckpointPublicationV1,
+        DayCheckpointV1,
+        std::collections::BTreeMap<String, Vec<u8>>,
+    )>,
+    MaterialError,
+> {
     let pointer = root.join("checkpoint.json");
     if !pointer.exists() {
         return Ok(None);
@@ -465,28 +590,44 @@ pub(crate) fn read_publication(
         return Err("日检查点与输入、配置或版本不符".into());
     }
     let directory = root.join(format!("checkpoint-{:020}", published.generation));
+    let mut saved = None;
+    let mut candidates = std::collections::BTreeMap::new();
     for file in &published.files {
         let path = directory.join(&file.path);
-        if path.parent() != Some(directory.as_path()) || hash_file(&path)? != file.sha256 {
+        if path.parent() != Some(directory.as_path()) {
+            return Err("完整日检查点文件身份不符".into());
+        }
+        if file.path == "day.cbor" {
+            saved = Some(read_verified_cbor::<DayCheckpointV1>(&path, &file.sha256)?);
+        } else if file.path.starts_with("candidate-") && file.path.ends_with(".cbor") {
+            let mut reader = BufReader::new(DigestReader {
+                inner: std::fs::File::open(&path)?,
+                digest: Sha256::new(),
+            });
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            if format!("{:x}", reader.get_ref().digest.clone().finalize()) != file.sha256 {
+                return Err("完整日检查点文件身份不符".into());
+            }
+            candidates.insert(file.path.clone(), bytes);
+        } else if hash_file(&path)? != file.sha256 {
             return Err("完整日检查点文件身份不符".into());
         }
     }
-    let saved: DayCheckpointV1 =
-        ciborium::de::from_reader(std::fs::File::open(directory.join("day.cbor"))?)?;
+    let saved = saved.ok_or("完整日检查点缺少day.cbor")?;
     if saved.format != DAY_CHECKPOINT_FORMAT
         || saved.identity != identity
         || saved.generation != published.generation
     {
         return Err("日检查点发布引用不符".into());
     }
-    Ok(Some((published, saved)))
+    Ok(Some((published, saved, candidates)))
 }
 pub(crate) fn publish(
     root: &Path,
     identity: &str,
     generation: u64,
-    candidates: usize,
-    completed: &[Option<serde_json::Value>],
+    files: Vec<CheckpointFileV1>,
 ) -> Result<(), MaterialError> {
     let previous = if root.join("checkpoint.json").exists() {
         Some(serde_json::from_reader::<_, CheckpointPublicationV1>(
@@ -496,19 +637,6 @@ pub(crate) fn publish(
         None
     };
     let directory = root.join(format!("checkpoint-{generation:020}"));
-    let mut files = vec![CheckpointFileV1 {
-        path: "day.cbor".into(),
-        sha256: hash_file(&directory.join("day.cbor"))?,
-    }];
-    for (index, complete) in completed.iter().enumerate().take(candidates) {
-        if complete.is_none() {
-            let path = format!("candidate-{index:06}.cbor");
-            files.push(CheckpointFileV1 {
-                sha256: hash_file(&directory.join(&path))?,
-                path,
-            });
-        }
-    }
     std::fs::File::open(&directory)?.sync_all()?;
     let pointer = root.join(".checkpoint.json.tmp");
     let mut file = std::fs::OpenOptions::new()
@@ -552,4 +680,196 @@ pub(crate) fn publish(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        cell::RefCell,
+        time::{Duration, Instant},
+    };
+
+    #[derive(Default, Serialize)]
+    struct EmptyWaitObservation {
+        wait_calls: u64,
+        returned_waits: u64,
+        wait_wall_including_lock_reacquire_ns: u128,
+    }
+    thread_local! {
+        static EMPTY_WAITS: RefCell<Option<EmptyWaitObservation>> = const { RefCell::new(None) };
+    }
+    pub(super) fn empty_wait_started() -> Option<Instant> {
+        EMPTY_WAITS.with(|value| {
+            let mut value = value.borrow_mut();
+            value.as_mut().map(|v| {
+                v.wait_calls += 1;
+                Instant::now()
+            })
+        })
+    }
+    pub(super) fn empty_wait_returned(started: Option<Instant>) {
+        if let Some(started) = started {
+            EMPTY_WAITS.with(|value| {
+                let mut value = value.borrow_mut();
+                let v = value.as_mut().unwrap();
+                v.returned_waits += 1;
+                v.wait_wall_including_lock_reacquire_ns += started.elapsed().as_nanos();
+            });
+        }
+    }
+    #[test]
+    #[ignore = "#185 explicit bounded empty-Hub wait observation, not a throughput gate"]
+    fn two_empty_day_consumers_observe_existing_wakeups() {
+        let hub = DayHubV1::new(&[]);
+        {
+            let mut buffer = hub.0.0.lock().unwrap();
+            for _ in 0..2 {
+                buffer.candidates.push(CandidateProgressV1 {
+                    cursor: CandidateCursorV1 {
+                        public: 0,
+                        hidden: 0,
+                        times: crate::timing::DeliveryTimes {
+                            delays: crate::timing::DelayScheduleV1::Fixed(0),
+                            last: None,
+                        },
+                    },
+                    active: true,
+                    waiting: false,
+                    ready: None,
+                    complete: None,
+                    source_health: None,
+                    requirements: None,
+                    runtime_started: false,
+                });
+            }
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let started = Instant::now();
+        let observations = std::thread::scope(|scope| {
+            let workers = (0..2)
+                .map(|index| {
+                    let hub = hub.clone();
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        EMPTY_WAITS.with(|value| {
+                            *value.borrow_mut() = Some(EmptyWaitObservation::default())
+                        });
+                        barrier.wait();
+                        // 两条原 next/Condvar 路径共享空Hub；不制造输入或业务超时。
+                        if index == 0 {
+                            assert!(
+                                DayPublicSourceV1::new(hub, index, VecDeque::new())
+                                    .next()
+                                    .is_none()
+                            );
+                        } else {
+                            assert!(DayHiddenSourceV1::new(hub, index).next().is_none());
+                        }
+                        EMPTY_WAITS.with(|value| value.borrow_mut().take().unwrap())
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            std::thread::sleep(Duration::from_millis(200));
+            {
+                let mut buffer = hub.0.0.lock().unwrap();
+                buffer.production = ProductionV1::Ended;
+                hub.0.1.notify_all();
+            }
+            workers
+                .into_iter()
+                .map(|w| w.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for v in &observations {
+            assert_eq!(v.wait_calls, v.returned_waits);
+        }
+        let output = serde_json::json!({
+            "format":"issue185-empty-hub-waits-v1", "empty_observation_requested_ms":200,
+            "wall_ns":started.elapsed().as_nanos(), "sources":["public","hidden"],
+            "observations":observations, "termination":"original ProductionV1::Ended + notify_all",
+            "limits":"test-only counters; wait wall includes lock reacquire, not CPU; no minimum wake count gate or extrapolated savings"
+        });
+        println!("empty_hub_observation: {output}");
+        if let Ok(path) = std::env::var("ISSUE185_WAIT_OUTPUT") {
+            std::fs::write(path, serde_json::to_vec_pretty(&output).unwrap()).unwrap();
+        }
+    }
+    #[test]
+    fn checkpoint_read_digest_includes_the_complete_decode_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("value.cbor");
+        let digest = write_cbor(&path, &42u64).unwrap();
+        assert_eq!(read_verified_cbor::<u64>(&path, &digest).unwrap(), 42);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"remaining-content")
+            .unwrap();
+        assert!(read_verified_cbor::<u64>(&path, &digest).is_err());
+        // 原格式允许解码后剩余字节；它们必须同样参与整个文件摘要。
+        assert_eq!(
+            read_verified_cbor::<u64>(&path, &hash_file(&path).unwrap()).unwrap(),
+            42
+        );
+    }
+    #[test]
+    fn checkpoint_digest_counts_partial_writes_and_propagates_failures() {
+        struct Partial {
+            bytes: Vec<u8>,
+            failed: bool,
+        }
+        impl Write for Partial {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.failed {
+                    return Err(std::io::Error::other("原写入失败"));
+                }
+                let n = bytes.len().min(3);
+                self.bytes.extend_from_slice(&bytes[..n]);
+                Ok(n)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::other("原刷新失败"))
+            }
+        }
+        let mut writer = DigestWriter {
+            inner: Partial {
+                bytes: vec![],
+                failed: false,
+            },
+            digest: Sha256::new(),
+        };
+        writer.write_all(b"checkpoint").unwrap();
+        let expected = Sha256::digest(&writer.inner.bytes);
+        assert_eq!(writer.digest.clone().finalize(), expected);
+        writer.inner.failed = true;
+        assert!(writer.write(b"not committed").is_err());
+        assert_eq!(writer.digest.clone().finalize(), expected);
+        assert!(writer.flush().is_err());
+        let tmp = tempfile::tempdir().unwrap();
+        #[derive(Serialize, Deserialize)]
+        struct Saved {
+            #[serde(with = "checkpoint_bytes")]
+            bytes: Vec<u8>,
+        }
+        let path = tmp.path().join("state.cbor");
+        let digest = write_cbor(
+            &path,
+            &Saved {
+                bytes: vec![0, 24, 255],
+            },
+        )
+        .unwrap();
+        assert_eq!(digest, hash_file(&path).unwrap());
+        let value: ciborium::Value =
+            ciborium::from_reader(std::fs::File::open(&path).unwrap()).unwrap();
+        assert!(
+            matches!(&value.as_map().unwrap()[0].1,ciborium::Value::Bytes(b) if b == &[0,24,255])
+        );
+        let saved: Saved = ciborium::from_reader(std::fs::File::open(&path).unwrap()).unwrap();
+        assert_eq!(saved.bytes, vec![0, 24, 255]);
+        assert!(write_cbor(&path, &saved).is_err(), "原create_new边界保持");
+    }
 }

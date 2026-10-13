@@ -30,10 +30,13 @@ def _coordinate_queue(candidate,original,row_roots,fault):
         total_quote=candidate.total_quote.select(flat,original.total_quote),
         consumed_base=candidate.consumed_base.select(flat,original.consumed_base),
         account_remaining=candidate.account_remaining.select(flat,original.account_remaining),
-        debt=candidate.debt.select(enabled,original.debt),fault=candidate.fault | fault[row_roots])
+        debt=candidate.debt.select(enabled,original.debt),fault=candidate.fault | fault[row_roots],
+        conservative=None if candidate.conservative is None else candidate.conservative.coordinate(original.conservative,enabled))
 
 
 def _coordinate_pool(candidate,original,fault):
+    if candidate is original:
+        return replace(original,fault=fault)
     enabled = (fault == 0).repeat_interleave(candidate.capacity)
     updates = {}
     for field in fields(candidate.records):

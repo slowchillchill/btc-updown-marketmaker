@@ -156,7 +156,7 @@ def main():
         advantages=dt_advantages(torch.zeros_like(floating),torch.zeros_like(floating),floating,
             actual.dt_seconds.reshape(1,1,1),mask,no.reshape(1,1,1),mask,
             actual.known.reshape(1,1,1),mask,actual.fault.reshape(1,1,1),
-            tau_gamma_seconds=1.,tau_lambda_seconds=1.)
+            target_end=torch.zeros_like(mask))
         assert not advantages.ready.cpu().item() and advantages.count.cpu().item()==1
         assert torch.equal(advantages.present,mask)
     not_ready(unavailable)

@@ -158,19 +158,102 @@ struct MarketState {
     exposure: [R; 2],
     unknown: bool,
 }
+struct PairObservation<'a> {
+    original: &'a MarketBusinessObservationV1,
+    assets: [&'a AssetBusinessObservationV1; 2],
+    // 只在一次计算内复用；没有跨观察或账户前沿的状态。
+    top_asks: [std::cell::OnceCell<Result<Option<Decimal>, &'static str>>; 2],
+}
+impl PairObservation<'_> {
+    fn top_ask(&self, side: usize) -> Result<Option<Decimal>, StrategyErrorV1> {
+        self.top_asks[side]
+            .get_or_init(|| {
+                value(&self.assets[side].asks)
+                    .map(|levels| {
+                        levels
+                            .iter()
+                            .try_fold(None, |best: Option<Decimal>, level| {
+                                let price = Decimal::from_str_exact(&level.price_pusd_per_share.0)
+                                    .map_err(|_| "非规范公共金额")?;
+                                Ok(best.map_or(Some(price), |p| Some(p.min(price))))
+                            })
+                    })
+                    .unwrap_or(Ok(None))
+            })
+            .as_ref()
+            .copied()
+            .map_err(|message| StrategyErrorV1::Arithmetic(message))
+    }
+}
+impl std::ops::Deref for PairObservation<'_> {
+    type Target = MarketBusinessObservationV1;
+    fn deref(&self) -> &Self::Target {
+        self.original
+    }
+}
+struct PairMarketRead<'a> {
+    observation: PairObservation<'a>,
+    rule_context: &'a PublicTradingRuleContextV1,
+}
+impl<'a> PairMarketRead<'a> {
+    fn from_frozen(f: &'a FrozenMarketReadV1) -> Result<Self, StrategyErrorV1> {
+        let o = &f.observation;
+        let up = o
+            .assets
+            .iter()
+            .find(|a| a.asset.outcome.label.eq_ignore_ascii_case("Up"));
+        let down = o
+            .assets
+            .iter()
+            .find(|a| a.asset.outcome.label.eq_ignore_ascii_case("Down"));
+        let (Some(up), Some(down)) = (up, down) else {
+            return Err(StrategyErrorV1::Arithmetic("策略要求Up/Down互补资产身份"));
+        };
+        if o.assets.len() != 2 {
+            return Err(StrategyErrorV1::Arithmetic("策略要求Up/Down互补资产身份"));
+        }
+        Ok(Self {
+            observation: PairObservation {
+                original: o,
+                assets: [up, down],
+                top_asks: Default::default(),
+            },
+            rule_context: &f.rule_context,
+        })
+    }
+}
+
 impl StrategyV1 for ComplementaryPairV1 {
     type Error = StrategyErrorV1;
     type Diagnostics = ComplementaryPairDiagnosticV1;
+    fn requires_trade_economics_details(&self) -> bool {
+        false
+    }
+    fn observation_requirements(&self) -> contracts::PublicObservationRequirementsV1 {
+        contracts::PublicObservationRequirementsV1 {
+            binance_depth_quantities: self.config.probability.binance_pressure_weight_usd != 0.0
+                || self.config.probability.binance_trade_pressure_weight_usd != 0.0,
+        }
+    }
     fn uses_source_health(&self) -> bool {
         true
     }
     fn next_health_evaluation_at(
         &self,
-        input: &StrategyCurrentReadV1<'_>,
+        input: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
         calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
         at: i64,
     ) -> Option<i64> {
         self.health_deadline(input, calculation, at)
+    }
+    fn qualify_intent_public(
+        &self,
+        group: &ClosedBusinessGroupV1,
+        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        index: usize,
+        at: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        Ok(self.qualify_public_group(group, calculation, index, at))
     }
     fn qualify_intent(
         &mut self,
@@ -208,30 +291,11 @@ impl StrategyV1 for ComplementaryPairV1 {
         }
         self.continuity.confirmed_high_water_pusd = high.public();
         // 公共观察按token排列，经济池按登记资产排列；业务Up/Down必须按身份连接。
-        let mut frames = input.markets.clone();
-        for f in &mut frames {
-            f.observation.assets.sort_by_key(|a| {
-                if a.asset.outcome.label.eq_ignore_ascii_case("Up") {
-                    0
-                } else {
-                    1
-                }
-            });
-            if f.observation.assets.len() != 2
-                || !f.observation.assets[0]
-                    .asset
-                    .outcome
-                    .label
-                    .eq_ignore_ascii_case("Up")
-                || !f.observation.assets[1]
-                    .asset
-                    .outcome
-                    .label
-                    .eq_ignore_ascii_case("Down")
-            {
-                return Err(StrategyErrorV1::Arithmetic("策略要求Up/Down互补资产身份"));
-            }
-        }
+        let frames = input
+            .markets
+            .iter()
+            .map(PairMarketRead::from_frozen)
+            .collect::<Result<Vec<_>, _>>()?;
         let states = frames
             .iter()
             .map(|f| self.state(input, f))
@@ -282,17 +346,54 @@ impl StrategyV1 for ComplementaryPairV1 {
         }
         let mut intents = Vec::new();
         let mut next = None;
+        let spot_scope = SourceStreamScopeV1 {
+            source: SourceStreamKindV1::ChainlinkSpot,
+            condition_id: None,
+            asset_or_symbol: "btc/usd".into(),
+        };
         for (f, s) in frames.iter().zip(&states) {
             let o = &f.observation;
             let probability_sources = self.probability_sources(o);
-            let probability_healthy = self.health_issues(o, &probability_sources, now).is_empty();
-            let pair_sources = self.pair_sources(o);
-            let source_health = self.health_issues(o, &pair_sources, now);
-            let p = if probability_healthy {
+            let mut pair_sources = probability_sources.clone();
+            pair_sources.extend(
+                o.assets
+                    .iter()
+                    .map(|a| Self::book_scope(o, &a.asset.token_id)),
+            );
+            let source_health_states = self.health_states(o, &pair_sources, now);
+            let healthy = |sources: &[SourceStreamScopeV1]| {
+                source_health_states
+                    .iter()
+                    .filter(|s| sources.contains(&s.scope))
+                    .all(|s| s.state.failure().is_none())
+            };
+            let probability_healthy = healthy(&probability_sources);
+            let source_health = source_health_states
+                .iter()
+                .filter_map(|s| {
+                    s.state.failure().map(|failure| SourceHealthIssueV1 {
+                        scope: s.scope.clone(),
+                        failure,
+                    })
+                })
+                .collect();
+            let spot_healthy = self
+                .source_health_state(o, &spot_scope, now)
+                .failure()
+                .is_none();
+            let price = if probability_healthy || spot_healthy {
                 self.signals
                     .entry(o.market.condition_id.0.clone())
                     .or_default()
-                    .estimate(o, now, &self.config.probability)?
+                    .maintain_history(o, now, &self.config.probability, spot_healthy)?
+            } else {
+                None
+            };
+            let p = if probability_healthy {
+                self.signals
+                    .get_mut(&o.market.condition_id.0)
+                    .expect("合格概率已维护信号记忆")
+                    .estimate(o, now, &self.config.probability, price)?
             } else {
                 ProbabilityEstimateV1::Unavailable(EstimateUnavailableV1::UnhealthySource)
             };
@@ -311,7 +412,7 @@ impl StrategyV1 for ComplementaryPairV1 {
                 comparison: None,
                 maximum_repair_price: None,
                 source_health,
-                source_health_states: self.health_states(o, &pair_sources, now),
+                source_health_states: source_health_states.clone(),
             };
             let trading = now >= o.market.window.start_at_utc_ms
                 && now < o.market.window.end_at_utc_ms
@@ -326,7 +427,7 @@ impl StrategyV1 for ComplementaryPairV1 {
             if p.up().is_some() {
                 repair_sources.extend(probability_sources);
             }
-            let repair_healthy = self.health_issues(o, &repair_sources, now).is_empty();
+            let repair_healthy = healthy(&repair_sources);
             if trading {
                 if repair_healthy {
                     self.repair(
@@ -459,7 +560,6 @@ impl StrategyV1 for ComplementaryPairV1 {
                         repair_token,
                         business: Self::business_dependency(
                             &input.action_before,
-                            &input.trade_economics,
                             &o.market.condition_id,
                             &[],
                         )

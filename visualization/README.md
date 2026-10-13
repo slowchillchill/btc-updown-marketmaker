@@ -22,6 +22,8 @@ cargo run -p visualization --locked --offline -- sources.json 127.0.0.1:4317 vis
 
 本地服务只展示配置文件中本次有权读取的来源，没有目录发现、路径选择 API 或评价目录搜索。报告、元数据、研究 JSON 和公共根目录分别显式填写；元数据内的生产路径不会被自动打开。相对路径相对于服务进程工作目录解析，配置文件本身应保存在仓库外或被忽略的本地产物目录。前端开发可用 `npm --prefix visualization/ui run dev`，Vite 将 `/api` 代理到本地 Rust 服务。
 
+页面顶部的“界面语言”可即时切换中文与英语，默认中文。浏览器使用 `localStorage` 记住选择；存储被禁用时仍可切换当前页面。切换保留当前来源、筛选、已读页和选中证据，不额外请求来源数据。导航、控件、说明、表头和图表标签使用所选语言；配置的来源名称、原始值、字段名、标识、引用和导出数据保持原样。前端文案通过 `i18next` 与 `react-i18next` 管理，中文原文为键，英语译文位于 `ui/src/locales/en.json`。
+
 最小来源配置：
 
 ```json
@@ -63,7 +65,7 @@ cargo run -p visualization --locked --offline -- sources.json 127.0.0.1:4317 vis
 
 报告/元数据响应的 `exact` 和公共页记录把**所有 JSON 数字转换为十进制文本**，避免 JS 安全整数或浮点表示损失。金额字符串、原 `ExactRationalV1` 的分子/分母、`Known`、`Unavailable`、布尔值和空值保持各自表示；界面不通过 JS 浮点转换重算经济事实；唯一现金总额显示用精确十进制将实际可用与实际预留相加，并保留两项原引用。报告/元数据另有 `raw_json`，保存未改写的原 JSON 文本；损坏文本可用时也保留。JSON 字段浏览按需展开，不自动构造历史曲线。
 
-`RangeEnd`、`StrategyExit`、`Failure` 保留原结束原因。正常范围结束的耐久报告、内存经济快照和 NOE 稳定前缀各自标明。当前没有诊断全历史、挂单本金专用读取或市场损益归因，不能把总本金占用当有效挂单价值，也不能插值历史 NAV。
+`RangeEnd`、`StrategyExit`、`Failure`、`BudgetStop` 保留原结束原因。正常范围结束的耐久报告、内存经济快照和 NOE 稳定前缀各自标明。当前没有诊断全历史、挂单本金专用读取或市场损益归因，不能把总本金占用当有效挂单价值，也不能插值历史 NAV。
 
 ## 总览、经济与有限范围
 
@@ -114,6 +116,9 @@ cargo clippy -p visualization --all-targets --no-deps --locked --offline -- -D w
 npm --prefix visualization/ui run build
 npm --prefix visualization/ui run test:browser -- .local-artifacts/visualization/synthetic-example/sources.json
 ```
+
+该浏览器回归也检查七个视图的中英文切换、筛选与证据保留、切换期间无额外来源请求、刷新后的语言记忆、存储禁用和英文窄屏布局。传入截图目录时保存两种语言的页面截图。
+`npm --prefix visualization/ui run test:i18n` 单独回归 NOE 动态标签，以及与界面词条同名的原始值和精确金额。
 
 浏览器验证使用已有 Chrome，默认可执行文件 `/usr/bin/google-chrome`，可通过 `CHROME_EXECUTABLE` 指定。它启动临时本地 Rust 服务、关闭服务/浏览器并清理所建临时测试输入；可在命令最后提供截图目录。脚本验证实际合成 RangeEnd 报告、八模块/七导航与静态关系、跨视图及跨页身份、UP/DOWN 非对称映射、精确现金加法、零与 Unavailable、负调度差与缺端点、成功范围下载、未知/损坏证据、切换/刷新及窄屏。非对称数据是脚本临时创建的独立展示边界夹具，明确标为“非生产研究”，不冒充原生产报告。截图和工程检查不代替用户人工视觉验收。
 
@@ -412,3 +417,8 @@ CARGO_TARGET_DIR=<实际target> node visualization/ui/tests/measurement-missing-
 ```
 
 该修复前端build与定向Chrome通过，无pageerror，自有资源已结束。仅前端选择边界/脚本/说明变化，未重复根回归或成本负载；历史成本摘要与源码哈希继续对应原测量头 `85cb6fcc58e930fd78089f00f66d5ec35301dc8a`，不把修复后的界面源码重标成曾测量版本。
+
+
+## 已保存小时研究快照
+
+`account_economics_v2` 报告含 `research.hours` 时提供累计小时选择。现金、NAV、风险、资金、返佣与执行/决策计数都读取同一 cumulative；缺逐市场与 Ledger 不借最终状态补齐。可通过可选 `report_provenance` 文件保留忠实提取来源、原包装 pointer 与初始资金。字段映射、英文 Demo 六镜、启动/停止和定向验证见[小时快照说明](docs/hour-snapshots.md)。

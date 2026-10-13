@@ -45,9 +45,29 @@ pub struct HistoricalDayCandidateResultV1 {
 }
 #[derive(Debug, Serialize)]
 pub struct HistoricalDayResultV1 {
+    /// 仅显式研究返回最后成功发布代；返回的部分报告不写入completed。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published_checkpoint: Option<serde_json::Value>,
     pub input_set_identity_sha256: Sha256Hex,
     pub public_applied_inputs: u64,
     pub candidates: Vec<HistoricalDayCandidateResultV1>,
+}
+/// 显式研究运行选项，不进入业务身份或原配置合同。
+#[derive(Clone, Debug)]
+pub struct HistoricalDayRunOptionsV1 {
+    pub research_summary: bool,
+    /// 正式预算从输入准备之前开始；发布成功后在原候选save边界退出。
+    pub started: Instant,
+    pub budget_save_after: Option<Duration>,
+}
+impl Default for HistoricalDayRunOptionsV1 {
+    fn default() -> Self {
+        Self {
+            research_summary: false,
+            started: Instant::now(),
+            budget_save_after: None,
+        }
+    }
 }
 /// 每个日期、每个候选在自己的线程内创建原策略和原运行对象。
 /// 同日候选只共享不可变公共组和隐藏桶，不共享账户、时钟或反馈。
@@ -83,6 +103,28 @@ where
     S::Error: std::fmt::Debug,
     F: Fn(&HistoricalPreparedRunConfigV1) -> Result<S, MaterialError> + Sync,
 {
+    run_historical_days_with_options_v1(
+        days,
+        rules,
+        factory,
+        parallel_dates,
+        &HistoricalDayRunOptionsV1::default(),
+    )
+}
+/// 原入口默认关闭研究功能；此入口显式启用小时汇总及预算保存。
+pub fn run_historical_days_with_options_v1<S, F>(
+    days: &[HistoricalDayConfigV1],
+    rules: Arc<SealedProcessRuleSnapshotV3>,
+    factory: &F,
+    parallel_dates: usize,
+    options: &HistoricalDayRunOptionsV1,
+) -> Result<Vec<HistoricalDayResultV1>, MaterialError>
+where
+    S: CheckpointStrategyV1,
+    S::Diagnostics: Serialize + serde::de::DeserializeOwned,
+    S::Error: std::fmt::Debug,
+    F: Fn(&HistoricalPreparedRunConfigV1) -> Result<S, MaterialError> + Sync,
+{
     let mut results = Vec::new();
     for batch in days.chunks(parallel_dates.max(1)) {
         let values = std::thread::scope(|scope| {
@@ -90,7 +132,7 @@ where
                 .iter()
                 .map(|day| {
                     let rules = rules.clone();
-                    scope.spawn(move || run_day::<S, F>(day, rules, factory))
+                    scope.spawn(move || run_day::<S, F>(day, rules, factory, options))
                 })
                 .collect::<Vec<_>>();
             handles
@@ -110,6 +152,7 @@ fn run_day<S, F>(
     day: &HistoricalDayConfigV1,
     rules: Arc<SealedProcessRuleSnapshotV3>,
     factory: &F,
+    options: &HistoricalDayRunOptionsV1,
 ) -> Result<HistoricalDayResultV1, MaterialError>
 where
     S: CheckpointStrategyV1,
@@ -182,11 +225,15 @@ where
     }
     let identity = format!("{:x}", identity.finalize());
     let restored = read_publication(&day.checkpoint_root, &identity)?;
-    if let Some((_, saved)) = &restored {
+    if let Some((published, saved, _)) = &restored {
         if saved.completed.iter().all(Option::is_some)
             && saved.completed.len() == day.candidates.len()
         {
             return Ok(HistoricalDayResultV1 {
+                published_checkpoint: options
+                    .research_summary
+                    .then(|| serde_json::to_value(published))
+                    .transpose()?,
                 input_set_identity_sha256: input_identity,
                 public_applied_inputs: saved.applied,
                 candidates: day
@@ -209,9 +256,10 @@ where
         }
     }
     let hub = DayHubV1::new(&day.candidates);
+    hub.0.0.lock().unwrap().research_summary = options.research_summary;
     let mut candidates = Vec::new();
     let mut count = 0;
-    let mut generation = restored.as_ref().map_or(0, |(p, _)| p.generation + 1);
+    let mut generation = restored.as_ref().map_or(0, |(p, _, _)| p.generation + 1);
     if day.checkpoint_root.is_dir() {
         for entry in std::fs::read_dir(&day.checkpoint_root)? {
             let entry = entry?;
@@ -226,48 +274,57 @@ where
             }
         }
     }
-    let (mut producer, catalog) = if let Some((published, saved)) = restored {
+    let (mut producer, catalog) = if let Some((_published, saved, mut saved_candidates)) = restored
+    {
         count = saved.applied;
         let mut buffer = hub.0.0.lock().unwrap();
-        buffer.public_base = saved.public_base;
-        buffer.public = saved
-            .public
-            .into_iter()
-            .map(|g| g.restore())
-            .collect::<Result<_, _>>()?;
-        buffer.hidden_base = saved.hidden_base;
-        buffer.hidden = saved
-            .hidden
+        let DayCheckpointStateV2::Running {
+            core,
+            producer: source,
+            catalog,
+            public_base,
+            public,
+            hidden_base,
+            hidden,
+            cursors,
+        } = saved.state
+        else {
+            return Err("完成日结果缺少对应候选报告".into());
+        };
+        buffer.public_base = public_base;
+        buffer.public = public.restore()?.into();
+        buffer.hidden_base = hidden_base;
+        buffer.hidden = hidden
             .into_iter()
             .map(HiddenBucketCheckpointV1::restore)
             .collect();
-        for (i, (cursor, complete)) in saved.cursors.into_iter().zip(saved.completed).enumerate() {
+        for (i, (cursor, complete)) in cursors.into_iter().zip(saved.completed).enumerate() {
             buffer.candidates[i].cursor = cursor;
             buffer.candidates[i].active = complete.is_none();
             buffer.candidates[i].complete = complete;
             if buffer.candidates[i].active {
-                let path = day
-                    .checkpoint_root
-                    .join(format!("checkpoint-{:020}", published.generation))
-                    .join(format!("candidate-{i:06}.cbor"));
-                candidates.push(Some(std::fs::read(path)?));
+                candidates.push(Some(
+                    saved_candidates
+                        .remove(&format!("candidate-{i:06}.cbor"))
+                        .ok_or("完整日检查点缺少活动候选")?,
+                ));
             } else {
                 candidates.push(None);
             }
         }
         let core =
             data_pipeline_core::public_observation_core::PublicObservationCoreV1::read_checkpoint(
-                saved.core.as_slice(),
+                core.as_slice(),
             )?;
         let producer = DayProducerV1::restore(
             core,
             &files,
-            saved.producer.as_slice(),
+            source.as_slice(),
             config.read_page_rows,
             config.max_read_batch_bytes,
             config.scope.received_start_utc_ms..config.scope.received_end_utc_ms,
         )?;
-        (producer, Arc::new(RwLock::new(saved.catalog)))
+        (producer, Arc::new(RwLock::new(catalog)))
     } else {
         candidates.resize_with(day.candidates.len(), || None);
         let catalog = Arc::new(RwLock::new(HistoricalRuntimeCatalogV1 {
@@ -334,7 +391,7 @@ where
             let rules = rules.clone();
             let hub = hub.clone();
             let metadata = serde_json::json!({"config":candidate,"day":day,"input_set_identity_sha256":input_identity,"source_identity_sha256":source_identity,
-                "source_manifests":admitted.iter().map(|d|(d.utc_day(),d.manifest_sha256())).collect::<Vec<_>>(),"rules_file_sha256":rules.file_sha256(),"entry":"original-parquet-day-v1"});
+                "source_manifests":admitted.iter().map(|d|(d.utc_day(),d.manifest_sha256())).collect::<Vec<_>>(),"rules_file_sha256":rules.file_sha256(),"maker_model_version":rules.maker_model_version_for(contracts::SimCallerRoleV1::HistoricalBacktest),"entry":"original-parquet-day-v1"});
             workers.push(scope.spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                     || -> Result<_, MaterialError> {
@@ -343,6 +400,8 @@ where
                             let mut buffer = hub.0.0.lock().unwrap();
                             buffer.candidates[index].source_health =
                                 Some(strategy.uses_source_health());
+                            buffer.candidates[index].requirements =
+                                Some(strategy.observation_requirements());
                             hub.0.1.notify_all();
                         }
                         let mut saved: Option<CandidateCheckpointV1<S::Diagnostics>> = saved
@@ -400,6 +459,8 @@ where
                 result.map(|value| (index, value))
             }));
         }
+        #[cfg(feature = "stage-timing")]
+        let mut stages = crate::stage_timing::StageTimings::new("day_producer".into());
         let started = Instant::now();
         let mut progress = Instant::now();
         let mut last_checkpoint = Instant::now();
@@ -416,49 +477,78 @@ where
                     if day.progress_interval_seconds>0 && progress.elapsed()>=Duration::from_secs(day.progress_interval_seconds) {
                         eprintln!("日作业: phase={}, inputs={count}, active_candidates={}, retained_public_groups={}, retained_hidden_buckets={}, elapsed_seconds={}, total_inputs=unknown",if ended {"consuming"} else if buffer.requested.is_some() {"checkpoint"} else {"producing"},buffer.candidates.iter().filter(|c|c.active).count(),buffer.public.len(),buffer.hidden.len(),started.elapsed().as_secs());progress=Instant::now();
                     }
-                    if buffer.candidates.iter().any(|c|c.active&&(!c.runtime_started||c.source_health.is_none())) {let _=hub.0.1.wait_timeout(buffer,Duration::from_millis(20)).unwrap();continue;}
+                    if buffer.candidates.iter().any(|c|c.active&&(!c.runtime_started||c.source_health.is_none()||c.requirements.is_none())) {let _=measure_stage!(stages, "producer_wait_startup_checkpoint_or_completion", hub.0.1.wait_timeout(buffer,Duration::from_millis(20))).unwrap();continue;}
                     if buffer.candidates.iter().any(|c|c.source_health==Some(true)) {producer.core.enable_source_progress();}
+                    if count == 0 {
+                        producer.core.set_observation_requirements(contracts::PublicObservationRequirementsV1 {
+                            binance_depth_quantities: buffer.candidates.iter().filter(|c|c.active).any(|c|c.requirements.is_some_and(|r| r.binance_depth_quantities)),
+                        });
+                    }
                     let complete=buffer.candidates.iter().all(|c|!c.active);
+                    let budget_due=options.budget_save_after.is_some_and(|after| options.started.elapsed()>=after);
+                    if budget_due && !complete { buffer.budget_stop_requested=true; }
                     let due=(day.checkpoint_interval_seconds>0 && last_checkpoint.elapsed()>=Duration::from_secs(day.checkpoint_interval_seconds))
                         ||day.checkpoint_every_applied_inputs.is_some_and(|n|n>0 && count-last_count>=n);
-                    if buffer.requested.is_none() && (due||complete) {buffer.requested=Some(generation);hub.0.1.notify_all();}
-                    let ready=buffer.requested.is_some() && buffer.candidates.iter().all(|c|!c.active||c.ready==buffer.requested);
+                    if buffer.requested.is_none() && (due||complete||buffer.budget_stop_requested) {buffer.requested=Some(generation);hub.0.1.notify_all();}
+                    let ready=buffer.requested.is_some() && buffer.candidates.iter().all(|c|!c.active||c.ready.as_ref().map(|(g,_)|*g)==buffer.requested);
                     if ready {
-                        let mut core=Vec::new();producer.core.write_checkpoint(&mut core)?;
-                        let mut source=Vec::new();producer.write_checkpoint(&mut source)?;
-                        // 共用组只保留当前消费者仍需的范围；前一完整点已经独立保存在磁盘。
+                        #[cfg(feature = "stage-timing")]
+                        let checkpoint_started = Instant::now();
+                        // 前一完整点独立保存；完成后只保留版本、输入、计数和完整报告。
                         let completed=buffer.candidates.iter().map(|c|c.complete.clone()).collect::<Vec<_>>();
-                        #[derive(Serialize)] struct Saved<'a> {format:&'a str,identity:&'a str,generation:u64,applied:u64,core:Vec<u8>,producer:Vec<u8>,catalog:&'a HistoricalRuntimeCatalogV1,
-                            public_base:usize,public:Vec<checkpoint::Delivery>,hidden_base:usize,hidden:Vec<HiddenBucketCheckpointV1>,cursors:Vec<CandidateCursorV1>,completed:&'a [Option<serde_json::Value>]}
-                        let catalog=catalog.read().unwrap();
-                        write_cbor(&day.checkpoint_root.join(format!("checkpoint-{generation:020}")).join("day.cbor"),&Saved {format:DAY_CHECKPOINT_FORMAT,identity:&identity,generation,applied:count,core,producer:source,catalog:&catalog,
-                            public_base:buffer.public_base,public:buffer.public.iter().map(checkpoint::Delivery::capture).collect(),hidden_base:buffer.hidden_base,hidden:buffer.hidden.iter().map(HiddenBucketCheckpointV1::capture).collect(),cursors:buffer.candidates.iter().map(|c|c.cursor.clone()).collect(),completed:&completed})?;
-                        publish(&day.checkpoint_root,&identity,generation,day.candidates.len(),&completed)?;
+                        let catalog = catalog.read().unwrap();
+                        let state = if complete {
+                            DayCheckpointStateV2::Complete
+                        } else {
+                            let mut core=Vec::new();producer.core.write_checkpoint(&mut core)?;
+                            let mut source=Vec::new();producer.write_checkpoint(&mut source)?;
+                            DayCheckpointStateV2::Running {
+                                core, producer: source, catalog: &*catalog,
+                                public_base:buffer.public_base, public:checkpoint::DeliveryBatch::capture(buffer.public.iter()),
+                                hidden_base:buffer.hidden_base, hidden:buffer.hidden.iter().map(HiddenBucketCheckpointV1::capture).collect(),
+                                cursors:buffer.candidates.iter().map(|c|c.cursor.clone()).collect(),
+                            }
+                        };
+                        let sha256 = write_cbor(&day.checkpoint_root.join(format!("checkpoint-{generation:020}")).join("day.cbor"),
+                            &DayCheckpointV1 { format:DAY_CHECKPOINT_FORMAT.into(),identity:identity.clone(),generation,applied:count,state,completed })?;
+                        let mut files = vec![CheckpointFileV1 {path:"day.cbor".into(),sha256}];
+                        for (index,candidate) in buffer.candidates.iter().enumerate().filter(|(_,c)|c.active) {
+                            files.push(CheckpointFileV1 {path:format!("candidate-{index:06}.cbor"),sha256:candidate.ready.as_ref().unwrap().1.clone()});
+                        }
+                        publish(&day.checkpoint_root,&identity,generation,files)?;
+                        #[cfg(feature = "stage-timing")]
+                        stages.record("checkpoint_capture_write_and_publish", checkpoint_started.elapsed());
+                        buffer.budget_stopped=buffer.budget_stop_requested && !complete;
                         buffer.requested=None;generation+=1;buffer.generation=generation;hub.0.1.notify_all();last_checkpoint=Instant::now();last_count=count;
-                        if complete {return Ok(());}
+                        if complete || buffer.budget_stopped {return Ok(());}
                     }
-                    if ended {let _=hub.0.1.wait_timeout(buffer,Duration::from_millis(20)).unwrap();continue;}
+                    if ended {let _=measure_stage!(stages, "producer_wait_startup_checkpoint_or_completion", hub.0.1.wait_timeout(buffer,Duration::from_millis(20))).unwrap();continue;}
                     // 已有可消费材料时让慢候选追上；等待必要完整隐藏桶时继续供料，避免互等。
-                    if buffer.public.len()+buffer.hidden.len()>lead && buffer.candidates.iter().any(|c|c.active&&!c.waiting&&(buffer.requested.is_none()||c.ready!=buffer.requested)) {
-                        let _=hub.0.1.wait_timeout(buffer,Duration::from_millis(10)).unwrap();continue;
+                    if buffer.public.len()+buffer.hidden.len()>lead && buffer.candidates.iter().any(|c|c.active&&!c.waiting&&(buffer.requested.is_none()||c.ready.as_ref().map(|(g,_)|*g)!=buffer.requested)) {
+                        let _=measure_stage!(stages, "producer_backpressure_wait", hub.0.1.wait_timeout(buffer,Duration::from_millis(10))).unwrap();continue;
                     }
                 }
-                let Some(mut next)=producer.next_applied()? else {ended=true;let mut buffer=hub.0.0.lock().unwrap();buffer.production=ProductionV1::Ended;hub.0.1.notify_all();continue;};
+                let Some(mut next)=measure_stage!(stages, "next_applied_including_decode_core_hidden", producer.next_applied())? else {ended=true;let mut buffer=hub.0.0.lock().unwrap();buffer.production=ProductionV1::Ended;hub.0.1.notify_all();continue;};
+                #[cfg(feature = "stage-timing")]
+                let publish_started = Instant::now();
                 count+=1;
-                {
+                let new_markets = next.applied.closed_groups.iter().flat_map(|g|g.records.iter()).filter_map(|fact| {
+                    if let contracts::PublicBusinessPayloadV1::MarketFact { market, payload: contracts::CanonicalMarketFactPayloadV1::FixedIdentity { assets } } = &fact.payload {
+                        Some((market, assets))
+                    } else { None }
+                }).collect::<Vec<_>>();
+                if next.initialization_binding.is_some() || !new_markets.is_empty() {
                     let mut catalog=catalog.write().unwrap();
                     if let Some(binding)=&next.initialization_binding {catalog.initialization.input_positions.insert(next.input.input_position);catalog.initialization.source_message_ids.insert(binding.source_message_id.0.clone());}
-                    for market in producer.core.fixed_markets() {
-                        if !catalog.markets.contains_key(&market.condition_id.0) {
-                            let context=producer.core.pm_context(&market.condition_id.0).ok_or("原登记市场缺少 PM 上下文")?;
-                            let assets=context.assets.into_iter().map(|a|a.asset).collect::<Vec<_>>().try_into().map_err(|_|"原登记市场不是二元市场")?;
-                            catalog.markets.insert(market.condition_id.0.clone(),PlatformMarketV1::try_new(market.clone(),assets)?);
-                        }
+                    for (market, assets) in new_markets {
+                        catalog.markets.entry(market.condition_id.0.clone()).or_insert(PlatformMarketV1::try_new(market.clone(), assets.clone().try_into().map_err(|_|"原登记市场不是二元市场")?)?);
                     }
                 }
                 let groups=PreparedPublicGroupV1::from_day(&mut next);
                 let hidden=next.hidden.into_iter().map(AcceptedHiddenStepBucketV1::from_day);
                 let mut buffer=hub.0.0.lock().unwrap();buffer.public.extend(groups);buffer.hidden.extend(hidden);hub.0.1.notify_all();
+                #[cfg(feature = "stage-timing")]
+                stages.record("delivery_assembly_and_publish_including_lock", publish_started.elapsed());
             }
         })).unwrap_or_else(|_|Err("日公共生产异常退出".into()));
         if let Err(error) = &production {
@@ -505,6 +595,13 @@ where
         candidates.sort_by_key(|(index, _)| *index);
         let candidates = candidates.into_iter().map(|(_, value)| value).collect();
         Ok(HistoricalDayResultV1 {
+            published_checkpoint: if options.research_summary {
+                Some(serde_json::from_reader(std::fs::File::open(
+                    day.checkpoint_root.join("checkpoint.json"),
+                )?)?)
+            } else {
+                None
+            },
             input_set_identity_sha256: input_identity,
             public_applied_inputs: count,
             candidates,

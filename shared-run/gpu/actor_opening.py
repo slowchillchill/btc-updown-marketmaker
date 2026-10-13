@@ -1,10 +1,22 @@
 """原SIM→NOE→Ledger冷开户结果机械安装；此后仅保留GPU活动账户。"""
 from dataclasses import dataclass,replace
 from fractions import Fraction
+from pathlib import Path
 import json
 import torch
 from queues import Numbers,ExactInt,ExactRational
 from actor_sources import install_actor_sources
+
+
+def load_actor_ledger_platform():
+    """冷开户和活动恢复共用原固定Ledger类型身份，不执行开户。"""
+    import importlib.util,sys
+    from pathlib import Path
+    name='actor_opening_ledger_platform'
+    if name not in sys.modules:
+        spec=importlib.util.spec_from_file_location(name,Path(__file__).resolve().parents[2]/'ledger/gpu/platform.py')
+        module=importlib.util.module_from_spec(spec);sys.modules[name]=module;spec.loader.exec_module(module)
+    return sys.modules[name]
 
 
 @dataclass(frozen=True)
@@ -95,6 +107,11 @@ def open_actor_root(public,hidden,codec,request,*,page_groups=256,hidden_page_bu
         {'market':by_condition[condition],'assets':[asset for asset in block.assets
             if by_token[asset['token_id']][0]==condition]} for condition in conditions]}}
     authority=json.loads(codec.open_actor_account_v2(json.dumps(request)))
+    # 规则分派只取原Native权威结果；GPU执行安装前取得对应的完整typed输入。
+    # Native此处只冷开户，没有消费hidden步骤；恢复不经过此入口。
+    if authority['maker_model']=='PUBLIC_TRADE_CONSERVATIVE_FIFO_V1':
+        hidden=hidden.for_public_trade(Path(request['log_path']).with_suffix('.hidden-v2'))
+        block=HiddenPmBlock.from_prepared(hidden.page(0,min(hidden_page_buckets,len(hidden.arrays['bucket_times']))))
     projection=authority['ledger_projection'];balance=projection['platform_confirmed_projection']
     sequence,account_sequence,private_sequence,batch_sequence=authority['session_sequences']
     def build():
@@ -103,17 +120,14 @@ def open_actor_root(public,hidden,codec,request,*,page_groups=256,hidden_page_bu
         fill=FillRecord.create(integer([1]),integer([1]),blank,zero,zero,~yes,request['finality_policy']['normal_path'])
         account=replace(PlatformAccountState.open(integer([int(Fraction(balance['cash_pusd'])*1000000)]),roots),
             next_sequence=integer([account_sequence]))
-        runtime=BaseSimRuntime(block.empty_state(segment_capacity=caps.segments),MutationRequests.empty(blank,capacity=caps.requests,action_capacity=caps.request_actions),
+        runtime=BaseSimRuntime(block.empty_state(segment_capacity=caps.segments,maker_model=authority["maker_model"]),MutationRequests.empty(blank,capacity=caps.requests,action_capacity=caps.request_actions),
             BaseOrders.empty(quantity,capacity=caps.orders),account,FillPool.empty(fill,capacity=caps.fills),
             RebateCoordinator(MakerDays.empty(t([list(range(len(conditions)))]),
                 t([[by_condition[c]['window']['end_at_utc_ms'] for c in conditions]]),
                 t([[True]*len(conditions)],torch.bool),fills=caps.calendar_fills,days=caps.calendar_days),TakerDays.empty(1,device,fills=caps.calendar_fills,days=caps.calendar_days)),
             input_frontier=InputCommitFrontier(integer([sequence]),request['session']['run_id'],request['session']['session_id']),
             post_results=PostResults.empty(quantity,caps.result_requests,caps.result_items))
-        import importlib.util,sys
-        from pathlib import Path
-        spec=importlib.util.spec_from_file_location('actor_opening_ledger_platform',Path(__file__).resolve().parents[2]/'ledger/gpu/platform.py')
-        module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        module=load_actor_ledger_platform()
         names=('cash_pusd','available_pusd','principal_encumbrance_pusd','immediate_taker_fee_encumbrance_pusd',
             'maker_rebate_receivable_pusd','taker_rebate_receivable_pusd','maker_rebate_locked_remainder_pusd','taker_rebate_locked_remainder_pusd')
         platform=module.PlatformBalances.open(rational([balance[name] for name in names]),rational(['0']*len(tokens)),

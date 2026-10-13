@@ -244,10 +244,12 @@ pub enum PreparedCanonicalInputV1<'a> {
     },
     BinanceDepthSnapshot {
         row: &'a crate::typed_raw::BinanceDepthSnapshotRow,
+        depth: crate::reduction::PreparedBinanceDepthV1,
         source: crate::pm_reduction::PreparedPmEvidenceV1<contracts::SourceEvidenceRefV3>,
     },
     BinanceDepthUpdate {
         row: &'a crate::typed_raw::BinanceDepthUpdateRow,
+        depth: crate::reduction::PreparedBinanceDepthV1,
         source: crate::pm_reduction::PreparedPmEvidenceV1<contracts::SourceEvidenceRefV3>,
     },
     BinanceAggregateTrade {
@@ -408,12 +410,14 @@ fn prepare_ingress_view_v1<'a>(
         TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(row)) => {
             PreparedCanonicalInputV1::BinanceDepthSnapshot {
                 row,
+                depth: crate::reduction::PreparedBinanceDepthV1::prepare(&row.bids, &row.asks)?,
                 source: prepared_source()?,
             }
         }
         TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(row)) => {
             PreparedCanonicalInputV1::BinanceDepthUpdate {
                 row,
+                depth: crate::reduction::PreparedBinanceDepthV1::prepare(&row.bids, &row.asks)?,
                 source: prepared_source()?,
             }
         }
@@ -459,6 +463,39 @@ fn prepare_ingress_view_v1<'a>(
         reference_selection: None,
         reference_selection_market: None,
     })
+}
+
+/// 冷端选择真实初始身份；普通后继需要前序，候选身份的损坏沿原归约错误传播。
+pub fn validate_metadata_initial_identity_v1(row: &TypedRawRowV2) -> Result<bool, crate::ContractError> {
+    use crate::{reduction::PolymarketMetadataReducer, typed_raw::PolymarketMetadataRowKind};
+    let metadata = match row {
+        TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(row)) => row,
+        TypedRawRowV2::PolymarketMarketMetadataV6(row) => match row.as_ref() {
+            PolymarketMarketMetadataV6Input::Existing(row) => row,
+            _ => return Ok(false),
+        },
+        _ => return Ok(false),
+    };
+    if metadata.metadata_row_kind != PolymarketMetadataRowKind::MetadataSnapshot
+        && !(crate::reduction::is_initial_gamma_transition(metadata)
+            && metadata.source_evidence_payload_json.is_some()) {
+        return Ok(false);
+    }
+    let recorded = RecordedIngressV1 {
+        input_stream_id: "metadata-initial-identity".into(), input_position: 0,
+        ingress: DptIngressV1::Message {
+            row: row.clone(),
+            source_evidence: crate::public_reference::source_evidence_v3_from_typed_raw_v2(row)?,
+        },
+        dependency_record_refs: Vec::new(),
+    };
+    let prepared = prepare_ingress_v1(&recorded, None, &BTreeMap::new(), &[], "metadata-initial-identity")?;
+    let PreparedCanonicalInputV1::Metadata(prepared) = prepared.current else { unreachable!() };
+    PolymarketMetadataReducer::compute_identity_snapshot(
+        crate::reduction::PolymarketMetadataInputV1 { row: prepared.row.clone(), evidence: prepared.source },
+        prepared.outcomes, prepared.initial_tick, "metadata-initial-identity",
+    )?;
+    Ok(true)
 }
 
 /// 来源准备借用唯一核心的当前身份，不构造第二份市场状态。

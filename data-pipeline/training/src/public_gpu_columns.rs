@@ -155,6 +155,7 @@ fn inline_payload_type(payload: &PublicBusinessPayloadV1) -> RecordingResult<&'s
                 RtdsObservedAnomalyClassificationV1::InvalidTimestamp => "reference.anomaly_timestamp",
             },
         },
+        PublicBusinessPayloadV1::BinanceDepthReference(_) => return Err("公共GPU列需要完整Binance深度事实或原前缀深度引用".into()),
         PublicBusinessPayloadV1::PolymarketMessage(_) => return Err("紧凑PM事实应引用原输入".into()),
     })
 }

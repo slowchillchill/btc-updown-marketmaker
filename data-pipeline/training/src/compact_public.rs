@@ -31,7 +31,8 @@ pub struct CompactPublicPreparationConfigV1 {
     pub initialization: Option<crate::historical_initialization::MetadataInitializationConfigV1>,
 }
 
-const SCHEMA: &str = "public_compact_facts_v4_reference_selection_zstd";
+const SCHEMA: &str = "public_compact_facts_v5_received_range_reference_selection_zstd";
+const REFERENCE_V4_SCHEMA: &str = "public_compact_facts_v4_reference_selection_zstd";
 const ZSTD_V3_SCHEMA: &str = "public_compact_facts_v3_zstd";
 const LEGACY_SCHEMA: &str = "public_compact_facts_v2";
 
@@ -46,6 +47,9 @@ pub struct CompactFileV1 {
 #[serde(deny_unknown_fields)]
 pub struct PublicCompactManifestV1 {
     pub schema_version: String,
+    /// 原准备选择的received右开范围；旧材料没有可证明的覆盖。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_range_utc_ms: Option<std::ops::Range<i64>>,
     pub header: PublicInputStreamHeaderV1,
     pub applied_prefix: AppliedIngressPrefixV1,
     pub inputs: u64,
@@ -262,13 +266,19 @@ impl PublicCompactWriterV1 {
             sources: new_file(&pending, "source_bindings.jsonl")?, pending,
             payload_bytes: 0,
             manifest: PublicCompactManifestV1 {
-                schema_version: SCHEMA.into(),
+                schema_version: SCHEMA.into(), received_range_utc_ms: None,
                 applied_prefix: AppliedIngressPrefixV1 {
                     input_stream_id: header.input_stream_id.clone(), next_input_position: 0,
             }, header, inputs: 0, groups: 0, facts: 0, pm_packets: 0, pm_steps: 0,
             reports: 0, normal_end: false, files: vec![],
             }, failed: false,
         })
+    }
+    pub fn create_for_received_range(target: &Path, header: PublicInputStreamHeaderV1,
+                                     received_range: std::ops::Range<i64>) -> RecordingResult<Self> {
+        let mut writer = Self::create(target, header)?;
+        writer.manifest.received_range_utc_ms = Some(received_range);
+        Ok(writer)
     }
     pub fn source_binding(&mut self, source: &SourceArtifactBindingV1) -> RecordingResult<()> {
         // 此材料属于输入身份交接，不能把它充当新数据验收。
@@ -522,7 +532,7 @@ impl PublicCompactReaderV1 {
     ) -> RecordingResult<Self> {
         progress(CompactPublicationProgressV1 {stage:"read_manifest",member:"manifest.json",completed_bytes:0,total_bytes:None});
         let manifest: PublicCompactManifestV1 = serde_json::from_reader(File::open(root.join("manifest.json"))?)?;
-        if !matches!(manifest.schema_version.as_str(), SCHEMA | ZSTD_V3_SCHEMA | LEGACY_SCHEMA) || !manifest.normal_end || manifest.inputs == 0
+        if !matches!(manifest.schema_version.as_str(), SCHEMA | REFERENCE_V4_SCHEMA | ZSTD_V3_SCHEMA | LEGACY_SCHEMA) || !manifest.normal_end || manifest.inputs == 0
             || manifest.applied_prefix.next_input_position != manifest.inputs
             || manifest.applied_prefix.input_stream_id != manifest.header.input_stream_id {
             return Err(io::Error::other("紧凑材料完成凭据不合法").into());
@@ -586,7 +596,7 @@ impl PublicCompactReaderV1 {
         if packet.input.input_stream_id != self.manifest.header.input_stream_id || packet.input.input_position != self.next {
             return Err(io::Error::other("材料packet输入位置错误").into());
         }
-        if self.manifest.schema_version != SCHEMA && packet.reference_preparation.is_some() {
+        if !matches!(self.manifest.schema_version.as_str(), SCHEMA | REFERENCE_V4_SCHEMA) && packet.reference_preparation.is_some() {
             return Err(io::Error::other("旧schema不能声明新参考选择能力").into());
         }
         let current_reference = if let DptIngressV1::Message {row:TypedRawRowV2::PolymarketRtdsChainlinkTwap(row),source_evidence} = &packet.input.ingress {
@@ -759,6 +769,7 @@ pub fn repack_public_compact_v1(
         || serde_json::to_value(&reader.manifest.header)? != serde_json::to_value(&writer.manifest.header)? {
         return Err(io::Error::other("重编码须从同一材料头的完整起点开始").into());
     }
+    writer.manifest.received_range_utc_ms = reader.manifest.received_range_utc_ms.clone();
     for source in serde_json::Deserializer::from_reader(reader.sources.try_clone()?)
         .into_iter::<SourceArtifactBindingV1>() {
         writer.source_binding(&source?)?;
@@ -1232,6 +1243,54 @@ mod tests {
                     .arg(validator).arg(&target).status().unwrap();
                 assert!(status.success());
             }
+        }
+    }
+
+    #[test]
+    fn compact_received_range_repack_and_legacy_versions() {
+        let temp=tempfile::tempdir().unwrap();
+        let header=PublicInputStreamHeaderV1 {
+            input_stream_id:"received-range-compatibility".into(),canonical_rule_version:"rule-v1".into(),
+            observation_version:"public-observation-v1".into(),ordering_version:"original-input-v1".into(),
+            input_scope:"constructed-finite".into(),max_pending_ws_terminals:2,initial_state:PublicInitialStateV1::Empty,
+        };
+        for schema in [SCHEMA,REFERENCE_V4_SCHEMA,ZSTD_V3_SCHEMA,LEGACY_SCHEMA] {
+            let target=temp.path().join(schema);
+            let mut core=PublicObservationCoreV1::new(header.clone()).unwrap();
+            let input=RecordedIngressV1 {input_stream_id:header.input_stream_id.clone(),input_position:0,
+                ingress:DptIngressV1::EndOfInput,dependency_record_refs:vec![]};
+            let prepared=prepare_public_ingress_v1(&core,&input,&BTreeMap::new(),&[]).unwrap();
+            let applied=core.push_facts(&prepared).unwrap();
+            let mut writer=if schema==SCHEMA {
+                PublicCompactWriterV1::create_for_received_range(&target,header.clone(),900..1450)
+            } else {PublicCompactWriterV1::create(&target,header.clone())}.unwrap();
+            // v4原参考选择记录即使没有选中的参考也保留该能力。
+            if matches!(schema,SCHEMA|REFERENCE_V4_SCHEMA) {writer.push_prepared(&input,&prepared,&applied).unwrap();}
+            else {writer.push(&input,&applied).unwrap();}
+            writer.publish().unwrap();
+            let mut manifest:PublicCompactManifestV1=serde_json::from_slice(&fs::read(target.join("manifest.json")).unwrap()).unwrap();
+            manifest.schema_version=schema.into();
+            if schema==LEGACY_SCHEMA {
+                let payload=target.join("packet_payload.bin");
+                let decoded=zstd::bulk::decompress(&fs::read(&payload).unwrap(),1<<20).unwrap();
+                fs::write(&payload,&decoded).unwrap();
+                fs::write(target.join("packet_offsets.u64le"),[0_u64.to_le_bytes(),(decoded.len() as u64).to_le_bytes()].concat()).unwrap();
+                for item in &mut manifest.files {
+                    item.bytes=fs::metadata(target.join(&item.name)).unwrap().len();
+                    item.sha256=file_sha256(&target.join(&item.name)).unwrap();
+                }
+            }
+            fs::write(target.join("manifest.json"),serde_json::to_vec(&manifest).unwrap()).unwrap();
+            let mut reader=PublicCompactReaderV1::open(&target,1<<20).unwrap();
+            assert_eq!(reader.manifest.received_range_utc_ms,if schema==SCHEMA {Some(900..1450)}else{None});
+            let repacked=temp.path().join(format!("repacked-{schema}"));
+            let mut writer=PublicCompactWriterV1::create(&repacked,header.clone()).unwrap();
+            repack_public_compact_v1(&mut reader,&mut writer,|_|{}).unwrap();writer.publish().unwrap();
+            let mut reader=PublicCompactReaderV1::open(&repacked,1<<20).unwrap();
+            assert_eq!(reader.manifest.received_range_utc_ms,manifest.received_range_utc_ms);
+            let packet=reader.next_packet().unwrap().unwrap();
+            assert_eq!(packet.reference_preparation.is_some(),matches!(schema,SCHEMA|REFERENCE_V4_SCHEMA));
+            assert_eq!(packet.input.input_position,0);assert!(reader.next_packet().unwrap().is_none());
         }
     }
 

@@ -63,6 +63,7 @@ pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error
         let snapshot = Snapshot {
             label: config.label.clone(),
             report,
+            report_provenance: load_engineering_projection(config.report_provenance.as_deref()),
             research: research.status(),
             existing_source: existing.status(),
             report_kind: config.report_kind,

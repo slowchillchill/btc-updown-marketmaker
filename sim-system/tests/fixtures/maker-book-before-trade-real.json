@@ -1,0 +1,79 @@
+[
+  {
+    "collector_admission_sequence": 24680353,
+    "collector_admission_time_utc_ms": 1789171204793,
+    "event": {
+      "price_changes": [
+        {
+          "asset_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+          "best_ask": "0.51",
+          "best_bid": "0.5",
+          "price": "0.5",
+          "side": "BUY",
+          "size": "65"
+        },
+        {
+          "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+          "best_ask": "0.5",
+          "best_bid": "0.49",
+          "price": "0.5",
+          "side": "SELL",
+          "size": "65"
+        }
+      ]
+    },
+    "event_type": "price_change",
+    "file_row": 1181,
+    "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+    "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+    "timestamp": 1789171204782,
+    "timestamp_received": 1789171204793
+  },
+  {
+    "collector_admission_sequence": 24680358,
+    "collector_admission_time_utc_ms": 1789171204804,
+    "event": {
+      "price_changes": [
+        {
+          "asset_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+          "best_ask": "0.51",
+          "best_bid": "0.49",
+          "price": "0.5",
+          "side": "BUY",
+          "size": "0"
+        },
+        {
+          "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+          "best_ask": "0.51",
+          "best_bid": "0.49",
+          "price": "0.5",
+          "side": "SELL",
+          "size": "0"
+        }
+      ]
+    },
+    "event_type": "price_change",
+    "file_row": 1186,
+    "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+    "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+    "timestamp": 1789171204789,
+    "timestamp_received": 1789171204804
+  },
+  {
+    "collector_admission_sequence": 24680430,
+    "collector_admission_time_utc_ms": 1789171204890,
+    "event": {
+      "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+      "fee_rate_bps": "0",
+      "price": "0.5",
+      "side": "BUY",
+      "size": "65"
+    },
+    "event_type": "last_trade_price",
+    "file_row": 1258,
+    "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+    "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+    "timestamp": 1789171204876,
+    "timestamp_received": 1789171204890
+  }
+]

@@ -28,6 +28,7 @@ import weakref,gc
 
 def stored_actual(value):
     if value is None:return None
+    if isinstance(value,(bool,int,float,str)):return value
     if isinstance(value,torch.Tensor):return value.detach().cpu().tolist()
     if hasattr(value,'words') and hasattr(value,'sign'):return {'integer':values(value),'sign':value.sign.cpu().tolist(),'fault':value.fault.cpu().tolist()}
     if hasattr(value,'numerator') and hasattr(value,'denominator'):return {'rational':[str(x) for x in amounts(value)]}
@@ -60,10 +61,172 @@ def diagnostic_columns(value,names):
     return {name:plain(getattr(value,name)) for name in names}
 
 
+def cost_observation_case(root,artifact,stage,observations,senders,model_records,completed_records,evidence,received_checks,resume_validation):
+    """原有限Root的宿主归属计时；分项允许嵌套，仅整段两端同步。"""
+    from public_ledger import PublicLedgerState
+    from public_trade_loop import _CapturedTrade
+    from maker_projection_loop import _CapturedMakerProjection
+    clock=root.clock;stats={};restore=[];segments=[];begins={};snapshot_seconds=0.
+    def measured(name,call):
+        def invoke(*args,**kwargs):
+            start=time.perf_counter()
+            try:return call(*args,**kwargs)
+            finally:
+                seconds=time.perf_counter()-start
+                row=stats.setdefault(name,dict(calls=0,host_seconds=0.,max_host_seconds=0.))
+                row['calls']+=1;row['host_seconds']+=seconds;row['max_host_seconds']=max(row['max_host_seconds'],seconds)
+        return invoke
+    def patch(owner,name,label):
+        old=getattr(owner,name);setattr(owner,name,measured(label,old));restore.append((owner,name,old))
+    handlers=clock.handlers.copy()
+    for phase,handler in handlers.items():clock.handlers[phase]=measured('sim_handler_'+str(phase),handler)
+    patch(PublicLedgerState,'append_batches','public_append_batches')
+    patch(clock,'receive_first','public_delivery')
+    patch(PublicLedgerReceiver,'__call__','actual_ledger_receive')
+    patch(root.run,'receive','public_receive_with_validation')
+    patch(root,'freeze','actual_freeze');patch(root.run,'freeze','freeze_with_validation')
+    for name in ('start','finish','send'):patch(root.models,name,'model_'+name)
+    for name in ('on_started','on_completed'):patch(root.models,name,'validation_'+name)
+    patch(_CapturedTrade,'__init__','cold_public_trade_capture')
+    patch(_CapturedMakerProjection,'__init__','cold_maker_projection_capture')
+    def progress(name,**row):
+        if name in ('sim_phase_begin','continuous_event_begin'):
+            key=name+':'+str(row.get('phase',row.get('kind')));begins[key]=begins.get(key,0)+1
+        measured('progress_with_validation',stage)(name,**row)
+    def snapshot(endpoint):
+        nonlocal snapshot_seconds
+        started=time.perf_counter();orders=clock.runtime.orders
+        out=dict(endpoint=endpoint,open_base_units=values(orders.quantities.open_base_units),
+            pending_base_units=values(orders.quantities.pending_maker_depletion_base_units),matched_base_units=values(orders.quantities.matched_base_units),
+            order_occupied=orders.occupied.cpu().tolist(),assets=orders.assets.cpu().tolist(),accepted_at=orders.accepted_at.cpu().tolist(),
+            source_position=clock.source.position.cpu().tolist(),input_sequence=values(clock.runtime.input_frontier.next_sequence),
+            ledger_entry=values(clock.public.ledger.current_entry_sequence),ledger_prefix=values(clock.public.ledger.current_local_prefix),
+            platform_prefix=values(clock.public.ledger.platform.platform_source_prefix),cash=[str(x) for x in amounts(clock.public.ledger.platform.balances)],
+            platform_outcomes=[str(x) for x in amounts(clock.public.ledger.platform.outcomes)],
+            ledger_fault=clock.public.ledger.fault.cpu().tolist(),account_fault=clock.runtime.account.fault.cpu().tolist(),
+            order_fault=orders.fault.cpu().tolist(),public_at=clock.gates.public_visible_at.cpu().tolist(),
+            next_observation=root.run.next_observation.cpu().tolist(),business_random=root.random.counter.cpu().tolist())
+        receipt=clock.runtime.input_frontier.public_receipt
+        assert receipt.source is clock.source.prepared
+        out['public_receipt']=dict(positions=receipt.positions.cpu().tolist(),input_sequence=values(receipt.input_sequence),original_reference=receipt.original_reference(0))
+        assert not any(out['ledger_fault']+out['account_fault']+out['order_fault']),out
+        snapshot_seconds+=time.perf_counter()-started;return out
+    # Root/Native冷装配和材料准备在区间外；原initialize/prehistory在首段内。
+    torch.cuda.synchronize();whole_start=time.perf_counter()
+    try:
+        for endpoint in (1301,1501,1535,1743,1792,1850,2001):
+            start=time.perf_counter();attempts=0
+            while True:
+                attempts+=1;advance=root.run.advance_before(T([endpoint]),T([True],torch.bool),progress=progress)
+                if resume_validation(advance):continue
+                break
+            row=snapshot(endpoint);row.update(attempts=attempts,host_seconds=time.perf_counter()-start)
+            segments.append(row);progress('cost_observation_segment',**row)
+        assert [int(o.frozen.cutoff.cpu()[0]) for o in observations]==[1300,1400,1500,1600,1700,1800,1900]
+        assert [r['started'] for r in model_records]==[1300,1414,1528,1642,1756,1870]
+        assert sorted(completed_records)==[1300,1400,1500,1600,1700]
+        assert senders[1].control.execute_at.cpu().tolist()==[1528] and senders[0].control.execute_at.cpu().tolist()==[1534]
+        assert senders[0].receipt is not None and senders[1].receipt is not None
+        assert root.run.next_observation.cpu().tolist()==[2000]
+        assert any(task.completed_at is not None and task.completed_at.cpu().tolist()==[2084] for task in root.models.tasks)
+        assert not clock.public.waiting.received.logical_and(~clock.public.waiting.consumed).any().cpu().item()
+        assert all(row['resources_fit'] for row in received_checks if row['ready']==[True])
+        # 原独立预算：1742外部2份后本方1微份；1791外部2份后本方10份。
+        # 不预设自然批数；先保存真实订单量，再核队列扣减和累计确认。
+        (artifact/'cost-observation-state.json').write_text(json.dumps(segments,indent=2)+'\n')
+        baseline,micro,positive,received=(segments[i] for i in (2,3,4,5))
+        # 本区间无关闭；接纳的GTC matched/pending均为零，不能用接纳前open作耗损基线。
+        depletion=lambda row:sum(row['matched_base_units'])+sum(row['pending_base_units'])
+        assert depletion(micro)-depletion(baseline)==1,(baseline,micro)
+        assert depletion(positive)-depletion(micro)==10_000_000,(micro,positive)
+        assert micro['order_occupied']==positive['order_occupied'] and micro['accepted_at']==positive['accepted_at']
+        assert sum(micro['open_base_units'])-sum(positive['open_base_units'])==10_000_000,(micro,positive)
+        assert sum(received['matched_base_units'])-sum(baseline['matched_base_units'])==10_000_001 and sum(received['pending_base_units'])==0,(baseline,received)
+        assert received['platform_prefix']==[7]  # 1850仅有SIM确认；不得为验证提前领取。
+        batches=[]
+        for batch in clock.public.ledger.columns.projection_batches:
+            columns=batch.emitted.nonzero().cpu().tolist()
+            if columns:batches.append(dict(rows=[int(batch.rows[r,c].cpu()) for r,c in columns],
+                batch_sequences=values(batch.batch_sequences),record_ordinals=values(batch.record_ordinals),
+                private_sequences=values(batch.private_sequences),received_at=batch.received_at.cpu().tolist()))
+        # 只读原Ledger/NOE成员，定位1791的Maker fill，再关联其原经济列和首次领取。
+        from fields import decode_fields
+        ledger=clock.public.ledger;columns=ledger.columns;life=ledger.lifecycle;waiting=clock.public.waiting
+        positions,position_fault=run(lambda:decode_fields(columns.positions,
+            ['scalar','scalar','integer','integer'],torch.ones(columns.positions.size(0),dtype=torch.bool,device=columns.positions.device)))
+        assert position_fault.cpu().tolist()==[0]*columns.positions.size(0)
+        position_values=[positions[0].cpu().tolist(),positions[1].cpu().tolist(),values(positions[2]),values(positions[3])]
+        fills=values(life.fills)
+        maker_ids={fills[c] for _,c in ((life.schemas==8)&(life.trade_roles==1)&(life.trade_matched_at==1791)).nonzero().cpu().tolist()}
+        assert maker_ids
+        economic_members=[];maker_evidence=[];all_rows=[]
+        sequences=values(columns.sequences);outcome=amounts(columns.outcomes);balances=amounts(columns.balances)
+        for batch in columns.projection_batches:
+            batch_sequences=values(batch.batch_sequences);ordinals=values(batch.record_ordinals);private=values(batch.private_sequences)
+            for root_index,c in batch.emitted.nonzero().cpu().tolist():
+                row_ref=int(batch.rows[root_index,c].cpu());match=(columns.row_refs[root_index]==row_ref).nonzero().flatten().cpu().tolist()
+                assert len(match)==1,(row_ref,match)
+                column=match[0];i=root_index*batch.rows.size(1)+c
+                identity=[int(batch.context_slots[root_index,c].cpu()),int(batch.run_slots[root_index,c].cpu()),batch_sequences[i],ordinals[i]]
+                assert [value[column] for value in position_values]==identity
+                assert sequences[column]==values(batch.economic_sequences)[i]
+                fact=dict(row=row_ref,column=column,position=columns.positions[column].cpu().tolist(),identity=identity,
+                    private=private[i],platform_at=int(batch.platform_at[root_index,c].cpu()),received_at=int(batch.received_at[root_index,c].cpu()),
+                    first_available_at=int(waiting.available_at[root_index,column].cpu()),ledger_available_at=int(ledger.available_at[root_index,column].cpu()),
+                    received=bool(waiting.received[root_index,column].cpu()),consumed=bool(waiting.consumed[root_index,column].cpu()),
+                    applied=bool(ledger.applied[root_index,column].cpu()),schema=int(life.schemas[root_index,column].cpu()),
+                    fill=fills[column],economic_tag=int(life.economic_tags[root_index,column].cpu()),economic_enabled=bool(columns.enabled[root_index,column].cpu()),
+                    sequence=sequences[column],asset_index=int(columns.asset_indices[root_index,column].cpu()),
+                    outcome=str(outcome[column]),balances=[str(v) for v in balances[column*8:column*8+8]])
+                all_rows.append(fact)
+                if fact['fill'] in maker_ids and fact['schema']==8 and int(life.trade_roles[root_index,column].cpu())==1:maker_evidence.append(fact)
+                if fact['fill'] in maker_ids and fact['economic_enabled'] and fact['economic_tag']==6:economic_members.append(fact)
+        target_token=next(a['token_id'] for a in clock.source.prepared.columns['assets'] if a['outcome']['label']=='Down')
+        target_asset=root.directory.tokens.index(target_token)
+        ledger_report=dict(target_token=target_token,target_asset_index=target_asset,maker_fill_sequences=sorted(maker_ids),
+            economic_records=economic_members,trade_evidence=maker_evidence,all_noe_rows=all_rows,
+            baseline_outcomes=baseline['platform_outcomes'],final_outcomes=segments[-1]['platform_outcomes'],
+            baseline_balances=baseline['cash'],final_balances=segments[-1]['cash'],receive_checks=received_checks)
+        (artifact/'cost-observation-ledger.json').write_text(json.dumps(ledger_report,indent=2)+'\n')
+        assert economic_members and maker_evidence
+        for fact in economic_members:
+            assert fact['asset_index']==target_asset and fact['received'] and fact['consumed'] and fact['applied'],fact
+            assert fact['first_available_at']==fact['ledger_available_at'] and 1850<fact['first_available_at']<=2001,fact
+        assert sum((Fraction(row['outcome']) for row in economic_members),Fraction())==Fraction(10_000_001,1_000_000)
+        for asset,(before,after) in enumerate(zip(baseline['platform_outcomes'],segments[-1]['platform_outcomes'],strict=True)):
+            assert Fraction(after)-Fraction(before)==(Fraction(10_000_001,1_000_000) if asset==target_asset else 0)
+        # 其余已应用列本区间无现金变动；可直接核这批原经济列与原余额，不另归约账户。
+        maker_columns={row['column'] for row in economic_members}
+        other=[row for row in all_rows if row['economic_enabled'] and row['applied'] and row['sequence']>baseline['platform_prefix'][0] and row['column'] not in maker_columns]
+        assert all(Fraction(row['balances'][0])==0 for row in other),other
+        assert Fraction(segments[-1]['cash'][0])-Fraction(baseline['cash'][0])==sum((Fraction(row['balances'][0]) for row in economic_members),Fraction())
+        assert any(row['at']==[1870] and row['platform_prefix']==[9] for row in received_checks)
+        assert any(row['at']==[1947] and row['platform_prefix']==[10] for row in received_checks)
+        torch.cuda.synchronize();whole_seconds=time.perf_counter()-whole_start
+    finally:
+        clock.handlers=handlers
+        for owner,name,old in reversed(restore):setattr(owner,name,old)
+    native=Path(os.environ['CARGO_TARGET_DIR'])/'debug/libmodel_native_inputs.so'
+    report=dict(passed=True,segments=segments,calls=stats,begin_counts=begins,whole_seconds=whole_seconds,
+        snapshot_host_seconds=snapshot_seconds,natural_batches=batches,maker_ledger=ledger_report,completed_cutoffs_in_actual_retirement_order=completed_records,requests=[dict(at=int(s.control.execute_at.cpu()[0]),
+            input_sequence=values(s.receipt.input_sequence),body=s.requests) for s in senders if s.receipt is not None],
+        events=evidence,receive_checks=received_checks,native=dict(path=str(native),sha256=hashlib.sha256(native.read_bytes()).hexdigest()),
+        observations=[int(o.frozen.cutoff.cpu()[0]) for o in observations],target_end=False,
+        allocated_peak_bytes=torch.cuda.max_memory_allocated(),reserved_peak_bytes=torch.cuda.max_memory_reserved(),
+        scope='one original out-of-order-buy Root; no PPO; original callbacks and assertions included; initial Root/material preparation outside, initialize inside; two outer CUDA synchronizations only',
+        resource_scope='process allocator peaks since original cold installation reset; includes cold Root and interval, not driver/device-wide peak',
+        timing_basis='host calls overlap/nest and are not additive; includes validation, progress I/O and snapshots; Run12 already exited before this run; actual GPU/process snapshot in execution binding; no exclusive GPU attribution or throughput claim')
+    (artifact/'cost-observation-report.json').write_text(json.dumps(report,indent=2)+'\n')
+    stage('cost_observation_complete',whole_seconds=whole_seconds,segments=len(segments),target_end=False)
+    return report
+
+
 def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,receipt,intents,asks,taker,maker,codec,artifact,stage,*,second_buy=False,assembled,root_runtime=None):
     evidence=[];original_stage=stage;page_changes=0;hidden_pages=[]
     receiver=PublicLedgerReceiver() if root_runtime is None else root_runtime.receiver
-    received_checks=[]
+    received_checks=[];reward_checks=[]
+    reward_case=bool(os.environ.get("B_GPU_ACTOR_INTERVAL_REWARD"))
+    finite_goal=source.get('finite_goal')
     def stage(name,**row):
         nonlocal page_changes
         if name=='publication_boundary' and os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL') and int(clock.gates.public_visible_at.cpu()[0])==87_000_009:
@@ -87,31 +250,37 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     conditions=source.get('cold_conditions',tuple(event['market']['condition_id'] for event in source['initial'][::2]))
     condition=conditions[0];tokens=source.get('cold_tokens',tuple(a['token_id'] for a in source['bounded_hidden']['assets']))
     asset_ends=source.get('cold_asset_ends',tuple(event['market']['window']['end_at_utc_ms'] for event in source['initial']))
-    if root_runtime is None:
+    if root_runtime is None or finite_goal or source.get('propagation_coverage'):
         legs=run(lambda:SubmittedLegs(T([[True,False]],torch.bool),T([[False,False]],torch.bool),T([[0,-1]]),T([[0,1]]),
             rational(['1000.001','0']),T([[True,False]],torch.bool),T([[0,-1]]),T([[0,1]]),T([[True,False]],torch.bool),
             SubmittedBuyTerms(T([[2,0]]),T([[False,False]],torch.bool),rational(['0.5','0']),rational(['500.0005','0']),T([[0,-1]]))))
         legs=run(lambda:bind_submission_receipt(legs,zero,receipt))
-        population=SubmittedActorRequests(intents,legs)
+        population=SubmittedActorRequests(intents,legs) if root_runtime is None else root_runtime.population
+        population.post_intents=intents;population.submitted_legs=legs
         assert not clock.public.registry.events.received.any().cpu().item()
-        history_targets=run(lambda:CancellationTargetHistory.open(integers([]),empty.bool()))
-        clock.public=replace(clock.public,cancellation_target_history=history_targets)
-        from actor_runtime import ActorDirectory,ActorRuntime,configure_continuous_execution
-        directory=ActorDirectory(tuple(conditions),tuple(tokens),tuple(a['token_id'] for a in clock.source.prepared.columns['assets']),
-            tuple(asset_ends),market_indices,assembled.condition_by_asset,block.asset_axis,asks)
-        scenario=run(lambda:CancelFailureScenario(empty,integers([]),integers([]),empty.bool(),zero.to(torch.int32)))
-        def paths(kind,world,selected):
-            width=world.hidden.queues.capacity*(selected.size(1) if kind=='taker' else 1)
-            return T([[0]*width])
-        configure_continuous_execution(clock,directory,population,rule,codec,sampler,taker,maker,paths,scenario)
-        clock.source.states=(pm,market,reference,binance)
-        root_runtime=ActorRuntime(clock,directory,population,receiver,{})
+        if root_runtime is None:
+            history_targets=run(lambda:CancellationTargetHistory.open(integers([]),empty.bool()))
+            clock.public=replace(clock.public,cancellation_target_history=history_targets)
+            from actor_runtime import ActorDirectory,ActorRuntime,configure_continuous_execution
+            directory=ActorDirectory(tuple(conditions),tuple(tokens),tuple(a['token_id'] for a in clock.source.prepared.columns['assets']),
+                tuple(asset_ends),market_indices,assembled.condition_by_asset,block.asset_axis,asks)
+            scenario=run(lambda:CancelFailureScenario(empty,integers([]),integers([]),empty.bool(),zero.to(torch.int32)))
+            def paths(kind,world,selected):
+                width=world.hidden.queues.capacity*(selected.size(1) if kind=='taker' else 1)
+                return T([[0]*width])
+            execution=configure_continuous_execution(clock,directory,population,rule,codec,sampler,taker,maker,paths,scenario)
+            clock.source.states=(pm,market,reference,binance)
+            root_runtime=ActorRuntime(clock,directory,population,receiver,{},execution)
     else:population=root_runtime.population
     if two and 'cold_authority' not in source:
         from maker_days import MakerDays
         from rebate_coordinator import RebateCoordinator
         clock.runtime=replace(clock.runtime,calendars=run(lambda:RebateCoordinator(
             MakerDays.empty(condition_slots[None,:],T([[301000,601000]]),yes[:,None].expand(1,2)),clock.runtime.calendars.taker)))
+    auto_rows=[]
+    if os.environ.get('B_GPU_AUTO_LOOP'):
+        from validate_auto_device_loop import observe as observe_auto
+        auto_rows=observe_auto(root_runtime.execution,artifact/'auto',resources=False)
     mutation=clock.handlers[5]
     def diagnostic_mutation(world,projection,choice):
         candidate,projected,batches,effect=mutation(world,projection,choice)
@@ -123,7 +292,8 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         return candidate,projected,batches,effect
     clock.handlers[5]=diagnostic_mutation
     torch.manual_seed(181606)
-    template=Policy100ms(ModelShape100ms(2,64)).cuda().eval();policies={}
+    template=Policy100ms(ModelShape100ms(2,64),propagation=(dict(horizon_ms=100,eta=1.)
+        if os.environ.get("B_GPU_PROPAGATION") else None)).cuda().eval();policies={}
     for at,family in [(1300,2),(1400,2 if second_buy else 0),(1500,0),(1600,0),(1700,4),(1800,0)]:
         at+=offset
         policy=copy.deepcopy(template)
@@ -155,14 +325,14 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             head.price.weight.zero_();head.price.bias.zero_();head.price.bias[38]=40.
         policies[at]=policy
     if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") and not two:policies[1900]=policies[1800]
-    if os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL'):policies[1900]=policies[1300]
+    if os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL'):policies[1800]=policies[1300]
     if two:
         for at in range(1900+offset,2800+offset,100):
             policy=copy.deepcopy(policies[1800+offset])
             if at==2000+offset:
                 with torch.no_grad():policy.action.actor.family[-1].bias[2]=40.;policy.action.actor.family[-1].bias[0]=0.
             policies[at]=policy
-    if 'cold_authority' in source:
+    if two and 'cold_authority' in source:
         # 下一市场的原Actor GTC跨越真实0.5 ask，覆盖公开最终性与资金延续。
         with torch.no_grad():
             policies[2000+offset].action.actor.price.bias[38]=0.
@@ -175,7 +345,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     random=ActionRandom(zero+181606,T([[0,0,0,0]]));observations=[];senders=[];bound=[]
     model_records=[];completed_records=[];retired_observations=[];retired_senders=[]
     expected_hidden=torch.zeros((2,len(market_indices),64),device=zero.device)
-    warm_steps=0;opened=False
+    warm_steps=0;opened=False;last_model_random=None
     empty_rows=[];history_checks=[];history_retry=False;resource_candidate=None;end_retry=False;release_calls=[]
     def freeze(world,at,enabled):
         nonlocal history_retry,resource_candidate
@@ -258,13 +428,39 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         stage('continuous_freeze',at=at.cpu().tolist(),accepted=accepted.cpu().tolist(),fault=observed.frozen.fault.cpu().tolist(),
             required=observed.market.required.cpu().tolist(),provided=observed.frozen.provided.all(1).cpu().tolist(),
             order_count=int(observed.account.orders.present.sum().cpu()),cancel_count=int(observed.actor.cancels.present.sum().cpu()))
-        if accepted.any().cpu().item():observations.append(observed)
+        if accepted.any().cpu().item():
+            observations.append(observed)
+            if model_root.reward_memory is not None and not reward_checks:
+                memory=model_root.reward_memory
+                nav,exposure=run(lambda:model_root.reward_reads(world.public))
+                reward_checks.append(dict(at=now,E=str(amounts(exposure.amount)[0]),WCM=str(amounts(nav.amounts[0])[0]),
+                    area='0',known=bool(exposure.known.cpu()[0]),fault=int(memory.fault.cpu()[0]),
+                    prefix=values(world.public.ledger.platform.platform_source_prefix)[0]))
         return observed,accepted
     def policy_start(observation,enabled):
         at=int(observation.frozen.cutoff.cpu()[0]);bound.append(at)
         return policies[at],zero+at
     def receive(public,delivery,enabled):
-        public,ready=receiver(public,delivery,enabled)
+        public,ready=root_receive(public,delivery,enabled)
+        if model_root.reward_memory is not None:
+            memory=model_root.reward_memory
+            nav,exposure=run(lambda:model_root.reward_reads(public))
+            entry=dict(at=int(clock.gates.public_visible_at.cpu()[0]),E=str(amounts(exposure.amount)[0]),
+                WCM=str(amounts(nav.amounts[0])[0]),area=str(amounts(memory.area_pusd_ms)[0]),
+                known=bool(exposure.known.cpu()[0]),fault=int(memory.fault.cpu()[0]),
+                prefix=values(public.ledger.platform.platform_source_prefix)[0])
+            from rebate_read import read_confirmed_rebates
+            conditions=public.ledger.rebate_days.condition_slots
+            rebates=run(lambda:read_confirmed_rebates(public.ledger,conditions,torch.ones_like(conditions,dtype=torch.bool),yes))
+            entry.update(cash=str(amounts(public.ledger.platform.balances)[0]),
+                confirmed_unpaid=str(sum(amounts(rebates.confirmed_unpaid),Fraction())),
+                paid=str(sum(amounts(rebates.paid),Fraction())))
+            previous=reward_checks[-1] if reward_checks else dict(at=int(memory.opened_at_ms.cpu()[0]),
+                E=str(amounts(memory.exposure)[0]),area='0')
+            expected=Fraction(previous['area'])+Fraction(previous['E'])*(entry['at']-previous['at'])
+            assert Fraction(entry['area'])==expected,(previous,entry,expected)
+            assert entry['known'] and entry['fault']==0
+            reward_checks.append(entry);stage('actual_reward_receive',**entry)
         columns,waiting=public.ledger.columns,public.waiting
         pending=waiting.received&~waiting.consumed
         row=dict(at=clock.gates.public_visible_at.cpu().tolist(),
@@ -304,7 +500,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                     market_row=identity[2]
                     if observation.frozen.role[row].cpu().item()!=role:continue
                     selected=observation.frozen.rows(T([row]))
-                    with torch.no_grad():state,hidden,value=task.policy.state_and_value(*selected.model_inputs(),expected_hidden[:,market_row:market_row+1])
+                    with torch.no_grad():state,hidden,value=task.policy.state_and_value(*selected.model_inputs(),expected_hidden[:,market_row:market_row+1],value_context=None)
                     torch.testing.assert_close(task.evaluation.hidden[:,row:row+1],hidden)
                     torch.testing.assert_close(task.evaluation.state[row:row+1],state)
                     if market_row==1 and role==0:warm_steps+=1
@@ -313,12 +509,23 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                         opened=True
                     expected_hidden[:,market_row:market_row+1]=hidden
         else:
-            with torch.no_grad():expected=task.policy.frozen_state_and_value(observation.frozen,expected_hidden,identities,task.evaluation.policy_version)
+            from model_train.gpu_policy import finite_value_context
+            context=None if models.goal_until is None else finite_value_context(observation.frozen.cutoff,
+                models.goal_until[observation.row_roots],models.trading_until[observation.row_roots])
+            with torch.no_grad():expected=task.policy.frozen_state_and_value(observation.frozen,expected_hidden,
+                identities,task.evaluation.policy_version,value_context=context)
+            torch.testing.assert_close(task.evaluation.state,expected.state)
+            if context is None:assert task.evaluation.value is None
+            else:
+                torch.testing.assert_close(task.evaluation.value,expected.value)
+                stage('finite_value_at_frozen_cutoff',cutoff=at,started=int(task.started_at.cpu()[0]),
+                    context=context.cpu().tolist(),value=task.evaluation.value.cpu().tolist())
             torch.testing.assert_close(task.evaluation.hidden,expected.hidden)
             expected_hidden.copy_(expected.hidden)
         model_records.append(dict(cutoff=at,started=int(task.started_at.cpu()[0]),completed=task.completed_at.cpu().tolist(),
             version=task.evaluation.policy_version.cpu().tolist(),observation=weakref.ref(original)))
     def model_completed(task):
+        nonlocal last_model_random
         assert ((task.stage==3)|~task.active).all().cpu().item()
         original=next(row for row in model_records if row['started']==int(task.started_at.cpu()[0]))
         version=task.evaluation.policy_version.cpu().tolist()
@@ -332,6 +539,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             retired_senders.append(weakref.ref(task.sender))
         retired_observations.append(weakref.ref(task.observation))
         completed_records.append(int(task.observation.account.cutoff.cpu()[0]))
+        if original["cutoff"]==1800:last_model_random=random.counter.clone()
     def released_refs():
         observations.clear();senders.clear();gc.collect()
         assert all(ref() is None for ref in retired_observations)
@@ -346,18 +554,37 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         at=int(observation.account.cutoff.cpu()[0])
         duration=150 if two else 114
         if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") and not two and at==1800:duration=214
-        if os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL') and at==1900:duration=87_000_009-2084
+        if os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL') and at==1800:duration=87_000_009-1870
         if full_warmup and at!=1900+offset:duration=20
-        return zero+duration,zero+120 if at==1300+offset else zero
+        return zero+duration,zero+(20 if reward_case else 120) if at==1300+offset else zero
     from model_train.continuous_root import ContinuousActorRoot
+    learning_context=bool(os.environ.get('B_GPU_ACTOR_LOGICAL_CONTEXT'))
+    learning_gap=bool(os.environ.get('B_GPU_ACTOR_LOGICAL_GAP'))
+    gap_trade=301500 if os.environ.get('B_GPU_ACTOR_LOGICAL_GAP_CUTOFF') else 301600
     model_root=ContinuousActorRoot(root_runtime,codec,rule,sampler,started_at=start,first_observation=T([first_observation]),
-        trading_until=T([2000]) if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") and not two else None,
+        trading_until=T([source['auto_two_market']['trading_until']]) if source.get('auto_two_market') else T([1301]) if source.get('propagation_coverage') else T([gap_trade]) if learning_gap else T([303000]) if learning_context else T([2000]) if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") and not two else None,
+        goal_until=T([303000]) if learning_gap else T([303000]) if learning_context else T([finite_goal["goal_until"] if finite_goal else 3000]) if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") and not two else None,
         request_namespace=source['run_id']+'/'+source['session_id'],policy_at_start=policy_start,timing=timing,
-        random=random,model_shape=template.shape,word_capacity=16,path_capacity=32)
+        random=random,model_shape=template.shape,word_capacity=16,path_capacity=32,
+        reward_a_pusd=rational(["0.02"]) if reward_case else None)
+    initial_request=not two
+    if initial_request:model_root.request_directory.append(source['request_id'])
+    if source.get('propagation_coverage'):
+        return propagation_coverage_case(model_root,artifact,original_stage)
+    if os.environ.get('B_GPU_ACTOR_JOINT_ROOTS'):
+        return logical_two_roots_case(model_root,policies[1300],source,artifact,original_stage)
+    if learning_gap:
+        return logical_gap_case(model_root,policies[first_observation],source,artifact,original_stage)
+    if learning_context:
+        return logical_context_case(model_root,policies[first_observation],source,artifact,original_stage)
+    if os.environ.get('B_GPU_ACTOR_LOGICAL_CUTOFF'):
+        return logical_cutoff_case(model_root,policies[1300],source,artifact,original_stage)
+    if os.environ.get('B_GPU_ACTOR_LOGICAL_BATCH'):
+        return logical_batch_case(model_root,policies[1300],source,artifact,original_stage)
+    root_receive=model_root.receive;model_root.receive=receive
     material=model_root.inputs;models=model_root.models;shared=model_root.run
     history=material.history;encoder=material.encoder
     request_directory=model_root.request_directory;task_requests=model_root.task_requests
-    if 'cold_authority' not in source:request_directory.append(source['request_id'])
     models.sender_factory=sender_factory
     models.on_started=model_started;models.on_completed=model_completed;models.release_markets=release_markets
     if source.get('nonzero_history_samples'):
@@ -391,8 +618,8 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                 return True
         return False
     continuations=0
-    while True:
-        result=shared.advance_before(T([302201 if gap else (2801+offset if two else 1901)]),yes,progress=stage)
+    def resume_validation(result):
+        nonlocal continuations,history_retry,resource_candidate,end_retry
         if result.fault.any().cpu().item():
             advance=result.stage_result;effect=None if advance is None else advance.stage_result
             stage('actual_continuous_fault',fault=result.fault.cpu().tolist(),
@@ -403,9 +630,9 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                 ledger_prefix=values(clock.public.ledger.current_local_prefix))
         advance=result.stage_result;effect=None if advance is None else advance.stage_result
         if grow_cancel_results(effect,result.fault):
-            continuations+=1;continue
+            continuations+=1;return True
         assert result.fault.cpu().tolist()==[0],result.fault.cpu().tolist()
-        if result.complete.cpu().item():break
+        if result.complete.cpu().item():return False
         if resource_candidate is not None:
             failed,required,hidden_before,identity_before,random_before=resource_candidate
             assert torch.equal(shared.next_observation,failed.account.cutoff)
@@ -431,7 +658,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
             assert model_root.resume_resources(result)
             history_retry=True;resource_candidate=None
             stage('whole_root_input_growth',at=shared.next_observation.cpu().tolist(),required=required,end_retry=end_retry)
-            continue
+            return True
         required_requests=max([clock.runtime.requests.capacity]+[int(s.receipt.required_requests.max().cpu()) for s in senders if s.receipt is not None])
         required_legs=max([clock.public.ledger.reservations.capacity]+[int(s.publication.reservation.decision.required_capacity.max().cpu())
             for s in senders if s.publication.reservation is not None])
@@ -441,15 +668,21 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
                 legs=old.reservations.capacity,required_legs=required_legs)
             assert model_root.resume_resources(result)
             continuations+=1
-            continue
+            return True
         if model_root.resume_resources(result):
-            continuations+=1;continue
+            continuations+=1;return True
         frozen=observations[-1] if observations else None
         if frozen is not None:stage('blocked_unknown',fault=frozen.frozen.fault.cpu().tolist(),required=frozen.market.required.cpu().tolist())
         raise AssertionError('真实连续路径未完成且尚无已报告物理需求')
+    if os.environ.get('B_GPU_ACTOR_COST_OBSERVATION'):
+        return cost_observation_case(model_root,artifact,stage,observations,senders,model_records,completed_records,evidence,received_checks,resume_validation)
+    while True:
+        result=shared.advance_before(T([302201 if gap else (2801+offset if two else 1901)]),yes,progress=stage)
+        if resume_validation(result):continue
+        break
     real_tasks=len(observations)
-    assert len(request_directory.keys)==real_tasks+int('cold_authority' not in source)
-    assert request_directory.keys[int('cold_authority' not in source):]==[
+    assert len(request_directory.keys)==real_tasks+int(initial_request)
+    assert request_directory.keys[int(initial_request):]==[
         source['run_id']+'/'+source['session_id']+':actor:'+str(i) for i in range(real_tasks)]
     raw_bytes,raw_offsets=request_directory.columns();raw=bytes(raw_bytes.cpu().tolist());offsets=raw_offsets.cpu().tolist()
     assert [raw[offsets[i]:offsets[i+1]].decode('utf-8') for i in range(len(offsets)-1)]==request_directory.keys
@@ -489,6 +722,9 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         else:
             result=verify_two_market_continuous(source,clock,material,models,observations,senders,history_retry,
                 history,encoder,random,evidence,started,artifact,stage,end_retry,release_calls,model_records,warm_steps,opened)
+        if source.get('auto_two_market'):
+            from validate_auto_device_loop import two_market_tail
+            result['auto_tail']=two_market_tail(model_root,auto_rows,source['auto_two_market'],stage)
         import shutil
         registry=material.history.registry
         result['source_identity_index']={'entries':registry.identity_count,'disk_bytes':registry.path.stat().st_size,
@@ -561,7 +797,10 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     assert values(observations[0].actor.cash_micro)!=values(observations[4].actor.cash_micro)
     pair_body=senders[0].requests[1][0];cancel_body=senders[4].requests[1][0]
     assert pair_body['method']=='POST_ORDERS' and cancel_body['method']=='CANCEL_ORDERS'
-    assert clock.source.next().eof.cpu().item()
+    next_public=clock.source.next()
+    if finite_goal:
+        assert not next_public.eof.cpu().item() and next_public.at.cpu().tolist()==[finite_goal['terminal_admitted_at']]
+    else:assert next_public.eof.cpu().item()
     assert not (clock.public.waiting.received&~clock.public.waiting.consumed).any().cpu().item()
     # 新任务身份依法改变原经验时延；C1900不能读取1939才处理的取消。
     # 在原1901边界先保留模型/冻结，再只推进真实已发请求及其可见反馈。
@@ -632,7 +871,8 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     assert first_finish['published'][0]==[True] and not first_finish['receipts'][0]
     assert first_finish['business_random'][0][0]>0
     pending_models=[task for task in models.tasks if task.active.any().cpu().item() and (task.stage<3).any().cpu().item()]
-    assert any(task.completed_at is not None and task.completed_at.cpu().tolist()==[2084 if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") else 1984] for task in pending_models)
+    expected_finish=87_000_009 if os.environ.get("B_GPU_ACTOR_SAME_TICK_TAIL") else (2084 if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") else 1984)
+    assert any(task.completed_at is not None and task.completed_at.cpu().tolist()==[expected_finish] for task in pending_models)
     if second_buy:
         assert senders[1].control.execute_at.cpu().tolist()==[1528] and senders[0].control.execute_at.cpu().tolist()==[1534]
         assert senders[1].receipt is not None and senders[0].receipt is not None
@@ -646,7 +886,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         repeat=sender.execute(clock,yes,progress=stage);assert repeat.receipt is sender.receipt
     assert values(clock.public.ledger.current_local_prefix)==before_prefix and torch.equal(random.counter,before_random)
     assert values(clock.runtime.input_frontier.next_sequence)==before_input
-    result=dict(passed=True,scope='same runtime/account C1300→C1400 queued→c1414 before s1534→new Pair processed→public C1700→Pair cancel→C1900 original frozen/inflight→actual cancel visibility→current Ledger',
+    result=dict(passed=True,scope=f'same runtime/account C1300→C1400 queued→c1414 before s{1434 if reward_case else 1534}→new Pair processed→public C1700→Pair cancel→C1900 original frozen/inflight→actual cancel visibility→current Ledger',
         requests=[{'sent_at':int(s.control.execute_at.cpu()[0]),'input_sequence':values(s.receipt.input_sequence)[0],'body':s.requests[1][0]} for s in senders if s.requests is not None],
         observations=[int(o.frozen.cutoff.cpu()[0]) for o in observations],model_starts=[row['started'] for row in model_records],
         page_changes=page_changes,capacity_continuations=continuations,input_sequence=values(clock.runtime.input_frontier.next_sequence),
@@ -658,25 +898,28 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         assert torch.equal(observations[0].market.fast[0,542:546],torch.tensor(history_checks[0]['history'],device='cuda',dtype=torch.float32))
         assert torch.equal(observations[0].market.fast[0,596:602],torch.tensor(history_checks[0]['path'],device='cuda',dtype=torch.float32))
     result['requests'].sort(key=lambda row:row['sent_at'])
-    rows=[]
-    for batch in clock.public.ledger.columns.projection_batches:
-        for column,on in enumerate(batch.emitted.cpu().tolist()[0]):
-            if on:
-                row=int(batch.rows[0,column].cpu())
-                rows.append(dict(batch=values(batch.batch_sequences)[column],ordinal=values(batch.record_ordinals)[column],
-                    private=values(batch.private_sequences)[column],received=int(batch.received_at[0,column].cpu()),
-                    semantic=clock.projection.normalizer.bank.semantic[row:row+1].cpu().tolist()))
-    actual_funds=run(clock.public.ledger.funds)
-    (artifact/'actual-continuous-values.json').write_text(json.dumps(dict(noe=rows,
-        post_results=stored_actual(clock.runtime.post_results.values),cancel_results=stored_actual(clock.runtime.cancel_results.groups),
-        ledger=dict(entry=values(clock.public.ledger.current_entry_sequence),local=values(clock.public.ledger.current_local_prefix),
-            platform_prefix=values(clock.public.ledger.platform.platform_source_prefix),balances=[str(x) for x in amounts(clock.public.ledger.platform.balances)],
-            funds={name:[str(x) for x in amounts(getattr(actual_funds,name))] for name in ('actual_available','maker_available','actual_reserved','maker_reserved')}),
-        evidence=evidence,scope='raw production outputs for independent CPU posterior'),indent=2)+'\n')
+    def export_current():
+        rows=[]
+        for batch in clock.public.ledger.columns.projection_batches:
+            for column,on in enumerate(batch.emitted.cpu().tolist()[0]):
+                if on:
+                    row=int(batch.rows[0,column].cpu())
+                    rows.append(dict(row=row,batch=values(batch.batch_sequences)[column],ordinal=values(batch.record_ordinals)[column],
+                        private=values(batch.private_sequences)[column],received=int(batch.received_at[0,column].cpu()),
+                        semantic=clock.projection.normalizer.bank.semantic[row:row+1].cpu().tolist()))
+        actual_funds=run(clock.public.ledger.funds)
+        (artifact/'actual-continuous-values.json').write_text(json.dumps(dict(noe=rows,
+            post_results=stored_actual(clock.runtime.post_results.values),cancel_results=stored_actual(clock.runtime.cancel_results.groups),
+            ledger=dict(entry=values(clock.public.ledger.current_entry_sequence),local=values(clock.public.ledger.current_local_prefix),
+                platform_prefix=values(clock.public.ledger.platform.platform_source_prefix),balances=[str(x) for x in amounts(clock.public.ledger.platform.balances)],
+                funds={name:[str(x) for x in amounts(getattr(actual_funds,name))] for name in ('actual_available','maker_available','actual_reserved','maker_reserved')}),
+            evidence=evidence,receive_checks=received_checks,reward_checks=reward_checks,
+            scope='raw production outputs for independent CPU posterior'),indent=2)+'\n')
+    export_current()
     (artifact/'actual-continuous-requests.json').write_text(json.dumps(result['requests'],indent=2)+'\n')
     if os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL'):
         same_tick_boundaries=[]
-        # C1900已接纳；从原完成2084起算，finish=Sk且dispatch=0。
+        # C1800在1870已开始；有限长计算跨截止，finish=Sk且dispatch=0。
         sk=T([87_000_009])
         before=shared.advance_before(sk,yes,progress=stage)
         assert before.complete.cpu().tolist()==[True] and before.fault.cpu().tolist()==[0]
@@ -720,6 +963,11 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         assert material.endpoints.previous_prefix.numel()==0
         assert not models.tasks
         result['window_stops_at']=2000;result['tail_checked_through_open_endpoint']=2300
+        assert [row['cutoff'] for row in model_records]==[1300,1400,1500,1600,1700,1800]
+        assert sorted(completed_records)==[1300,1400,1500,1600,1700,1800]  # 完整人口；退役顺序保真实发送时刻。
+        assert torch.equal(random.counter,last_model_random)  # C1800完成后C1900不调用策略或抽动作。
+        assert models.last_completed_at.cpu().tolist()==[2084]
+        result['unstarted_cutoffs_retired']=[1900]
         result['first_accepted_model_finish_after_window']=2084
         result['last_accepted_model_finish_after_window']=max(row['completed'][0] for row in model_records)
         # 原CPU FOK参考给应收，原日规则给付款；金额不从GPU付款后态生成。
@@ -729,23 +977,114 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         pre_day=clock.public.ledger.platform.balances
         assert amounts(pre_day)[5]==cpu_accrued
         pre_cash=amounts(pre_day)[0];pre_entry=values(clock.public.ledger.current_entry_sequence)
-        before_day=shared.advance_before(T([87_000_000]),yes,progress=stage)
+        reward_endpoints=[]
+        def endpoint(at):
+            while True:
+                advance,score=model_root.read_interval_reward(T([at]),yes,progress=stage)
+                assert advance.fault.cpu().tolist()==[0]
+                if advance.complete.all().cpu().item():break
+                assert model_root.resume_resources(advance)
+            assert score is not None and score.present.cpu().tolist()==score.known.cpu().tolist()==[True]
+            assert score.fault.cpu().tolist()==[0]
+            memory=model_root.reward_memory
+            nav,_=run(lambda:model_root.reward_reads(clock.public))
+            prior=reward_checks[-1]
+            area=Fraction(prior['area'])+Fraction(prior['E'])*(at-prior['at'])
+            expected=5*(amounts(nav.amounts[0])[0]-amounts(memory.initial_nav)[0]-Fraction(1,50)*area/6_000_000)
+            assert amounts(score.exact)==[expected]
+            assert score.dt_seconds.cpu().tolist()==[torch.tensor((at-1300)/1000,dtype=score.dt_seconds.dtype).item()]
+            saved=stored_actual(memory);entry=values(clock.public.ledger.current_entry_sequence)
+            again,repeated=model_root.read_interval_reward(T([at]),yes,progress=stage)
+            assert again.complete.all().cpu().item() and stored_actual(model_root.reward_memory)==saved
+            assert stored_actual(repeated)==stored_actual(score)
+            assert values(clock.public.ledger.current_entry_sequence)==entry
+            reward_endpoints.append(dict(at=at,training_score=str(expected),WCM=str(amounts(nav.amounts[0])[0]),
+                area_pusd_ms=str(area),dt_seconds=score.dt_seconds.cpu().tolist(),known=True,fault=0))
+            return advance
+        if reward_case:
+            assert model_root.reward_memory.opened_at_ms.cpu().tolist()==[1300]
+            witness=next(row for row in reward_checks if row['at']==1434)
+            before=next(row for row in reward_checks if row['at']==1400)
+            assert Fraction(witness['E'])!=Fraction(before['E']),(before,witness)
+            # 原CPU确认持仓的唯一腿差；不是从训练分倒推暴露。
+            balances=source['received_ledger']['projection']['platform_confirmed_projection']['outcome_balances']
+            assert Fraction(witness['E'])==sum((abs(Fraction(row['balance_shares'])) for row in balances),Fraction())
+            endpoint(3000)  # 目标配置不封口；原87000000付款仍未发生。
+        else:assert model_root.reward_memory is None
+        before_day=endpoint(87_000_000) if reward_case else shared.advance_before(T([87_000_000]),yes,progress=stage)
         assert before_day.complete.cpu().tolist()==[True] and before_day.fault.cpu().tolist()==[0]
-        assert amounts(clock.public.ledger.platform.balances)[0]==pre_cash
-        assert values(clock.public.ledger.current_entry_sequence)==pre_entry
-        after_day=shared.advance_before(T([87_010_000]),yes,progress=stage)
+        if finite_goal:
+            # Terminal/Auto已由同一原时钟在日成熟之前消费，现金只增加实际赢家持仓。
+            winner=sum((Fraction(row['balance_shares']) for row in source['received_ledger']['projection']['platform_confirmed_projection']['outcome_balances'] if row['token_id']=='1'),Fraction())
+            assert amounts(clock.public.ledger.platform.balances)[0]==pre_cash+winner
+            assert amounts(clock.public.ledger.platform.outcomes)==[Fraction(),Fraction()]
+            assert clock.runtime.resolution_obligations.auto_redeemed.cpu().tolist()==[[True]]
+        else:
+            assert amounts(clock.public.ledger.platform.balances)[0]==pre_cash
+            assert values(clock.public.ledger.current_entry_sequence)==pre_entry
+        after_day=endpoint(87_010_000) if reward_case else shared.advance_before(T([87_010_000]),yes,progress=stage)
+        export_current()  # 先保全真实目标后缀；校验失败不再丢失确认/付款正文与领取位置。
+        if reward_case:
+            if finite_goal:
+                # 同次原Receiver可以连续闭合确认与付款，Root只观察返回的公开前缀。
+                before=next(row for row in reward_checks if row['at']==87_000_010)
+                paid=next(row for row in reward_checks if Fraction(row.get('paid','0'))==payable)
+                waiting=next(row for row in received_checks if row['at']==[87_000_010])
+                assert before['prefix']==8 and paid['prefix']==10
+                assert any(row['sequence']==10 and row['first_available_at']==87_000_010 for row in waiting['waiting'])
+                assert Fraction(before['paid'])==Fraction(before['confirmed_unpaid'])==0
+                assert Fraction(paid['WCM'])-Fraction(before['WCM'])==payable
+                assert Fraction(paid['cash'])-Fraction(before['cash'])==payable
+                assert Fraction(paid['confirmed_unpaid'])==0 and Fraction(paid['paid'])==payable
+                confirmation=dict(previous_prefix=before,closed_prefix=paid,
+                    same_receive_closes_confirmation_and_payment=True)
+            else:
+                confirmed=next(row for row in reward_checks if Fraction(row.get('confirmed_unpaid','0'))==payable)
+                paid=next(row for row in reward_checks if Fraction(row.get('paid','0'))==payable)
+                before=reward_checks[reward_checks.index(confirmed)-1]
+                assert Fraction(confirmed['WCM'])-Fraction(before['WCM'])==payable
+                assert confirmed['WCM']==paid['WCM']
+                assert Fraction(confirmed['confirmed_unpaid'])==payable and Fraction(paid['confirmed_unpaid'])==0
+                assert Fraction(paid['paid'])-Fraction(confirmed['paid'])==payable
+                assert Fraction(paid['cash'])-Fraction(confirmed['cash'])==payable
+                confirmation=dict(confirmed_prefix=confirmed,paid_prefix=paid,payment_preserves_WCM=True)
+            # 收益项不重计；训练分仍扣除按真实公开E积分的时间成本。
+            result['economic_interval']=dict(a_pusd='1/50',opened_at=1300,receive_checks=reward_checks,
+                endpoints=reward_endpoints,send_between_observations=witness,**confirmation,
+                repeated_endpoint_pure=True,goal_does_not_seal_income=True)
+            stage('actual_root_economic_interval',**result['economic_interval'])
         assert after_day.complete.cpu().tolist()==[True] and after_day.fault.cpu().tolist()==[0]
         paid_balance=amounts(clock.public.ledger.platform.balances)
-        assert paid_balance[0]==pre_cash+payable and paid_balance[5]==0 and paid_balance[7]==cpu_accrued-payable
-        assert values(clock.public.ledger.current_entry_sequence)==[pre_entry[0]+4]
+        assert paid_balance[0]==pre_cash+payable+(winner if finite_goal else 0) and paid_balance[5]==0 and paid_balance[7]==cpu_accrued-payable
+        if not finite_goal:assert values(clock.public.ledger.current_entry_sequence)==[pre_entry[0]+4]
+        if finite_goal:
+            assert clock.source.next().eof.cpu().item()
+            assert reward_endpoints[-1]['at']==finite_goal['goal_until']
+            assert Fraction(reward_checks[-1]['E'])==0
+            result['finite_goal']=dict(finite_goal,terminal_facts_count=len(finite_goal['terminal_facts']),
+                auto_cash_pusd=str(winner),goal_training_score=reward_endpoints[-1]['training_score'],
+                actual_final_prefix=values(clock.public.ledger.platform.platform_source_prefix),
+                actual_goal_ledger_entry=values(clock.public.ledger.current_entry_sequence),
+                no_tail_observations=True,complete_target_posterior_pending=True)
+            del result['finite_goal']['terminal_facts']
+            export_current()  # 完整目标后缀，原pre-tail人口不冒充最终后验。
+            stage('finite_goal_endpoint',**result['finite_goal'])
         assert shared.next_observation.cpu().tolist()==[2000]
         assert not (clock.public.waiting.received&~clock.public.waiting.consumed).any().cpu().item()
         result['taker_day_at_utc_ms']=87_000_000;result['taker_paid_pusd']=str(payable)
         result['taker_locked_pusd']=str(cpu_accrued-payable)
         result['elapsed_seconds']=time.perf_counter()-started
+    if os.environ.get('B_GPU_ACTOR_WINDOW_TAIL') and not two:
+        assert [row['cutoff'] for row in model_records]==[1300,1400,1500,1600,1700,1800]
+        assert not models.tasks
+        never_started=weakref.ref(observations[-1])
     partial=verify_partial_queue_retirement(observations[0],policies[1300])
     del sender,pending_models
     result['task_retirement']=dict(released_refs(),partial_roots=partial)
+    if os.environ.get('B_GPU_ACTOR_WINDOW_TAIL') and not two:
+        assert never_started() is None
+        result['task_retirement']['unstarted_frozen_released']=True
+        result['task_retirement']['unstarted_cutoffs']=[1900]
     stage('actual_task_retirement',**result['task_retirement'])
     return result
 
@@ -883,6 +1222,896 @@ def verify_partial_queue_retirement(original,policy):
         identity_unchanged=True,all_roots_complete_retires=True,scope='real queue/model forward; publication/send interface substitutes, no SIM clock')
 
 
+def logical_two_roots_case(first,policy,source,artifact,stage):
+    """两次真实冷开户、各根合法前沿、统一全人口PPO；有限工程代表。"""
+    from model_train.logical_batch import JointLearner,LogicalBatchConfig
+    from model_train.continuous_root import ContinuousActorRoot
+    from model_train.dt_advantages import normalize_advantages
+    from actor_runtime import open_continuous_runtime
+    from actor_opening import ActorOpeningCapacities
+    from public_device_page import PreparedPublicBlocks
+    from tensordict import TensorDict
+    rule_path=ROOT/'sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json'
+    second_artifact=artifact/'root-b';second_artifact.mkdir()
+    request=dict(log_path=str(second_artifact/'cold-session.log'),noe_root=str(second_artifact/'cold-noe'),
+        rule_path=str(rule_path),rule_sha256=hashlib.sha256(rule_path.read_bytes()).hexdigest(),
+        rules_as_of_utc_ms=2**63-1,implementation_identity=json.loads(rule_path.read_text())['provenance']['implementation_identity'],
+        source_sha256=hashlib.sha256((artifact/'public-compact/manifest.json').read_bytes()).hexdigest(),
+        finality_policy=dict(schema_version='trade_finality_policy_v2',normal_path=source['finality_path'],failure_overrides=[]),
+        activation_id=source['run_id']+'-root-b-activate',session=dict(run_id=source['run_id']+'-root-b',
+            session_id=source['session_id']+'-root-b',account_id='joint-root-b-account',caller_role='MODEL_TRAIN',
+            caller_instance_id='joint-root-b-caller',creation_request_id='joint-root-b-create',
+            response_bridge_binding_id='joint-root-b-bridge',initial_account_state=dict(available_pusd='2000'),
+            session_seed=source['session_seed']+'-root-b'))
+    sampler=type(first.sampler).build((ROOT/'sim-system/config/latency-profiles'/source['profile_sha256']/'profile.json').read_bytes(),
+        source['profile_sha256'],[request['session']['session_seed'].encode('ascii')])
+    public=PreparedPublicBlocks(artifact/'public-page',artifact/'public-compact')
+    hidden=PreparedHiddenPages(artifact/'hidden-pages',source['bounded_hidden']['source_binding'])
+    scenario=run(lambda:CancelFailureScenario(T([[]]),integers([]),integers([]),T([[]],torch.bool),T([0]).to(torch.int32)))
+    def paths(kind,world,selected):return T([[0]*(world.hidden.queues.capacity*(selected.size(1) if kind=='taker' else 1))])
+    taker,maker=run(lambda:(rational([source['taker_rebate_rate']]),rational([source['maker_rebate_rate']])))
+    second_runtime=open_continuous_runtime(public,hidden,first.codec,request,first.rule,sampler,
+        capacities=ActorOpeningCapacities(*([1]*13)),page_groups=3,hidden_page_buckets=1,
+        taker_rate=taker,maker_rate=maker,fill_paths=paths,cancel_scenario=scenario,
+        gtd=ScheduledTime.absent(T([0])),auto_redemption=True)
+    (second_artifact/'cold-request.json').write_text(json.dumps(request,indent=2)+'\n')
+    (second_artifact/'cold-authority.json').write_text(json.dumps(second_runtime.authority,indent=2)+'\n')
+    b_goal=source['maker_page_material']['b_goal_until'] if os.environ.get('B_GPU_MAKER_PROJECTION_ROOT') else 87010000
+    second=ContinuousActorRoot(second_runtime,first.codec,first.rule,sampler,started_at=T([-29000]),
+        first_observation=T([1300]),trading_until=T([2000]),goal_until=T([b_goal]),
+        request_namespace=request['session']['run_id']+'/'+request['session']['session_id'],
+        policy_at_start=lambda observation,active:(policy,T([0])),
+        timing=lambda observation:(T([214 if int(observation.account.cutoff[0])==1800 else 114]),T([0])),
+        random=ActionRandom(T([181607]),T([[0,0,0,0]])),model_shape=policy.shape,word_capacity=16,path_capacity=32,
+        reward_a_pusd=rational(['0.02']))
+    if os.environ.get('B_GPU_PUBLIC_STAGE_APPEND'):
+        from validate_public_append import observe as observe_append
+        observe_append(first.clock,artifact/'public-append-a',resources=True)
+        observe_append(second.clock,artifact/'public-append-b')
+    with torch.no_grad():
+        policy.action.actor.family[-1].bias[2]=6.
+        policy.action.actor.variant.bias.copy_(T([2,0]).float())
+        policy.action.actor.price.bias[38]=6.
+    config_a=LogicalBatchConfig(2,1,1,1,.2,.5,0.)
+    config_b=replace(config_a,decisions=6)
+    optimizer=torch.optim.AdamW(policy.parameters(),lr=.0001)
+    joint=JointLearner(policy,optimizer,config_a,T([0]))
+    tracking=bool(os.environ.get('B_GPU_MLFLOW'))
+    if tracking:
+        from mlflow import MlflowClient
+        from model_train.training_report import MLflowReport,ReportWriteError
+        tracking_uri='sqlite:///'+str(artifact/'mlflow.db')
+        tracking_client=MlflowClient(tracking_uri=tracking_uri)
+        experiment=tracking_client.create_experiment('issue-181-real-joint-engineering',
+            artifact_location=(artifact/'mlflow-artifacts').as_uri())
+        mlflow_run=tracking_client.create_run(experiment).info.run_id
+        actual_binding=json.loads(Path(os.environ['B_GPU_CHECKPOINT_BINDING']).read_text())
+        joint.reporter=MLflowReport(tracking_uri,mlflow_run,dict(formal_training=False,
+            latency_profile_sha256=source['profile_sha256'],candidate_tree=actual_binding['tree'],
+            versions={name:__import__('importlib.metadata',fromlist=['version']).version(name) for name in ('torch','torchrl','mlflow')},
+            source_manifest_sha256=hashlib.sha256((artifact/'public-compact/manifest.json').read_bytes()).hexdigest(),
+            preparation=json.loads((artifact/'source-preparation.json').read_text()),
+            actual_native=actual_binding['binaries'],loss_scope='joint full-decision population; arithmetic mean over actual epochs'))
+        (artifact/'mlflow-config.json').write_text(json.dumps(dict(tracking_uri=tracking_uri,run_id=mlflow_run),indent=2)+'\n')
+    a=joint.add_root(first,config_a);b=joint.add_root(second,config_b)
+    first.models.timing=lambda observation:(T([20]),T([400 if int(observation.account.cutoff[0])==1300 else 0]))
+    roots=(first,second);batches=(a,b);starts=[[],[]];refs=[[],[]];published=[[],[]];sent=[[],[]];completions=[[],[]]
+    if os.environ.get('B_GPU_PUBLIC_TRADE_DIAGNOSTIC'):
+        from projection import Projection
+        original_finish=Projection._finish
+        def plain(value):
+            if isinstance(value,torch.Tensor):return value.detach().cpu().tolist()
+            if is_dataclass(value):return {f.name:plain(getattr(value,f.name)) for f in fields(value)}
+            if isinstance(value,dict):return {k:plain(v) for k,v in value.items()}
+            if isinstance(value,(tuple,list)):return [plain(v) for v in value]
+            if isinstance(value,frozenset):return sorted(value)
+            return value
+        def finish(self,emitter,records,source_fault,**kwargs):
+            result=original_finish(self,emitter,records,source_fault,**kwargs)
+            if not Numbers.device_batch_active() and bool(result[1].fault.any().cpu()):
+                path=artifact/'projection-fault.json'
+                if not path.exists():
+                    path.write_text(json.dumps(dict(binding={name:plain(getattr(self,name)) for name in
+                        ('account_slots','condition_slots','token_slots','asset_indices','asset_roots','order_sequence')},
+                        source_fault=plain(source_fault),emitter=plain(emitter),records=[dict(mapped=plain(mapped),kind=kind,
+                            private=plain(private),batch=plain(batch),received=plain(received),category=plain(category),
+                            platform=plain(platform),wanted=plain(wanted))
+                            for mapped,kind,private,batch,received,category,platform,wanted in records],
+                        normalizer_before=plain(self.normalizer),normalizer_after=plain(result[0].normalizer),
+                        result=plain(result[1])),indent=2)+'\n')
+                    stage('projection_fault_diagnostic_saved',path=str(path),fault=result[1].fault.cpu().tolist())
+            return result
+        Projection._finish=finish
+    if os.environ.get('B_GPU_MAKER_PROJECTION_ROOT'):
+        from validate_maker_projection import observe
+        for index,root in enumerate(roots):
+            directory=artifact/('maker-root-'+str(index));directory.mkdir()
+            observe(root.runtime.execution,directory)
+    callback_probes=[]
+    if os.environ.get('B_GPU_HIDDEN_REFERENCE_LOOP'):
+        # 用真实冻结/任务执行跨UTC四回调的原时间用途；不重放模型或修改时延。
+        import ast
+        from validate_cross_utc_actor import observation_time,strategy_callbacks
+        tree=ast.parse((Path(__file__).parent/'validate_cross_utc_actor.py').read_text())
+        run_node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run_actor')
+        functions={n.name:n for n in run_node.body if isinstance(n,ast.FunctionDef)}
+        for _ in roots:
+            namespace=dict(hashlib=hashlib,observation_time=observation_time,pending={})
+            nodes=[functions['frozen_digest']]
+            for name,original in [('probe_start','on_started'),('probe_complete','on_completed')]:
+                time_row=next(i for i,n in enumerate(functions[original].body)
+                    if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='at' for t in n.targets))
+                statements=functions[original].body[time_row:time_row+2]
+                prefix=ast.parse('frozen=task.observation.frozen').body if name=='probe_start' else []
+                fn=ast.FunctionDef(name=name,args=ast.arguments(posonlyargs=[],args=[ast.arg(arg='task')],
+                    kwonlyargs=[],kw_defaults=[],defaults=[]),body=prefix+statements+ast.parse('return at').body,
+                    decorator_list=[])
+                nodes.append(fn)
+            exec(compile(ast.fix_missing_locations(ast.Module(body=nodes,type_ignores=[])),
+                'actual_cross_utc_callback_time_statements','exec'),namespace)
+            callback_probes.append(namespace)
+    (artifact/"joint-runtime-config.json").write_text(json.dumps(dict(
+        a=dict(trading_until=2000,goal_until=87010000,duration_ms=20,dispatch_ms={"1300":400,"other":0}),
+        b=dict(trading_until=2000,goal_until=b_goal,duration_ms={"1800":214,"other":114},dispatch_ms=0),
+        config_a=vars(config_a),config_b=vars(config_b),propagation=policy.propagation),indent=2)+"\n")
+    for index,(root,batch) in enumerate(zip(roots,batches,strict=True)):
+        old_started=batch.started;old_published=batch.published
+        def started(task,h_in,index=index,root=root,batch=batch,old_started=old_started):
+            from model_train.gpu_policy import finite_value_context
+            frozen=task.observation.frozen
+            with torch.no_grad():expected=policy.frozen_state_and_value(frozen,h_in,frozen.identities,
+                task.evaluation.policy_version,value_context=finite_value_context(frozen.cutoff,
+                    root.goal_until[task.observation.row_roots],root.trading_until[task.observation.row_roots]))
+            torch.testing.assert_close(expected.hidden,task.evaluation.hidden)
+            torch.testing.assert_close(expected.value,task.evaluation.value)
+            old_started(task,h_in);refs[index].append(weakref.ref(batch.states[-1]))
+            if os.environ.get('B_GPU_HIDDEN_REFERENCE_LOOP'):
+                from validate_cross_utc_actor import observation_time
+                observation=task.observation
+                assert observation_time(observation)==int(observation.cutoff.observed_at[0])
+                assert torch.equal(observation.account.cutoff[observation.row_roots],observation.frozen.cutoff)
+                config=dict(buy_cutoffs=[1300],durations={'1300':114},calculation_ms=20,dispatch_ms={'1300':400})
+                lookup={0:'NoTrade',2:'buy'}
+                choose,time=strategy_callbacks(config,lookup,root.zero)
+                at=callback_probes[index]['probe_start'](task)
+                selected,version=choose(observation,root.yes);calculation,dispatch=time(observation)
+                assert selected==lookup[2 if at==1300 else 0] and version.cpu().tolist()==[1]
+                assert calculation.cpu().tolist()==[114 if at==1300 else 20]
+                assert dispatch.cpu().tolist()==[400 if at==1300 else 0]
+                stage('cross_utc_callback_time_checked',root=index,cutoff=at,started_at=task.started_at.cpu().tolist(),
+                    policy=selected,calculation=calculation.cpu().tolist(),dispatch=dispatch.cpu().tolist())
+            starts[index].append(dict(cutoff=int(task.observation.account.cutoff[0]),at=int(task.started_at[0]),
+                version=task.evaluation.policy_version.cpu().tolist()))
+        def publication(task,accepted,index=index,old_published=old_published):
+            old_published(task,accepted)
+            completions[index].append(dict(cutoff=int(task.observation.account.cutoff[0]),at=int(task.completed_at[0])))
+            if task.sender is not None:published[index].append(stored_actual(task.sender.publication.candidate))
+        def completed(task,index=index):
+            if callback_probes:
+                at=callback_probes[index]['probe_complete'](task)
+                stage('cross_utc_completion_key_checked',root=index,cutoff=at,send_at=task.send_at.cpu().tolist())
+            if task.sender is not None:sent[index].append(dict(cutoff=int(task.observation.account.cutoff[0]),
+                at=int(task.send_at[0]),path=stored_actual(task.sender.publication.candidate),
+                request_contexts=stored_actual(task.request_identity.contexts)))
+        batch.started=started;batch.published=publication;root.models.on_completed=completed
+    def collect(root):
+        while True:
+            result=root.collect_learning_batch(T([2001 if root is first else 2085]),root.yes,
+                progress=lambda name,**row:stage(name,root='a' if root is first else 'b',**row))
+            if result is None or result.learning_boundary or result.complete.all().cpu().item():return result
+            assert root.resume_resources(result),stored_actual(result)
+    def prepare(root,target_end=False):
+        label="a" if root is first else "b"
+        stage("joint_prepare_begin",root=label,target_end=target_end)
+        while True:
+            advance,prepared=root.prepare_learning_batch(root.yes,target_end=target_end,
+                progress=lambda name,**row:stage(name,root='a' if root is first else 'b',**row))
+            if prepared is not None:
+                stage("joint_prepare_end",root=label,target_end=target_end,decisions=root.learning.pending_count)
+                return prepared
+            assert advance is not None and root.resume_resources(advance),stored_actual(advance)
+    assert collect(first).learning_boundary
+    assert a.pending_count==2 and int(first.clock.gates.public_visible_at[0])==1500
+    old_task=next(t for t in first.models.tasks if int(t.observation.account.cutoff[0])==1300)
+    old_sender=old_task.sender;old_path=stored_actual(old_sender.publication.candidate)
+    sender_ref=weakref.ref(old_sender)
+    a_hidden=first.models.hidden.clone();a_rng=first.random.counter.clone()
+    a_public=stored_actual(first.clock.public.ledger);a_position=first.clock.source.position
+    initial_obligations=second.clock.runtime.resolution_obligations
+    initial_fill_capacity=second.clock.runtime.fills.capacity
+    initial_bindings=stored_actual(initial_obligations)
+    second_collection=collect(second)
+    assert second_collection.complete.all().cpu().item() and b.pending_count==6
+    assert [(s["cutoff"],s["at"]) for s in starts[1]]==[(1300,1300),(1400,1414),(1500,1528),(1600,1642),(1700,1756),(1800,1870)]
+    assert completions[1][-1]==dict(cutoff=1800,at=2084)
+    assert not second.models.eligible_starts() and not second.models.tasks
+    grown=second.clock.runtime.resolution_obligations
+    assert second.clock.runtime.fills.capacity>initial_fill_capacity
+    assert grown.pending.size(2)==second.clock.runtime.fills.capacity
+    torch.testing.assert_close(grown.pending[:,:,:initial_fill_capacity],initial_obligations.pending)
+    torch.testing.assert_close(grown.reference_indices,initial_obligations.reference_indices)
+    assert stored_actual(initial_obligations)==initial_bindings
+    stage("joint_fill_growth",old_capacity=initial_fill_capacity,new_capacity=second.clock.runtime.fills.capacity,
+        obligation_capacity=grown.pending.size(2),old_bindings_unchanged=True)
+    prepare(first)
+    if os.environ.get('B_GPU_MAKER_PROJECTION_ROOT'):
+        while True:
+            advance,point=second.read_interval_reward(T([source['maker_page_material']['maker_maturity']]),second.yes,
+                progress=lambda name,**row:stage(name,root='b',**row))
+            if point is not None:break
+            assert second.resume_resources(advance)
+        assert second.clock.runtime.calendars.maker.occupied.any().cpu().item()
+        assert not second.clock.runtime.calendars.maker.mature.any().cpu().item()
+        assert not second.clock.runtime.calendars.maker.paid.any().cpu().item()
+        maker_before_cash=values(second.clock.runtime.account.cash)
+        maker_before_rebates=amounts(second.clock.runtime.account.rebates)
+    prepare(second,True)
+    if os.environ.get('B_GPU_MAKER_PROJECTION_ROOT'):
+        calendar=second.clock.runtime.calendars.maker
+        payable=amounts(calendar.payable);accrued=amounts(calendar.accrued);locked=amounts(calendar.locked)
+        account=second.clock.runtime.account;public=second.clock.public;normalizer=second.clock.projection.normalizer
+        # 先保存实际日结果和原NOE/Ledger读面；断言失败仍保留真实金额与付款资格。
+        (artifact/'maker-target-state.json').write_text(json.dumps(dict(
+            goal_until=b_goal,calendar=stored_actual(calendar),account=stored_actual(account),
+            before_cash=maker_before_cash,before_rebates=[str(x) for x in maker_before_rebates],
+            exact=dict(accrued=[str(x) for x in accrued],payable=[str(x) for x in payable],locked=[str(x) for x in locked]),
+            noe_bank={f.name:(sorted(normalizer.bank.declared_schemas) if f.name=='declared_schemas' else
+                stored_actual(getattr(normalizer.bank,f.name))) for f in fields(normalizer.bank)},
+            batches=stored_actual(public.ledger.columns.projection_batches),
+            ledger=dict(entry=values(public.ledger.current_entry_sequence),local=values(public.ledger.current_local_prefix),
+                platform_prefix=values(public.ledger.platform.platform_source_prefix),
+                balances=[str(x) for x in amounts(public.ledger.platform.balances)],
+                maker_cash=[str(x) for x in amounts(public.ledger.maker_cash)])),indent=2)+'\n')
+        assert torch.equal(calendar.mature,calendar.occupied)
+        assert torch.equal(calendar.finalized,calendar.occupied)
+        assert torch.equal(calendar.paid,calendar.occupied & (calendar.payable.numerator.sign.reshape_as(calendar.occupied)>0))
+        assert values(account.cash)==[maker_before_cash[0]+int(sum(payable)*1000000)]
+        assert amounts(account.rebates)[0]==sum(accrued)-sum(payable)-sum(locked)
+        assert amounts(account.rebates)[2]==sum(locked)
+        stage('maker_target_tail',goal_until=b_goal,maturity=source['maker_page_material']['maker_maturity'],
+            before_cash=maker_before_cash,after_cash=values(second.clock.runtime.account.cash),
+            payable=[str(value) for value in payable],actual_public_prefix=values(second.clock.public.ledger.platform.platform_source_prefix))
+    assert int(first.clock.gates.public_visible_at[0])==1500 and first.clock.source.position==a_position
+    assert stored_actual(first.clock.public.ledger)==a_public and not old_sender.complete.all().cpu().item()
+    assert first.clock.source.prepared is not second.clock.source.prepared
+    assert first.clock.runtime.hidden_frontier.columns.source.catalog is not second.clock.runtime.hidden_frontier.columns.source.catalog
+    assert first.models.hidden is not second.models.hidden
+    assert first.runtime is not second.runtime and first.receiver is not second.receiver
+    assert first.random is not second.random and first.random.seed.cpu().tolist()!=second.random.seed.cpu().tolist()
+    account_a=first.runtime.authority['ledger_projection']['account_instance_key']
+    account_b=second.runtime.authority['ledger_projection']['account_instance_key']
+    assert account_a!=account_b
+    # 原合法Unknown经济读面；仅本次资格注入，全部原材料/路径/消费位置保留。
+    no=~second.yes
+    def unknown():
+        from portfolio_economics import read_portfolio_economics
+        portfolio=read_portfolio_economics(second.clock.public.ledger,economic_prefix_known=second.yes,
+            success_prefix_known=no,settlement_prefix_known=second.yes,rebate_prefix_known=second.yes,
+            economic_liability_prefix_known=second.yes)
+        _,point=second.reward_memory.endpoint(second.goal_until,portfolio,second.yes)
+        return point
+    unknown_point=run(unknown);assert not unknown_point.nav_known.all().cpu().item()
+    b.prepare(target_end=True,endpoint=unknown_point)
+    preserved=[tuple(id(s) for s in batch.states) for batch in batches]
+    paths_before=[[stored_actual(s.path) for s in batch.states] for batch in batches]
+    parameters=[p.detach().clone() for p in policy.parameters()]
+    stage("joint_unknown_update_begin")
+    refusal=joint.update()
+    stage("joint_unknown_update_end",updated=False)
+    assert all(not r.updated and not r.ready for r in refusal.values()) and not optimizer.state
+    assert joint.consumed_batches==0 and int(joint.version[0])==0
+    if tracking:assert tracking_client.get_metric_history(mlflow_run,'decisions')==[] and joint.reporter.pending is None
+    assert preserved==[tuple(id(s) for s in batch.states) for batch in batches]
+    assert paths_before==[[stored_actual(s.path) for s in batch.states] for batch in batches]
+    assert all(torch.equal(x,y) for x,y in zip(parameters,policy.parameters(),strict=True))
+    del parameters,unknown_point
+    prepare(second,True)
+    raw_advantages=[];joint_records=[];propagation_records=[]
+    if policy.propagation is not None:
+        from model_train.propagation import prepare_labels
+        before_reader=(first.clock.source.position.clone(),first.clock.source.prepared.current,first.clock.source.prepared.current_index)
+        before_public=stored_actual(first.clock.public.ledger)
+        before_rng=first.random.counter.clone()
+        origins=[s.propagation_origin for s in a.prepared.decisions]
+        # 普通根尚未公开到1600；本批尾标签不等待、不转移到后批。
+        unripe=prepare_labels(first,origins,200)
+        assert not unripe.valid[-1].any().cpu().item()
+        crossed=prepare_labels(first,origins,1000)
+        assert not crossed.valid.any().cpu().item()
+        assert torch.equal(first.clock.source.position,before_reader[0])
+        assert first.clock.source.prepared.current is before_reader[1] and first.clock.source.prepared.current_index==before_reader[2]
+        assert stored_actual(first.clock.public.ledger)==before_public and torch.equal(first.random.counter,before_rng)
+        label=a.prepared.propagation
+        torch.testing.assert_close(label.value,T([[.01,0.],[-.01,0.]],torch.float32),rtol=1e-5,atol=1e-7)
+        assert label.valid.all().cpu().item()
+        causal=first.clock.source.prepared.causal
+        assert (causal==1400).any()
+        assert int(label.endpoint_prefix[0])==int(__import__("numpy").searchsorted(causal,1400,side="left")-1)
+        assert any(not row.all().cpu().item() for row in b.prepared.propagation.valid)
+        # 缺腿源于原Down ask删除，Up真实零变化仍为合法标签。
+        assert b.prepared.propagation.valid[2:].any().cpu().item()
+        stage("propagation_labels",a_value=label.value.cpu().tolist(),a_mask=label.valid.cpu().tolist(),
+            b_value=b.prepared.propagation.value.cpu().tolist(),b_mask=b.prepared.propagation.valid.cpu().tolist(),
+            horizon_ms=100,eta=1,strict_same_tick=True,reader_ledger_rng_unchanged=True)
+    def prepared(active,statistics):
+        stage("joint_statistics",roots=len(active),count=int(statistics.count))
+        raw=torch.cat([block.advantage[block.present] for batch in active for block in batch.prepared.blocks])
+        torch.testing.assert_close(statistics.mean,raw.mean())
+        torch.testing.assert_close(statistics.m2,((raw-raw.mean())**2).sum(),rtol=1e-4,atol=1e-4)
+        assert int(statistics.count)==len(raw)
+        raw_advantages.append(raw.detach().cpu().tolist())
+        if policy.propagation is not None:
+            masks=torch.cat([batch.prepared.propagation.valid for batch in active])
+            assert masks.shape==(len(raw),2)
+            stage("propagation_population",legal_legs=int(masks.sum()),masked_legs=int((~masks).sum()))
+    def replayed(data,epoch):
+        stage("joint_replay",epoch=epoch,count=len(data),version=int(joint.version[0]))
+        if epoch==0:
+            torch.testing.assert_close(data['new_joint_log_prob'],data['old_joint_log_prob'],rtol=1e-4,atol=1e-4)
+            torch.testing.assert_close(data['recomputed_value'],data['state_value'],rtol=1e-4,atol=1e-4)
+        raw=torch.tensor(raw_advantages[-1],device='cuda')
+        direct=(raw-raw.mean())/raw.std(unbiased=False).clamp_min(torch.finfo(raw.dtype).eps)
+        torch.testing.assert_close(data['advantage'].flatten(),direct,rtol=1e-4,atol=1e-4)
+        if policy.propagation is not None:
+            mask=data["propagation_valid"];prediction=data["propagation_prediction"];label=data["propagation_label"]
+            errors=(prediction-label).square()
+            direct_aux=errors[mask].sum()/mask.sum().clamp_min(1)
+            computed=torch.where(mask,errors,0.).sum()/mask.sum().clamp_min(1)
+            torch.testing.assert_close(computed,direct_aux)
+            gradients=torch.autograd.grad(computed,(policy.propagation_head.weight,
+                next(policy.state.core.parameters())),retain_graph=True)
+            assert all(g.abs().sum().cpu().item()>0 for g in gradients)
+            propagation_records.append(dict(version=int(joint.version[0]),legal_legs=int(mask.sum()),
+                masked_legs=int((~mask).sum()),loss=float(computed.detach()),label=label.cpu().tolist(),
+                mask=mask.cpu().tolist(),head_and_shared_gradient=True))
+        # 原ClipPPOLoss核拼接人口；root均值不作为oracle。
+        losses=joint.loss(data)
+        ratio=(data['new_joint_log_prob']-data['old_joint_log_prob']).exp().unsqueeze(-1)
+        expected=-torch.minimum(ratio*data['advantage'],ratio.clamp(.8,1.2)*data['advantage']).mean()
+        torch.testing.assert_close(losses['loss_objective'],expected)
+        joint_records.append(dict(version=int(joint.version[0]),epoch=epoch,decisions=len(data),
+            raw_advantage=raw_advantages[-1],old_joint=data['old_joint_log_prob'].detach().cpu().tolist(),
+            new_joint=data['new_joint_log_prob'].detach().cpu().tolist(),losses={k:stored_actual(v) for k,v in losses.items()}))
+    joint.on_prepared=prepared;joint.on_replayed=replayed
+    stage("joint_update_begin",roots=2)
+    if tracking:
+        original_write=joint.reporter.write_pending
+        def fail_report():raise OSError('finite validation: MLflow write failed after actual update')
+        joint.reporter.write_pending=fail_report
+        try:joint.update()
+        except ReportWriteError as error:
+            assert isinstance(error.__cause__,OSError)
+            updates=error.update_results
+            assert joint.consumed_batches==1 and int(joint.version[0])==1
+            assert not a.states and not b.states and a.prepared is None and b.prepared is None
+            from validate_active_checkpoint import own,assert_same
+            after_step=own(dict(policy=policy.state_dict(),optimizer=optimizer.state_dict(),version=joint.version))
+            summary=json.loads(json.dumps(joint.reporter.pending))
+            (artifact/'mlflow-failed-write-summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+        else:raise AssertionError('报告失败应明确返回已经更新的事实')
+        finally:joint.reporter.write_pending=original_write
+        assert joint.reporter.pending is not None
+        assert tracking_client.get_metric_history(mlflow_run,'loss_total')==[]
+    else:updates=joint.update()
+    stage("joint_update_end",version=int(joint.version[0]),consumed_batches=joint.consumed_batches)
+    assert updates[a].updated and updates[b].updated and int(joint.version[0])==1
+    assert joint.consumed_batches==1 and b.ended and not a.ended
+    assert updates[a].decisions==2 and updates[b].decisions==6 and not updates[a].target_end and updates[b].target_end
+    assert torch.equal(first.models.hidden,a_hidden) and torch.equal(first.random.counter,a_rng)
+    assert stored_actual(old_sender.publication.candidate)==old_path and not old_sender.complete.all().cpu().item()
+    assert a.states==[] and b.states==[] and not second.models.tasks
+    gc.collect();assert all(ref() is None for items in refs for ref in items)
+    assert all(root.clock.public_loop.captured is not None for root in (first,second))
+    stage('public_loop_production_consumed',positions=[root.clock.source.position.cpu().tolist() for root in (first,second)],
+        private_loop_counts=[int(root.clock.public_loop.captured.processed.cpu()) for root in (first,second)])
+    if os.environ.get('B_GPU_ACTIVE_CHECKPOINT'):
+        from model_train.active_checkpoint import save_joint_checkpoint
+        binding=[dict(name='finite_joint_v1',duration_default=20,duration={},dispatch_default=0,dispatch={'1300':400}),
+            dict(name='finite_joint_v1',duration_default=114,duration={'1800':214},dispatch_default=0,dispatch={})]
+        source_binding=json.loads(Path(os.environ['B_GPU_CHECKPOINT_BINDING']).read_text())
+        checkpoint=save_joint_checkpoint(joint,artifact/'checkpoints',bindings=binding,source_binding=source_binding,progress=stage)
+        if tracking:
+            # 保存成员先保原pending；完整latest发布后，更新摘要连同点引用补写。
+            assert joint.reporter.pending is None
+            assert_same(after_step,own(dict(policy=policy.state_dict(),optimizer=optimizer.state_dict(),version=joint.version)))
+            assert joint.consumed_batches==1
+            logged=tracking_client.get_metric_history(mlflow_run,'loss_total')
+            expected=sum(float(value) for name,value in joint_records[0]['losses'].items() if name.startswith('loss_'))+propagation_records[0]['loss']
+            assert len(logged)==1 and logged[0].step==1 and abs(logged[0].value-expected)<1e-4
+            actual_profile=summary['report']['training_configuration']
+            assert actual_profile['model_shape']==vars(policy.shape)
+            assert actual_profile['input_version']==policy.input_version and actual_profile['value_version']==policy.value_version
+            assert actual_profile['propagation']==policy.propagation
+            assert actual_profile['optimizer']['param_groups'][0]['lr']==.0001
+            assert actual_profile['roots'][0]['reward_a_pusd']==['1/50']
+            assert actual_profile['roots'][1]['goal_until']==[87010000]
+            assert summary['report']['roots']==2 and summary['metrics']['decisions']==8
+            assert summary['metrics']['aux_valid']==13 and summary['metrics']['aux_masked']==3
+            stage('mlflow_retry_report_only',step=1,loss=logged[0].value,weights_adam_version_consumption_unchanged=True)
+        previous_latest=(artifact/'checkpoints/latest.json').read_bytes()
+        def incomplete(path):
+            raise OSError('finite validation: member write completed, manifest not published')
+        try:
+            save_joint_checkpoint(joint,artifact/'checkpoints',bindings=binding,
+                source_binding=source_binding,progress=stage,before_manifest=incomplete)
+        except OSError as error:
+            assert str(error).startswith('finite validation:')
+        else:raise AssertionError('未完整成员不应发布')
+        assert (artifact/'checkpoints/latest.json').read_bytes()==previous_latest
+        half=list((artifact/'checkpoints').glob('.step-*'))
+        assert len(half)==1 and not (half[0]/'manifest.json').exists()
+        # 当前checkpoint成员与后续真实执行对象隔离；只读oracle不借导出器。
+        continuation_begin=[len(x) for x in starts];completion_begin=[len(x) for x in sent]
+    b_position=second.clock.source.position;b_rng=second.random.counter.clone();b_cash=stored_actual(second.clock.public.ledger.platform.balances)
+    assert collect(first).learning_boundary
+    prepare(first);stage("joint_update_begin",roots=1)
+    second_update=joint.update();stage("joint_update_end",version=int(joint.version[0]),consumed_batches=joint.consumed_batches)
+    assert set(second_update)=={a} and second_update[a].updated
+    assert joint.consumed_batches==2 and int(joint.version[0])==2
+    # 只A推进自己的原开放时刻；B既有目标不再次消费、不造空样本。
+    while True:
+        advance=first.run.advance_before(T([1721]),first.yes,progress=stage)
+        if advance.complete.all().cpu().item():break
+        assert first.resume_resources(advance)
+    assert next(row for row in sent[0] if row['cutoff']==1300)['at']==1720
+    assert next(row for row in sent[0] if row['cutoff']==1300)['path']==old_path
+    assert starts[0][2]['cutoff']==1500 and starts[0][2]['version']==[1]
+    assert starts[0][4]['cutoff']==1700 and starts[0][4]['version']==[2]
+    assert second.clock.source.position==b_position and torch.equal(second.random.counter,b_rng)
+    assert stored_actual(second.clock.public.ledger.platform.balances)==b_cash and b.states==[]
+    assert first.request_directory is not second.request_directory
+    assert all(row['request_contexts'][0]['global_request_id']!=other['request_contexts'][0]['global_request_id']
+        for row in sent[0] for other in sent[1])
+    del old_task,old_sender;gc.collect();assert sender_ref() is None
+    report=dict(scope='two real independent cold account Roots; one joint learner; finite engineering validation',
+        config_a=vars(config_a),config_b=vars(config_b),optimizer=dict(kind='AdamW',lr=.0001,weight_decay=.01),
+        accounts=[account_a,account_b],starts=starts,completions=completions,
+        bounds=dict(trading_until=[2000,2000],goal_until=[87010000,b_goal],b_last_start=1870,b_last_finish=2084,b_cutoff1900_not_started=True),updates=[stored_actual(updates[a]),stored_actual(updates[b]),stored_actual(second_update[a])],
+        joint_replays=joint_records,propagation=policy.propagation,propagation_replays=propagation_records,
+        unknown_keeps_all_materials_zero_step=True,
+        independent_readers_accounts_hidden_rng=True,old_send_path_unchanged=True,
+        ended_root_not_reconsumed=True,consumed_batches=joint.consumed_batches)
+    if tracking:
+        assert [(m.step,m.value) for m in tracking_client.get_metric_history(mlflow_run,'decisions')]==[(1,8.),(2,2.)]
+        assert [(m.step,m.value) for m in tracking_client.get_metric_history(mlflow_run,'aux_valid')]==[(1,13.),(2,2.)]
+        assert len(tracking_client.get_metric_history(mlflow_run,'checkpoint_published'))==1
+        report['mlflow']=dict(tracking_uri=tracking_uri,run_id=mlflow_run,steps=[1,2],
+            write_failure_after_update_preserved=True,retry_report_only=True,global_loss_not_doubled=True)
+    if os.environ.get('B_GPU_ACTIVE_CHECKPOINT'):
+        from validate_active_checkpoint import direct_oracle
+        oracle=direct_oracle(joint)
+        oracle['starts']=[rows[begin:] for rows,begin in zip(starts,continuation_begin,strict=True)]
+        oracle['sent']=[rows[begin:] for rows,begin in zip(sent,completion_begin,strict=True)]
+        torch.save(oracle,artifact/'uninterrupted-oracle.pt')
+        (artifact/'checkpoint-result.json').write_text(json.dumps(dict(checkpoint=str(checkpoint),
+            oracle=str(artifact/'uninterrupted-oracle.pt'),endpoint=1721,new_process_required=True),indent=2)+'\n')
+        if os.environ.get('B_GPU_HIDDEN_REFERENCE_LOOP'):
+            from validate_active_checkpoint import advance_reference_tail
+            tail=advance_reference_tail(joint,stage)
+            tail_oracle=direct_oracle(joint)
+            tail_oracle['starts']=[rows[begin:] for rows,begin in zip(starts,continuation_begin,strict=True)]
+            tail_oracle['sent']=[rows[begin:] for rows,begin in zip(sent,completion_begin,strict=True)]
+            torch.save(tail_oracle,artifact/'uninterrupted-reference-tail-oracle.pt')
+            (artifact/'reference-tail-report.json').write_text(json.dumps(tail,indent=2)+'\n')
+        if os.environ.get('B_GPU_MAKER_PROJECTION_ROOT'):
+            from validate_active_checkpoint import advance_maker_tail
+            tail=advance_maker_tail(joint,stage,artifact/'maker-post-checkpoint')
+            tail_oracle=direct_oracle(joint)
+            tail_oracle['starts']=[rows[begin:] for rows,begin in zip(starts,continuation_begin,strict=True)]
+            tail_oracle['sent']=[rows[begin:] for rows,begin in zip(sent,completion_begin,strict=True)]
+            torch.save(tail_oracle,artifact/'uninterrupted-maker-tail-oracle.pt')
+            (artifact/'maker-tail-report.json').write_text(json.dumps(tail,indent=2)+'\n')
+        if os.environ.get('B_GPU_AUTO_CHECKPOINT'):
+            from validate_active_checkpoint import advance_auto_tail
+            tail=advance_auto_tail(joint,stage,artifact)
+            tail_oracle=direct_oracle(joint)
+            tail_oracle['starts']=[rows[begin:] for rows,begin in zip(starts,continuation_begin,strict=True)]
+            tail_oracle['sent']=[rows[begin:] for rows,begin in zip(sent,completion_begin,strict=True)]
+            torch.save(tail_oracle,artifact/'uninterrupted-auto-tail-oracle.pt')
+            (artifact/'auto-tail-report.json').write_text(json.dumps(tail,indent=2)+'\n')
+    (artifact/'actual-joint-roots-report.json').write_text(json.dumps(report,indent=2)+'\n')
+    return report
+
+
+def logical_batch_case(root,policy,source,artifact,stage):
+    """真实Root有限批→联合路径ClipPPO→释放→同账户续采；工程参数无正式默认。"""
+    from model_train.logical_batch import LogicalBatchConfig,LogicalBatch
+    from model_train.gpu_policy import finite_value_context
+    from portfolio_economics import read_portfolio_economics
+    from exposure import read_portfolio_exposure
+    config=LogicalBatchConfig(decisions=2,tbptt=1,burn_in=1,epochs=1,
+        clip_epsilon=.2,critic_coefficient=.5,entropy_coefficient=0.)
+    (artifact/'logical-batch-config.json').write_text(json.dumps(vars(config),indent=2)+'\n')
+    with torch.no_grad():
+        policy.action.actor.family[-1].bias[2]=6.
+        policy.action.actor.variant.bias.copy_(T([2,0]).float())
+        policy.action.actor.price.bias[38]=6.
+    optimizer=torch.optim.AdamW(policy.parameters(),lr=.0001)
+    learner=root.enable_learning(policy,optimizer,config,T([0]))
+    replay_checks=[]
+    def replayed(data,epoch):
+        # 同行为参数、真实h_in与完整路径；同时比较联合ell和所有决定价值。
+        if epoch==0:
+            torch.testing.assert_close(data['new_joint_log_prob'],data['old_joint_log_prob'],rtol=1e-4,atol=1e-4)
+            torch.testing.assert_close(data['recomputed_value'],data['state_value'],rtol=1e-4,atol=1e-4)
+        replay_checks.append(dict(version=int(learner.version[0]),epoch=epoch,
+            joint_old=data['old_joint_log_prob'].detach().cpu().tolist(),
+            joint_replayed=data['new_joint_log_prob'].detach().cpu().tolist()))
+    learner.on_replayed=replayed
+    root.models.timing=lambda observation:(T([20]),T([400 if int(observation.account.cutoff.cpu()[0])==1300 else 0]))
+    starts=[];publications=[];requests=[];references=[];updates=[]
+    old_started=learner.started;old_published=learner.published
+    def started(task,h_in):
+        with torch.no_grad():
+            rows=task.observation.row_roots;frozen=task.observation.frozen
+            value_context=finite_value_context(frozen.cutoff,root.goal_until[rows],root.trading_until[rows])
+            expected=policy.frozen_state_and_value(frozen,h_in,frozen.identities,
+                task.evaluation.policy_version,value_context=value_context)
+        torch.testing.assert_close(task.evaluation.hidden,expected.hidden)
+        torch.testing.assert_close(task.evaluation.state,expected.state)
+        torch.testing.assert_close(task.evaluation.value,expected.value)
+        starts.append(dict(cutoff=int(task.observation.account.cutoff.cpu()[0]),
+            started=int(task.started_at.cpu()[0]),version=task.evaluation.policy_version.cpu().tolist(),
+            h_in_all_layers=True,role=frozen.role.cpu().tolist()))
+        old_started(task,h_in)
+        references.append(weakref.ref(learner.states[-1]))
+    def published(task,accepted):
+        old_published(task,accepted)
+        if task.sender is not None:
+            path=task.sender.publication.candidate
+            publications.append(dict(cutoff=int(task.observation.account.cutoff.cpu()[0]),
+                completed=int(task.completed_at.cpu()[0]),send_at=int(task.send_at.cpu()[0]),
+                version=path.policy_version.cpu().tolist(),length=path.length.cpu().tolist(),
+                choices=path.choices.cpu().tolist(),old_log_prob=path.log_prob.cpu().tolist(),
+                rng=path.random.counter.cpu().tolist(),request_contexts=stored_actual(task.request_identity.contexts)))
+    learner.started=started;learner.published=published
+    def completed(task):
+        if task.sender is not None and task.sender.requests is not None:
+            sender=task.sender
+            requests.append(dict(cutoff=int(task.observation.account.cutoff.cpu()[0]),
+                sent_at=int(sender.control.execute_at.cpu()[0]),input_sequence=values(sender.receipt.input_sequence)[0],
+                body=sender.requests[1][0],version=sender.publication.candidate.policy_version.cpu().tolist(),
+                choices=sender.publication.candidate.choices.cpu().tolist(),
+                rng=sender.publication.candidate.random.counter.cpu().tolist()))
+    root.models.on_completed=completed
+    def collect():
+        while True:
+            result=root.collect_learning_batch(T([2001]),root.yes,progress=stage)
+            if result is None or result.learning_boundary:return result
+            if result.complete.all().cpu().item():return result
+            assert root.resume_resources(result),stored_actual(result)
+    first=collect()
+    assert first.learning_boundary and root.run.next_observation.cpu().tolist()==[1600]
+    assert [s['cutoff'] for s in starts]==[1300,1400]
+    assert starts[0]['started']==1300 and publications[0]['completed']==1320
+    assert int(root.clock.gates.public_visible_at.cpu()[0])==1500
+    old_task=next(t for t in root.models.tasks if int(t.observation.account.cutoff.cpu()[0])==1300)
+    old_path=stored_actual(old_task.sender.publication.candidate);old_rng=root.random.counter.clone()
+    old_hidden=root.models.hidden.clone()
+    endpoint,value,ready,fault=learner.bootstrap()
+    assert torch.equal(root.models.hidden,old_hidden) and torch.equal(root.random.counter,old_rng)
+    assert ready.all().cpu().item() and not fault.any().cpu().item()
+    # 原合法Unknown读面进入同一个真实批消费者；它不消费/清零，也不step。
+    blocked=LogicalBatch(root,policy,torch.optim.AdamW(policy.parameters(),lr=.0001),config,T([0]))
+    blocked.states=[replace(s) for s in learner.states];blocked.pending_count=learner.pending_count
+    no=torch.zeros_like(root.yes)
+    def unknown_point():
+        portfolio=read_portfolio_economics(root.clock.public.ledger,economic_prefix_known=root.yes,
+            success_prefix_known=no,settlement_prefix_known=root.yes,rebate_prefix_known=root.yes,
+            economic_liability_prefix_known=root.yes)
+        # 不修改known摘要；原读面按缺失success前缀形成Unknown。
+        memory=root.reward_memory
+        _,point=memory.endpoint(memory.last_at_ms,portfolio,root.yes)
+        return point
+    unknown=run(unknown_point)
+    assert not unknown.nav_known.all().cpu().item()
+    blocked.bootstrap=lambda:(unknown,*learner.bootstrap()[1:])
+    before=[p.detach().clone() for p in policy.parameters()]
+    refusal=blocked.update()
+    assert not refusal.ready and not refusal.updated and len(blocked.states)==2
+    assert not blocked.optimizer.state and all(torch.equal(a,b) for a,b in zip(before,policy.parameters(),strict=True))
+    first_update=learner.update();assert first_update.updated and first_update.version==1
+    assert torch.equal(root.models.hidden,old_hidden) and torch.equal(root.random.counter,old_rng)
+    assert stored_actual(old_task.sender.publication.candidate)==old_path
+    updates.append(stored_actual(first_update));del old_task,blocked,before,endpoint
+    gc.collect();assert all(ref() is None for ref in references[:1])
+    while True:
+        result=collect()
+        if result is not None and result.complete.all().cpu().item():break
+        _,update=root.update_learning_batch(root.yes)
+        assert update.updated
+        updates.append(stored_actual(update));stage('logical_batch_update',**updates[-1])
+    _,last=root.update_learning_batch(root.yes,target_end=True,progress=stage)
+    assert last.updated and last.target_end and last.bootstrap.cpu().tolist()==[[0.]]
+    updates.append(stored_actual(last))
+    assert starts[2]['cutoff']==1500 and starts[2]['version']==[1]
+    assert [s['cutoff'] for s in starts]==list(range(1300,2000,100))
+    assert next(i for i,r in enumerate(requests) if r['cutoff']==1500)<next(i for i,r in enumerate(requests) if r['cutoff']==1300)
+    sent_old=next(r for r in requests if r['cutoff']==1300)
+    published_old=publications[0]
+    assert sent_old['choices']==published_old['choices'] and sent_old['version']==published_old['version']
+    assert sent_old['rng']==published_old['rng'] and sent_old['sent_at']==published_old['send_at']==1720
+    assert learner.states==[] and not root.models.tasks
+    gc.collect();assert all(ref() is None for ref in references)
+    before_memory=stored_actual(root.reward_memory)
+    _,goal=root.read_interval_reward(root.goal_until,root.yes,progress=stage)
+    _,repeated=root.read_interval_reward(root.goal_until,root.yes,progress=stage)
+    assert stored_actual(goal)==stored_actual(repeated) and stored_actual(root.reward_memory)==before_memory
+    assert root.clock.source.next().eof.all().cpu().item()
+    report=dict(scope='real single-account bounded collection/full joint-path ClipPPOLoss/update/resume; engineering fixture',
+        config=vars(config),optimizer=dict(kind='AdamW',lr=.0001,weight_decay=.01),
+        starts=starts,publications=publications,requests=requests,updates=updates,replay_checks=replay_checks,
+        unknown_read_blocks_optimizer_retains_population=True,consumed_references_released=True,
+        activity_hidden_not_written_by_learning=True,old_published_path_and_rng_unchanged=True,
+        goal=stored_actual(goal),cash=[str(x) for x in amounts(root.clock.public.ledger.platform.balances)],
+        platform_prefix=values(root.clock.public.ledger.platform.platform_source_prefix))
+    (artifact/'actual-logical-batch-report.json').write_text(json.dumps(report,indent=2)+'\n')
+    return report
+
+
+def logical_context_case(root,policy,source,artifact,stage):
+    """原双市场同根：真实T−30 ContextOnly与当前决定共享一次全层递推。"""
+    from model_train.logical_batch import LogicalBatchConfig
+    from model_train.gpu_policy import finite_value_context
+    config=LogicalBatchConfig(1,1,1,1,.2,.5,0.)
+    optimizer=torch.optim.AdamW(policy.parameters(),lr=.0001)
+    learner=root.enable_learning(policy,optimizer,config,T([0]))
+    root.models.timing=lambda observation:(T([20]),T([0]))
+    starts=[];owned=[];original=learner.started
+    def started(task,h_in):
+        frozen=task.observation.frozen
+        assert frozen.role.cpu().tolist()==[1,0]
+        with torch.no_grad():
+            context=finite_value_context(frozen.cutoff,root.goal_until[task.observation.row_roots],
+                root.trading_until[task.observation.row_roots])
+            expected_hidden=h_in.clone()
+            for role in (0,1):
+                rows=torch.nonzero(frozen.role==role).flatten()
+                part=policy.frozen_state_and_value(frozen.rows(rows),h_in[:,rows],frozen.identities[rows],
+                    task.evaluation.policy_version[rows],value_context=context[rows])
+                expected_hidden[:,rows]=part.hidden
+                torch.testing.assert_close(part.state,task.evaluation.state[rows])
+                torch.testing.assert_close(part.value,task.evaluation.value[rows])
+        torch.testing.assert_close(expected_hidden,task.evaluation.hidden)
+        starts.append(dict(cutoff=frozen.cutoff.cpu().tolist(),version=task.evaluation.policy_version.cpu().tolist(),
+            h_in=h_in.detach().clone(),h_out=expected_hidden.detach().clone()))
+        original(task,h_in)
+        owned.append(weakref.ref(learner.states[-1]))
+    learner.started=started
+    def advance(horizon,collect):
+        while True:
+            result=(root.collect_learning_batch if collect else root.run.advance_before)(T([horizon]),root.yes,progress=stage)
+            if result is None or result.learning_boundary or result.complete.all().cpu().item():return result
+            assert root.resume_resources(result)
+    boundary=advance(300401,True)
+    assert boundary.learning_boundary and len(starts)==1
+    assert int(root.clock.gates.public_visible_at[0])==300400
+    assert root.run.next_observation.cpu().tolist()==[300500]
+    queued=learner._successor();frozen=queued.observation.frozen
+    assert frozen.cutoff.cpu().tolist()==[300400,300400] and frozen.role.cpu().tolist()==[1,0]
+    h=root.models.hidden.clone();rng=root.random.counter.clone()
+    _,bootstrap,ready,fault=learner.bootstrap()
+    with torch.no_grad():
+        expected=policy.frozen_state_and_value(frozen,h,frozen.identities,T([0,0]),
+            value_context=finite_value_context(frozen.cutoff,T([303000,303000]),T([303000,303000])))
+    torch.testing.assert_close(bootstrap,expected.value[queued.observation.decision_rows])
+    assert ready.all().cpu().item() and not fault.any().cpu().item()
+    assert not torch.equal(expected.hidden[:,1],h[:,1])
+    assert torch.equal(root.models.hidden,h) and torch.equal(root.random.counter,rng)
+    replay_checks=[]
+    def replayed(data,epoch):
+        if epoch==0:
+            torch.testing.assert_close(data['new_joint_log_prob'],data['old_joint_log_prob'],rtol=1e-4,atol=1e-4)
+            torch.testing.assert_close(data['recomputed_value'],data['state_value'],rtol=1e-4,atol=1e-4)
+        replay_checks.append(dict(epoch=epoch,old=data['old_joint_log_prob'].detach().cpu().tolist(),
+            replay=data['new_joint_log_prob'].detach().cpu().tolist(),
+            old_value=data['state_value'].detach().cpu().tolist(),
+            replayed_value=data['recomputed_value'].detach().cpu().tolist()))
+    learner.on_replayed=replayed
+    update=learner.update();assert update.updated
+    gc.collect();assert owned[0]() is None
+    assert torch.equal(root.models.hidden,h) and torch.equal(root.random.counter,rng)
+    advance(300421,False)
+    assert len(starts)==2 and starts[1]['version']==[1,1]
+    assert torch.equal(starts[1]['h_in'],h)
+    # 临时bootstrap没有提交；更新后未开始ContextOnly与决定首次真实递推一次。
+    torch.testing.assert_close(root.models.hidden,starts[1]['h_out'])
+    report=dict(scope='original two-market T-30 ContextOnly row + genuine next decision, one account; ordinary bootstrap only',
+        config=vars(config),trading_until=303000,goal_until=303000,goal_closed=False,
+        first_cutoff=300300,first_complete=300320,next_frozen=300400,next_complete=300420,
+        roles=[1,0],all_gru_layers_compared=True,bootstrap_does_not_commit=True,
+        next_first_bound_version=[1,1],update=stored_actual(update),replay_checks=replay_checks,
+        context_only_no_policy_loss=True,consumed_reference_released=True)
+    (artifact/'actual-logical-context-report.json').write_text(json.dumps(report,indent=2)+'\n')
+    return report
+
+
+
+
+def logical_cutoff_case(root,policy,source,artifact,stage):
+    """原有限目标：最后已开始计算跨截止，不用旧排队决定作bootstrap。"""
+    from model_train.logical_batch import LogicalBatchConfig
+    config=LogicalBatchConfig(6,1,1,1,.2,.5,0.)
+    with torch.no_grad():
+        policy.action.actor.family[-1].bias.fill_(-40.)
+        policy.action.actor.family[-1].bias[0]=40.
+    learner=root.enable_learning(policy,torch.optim.AdamW(policy.parameters(),lr=.0001),config,T([0]))
+    root.models.timing=lambda observation:(T([214 if int(observation.account.cutoff[0])==1800 else 114]),T([0]))
+    starts=[];published=[];refs=[];last_rng=[];original=learner.started;publish=learner.published
+    def started(task,h_in):
+        original(task,h_in);refs.append(weakref.ref(learner.states[-1]))
+        starts.append((int(task.observation.account.cutoff[0]),int(task.started_at[0])))
+    def complete(task,accepted):
+        publish(task,accepted)
+        published.append((int(task.observation.account.cutoff[0]),int(task.completed_at[0])))
+        if published[-1][0]==1800:last_rng.append(root.random.counter.clone())
+    learner.started=started;learner.published=complete
+    while True:
+        result=root.collect_learning_batch(T([2100]),root.yes,progress=stage)
+        if result.complete.all().cpu().item():break
+        assert not result.learning_boundary and root.resume_resources(result)
+    assert starts==[(1300,1300),(1400,1414),(1500,1528),(1600,1642),(1700,1756),(1800,1870)]
+    assert published[-1]==(1800,2084) and learner.pending_count==6
+    assert not root.models.tasks and root.models.hidden.shape[1]==0
+    assert learner._successor() is None and learner.bootstrap() is None
+    assert torch.equal(root.random.counter,last_rng[0])
+    def replayed(data,epoch):
+        if epoch==0:
+            torch.testing.assert_close(data['new_joint_log_prob'],data['old_joint_log_prob'],rtol=1e-4,atol=1e-4)
+            torch.testing.assert_close(data['recomputed_value'],data['state_value'],rtol=1e-4,atol=1e-4)
+    learner.on_replayed=replayed
+    while True:
+        advance,update=root.update_learning_batch(root.yes,target_end=True,progress=stage)
+        if update is not None:break
+        assert root.resume_resources(advance)
+    assert update.updated and update.decisions==6 and update.target_end
+    assert update.bootstrap.cpu().tolist()==[[0.]] and learner.states==[]
+    gc.collect();assert all(ref() is None for ref in refs)
+    assert torch.equal(root.random.counter,last_rng[0])
+    assert root.clock.source.next().eof.all().cpu().item()
+    _,reward=root.read_interval_reward(root.goal_until,root.yes,progress=stage)
+    report=dict(config=vars(config),starts=starts,published=published,trading_until=2000,
+        goal_until=87010000,ineligible_C1900_not_bootstrap=True,no_retired_policy_or_rng=True,
+        no_consumer_hot_rows_released=True,consumed_references_released=True,update=stored_actual(update),
+        final_reward=stored_actual(reward),platform_prefix=values(root.clock.public.ledger.platform.platform_source_prefix))
+    (artifact/'actual-logical-cutoff-report.json').write_text(json.dumps(report,indent=2)+'\n')
+    return report
+
+
+def logical_gap_case(root,policy,source,artifact,stage):
+    """真实5min窗口错开300ms：暂停批跨三个纯ContextOnly网格。"""
+    from model_train.logical_batch import LogicalBatchConfig
+    from model_train.gpu_policy import finite_value_context
+    cutoff_case=bool(os.environ.get('B_GPU_ACTOR_LOGICAL_GAP_CUTOFF'))
+    with torch.no_grad():
+        policy.action.actor.family[-1].bias.fill_(-40.)
+        policy.action.actor.family[-1].bias[0]=40.  # 真正NoTrade决定，不伪造ContextOnly动作。
+    learner=root.enable_learning(policy,torch.optim.AdamW(policy.parameters(),lr=.0001),
+        LogicalBatchConfig(7,2,1,1,.2,.5,0.),T([0]))
+    root.models.timing=lambda observation:(T([80 if int(observation.account.cutoff[0])>=301000 else 20]),T([0]))
+    starts=[];refs=[];original=learner.started
+    def started(task,h_in):
+        frozen=task.observation.frozen;rows=task.observation.row_roots
+        context=finite_value_context(frozen.cutoff,root.goal_until[rows],root.trading_until[rows])
+        with torch.no_grad():
+            expected=task.evaluation.hidden.clone()
+            for role in (0,1):
+                selected=torch.nonzero(frozen.role==role).flatten()
+                if not selected.numel():continue
+                part=policy.frozen_state_and_value(frozen.rows(selected),h_in[:,selected],
+                    frozen.identities[selected],task.evaluation.policy_version[selected],value_context=context[selected])
+                expected[:,selected]=part.hidden
+        torch.testing.assert_close(expected,task.evaluation.hidden)
+        if starts:
+            previous=starts[-1]
+            mapping=(frozen.identities[:,None]==previous['identities'][None]).all(2)
+            assert mapping.any(1).all().cpu().item()
+            torch.testing.assert_close(h_in,previous['h_out'][:,mapping.to(torch.int64).argmax(1)])
+        original(task,h_in);refs.append(weakref.ref(learner.states[-1]))
+        starts.append(dict(cutoff=int(task.observation.account.cutoff[0]),at=int(task.started_at[0]),
+            roles=frozen.role.cpu().tolist(),version=task.evaluation.policy_version.cpu().tolist(),
+            h_out=expected.detach().clone(),identities=frozen.identities.clone()))
+        stage('logical_gap_started',**{k:v for k,v in starts[-1].items() if k not in ('h_out','identities')})
+    learner.started=started
+    def advance(horizon,collect=True):
+        while True:
+            result=(root.collect_learning_batch if collect else root.run.advance_before)(T([horizon]),root.yes,progress=stage)
+            if result is None or result.learning_boundary or result.complete.all().cpu().item():return result
+            assert root.resume_resources(result)
+    boundary=advance(301501 if cutoff_case else 301301)
+    assert [s['cutoff'] for s in starts]==list(range(300300,301000,100))
+    assert learner.pending_count==7 and all(s.published for s in learner.states)
+    if cutoff_case:
+        assert boundary.complete.all().cpu().item() and not boundary.learning_boundary
+        assert learner._successor() is None and learner.bootstrap() is None
+        assert not root.models.tasks
+        before=[p.detach().clone() for p in policy.parameters()]
+        refusal=learner.update()
+        assert not refusal.updated and learner.pending_count==7
+        assert all(torch.equal(a,b) for a,b in zip(before,policy.parameters(),strict=True))
+        report=dict(cutoff_predecessor_duration_blocks_bootstrap=True,trading_until=301500,
+            pending_decisions_retained=7,optimizer_not_called=True,declared_goal=303000,goal_closed=False)
+    else:
+        assert boundary.learning_boundary and int(root.clock.gates.public_visible_at[0])==301300
+        plan=root.models.eligible_starts()
+        assert [(int(t.observation.account.cutoff[0]),int(at[0])) for t,active,at in plan]==[
+            (301000,301300),(301100,301380),(301200,301460),(301300,301540)]
+        hidden=root.models.hidden.clone();rng=root.random.counter.clone()
+        assert learner.bootstrap() is not None
+        assert torch.equal(hidden,root.models.hidden) and torch.equal(rng,root.random.counter)
+        def replayed(data,epoch):
+            if epoch==0:
+                torch.testing.assert_close(data['new_joint_log_prob'],data['old_joint_log_prob'],rtol=1e-4,atol=1e-4)
+                torch.testing.assert_close(data['recomputed_value'],data['state_value'],rtol=1e-4,atol=1e-4)
+        learner.on_replayed=replayed
+        update=learner.update();assert update.updated
+        gc.collect();assert all(ref() is None for ref in refs)
+        advance(301621,False)
+        tail=starts[7:]
+        assert [(s['cutoff'],s['at']) for s in tail]==[(301000,301300),(301100,301380),(301200,301460),(301300,301540)]
+        assert [s['roles'] for s in tail]==[[0],[0],[0],[1]]
+        assert all(s['version']==[1] for s in tail)
+        assert learner.pending_count==1 and len(learner.states)==4
+        assert all(s.published for s in learner.states)
+        assert all(s.path is None for s in learner.states[:3]) and learner.states[3].path is not None
+        torch.testing.assert_close(root.models.hidden,tail[-1]['h_out'])
+        report=dict(real_context_only_tasks=3,context_only_not_decisions=True,context_only_completed_without_sender=True,
+            next_decision_started_at=301540,next_decision_cutoff=301300,next_version=1,
+            all_gru_layers_compared=True,bootstrap_does_not_commit=True,consumed_references_released=True,
+            update=stored_actual(update),goal_closed=False)
+    report['starts']=[{k:v for k,v in s.items() if k not in ('h_out','identities')} for s in starts]
+    (artifact/'actual-logical-gap-report.json').write_text(json.dumps(report,indent=2)+'\n')
+    return report
+
+
+def propagation_coverage_case(root,artifact,stage):
+    """实际有限选源到1450，EOF后只推进原经济/Actor时钟，不补公共事实。"""
+    from model_train.propagation import frozen_origin,prepare_labels
+    from public_device_page import PreparedPublicBlocks
+    origins=[];decisions=[]
+    def started(task):
+        rows=task.observation.decision_rows
+        rows=rows[task.observation.frozen.role[rows]==1]
+        origins.append(frozen_origin(root,task,rows))
+        decisions.append(task.observation.frozen.cutoff[rows].cpu().tolist())
+    root.models.on_started=started
+    while True:
+        result=root.run.advance_before(T([2000]),root.yes,progress=stage)
+        if result.complete.all().cpu().item():break
+        assert root.resume_resources(result),stored_actual(result.fault)
+    assert result.fault.cpu().tolist()==[0] and root.clock.source.next().eof.cpu().tolist()==[True]
+    assert decisions==[[1300]],decisions
+    prepared=root.clock.source.prepared
+    assert prepared.received_range_utc_ms==dict(start=900,end=1450)
+    assert int(prepared.causal[-1])==1351
+    assert root.clock.gates.public_visible_at.cpu().tolist()==[2000]
+    before=(root.clock.source.position.clone(),prepared.current,prepared.current_index,
+        stored_actual(root.clock.public.ledger),root.random.counter.clone(),root.models.hidden.clone(),
+        stored_actual(root.clock.runtime.account),stored_actual(root.clock.runtime.orders))
+    inside=prepare_labels(root,origins,100);outside=prepare_labels(root,origins,200)
+    edge=prepare_labels(root,origins,150)
+    assert inside.valid.all().cpu().item() and edge.valid.all().cpu().item()
+    assert not outside.valid.any().cpu().item()
+    torch.testing.assert_close(inside.value,torch.zeros_like(inside.value),rtol=0,atol=0)
+    assert torch.equal(root.clock.source.position,before[0])
+    assert prepared.current is before[1] and prepared.current_index==before[2]
+    assert stored_actual(root.clock.public.ledger)==before[3]
+    assert torch.equal(root.random.counter,before[4]) and torch.equal(root.models.hidden,before[5])
+    assert stored_actual(root.clock.runtime.account)==before[6] and stored_actual(root.clock.runtime.orders)==before[7]
+    # 与恢复相同的材料读口重建；只读原manifest，不复制范围到catalog/Root。
+    rebuilt=PreparedPublicBlocks(prepared.directory,prepared.material)
+    child=rebuilt.read(0)
+    assert rebuilt.received_range_utc_ms==child.received_range_utc_ms==prepared.received_range_utc_ms
+    report=dict(scope='original cold Root, one real C1300 decision, EOF then economic clock2000; query only, no new PPO update',
+        coverage=prepared.received_range_utc_ms,last_group_received=1350,last_group_causal=1351,
+        market_end=2000,clock=2000,cutoffs=decisions,within=stored_actual(inside.valid),
+        exact_material_end=stored_actual(edge.valid),outside=stored_actual(outside.valid),
+        value=stored_actual(inside.value),source_position=stored_actual(root.clock.source.position),
+        reader_economics_rng_hidden_unchanged=True,restored_reader_range=rebuilt.received_range_utc_ms)
+    (artifact/'actual-propagation-coverage-report.json').write_text(json.dumps(report,indent=2)+'\n')
+    return report
+
+
 def main():
     source=json.load(sys.stdin);artifact=Path(os.environ['B_GPU_ORDER_ARTIFACT_DIR'])
     path=Path(os.environ['CARGO_TARGET_DIR'])/'debug/libmodel_native_inputs.so'
@@ -894,7 +2123,8 @@ def main():
             if at%1000:return
             row=dict(row,observation_position=max(0,(at-271000)//100+1),observations_total=309)
         print(json.dumps(row),file=sys.stderr,flush=True)
-    if source.get('continuous_two_markets'):
+    cold_request=None
+    if source.get('continuous_two_markets') or source.get('finite_goal') or source.get('propagation_coverage'):
         from latency import EmpiricalDelaySampler
         from rules import PublicRuleGpu
         # 有限材料的真实行情价位目录；不以未来请求推账户或预留。
@@ -921,11 +2151,18 @@ def main():
                 account_id='gpu-cold-account',caller_role='MODEL_TRAIN',caller_instance_id='gpu-cold-caller',
                 creation_request_id='gpu-cold-create',response_bridge_binding_id='gpu-cold-bridge',
                 initial_account_state=dict(available_pusd='2000'),session_seed=source['session_seed']))
+        if source.get('finite_goal') or source.get('propagation_coverage'):
+            identity=source['opening_ledger']['projection']['account_instance_key']
+            cold_request['session'].update(account_id=identity['account_id'],caller_role=identity['caller_role'],
+                caller_instance_id=identity['caller_instance_id'],creation_request_id='create-'+source['run_id'],
+                response_bridge_binding_id='bridge-control-v2')
+            cold_request['activation_id']='activate-'+source['run_id']
+    if source.get('continuous_two_markets'):
         taker,maker=run(lambda:(rational([source['taker_rebate_rate']]),rational([source['maker_rebate_rate']])))
         report=bounded(source,None,None,None,sampler,PublicRuleGpu(source['rule']),slots,T([0]*len(slots)),None,None,asks,
             taker,maker,progress,codec,artifact,continuous=continuous,cold_request=cold_request)
     else:
-        report=check(source,codec.post_terms_batch_v2,progress,before_drive=lambda *args,**kwargs:bounded(*args,codec,artifact,continuous=lambda *a,**k:continuous(*a,second_buy='--out-of-order-buy' in sys.argv,**k),**kwargs),defer_initial_send=True)
+        report=check(source,codec.post_terms_batch_v2,progress,before_drive=lambda *args,**kwargs:bounded(*args,codec,artifact,continuous=lambda *a,**k:continuous(*a,second_buy='--out-of-order-buy' in sys.argv,**k),cold_request=cold_request,**kwargs),defer_initial_send=True)
 
     print(json.dumps(report),flush=True)
 

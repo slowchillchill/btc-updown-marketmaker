@@ -17,6 +17,7 @@ class FrozenActorObservation:
     decision_rows: torch.Tensor
     row_roots: torch.Tensor | None = None
     root_cutoffs: torch.Tensor | None = None
+    reward_endpoint: object = None  # 唯一原区间记忆的同前缀冻结端点；实际学习消费者拥有。
 
     def actor_view(self):
         """只给原Actor根级当前市场；ContextOnly不建立第二动作人口。"""

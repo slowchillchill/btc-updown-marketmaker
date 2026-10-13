@@ -69,7 +69,10 @@ impl Source {
         };
         let record = if n == 0 {
             SimV2SourceRecordReferenceV1::AccountOpening
-        } else if matches!(kinds.first(), Some(Kind::TradeLifecycle { .. })) {
+        } else if matches!(
+            kinds.first(),
+            Some(Kind::TradeLifecycle { .. } | Kind::TradeLifecycleV3 { .. })
+        ) {
             SimV2SourceRecordReferenceV1::TradeLifecycle {
                 private_feedback_sequence: n,
                 platform_event_at_utc_ms: 100 + n as i64,
@@ -80,9 +83,42 @@ impl Source {
                 private_feedback_sequence: n,
                 platform_responded_at_utc_ms: 100 + n as i64,
                 response_received_at_utc_ms: 200 + n as i64,
-                association: SimV2DirectResponseAssociationV1::Request {
-                    global_request_id: format!("query-{n}"),
+                association: if matches!(
+                    kinds.first(),
+                    Some(Kind::Control {
+                        result: Control::Submission { .. }
+                    })
+                ) {
+                    SimV2DirectResponseAssociationV1::SubmissionItem {
+                        global_request_id: format!("submit-{n}"),
+                        batch_item_ordinal: 0,
+                    }
+                } else if matches!(
+                    kinds.first(),
+                    Some(Kind::Control {
+                        result: Control::Cancellation { .. }
+                    })
+                ) {
+                    SimV2DirectResponseAssociationV1::CancellationTarget {
+                        global_request_id: format!("cancel-{n}"),
+                        method: ExecutionMethodV2::CancelOrder,
+                        target_ordinal: 0,
+                        input_item_refs: vec![CancelInputItemRefV2 {
+                            item_id: format!("cancel-item-{n}"),
+                            batch_item_ordinal: 0,
+                        }],
+                    }
+                } else {
+                    SimV2DirectResponseAssociationV1::Request {
+                        global_request_id: format!("query-{n}"),
+                    }
                 },
+            }
+        } else if matches!(kinds.first(), Some(Kind::OrderLifecycle { .. })) {
+            SimV2SourceRecordReferenceV1::OrderLifecycle {
+                private_feedback_sequence: n,
+                platform_event_at_utc_ms: 100 + n as i64,
+                feedback_received_at_utc_ms: 200 + n as i64,
             }
         } else {
             SimV2SourceRecordReferenceV1::SettlementLifecycle {
@@ -656,4 +692,436 @@ fn terminal_success_read_is_not_economic_application() {
         ExecutionReadValueV1::NotApplicable
     );
     assert_eq!(read.cash().actual_available_pusd, number("100"));
+}
+
+fn order_identity(source: &Source, id: &str) -> Identity {
+    Identity::entity(
+        &Arc::new(source.context.account_identity.clone()),
+        &SourceNeutralEntityKeyV1::Order {
+            source_order_id: id.into(),
+        },
+    )
+    .unwrap()
+}
+fn accepted_quantity(order: &Identity, matched: &str, open: &str) -> Kind {
+    Kind::Control {
+        result: Control::Submission {
+            outcome: SourceNeutralSubmissionOutcomeV2::Accepted {
+                order: SourceNeutralOrderSnapshotV1 {
+                    order_identity: order.clone(),
+                    condition_id: ConditionId("condition".into()),
+                    token_id: TokenId("up".into()),
+                    state: SourceNeutralOrderStateV1::Open,
+                },
+                measurement: SourceNeutralSubmissionMeasurementV1::Base {
+                    matched_base_quantity_shares: number(matched),
+                    open_base_quantity_shares: number(open),
+                },
+                effective_processing_at_utc_ms: 100,
+            },
+        },
+    }
+}
+fn counted_trade(
+    source: &Source,
+    order: &Identity,
+    id: &str,
+    quantity: &str,
+    role: TradeLiquidityRoleV2,
+    disposition: SourceNeutralTradeEconomicDispositionV1,
+    modern: bool,
+) -> Kind {
+    let state = match disposition {
+        SourceNeutralTradeEconomicDispositionV1::PendingUnapplied
+        | SourceNeutralTradeEconomicDispositionV1::PendingApplied => {
+            SourceNeutralTradeStateV1::Matched
+        }
+        SourceNeutralTradeEconomicDispositionV1::FinalSuccess => {
+            SourceNeutralTradeStateV1::Confirmed
+        }
+        _ => SourceNeutralTradeStateV1::Failed,
+    };
+    let price = if id == "sim-257" { "0.81" } else { "0.5" };
+    let result = Trade {
+        trade_identity: Identity::entity(
+            &Arc::new(source.context.account_identity.clone()),
+            &SourceNeutralEntityKeyV1::Trade {
+                source_trade_id: id.into(),
+            },
+        )
+        .unwrap(),
+        order_identity: order.clone(),
+        condition_id: ConditionId("condition".into()),
+        token_id: TokenId("up".into()),
+        state,
+        economic_disposition: disposition.clone(),
+        fill_sequence: id.trim_start_matches("sim-").parse().unwrap(),
+        matched_at_utc_ms: 100,
+        liquidity_role: role,
+        source_price_pusd_per_share: number(price),
+        base_quantity_shares: number(quantity),
+        quote_amount_pusd: number(
+            &(quantity.parse::<rust_decimal::Decimal>().unwrap()
+                * price.parse::<rust_decimal::Decimal>().unwrap())
+            .to_string(),
+        ),
+        immediate_taker_fee_pusd: number("0"),
+        economic_application_account_transition_seq: matches!(
+            disposition,
+            SourceNeutralTradeEconomicDispositionV1::PendingApplied
+                | SourceNeutralTradeEconomicDispositionV1::FinalFailureCompensated
+        )
+        .then_some(1),
+    };
+    if modern {
+        Kind::TradeLifecycleV3 {
+            result: contracts::economics::SourceNeutralTradeLifecycleResultV3 {
+                result,
+                maker_fee_equivalent_pusd: ExecutionReadValueV1::Known(number("0")),
+            },
+        }
+    } else {
+        Kind::TradeLifecycle { result }
+    }
+}
+fn assert_counts(writer: &LedgerWriterV1, open: u64, pending: u64) {
+    let projection = writer.projection_v2().unwrap();
+    assert_eq!(
+        projection.platform_confirmed_projection.open_order_count,
+        open
+    );
+    assert_eq!(
+        projection.platform_confirmed_projection.pending_fill_count,
+        pending
+    );
+    assert_eq!(
+        projection
+            .market_projections
+            .iter()
+            .map(|m| m.open_order_count)
+            .sum::<u64>(),
+        open
+    );
+    assert_eq!(
+        projection
+            .market_projections
+            .iter()
+            .map(|m| m.pending_fill_count)
+            .sum::<u64>(),
+        pending
+    );
+    assert_eq!(
+        projection.platform_confirmed_projection.cash_pusd,
+        number("100")
+    );
+    assert_eq!(
+        projection.platform_confirmed_projection.fees_pusd,
+        number("0")
+    );
+}
+#[test]
+fn maker_full_match_closes_open_quantity_once_independent_of_finality_and_recovery() {
+    use SourceNeutralTradeEconomicDispositionV1::*;
+    let temp = tempfile::tempdir().unwrap();
+    let mut source = Source::new(&temp.path().join("noe"), "maker-open-count");
+    source.accept(Kind::Economic {
+        evidence: SourceNeutralEconomicEvidenceV1::AccountOpening {
+            opening_evidence_identity: "opening".into(),
+            available_pusd: number("100"),
+        },
+    });
+    let order = order_identity(&source, "sim-413");
+    source.accept(accepted_quantity(&order, "0", "39.45"));
+    // 原事故数量：sim-257 耗尽 sim-413 的全部 39.45 份开放余量。
+    source.accept(counted_trade(
+        &source,
+        &order,
+        "sim-257",
+        "39.45",
+        TradeLiquidityRoleV2::MakerInferred,
+        PendingUnapplied,
+        true,
+    ));
+    source.accept(counted_trade(
+        &source,
+        &order,
+        "sim-257",
+        "39.45",
+        TradeLiquidityRoleV2::MakerInferred,
+        FinalSuccess,
+        true,
+    ));
+    source.accept(counted_trade(
+        &source,
+        &order,
+        "sim-257",
+        "39.45",
+        TradeLiquidityRoleV2::MakerInferred,
+        PendingUnapplied,
+        true,
+    ));
+    source.accept(accepted_quantity(&order, "0", "39.45"));
+    source.stable();
+    let records = source.source.take_closed(500, 700);
+    assert_eq!(records.len(), 5);
+    let mut writer =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    let materials = Arc::new(Mutex::new(Vec::new()));
+    let sink = materials.clone();
+    writer.bind_record_sink_v2(Box::new(move |m| sink.lock().unwrap().push(m)));
+    writer
+        .apply_noe_memory_v1(&source.source.opening_record().unwrap())
+        .unwrap();
+    writer.apply_noe_memory_v1(&records[0]).unwrap();
+    assert_counts(&writer, 1, 0);
+    writer.apply_noe_memory_v1(&records[1]).unwrap();
+    assert_counts(&writer, 0, 1);
+    let mut checkpoint = Vec::new();
+    writer.write_checkpoint(&mut checkpoint).unwrap();
+    // 只有恢复支继续原耐久序列；不中断支仅作业务状态对照，不再次写入尾部。
+    writer.reconnect_record_sink_v2(Box::new(|_| {}));
+    let mut restored = LedgerWriterV1::restore_checkpoint(checkpoint.as_slice()).unwrap();
+    let sink = materials.clone();
+    restored.reconnect_record_sink_v2(Box::new(move |m| sink.lock().unwrap().push(m)));
+    for record in &records[2..] {
+        writer.apply_noe_memory_v1(record).unwrap();
+        restored.apply_noe_memory_v1(record).unwrap();
+        assert_counts(&restored, 0, 0);
+        assert_eq!(writer.projection_v2(), restored.projection_v2());
+    }
+    for record in &records {
+        restored.apply_noe_memory_v1(record).unwrap();
+    }
+    assert_counts(&restored, 0, 0);
+    let root = temp.path().join("ledger");
+    let mut background = LedgerBackgroundWriterV2::new(&root);
+    for material in materials.lock().unwrap().iter() {
+        background.write(material).unwrap();
+    }
+    background.finish().unwrap();
+    let mut cold = LedgerWriterV1::open_durable(&root).unwrap();
+    assert_eq!(cold.projection_v2(), restored.projection_v2());
+    for record in &records {
+        cold.apply_noe_memory_v1(record).unwrap();
+    }
+    assert_counts(&cold, 0, 0);
+}
+#[test]
+fn initial_taker_is_not_deducted_again_and_late_acceptance_keeps_maker_depletion() {
+    use SourceNeutralTradeEconomicDispositionV1::*;
+    let temp = tempfile::tempdir().unwrap();
+    let mut source = Source::new(&temp.path().join("noe"), "mixed-open-count");
+    source.accept(Kind::Economic {
+        evidence: SourceNeutralEconomicEvidenceV1::AccountOpening {
+            opening_evidence_identity: "opening".into(),
+            available_pusd: number("100"),
+        },
+    });
+    let order = order_identity(&source, "sim-414");
+    source.accept(counted_trade(
+        &source,
+        &order,
+        "sim-258",
+        "2",
+        TradeLiquidityRoleV2::MakerInferred,
+        PendingUnapplied,
+        false,
+    ));
+    source.accept(accepted_quantity(&order, "4", "6"));
+    source.accept(counted_trade(
+        &source,
+        &order,
+        "sim-259",
+        "4",
+        TradeLiquidityRoleV2::Taker,
+        FinalSuccess,
+        false,
+    ));
+    source.accept(counted_trade(
+        &source,
+        &order,
+        "sim-258",
+        "2",
+        TradeLiquidityRoleV2::MakerInferred,
+        FinalFailureUnapplied,
+        false,
+    ));
+    source.accept(counted_trade(
+        &source,
+        &order,
+        "sim-260",
+        "4",
+        TradeLiquidityRoleV2::MakerInferred,
+        PendingApplied,
+        false,
+    ));
+    source.accept(counted_trade(
+        &source,
+        &order,
+        "sim-260",
+        "4",
+        TradeLiquidityRoleV2::MakerInferred,
+        FinalFailureCompensated,
+        false,
+    ));
+    source.accept(Kind::OrderLifecycle {
+        result: SourceNeutralOrderLifecycleResultV1 {
+            order_identity: order.clone(),
+            condition_id: ConditionId("condition".into()),
+            token_id: TokenId("up".into()),
+            event: SourceNeutralOrderLifecycleEventV1::Accepted {
+                state: SourceNeutralOrderStateV1::Open,
+            },
+        },
+    });
+    source.stable();
+    let records = source.source.take_closed(500, 700);
+    assert_eq!(records.len(), 7);
+    let mut writer =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    writer
+        .apply_noe_memory_v1(&source.source.opening_record().unwrap())
+        .unwrap();
+    for (record, (open, pending)) in
+        records
+            .iter()
+            .zip([(0, 1), (1, 1), (1, 1), (1, 0), (0, 1), (0, 0), (0, 0)])
+    {
+        writer.apply_noe_memory_v1(record).unwrap();
+        assert_counts(&writer, open, pending);
+    }
+}
+
+#[test]
+fn canceled_remainder_and_late_match_keep_open_and_finality_counts_separate() {
+    use SourceNeutralTradeEconomicDispositionV1::*;
+    let temp = tempfile::tempdir().unwrap();
+    let mut source = Source::new(&temp.path().join("noe"), "cancel-open-count");
+    source.accept(Kind::Economic {
+        evidence: SourceNeutralEconomicEvidenceV1::AccountOpening {
+            opening_evidence_identity: "opening".into(),
+            available_pusd: number("100"),
+        },
+    });
+    let order = order_identity(&source, "sim-415");
+    source.accept(accepted_quantity(&order, "0", "5"));
+    source.accept(counted_trade(
+        &source,
+        &order,
+        "sim-261",
+        "2",
+        TradeLiquidityRoleV2::MakerInferred,
+        PendingUnapplied,
+        true,
+    ));
+    for outcome in [
+        SourceNeutralCancellationOutcomeV1::EvidenceUnknownNoEffect,
+        SourceNeutralCancellationOutcomeV1::NotCanceledNoEffect,
+        SourceNeutralCancellationOutcomeV1::Canceled,
+    ] {
+        source.accept(Kind::Control {
+            result: Control::Cancellation {
+                order_identity: order.clone(),
+                outcome,
+            },
+        });
+    }
+    // 成交先于撤单发生，成交反馈随后到达。
+    source.accept(counted_trade(
+        &source,
+        &order,
+        "sim-262",
+        "1",
+        TradeLiquidityRoleV2::MakerInferred,
+        PendingUnapplied,
+        true,
+    ));
+    source.accept(accepted_quantity(&order, "0", "5"));
+    source.accept(counted_trade(
+        &source,
+        &order,
+        "sim-261",
+        "2",
+        TradeLiquidityRoleV2::MakerInferred,
+        FinalFailureUnapplied,
+        true,
+    ));
+    source.accept(counted_trade(
+        &source,
+        &order,
+        "sim-262",
+        "1",
+        TradeLiquidityRoleV2::MakerInferred,
+        FinalSuccess,
+        true,
+    ));
+    source.stable();
+    let records = source.source.take_closed(500, 700);
+    assert_eq!(records.len(), 9);
+    let mut writer =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    writer
+        .apply_noe_memory_v1(&source.source.opening_record().unwrap())
+        .unwrap();
+    for (record, (open, pending)) in records.iter().zip([
+        (1, 0),
+        (1, 1),
+        (1, 1),
+        (1, 1),
+        (0, 1),
+        (0, 2),
+        (0, 2),
+        (0, 1),
+        (0, 0),
+    ]) {
+        writer.apply_noe_memory_v1(record).unwrap();
+        assert_counts(&writer, open, pending);
+    }
+}
+
+/// 真实关闭先到；无预留的迟到Open/Base不能创建市场人口。
+#[test]
+fn terminal_before_open_without_reservation_keeps_market_absent() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut source = Source::new(&temp.path().join("noe"), "terminal-before-open");
+    source.accept(Kind::Economic { evidence: SourceNeutralEconomicEvidenceV1::AccountOpening {
+        opening_evidence_identity: "opening".into(), available_pusd: number("100"),
+    }});
+    let order = order_identity(&source, "sim-416");
+    for event in [SourceNeutralOrderLifecycleEventV1::CallerCanceled,
+        SourceNeutralOrderLifecycleEventV1::Accepted { state: SourceNeutralOrderStateV1::Open }] {
+        source.accept(Kind::OrderLifecycle { result: SourceNeutralOrderLifecycleResultV1 {
+            order_identity: order.clone(), condition_id: ConditionId("condition".into()),
+            token_id: TokenId("up".into()), event,
+        }});
+    }
+    source.accept(accepted_quantity(&order, "0", "5"));
+    source.stable();
+    let records = source.source.take_closed(500, 700);
+    assert_eq!(records.len(), 3);
+    let mut writer = LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    writer.apply_noe_memory_v1(&source.source.opening_record().unwrap()).unwrap();
+    let mut checkpoints = Vec::new();
+    for record in &records {
+        writer.apply_noe_memory_v1(record).unwrap();
+        assert_counts(&writer, 0, 0);
+        let projection = writer.projection_v2().unwrap();
+        assert!(projection.market_projections.is_empty());
+        checkpoints.push(projection);
+    }
+    if let Ok(validator) = std::env::var("B_GPU_TERMINAL_ORDER_VALIDATOR") {
+        let artifact = std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
+        let rows = records.iter().map(|r| serde_json::json!({"record":r.record(),
+            "position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
+        let path = artifact.join("terminal-before-open.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&serde_json::json!({"records":rows,
+            "checkpoints":checkpoints})).unwrap()).unwrap();
+        let result = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+            .arg(validator).arg(path).output().unwrap();
+        std::fs::write(artifact.join("GPU.stdout"),&result.stdout).unwrap();
+        std::fs::write(artifact.join("GPU.stderr"),&result.stderr).unwrap();
+        assert!(result.status.success(), "GPU exit={:?} stderr={}",result.status.code(),
+            String::from_utf8_lossy(&result.stderr));
+        println!("{}",String::from_utf8_lossy(&result.stdout));
+    }
 }

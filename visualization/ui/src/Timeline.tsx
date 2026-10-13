@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useEffect, useRef } from "react";
 import * as echarts from "echarts/core";
 import { ScatterChart } from "echarts/charts";
@@ -12,6 +13,7 @@ export function Timeline({
   points: Point[];
   onSelect: (e: Evidence) => void;
 }) {
+  const { t: tr } = useTranslation();
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!ref.current || !points.length) return;
@@ -30,12 +32,12 @@ export function Timeline({
           const i = (params as { dataIndex: number }).dataIndex;
           const p = points[i];
           // 纯文本显示，避免来源字符串成为 HTML。
-          return p ? `${p.clock} · ${p.originalUtcText ?? p.utcMs}` : "";
+          return p ? `${tr(p.clock)} · ${p.originalUtcText ?? p.utcMs}` : "";
         },
       },
       xAxis: {
         type: "value",
-        name: "相对起点 ms（仅绘图近似）",
+        name: tr("相对起点 ms（仅绘图近似）"),
         nameLocation: "middle",
         nameGap: 28,
         axisLabel: { color: "#8aa2b8" },
@@ -45,7 +47,10 @@ export function Timeline({
       yAxis: {
         type: "category",
         data: clocks,
-        axisLabel: { color: "#a9c2d7" },
+        axisLabel: {
+          color: "#a9c2d7",
+          formatter: (value: string) => tr(value),
+        },
         splitLine: { show: true, lineStyle: { color: "#233449" } },
       },
       series: [
@@ -70,13 +75,14 @@ export function Timeline({
       resize.disconnect();
       chart.dispose();
     };
-  }, [points, onSelect]);
+  }, [points, onSelect, tr]);
   return (
     <>
-      <div className="timeline" ref={ref} aria-label="有限多时钟事实图" />
+      <div className="timeline" ref={ref} aria-label={tr("有限多时钟事实图")} />
       <p className="muted">
-        仅显示已知点；没有完整诊断历史，不画经济曲线或补造持续时间。图上坐标为近似位移，选点查看原精确
-        时间（毫秒整数或原微秒 UTC 文本）。
+        {tr(
+          "仅显示已知点；没有完整诊断历史，不画经济曲线或补造持续时间。图上坐标为近似位移，选点查看原精确 时间（毫秒整数或原微秒 UTC 文本）。",
+        )}
       </p>
     </>
   );

@@ -10,6 +10,7 @@ class ContinuousAdvance:
     fault: torch.Tensor
     events: int
     stage_result: object = None
+    learning_boundary: bool = False
 
 
 class ContinuousActorRun:
@@ -21,6 +22,8 @@ class ContinuousActorRun:
     def __init__(self,clock,first_observation,models,freeze,receive,*,trading_until=None,settlement=None,inputs=None,initialize=None):
         self.clock=clock;self.next_observation=first_observation.clone()
         self.models=models;self.freeze=freeze;self.receive=receive;self.initialize=initialize
+        self.models.start_frontier=lambda:torch.where(clock.gates.has_public_visible,
+            clock.gates.public_visible_at,self.models.last_completed_at)
         self.trading_until=trading_until;self.settlement=settlement
         self.economic_resume=torch.zeros_like(first_observation,dtype=torch.bool)
         owner=inputs if inputs is not None else getattr(freeze,'__self__',None)
@@ -28,7 +31,7 @@ class ContinuousActorRun:
         if self.input_owner is not None:self.input_owner.bind_source(clock.source)
         if self.input_owner is not None:self.models.bind_inputs(self.input_owner)
 
-    def advance_before(self,horizon,enabled,*,progress=None):
+    def advance_before(self,horizon,enabled,*,progress=None,learning_boundary=None):
         blocked=torch.zeros_like(enabled);fault=torch.zeros_like(horizon,dtype=torch.int32)
         count=0;stage=None;blocked_stage=None
         if self.initialize is not None:
@@ -60,11 +63,14 @@ class ContinuousActorRun:
                 stage=self.clock.advance_before(horizon,boundary,progress=progress)
                 fault |= stage.fault
                 complete=boundary&stage.complete&(fault==0)
+                # 本轮事件索引已不用；开放horizon推进后按真实新前沿退役。
+                self.models.retire_unstartable()
                 self.models.retire_consumed_markets(torch.where(observing,self.next_observation-100,self.clock.gates.public_visible_at))
                 return ContinuousAdvance(complete,blocked| (boundary&~complete),fault,count,blocked_stage if blocked_stage is not None else stage)
             # 与原SIM调用相同，只冷读实际已选处理器类别；根/时间选择留在设备。
             selected_kind=int(kind[due].min().cpu())
             active=due&(kind==selected_kind)
+            if progress:progress('continuous_event_begin',events=count,kind=selected_kind)
             if selected_kind==3:
                 complete,error,send_advance=self.models.send(self.clock,active,progress=progress)
                 fault |= error
@@ -111,3 +117,6 @@ class ContinuousActorRun:
             count+=1
             if progress:progress('continuous_event',events=count,kind=selected_kind,
                 at=at.detach().cpu().tolist(),active=active.detach().cpu().tolist(),blocked=blocked.detach().cpu().tolist())
+            if learning_boundary is not None and not bool(blocked.any().cpu()) and learning_boundary():
+                # 学习停点不是horizon完成或资源阻塞；原观察/发送网格不改。
+                return ContinuousAdvance(torch.zeros_like(enabled),blocked,fault,count,stage,True)

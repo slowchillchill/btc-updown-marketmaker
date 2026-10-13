@@ -7,7 +7,7 @@ from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
-import importlib.util,json,sys,time
+import importlib.util,json,os,sys,time
 import torch
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/"ledger/gpu"))
 from queues import Numbers
@@ -70,12 +70,20 @@ def check(source,sampler):
         projection=Projection.open(emitter,zero,zero,zero,zero,t([0,0]),integers([0]),zero,zero,zero,zero)
         return world,projection
     world,projection=Numbers.run_exact_batch(initialize)
+    if os.environ.get('B_GPU_AUTO_DEVICE'):
+        from auto_redemption_loop import AutoRedemptionDeviceLoop
+        auto_loop=AutoRedemptionDeviceLoop()
+        def automatic(world,projection,at,*,preceding=None):
+            return auto_loop.run(world,projection,t([at]),yes,sampler,preceding=preceding)
+    else:
+        def automatic(world,projection,at,*,preceding=None):
+            return Numbers.run_exact_batch(lambda:world.try_auto_redeem(t([at]),yes,projection,sampler,preceding=preceding))
+
     # 原before属于触发批已经消费的真实前缀；只承接其位置，不重放前缀账户。
     ordinal=references[0]['position']['record_ordinal']
     previous=SimpleNamespace(emitted=t([[True]*ordinal],torch.bool),
         batch_sequences=integers([references[0]['position']['source_watermark']['projection_batch_sequence']]*ordinal))
-    world,projection,batches=Numbers.run_exact_batch(lambda:world.try_auto_redeem(t([at]),yes,projection,sampler,
-        preceding=(previous,) if ordinal else ()))
+    world,projection,batches=automatic(world,projection,at,preceding=(previous,) if ordinal else ())
     assert len(batches)==1
     batch=batches[0]
     assert batch.fault.cpu().tolist()==[0] and batch.emitted.sum(1).cpu().tolist()==[len(references)]
@@ -92,7 +100,7 @@ def check(source,sampler):
         body=next(iter(reference['record'].values()))
         assert projection.normalizer.bank.source_order[batch.rows[0,index],3].cpu().item()==body['source_order']['ordinal']
     unchanged=world
-    world,projection,repeated=Numbers.run_exact_batch(lambda:world.try_auto_redeem(t([at+1]),yes,projection,sampler))
+    world,projection,repeated=automatic(world,projection,at+1)
     assert not repeated and world is unchanged
     economic=EconomicColumns.from_projection_batches([batch])
     def open_ledger():

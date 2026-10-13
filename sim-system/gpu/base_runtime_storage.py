@@ -33,14 +33,16 @@ class TerminalFeedback:
 
 
 def _shared(value, name):
-    return name == 'columns' or isinstance(value, FillRecord) and name in (
+    return name in ('columns','resolution_columns') or isinstance(value, FillRecord) and name in (
         'offsets', 'states', 'lengths', 'economic_ordinals')
 
 
-def _owned(value, layout):
+def _owned(value, layout, *, word_capacity=0, word_widths=None):
     if isinstance(value, ExactInt):
         # 布局只来自冷资源准备；不能截断原精确值或人口。
-        width = max(value.words.size(1), layout.words.size(1))
+        width = max(value.words.size(1), layout.words.size(1), word_capacity)
+        if word_widths is not None:
+            word_widths.append(width)
         value = value.with_capacity(width)
         return ExactInt(value.words.clone(), value.sign.clone(), value.fault.clone())
     if isinstance(value, torch.Tensor):
@@ -50,12 +52,14 @@ def _owned(value, layout):
         return value.clone()
     if is_dataclass(value):
         return replace(value, **{field.name: getattr(value, field.name) if _shared(value, field.name)
-            else _owned(getattr(value, field.name), getattr(layout, field.name)) for field in fields(value)})
+            else _owned(getattr(value, field.name), getattr(layout, field.name),
+                word_capacity=word_capacity, word_widths=word_widths) for field in fields(value)})
     if isinstance(value, tuple):
         if len(value) != len(layout):
             raise ValueError('固定SIM输出人口不一致')
-        return tuple(_owned(item, target) for item, target in zip(value, layout))
-    if value is None or isinstance(value, (str, int, bool)):
+        return tuple(_owned(item, target, word_capacity=word_capacity, word_widths=word_widths)
+                     for item, target in zip(value, layout))
+    if value is None or isinstance(value, (str, int, bool, frozenset)):
         if value != layout:
             raise ValueError('活动SIM物理布局元数据不一致')
         return value
@@ -73,6 +77,9 @@ def _tensor_pairs(target, candidate):
         for field in fields(target):
             if not _shared(target, field.name):
                 yield from _tensor_pairs(getattr(target, field.name), getattr(candidate, field.name))
+    elif isinstance(target,tuple):
+        if len(target)!=len(candidate):raise ValueError('候选物理tuple人口变化须退出图')
+        for left,right in zip(target,candidate):yield from _tensor_pairs(left,right)
     elif target != candidate:
         raise ValueError('候选不能更换活动SIM冷元数据')
 
@@ -191,7 +198,7 @@ class SimFeedbackPage:
     count是物理迭代人口，不是fill/private/经济序号。页满只请求冷消费/换页，
     不丢义务；已写页在消费者与冻结引用解除前保持不变。
     """
-    def __init__(self, template, capacity):
+    def __init__(self, template, capacity, *, device=None):
         if type(capacity) is not int or capacity < 1:
             raise ValueError('SIM反馈页须有正物理容量')
         self.capacity = capacity
@@ -201,7 +208,8 @@ class SimFeedbackPage:
             self.buffers.append(torch.zeros((capacity, *value.shape), dtype=value.dtype, device=value.device))
             return value
         _page_map(template, allocate)
-        self.count = torch.zeros((), dtype=torch.int64, device=template.at.device)
+        self.count = torch.zeros((), dtype=torch.int64,
+                                 device=template.at.device if device is None else device)
 
     def append(self, value, committed, population):
         slot = self.count.clamp(0, self.capacity-1).reshape(1)
@@ -219,6 +227,72 @@ class SimFeedbackPage:
         """冷消费已写物理槽；返回借同一不可变页的原类型视图。"""
         buffers = iter(self.buffers)
         return _page_map(self.template, lambda _: next(buffers)[index])
+
+    def snapshot(self):
+        """交给下一设备消费者的独立页；下次replay不能改写此输出。"""
+        return SimFeedbackSnapshot(_owned(self.template,self.template),
+            tuple(buffer.clone() for buffer in self.buffers),self.count.clone(),self.capacity)
+
+
+@dataclass(frozen=True)
+class SimFeedbackSnapshot:
+    template: object
+    buffers: tuple
+    count: torch.Tensor
+    capacity: int
+
+    def member_buffer(self,member):
+        """按原模板成员定位整页设备列；不读取人口或复制来源。"""
+        buffers=iter(self.buffers);selected=[]
+        def inspect(value):
+            buffer=next(buffers)
+            if value is member:selected.append(buffer)
+            return value
+        _page_map(self.template,inspect)
+        if len(selected)!=1:raise ValueError('反馈成员须属于原页模板且只有一个物理列')
+        return selected[0]
+
+    def feedback_present(self):
+        """原全页反馈判断留设备；未写尾槽不参与人口。"""
+        event=self.template.event
+        emitted=(event.emitted,event.economic_delta.emitted,event.failure_delta.emitted,
+            event.rebate_delta.emitted)
+        buffers=iter(self.buffers);selected=[]
+        def inspect(value):
+            buffer=next(buffers)
+            if any(value is member for member in emitted):selected.append(buffer)
+            return value
+        _page_map(self.template,inspect)
+        population=torch.arange(self.capacity,device=self.count.device)<self.count
+        return torch.stack([value.any(dim=tuple(range(1,value.ndim)))&population
+            for value in selected]).any()
+
+    def read_device(self,index):
+        """设备物理坐标gather；不以Tensor标量索引触发宿主取值。"""
+        buffers=iter(self.buffers)
+        return _page_map(self.template,lambda _:next(buffers).index_select(0,index.reshape(1)).squeeze(0))
+
+    def with_capacity(self,width):
+        """只为冷私有布局补原ExactInt高位零，不改变页人口或精确值。"""
+        template=_owned(self.template,self.template,word_capacity=width)
+        def nested(original,current):
+            if isinstance(original,SimFeedbackSnapshot):return original.with_capacity(width)
+            if is_dataclass(original):
+                return replace(current,**{f.name:nested(getattr(original,f.name),getattr(current,f.name))
+                    for f in fields(original) if not _shared(original,f.name)})
+            if isinstance(original,tuple):return tuple(nested(a,b) for a,b in zip(original,current))
+            return current
+        template=nested(self.template,template)
+        buffers=iter(self.buffers);expanded=[]
+        def install(value):
+            old=next(buffers)
+            if old.shape[1:]!=value.shape:
+                # 唯一形状变化来自上面的ExactInt.with_capacity。
+                old=torch.nn.functional.pad(old,(0,value.size(-1)-old.size(-1)))
+            expanded.append(old)
+            return value
+        _page_map(template,install)
+        return replace(self,template=template,buffers=tuple(expanded))
 
 
 class FinalityFeedbackPage(SimFeedbackPage):

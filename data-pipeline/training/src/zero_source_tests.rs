@@ -949,7 +949,7 @@ fn complete_and_zero_source_inputs_are_invariant_to_physical_batching() {
 }
 
 #[test]
-fn selected_file_damage_after_freeze_is_rejected_by_actual_build() {
+fn selected_file_damage_is_rejected_by_independent_reopened_build() {
     let mut fixture = Fixture::new();
     fixture.day(
         DAY,
@@ -961,6 +961,9 @@ fn selected_file_damage_after_freeze_is_rejected_by_actual_build() {
         )],
     );
     let input = fixture.freeze();
+    let first = TempDir::new().unwrap();
+    // 首次实际build消费准入移交的打开对象。独立再次build必须重新核验内容。
+    build(&input, &scope(), &first.path().join("candidate"), false).unwrap();
     let path = input.admitted_daily_inputs()[0].files()[0].file_path();
     let mut bytes = fs::read(path).unwrap();
     let offset = bytes.len() / 2;

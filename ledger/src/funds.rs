@@ -195,6 +195,19 @@ impl LedgerFundsReadV1<'_> {
             .keys()
             .filter_map(|id| self.request(id))
     }
+    /// 只枚举原 owner 中尚未转换或释放的预留身份；旧状态按原事实读取。
+    pub fn active_requests(&self) -> Box<dyn Iterator<Item = RequestFundsReadV1<'_>> + '_> {
+        if let Some(ids) = &self.writer.reservations.active_requests {
+            Box::new(ids.iter().filter_map(|id| self.request(id)))
+        } else {
+            Box::new(self.requests().filter(|r| {
+                !matches!(
+                    r.reservation_state,
+                    ReservationStatusV1::Converted | ReservationStatusV1::Released
+                )
+            }))
+        }
+    }
     pub fn orders(&self) -> impl Iterator<Item = OrderFundsReadV1<'_>> {
         self.writer
             .funds

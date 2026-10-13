@@ -458,10 +458,66 @@ pub(crate) fn duplicate_suppressed_report<E: ReductionEvidenceV1>(
     Ok(report)
 }
 
+/// 一次准备的深度数值，复用原规范化和精确Decimal算法，不携带归约状态。
+pub struct PreparedBinanceDepthV1 {
+    bids: Vec<PreparedDepthLevel>,
+    asks: Vec<PreparedDepthLevel>,
+}
+struct PreparedDepthLevel {
+    price: ExactDecimal,
+    quantity: Decimal,
+    key: Decimal,
+}
+impl PreparedBinanceDepthV1 {
+    pub(crate) fn prepare(bids: &[DepthLevel], asks: &[DepthLevel]) -> Result<Self, ContractError> {
+        Ok(Self {
+            bids: prepare_reference_levels(bids, "bids")?,
+            asks: prepare_reference_levels(asks, "asks")?,
+        })
+    }
+}
+fn prepare_reference_levels(
+    levels: &[DepthLevel],
+    field: &str,
+) -> Result<Vec<PreparedDepthLevel>, ContractError> {
+    levels
+        .iter()
+        .enumerate()
+        .map(|(i, level)| {
+            let pf = format!("{field}[{i}].price");
+            let qf = format!("{field}[{i}].quantity");
+            let price = typed_raw::normalize_decimal_text(&level.price, &pf)
+                .map_err(typed_raw_contract_error)?;
+            let quantity = typed_raw::normalize_decimal_text(&level.quantity, &qf)
+                .map_err(typed_raw_contract_error)?;
+            Ok(PreparedDepthLevel {
+                key: parse_canonical_decimal(&price, &pf)?,
+                quantity: parse_canonical_decimal(&quantity, &qf)?,
+                price,
+            })
+        })
+        .collect()
+}
+mod depth_quantity {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(
+        value: &Decimal,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        exact_from_decimal(*value).serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Decimal, D::Error> {
+        let value = ExactDecimal::deserialize(deserializer)?;
+        parse_canonical_decimal(&value, "quantity").map_err(serde::de::Error::custom)
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct ReferenceLevelState<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     price: ExactDecimal,
-    quantity: ExactDecimal,
+    #[serde(with = "depth_quantity")]
+    quantity: Decimal,
     direct_evidence: E,
 }
 
@@ -526,6 +582,12 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
             .map(binance_depth_payload)
     }
 
+    pub(crate) fn has_current_depth_value(&self) -> bool {
+        self.current_epoch
+            .as_ref()
+            .and_then(|epoch| self.epochs.get(epoch))
+            .is_some_and(|state| state.book.is_some())
+    }
     /// 返回会随输入增长、并由生产编排层实施硬上限的保留集合条目数。
     pub fn retained_state_entries(&self) -> usize {
         self.epochs.values().fold(
@@ -552,7 +614,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         row: &BinanceDepthSnapshotRow,
         evidence: E,
     ) -> Result<ReferenceReductionOutcomeV1<E, E::Identity>, ContractError> {
-        self.compute_snapshot_projection(row, evidence, false)
+        self.compute_snapshot_projection(row, evidence, false, None)
             .map(|outcome| outcome.expect("完整路径提供公共归约结果"))
     }
     pub fn compute_update(
@@ -560,8 +622,26 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         row: &BinanceDepthUpdateRow,
         evidence: E,
     ) -> Result<ReferenceReductionOutcomeV1<E, E::Identity>, ContractError> {
-        self.compute_update_projection(row, evidence, false)
+        self.compute_update_projection(row, evidence, false, None)
             .map(|outcome| outcome.expect("完整路径提供公共归约结果"))
+    }
+    pub(crate) fn compute_prepared_snapshot(
+        &mut self,
+        row: &BinanceDepthSnapshotRow,
+        evidence: E,
+        depth: &PreparedBinanceDepthV1,
+    ) -> Result<ReferenceReductionOutcomeV1<E, E::Identity>, ContractError> {
+        self.compute_snapshot_projection(row, evidence, false, Some(depth))
+            .map(|v| v.expect("完整路径提供公共归约结果"))
+    }
+    pub(crate) fn compute_prepared_update(
+        &mut self,
+        row: &BinanceDepthUpdateRow,
+        evidence: E,
+        depth: &PreparedBinanceDepthV1,
+    ) -> Result<ReferenceReductionOutcomeV1<E, E::Identity>, ContractError> {
+        self.compute_update_projection(row, evidence, false, Some(depth))
+            .map(|v| v.expect("完整路径提供公共归约结果"))
     }
     /// 研究薄入口复用已验证行和接纳边界，不投影完整事件或盘口谱系。
     pub fn apply_quantity_snapshot(
@@ -569,7 +649,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         row: &BinanceDepthSnapshotRow,
         evidence: E,
     ) -> Result<(), ContractError> {
-        self.compute_snapshot_projection(row, evidence, true)
+        self.compute_snapshot_projection(row, evidence, true, None)
             .map(|_| ())
     }
     pub fn apply_quantity_update(
@@ -577,7 +657,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         row: &BinanceDepthUpdateRow,
         evidence: E,
     ) -> Result<(), ContractError> {
-        self.compute_update_projection(row, evidence, true)
+        self.compute_update_projection(row, evidence, true, None)
             .map(|_| ())
     }
     /// 研究已定位的数量资格缺口：丢弃当前数量状态，delta不能重建。
@@ -618,9 +698,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
             levels
                 .values()
                 .try_fold(EconomicRational::zero(), |sum, level| {
-                    Ok::<_, ContractError>(sum.add(&EconomicRational::from_decimal(
-                        parse_canonical_decimal(&level.quantity, "quantity")?,
-                    )))
+                    Ok::<_, ContractError>(sum.add(&EconomicRational::from_decimal(level.quantity)))
                 })
                 .map(|sum| sum.public())
         };
@@ -632,6 +710,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         row: &BinanceDepthSnapshotRow,
         evidence: E,
         quantity_only: bool,
+        prepared: Option<&PreparedBinanceDepthV1>,
     ) -> Result<Option<ReferenceReductionOutcomeV1<E, E::Identity>>, ContractError> {
         self.begin_epoch(&row.source_sequence_epoch_id)?;
         let state = self
@@ -645,8 +724,15 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         )?;
         state.last_admission_sequence = Some(row.collector_admission_sequence);
 
-        let bids = reference_level_map(&row.bids, &evidence, "bids")?;
-        let asks = reference_level_map(&row.asks, &evidence, "asks")?;
+        let local;
+        let depth = if let Some(prepared) = prepared {
+            prepared
+        } else {
+            local = PreparedBinanceDepthV1::prepare(&row.bids, &row.asks)?;
+            &local
+        };
+        let bids = reference_level_map(&depth.bids, &evidence, "bids")?;
+        let asks = reference_level_map(&depth.asks, &evidence, "asks")?;
         let prior_evidence = state
             .book
             .as_ref()
@@ -738,6 +824,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         row: &BinanceDepthUpdateRow,
         evidence: E,
         quantity_only: bool,
+        prepared: Option<&PreparedBinanceDepthV1>,
     ) -> Result<Option<ReferenceReductionOutcomeV1<E, E::Identity>>, ContractError> {
         self.begin_epoch(&row.source_sequence_epoch_id)?;
         let state = self
@@ -880,10 +967,17 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                     .as_mut()
                     .expect("expected verdict requires a book");
                 let previous_frontier = book.visibility_frontier_evidence.clone();
+                let local;
+                let depth = if let Some(prepared) = prepared {
+                    prepared
+                } else {
+                    local = PreparedBinanceDepthV1::prepare(&row.bids, &row.asks)?;
+                    &local
+                };
                 let bid_report = apply_reference_level_updates(
                     &mut book.bids,
                     &mut book.deleted_bids,
-                    &row.bids,
+                    &depth.bids,
                     &evidence,
                     "bids",
                     !quantity_only,
@@ -891,7 +985,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                 let ask_report = apply_reference_level_updates(
                     &mut book.asks,
                     &mut book.deleted_asks,
-                    &row.asks,
+                    &depth.asks,
                     &evidence,
                     "asks",
                     !quantity_only,
@@ -1023,21 +1117,15 @@ fn expected_depth_verdict<E: ReductionEvidenceV1>(
 }
 
 fn reference_level_map<E: ReductionEvidenceV1>(
-    levels: &[DepthLevel],
+    levels: &[PreparedDepthLevel],
     evidence: &E,
     field: &str,
 ) -> Result<BTreeMap<Decimal, ReferenceLevelState<E>>, ContractError> {
     let mut mapped = BTreeMap::new();
-    for (index, level) in levels.iter().enumerate() {
-        let price =
-            typed_raw::normalize_decimal_text(&level.price, &format!("{field}[{index}].price"))
-                .map_err(typed_raw_contract_error)?;
-        let quantity = typed_raw::normalize_decimal_text(
-            &level.quantity,
-            &format!("{field}[{index}].quantity"),
-        )
-        .map_err(typed_raw_contract_error)?;
-        let key = parse_canonical_decimal(&price, &format!("{field}[{index}].price"))?;
+    for level in levels {
+        let price = level.price.clone();
+        let quantity = level.quantity;
+        let key = level.key;
         if mapped
             .insert(
                 key,
@@ -1101,32 +1189,25 @@ impl QuantityTotals {
 fn apply_reference_level_updates<E: ReductionEvidenceV1>(
     levels: &mut BTreeMap<Decimal, ReferenceLevelState<E>>,
     deleted_levels: &mut BTreeMap<Decimal, E>,
-    updates: &[DepthLevel],
+    updates: &[PreparedDepthLevel],
     evidence: &E,
     field: &str,
     collect_report: bool,
 ) -> Result<Option<(QuantityTotals, Vec<E>)>, ContractError> {
     let mut seen = BTreeSet::new();
     let mut report = collect_report.then(|| (QuantityTotals::default(), Vec::new()));
-    for (index, update) in updates.iter().enumerate() {
-        let price =
-            typed_raw::normalize_decimal_text(&update.price, &format!("{field}[{index}].price"))
-                .map_err(typed_raw_contract_error)?;
-        let quantity = typed_raw::normalize_decimal_text(
-            &update.quantity,
-            &format!("{field}[{index}].quantity"),
-        )
-        .map_err(typed_raw_contract_error)?;
-        let key = parse_canonical_decimal(&price, &format!("{field}[{index}].price"))?;
+    for update in updates {
+        let price = update.price.clone();
+        let quantity = update.quantity;
+        let key = update.key;
         if !seen.insert(key) {
             return Err(invalid(field, "contains a duplicate update price"));
         }
         let previous = levels.get(&key);
         let before = previous
-            .map(|level| parse_canonical_decimal(&level.quantity, field))
-            .transpose()?
+            .map(|level| level.quantity)
             .unwrap_or(Decimal::ZERO);
-        let after = parse_canonical_decimal(&quantity, field)?;
+        let after = quantity;
         if let Some((summary, prior_evidence)) = report.as_mut() {
             if let Some(previous) = previous {
                 prior_evidence.push(previous.direct_evidence.clone());
@@ -1195,7 +1276,7 @@ fn binance_depth_payload<E: ReductionEvidenceV1>(
         .rev()
         .map(|level| ReferencePriceLevelV1 {
             price_usdt_per_btc: level.price.clone(),
-            quantity_btc: level.quantity.clone(),
+            quantity_btc: exact_from_decimal(level.quantity),
         })
         .collect();
     let asks = book
@@ -1203,7 +1284,7 @@ fn binance_depth_payload<E: ReductionEvidenceV1>(
         .values()
         .map(|level| ReferencePriceLevelV1 {
             price_usdt_per_btc: level.price.clone(),
-            quantity_btc: level.quantity.clone(),
+            quantity_btc: exact_from_decimal(level.quantity),
         })
         .collect();
     BinanceDepthStateReferenceV1 {
@@ -2897,6 +2978,18 @@ fn validate_polymarket_metadata_input(
     Ok(())
 }
 
+pub(crate) fn is_initial_gamma_transition(row: &PolymarketMarketMetadataRow) -> bool {
+    use typed_raw::{MetadataSourceEvidenceEventType, MetadataSourceEvidenceOrigin,
+        PolymarketMetadataOrigin, PolymarketMetadataRowKind};
+    row.metadata_row_kind == PolymarketMetadataRowKind::MarketStateTransition
+        && row.metadata_origin == PolymarketMetadataOrigin::LocalMarketStateTimer
+        && matches!((row.source_evidence_origin, row.source_evidence_event_type),
+            (Some(MetadataSourceEvidenceOrigin::GammaMarketsDiscovery),
+             Some(MetadataSourceEvidenceEventType::GammaMarketsDiscoveryResponse))
+            | (Some(MetadataSourceEvidenceOrigin::GammaBySlug),
+               Some(MetadataSourceEvidenceEventType::GammaMarketBySlugResponse)))
+}
+
 fn validate_initial_identity_metadata<E: crate::pm_reduction::PmEvidenceV1>(
     input: &PolymarketMetadataInputV1<E>,
 ) -> Result<(), ContractError> {
@@ -2922,22 +3015,7 @@ fn validate_initial_identity_metadata<E: crate::pm_reduction::PmEvidenceV1>(
         )
     );
     // 首个本地计时器行可以保留先前收到的真实Gamma载荷；产生方不等于证据来源。
-    let gamma_transition = input.row.metadata_row_kind
-        == PolymarketMetadataRowKind::MarketStateTransition
-        && input.row.metadata_origin == PolymarketMetadataOrigin::LocalMarketStateTimer
-        && matches!(
-            (
-                input.row.source_evidence_origin,
-                input.row.source_evidence_event_type
-            ),
-            (
-                Some(MetadataSourceEvidenceOrigin::GammaMarketsDiscovery),
-                Some(MetadataSourceEvidenceEventType::GammaMarketsDiscoveryResponse)
-            ) | (
-                Some(MetadataSourceEvidenceOrigin::GammaBySlug),
-                Some(MetadataSourceEvidenceEventType::GammaMarketBySlugResponse)
-            )
-        );
+    let gamma_transition = is_initial_gamma_transition(&input.row);
     if !(input.row.metadata_row_kind == PolymarketMetadataRowKind::MetadataSnapshot
         && source_pair_matches
         || gamma_transition)

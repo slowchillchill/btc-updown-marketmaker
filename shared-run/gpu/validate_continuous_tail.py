@@ -81,9 +81,15 @@ def verify(source,runtime,projection,accepted_batch,block,sampler,receipt,kind,a
         condition_by_market=T([[0]]),market_end_by_market=T([[source['market_end']]]),
         redemption_sources=redemption,settlement_policy=T([[0]]),resolution_identity_bytes=identities,
         resolution_identity_offsets=offsets)
+    if os.environ.get('B_GPU_AUTO_LOOP'):
+        from validate_auto_device_loop import observe as observe_auto
+        observe_auto(backend,artifact/'auto',resources=True)
     # 原正式费率上下文，hidden Maker消费者沿原TakeRatio读取，不让测试复制算法。
     from types import SimpleNamespace
     backend.rule=SimpleNamespace(values=rational(['0','0','0.07']),context={'fee_exponent':1})
+    if os.environ.get('B_GPU_MAKER_PROJECTION'):
+        from validate_maker_projection import observe
+        observe(backend,artifact,resources=True)
     trace=[]
     def progress(stage,**data):
         trace.append(dict(stage=stage,elapsed_seconds=time.perf_counter()-started,**data))
@@ -91,6 +97,9 @@ def verify(source,runtime,projection,accepted_batch,block,sampler,receipt,kind,a
         if stage in ('sim_phase','continuous_event'):
             print(json.dumps(trace[-1]),file=sys.stderr,flush=True)
     clock=BoundedSendClock(runtime,projection,public,public_source,backend.handlers(),ScheduledTime.absent(zero),lambda p:p.normalizer.bank)
+    if os.environ.get('B_GPU_PUBLIC_STAGE_APPEND'):
+        from validate_public_append import observe as observe_append
+        observe_append(clock,artifact/'public-append',resources=True)
     received=[]
     receiver=PublicLedgerReceiver(word_capacity=16)
     def receive(state,delivery,enabled):
@@ -161,6 +170,9 @@ def verify(source,runtime,projection,accepted_batch,block,sampler,receipt,kind,a
             assert clock.runtime.resolution_obligations.pending.any().cpu().item()
             print(json.dumps(dict(conflict_rejected_common_transaction_preserved=True,**report)))
         return
+    if os.environ.get('B_GPU_MAKER_PROJECTION'):
+        from validate_maker_projection import common_fault
+        common_fault(clock,shared,yes,artifact,progress)
     result=shared.advance_before(T([source['confirmed_at']+200000]),yes,progress=progress)
     assert result.complete.cpu().tolist()==[True] and result.fault.cpu().tolist()==[0]
     assert not models.tasks and torch.equal(shared.next_observation,cutoff)

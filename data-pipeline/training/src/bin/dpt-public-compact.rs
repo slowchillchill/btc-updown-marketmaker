@@ -217,7 +217,8 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     )?;
     let mut header = config.header.clone();
     header.ordering_version = HISTORICAL_SOURCE_HEAD_ORDERING_VERSION.into();
-    let mut writer = PublicCompactWriterV1::create(&config.work_root.join("compact-public"), header.clone())?;
+    let mut writer = PublicCompactWriterV1::create_for_received_range(&config.work_root.join("compact-public"), header.clone(),
+        config.received_start_utc_ms..config.received_end_utc_ms)?;
     let mut last_notice = Instant::now();
     let _public = consume_historical_merge_facts_v1(&mut merge, header, &mut writer, |processed| {
         if last_notice.elapsed().as_secs() >= 10 {

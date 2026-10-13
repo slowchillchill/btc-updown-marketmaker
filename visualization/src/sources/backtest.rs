@@ -52,7 +52,7 @@ fn load_json(path: Option<&Path>, report: Option<bool>) -> Document {
                     } else if report == Some(true)
                         && !matches!(
                             value.get("end_reason").and_then(|v| v.as_str()),
-                            Some("RangeEnd" | "StrategyExit" | "Failure")
+                            Some("RangeEnd" | "StrategyExit" | "Failure" | "BudgetStop")
                         )
                     {
                         doc.status = "unsupported_report";

@@ -4,10 +4,7 @@ use ::execution_normalization::MemoryLogicalIdentityV1;
 use contracts::{execution_normalization::SourceNeutralTradeLifecycleResultV2, *};
 use ledger::*;
 use sim_system::{execution::*, public_consumption::*};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrozenTradeEconomicsV1 {
@@ -101,6 +98,14 @@ pub enum QualifiedBatchResultV1 {
 pub trait StrategyV1 {
     type Error;
     type Diagnostics;
+    /// 默认保留逐笔冻结；只消费原 owner 费用分配的策略可显式不请求明细。
+    fn requires_trade_economics_details(&self) -> bool {
+        true
+    }
+    /// 默认完整投影；日生产者取所有实际候选的需求并集。
+    fn observation_requirements(&self) -> contracts::PublicObservationRequirementsV1 {
+        contracts::PublicObservationRequirementsV1::FULL
+    }
     /// 默认不选用；旧调用方继续使用原回调、时序与组节奏。
     fn uses_source_health(&self) -> bool {
         false
@@ -108,11 +113,21 @@ pub trait StrategyV1 {
     /// 返回严格晚于当前时刻的必要期限；没有固定节拍或公共阈值。
     fn next_health_evaluation_at(
         &self,
-        _input: &StrategyCurrentReadV1<'_>,
+        _markets: &[PublicObservationFrameV1<'_>],
         _calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
         _at: i64,
     ) -> Option<i64> {
         None
+    }
+    /// 每个成功消费的公开组只检查冻结动作的公开依赖；不读取账户或重算策略。
+    fn qualify_intent_public(
+        &self,
+        _group: &ClosedBusinessGroupV1,
+        _calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        _intent_index: usize,
+        _at: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        Ok(IntentQualificationV1::Qualified)
     }
     /// 当前合法事实与原冻结决定分别提供，不能以新事实改写原业务值。
     fn qualify_intent(
@@ -222,17 +237,31 @@ impl SharedExecutionV2 {
         &mut self,
         driver: &mut PublicConsumptionStateV1,
     ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+        self.strategy_input_with_trade_details(driver, true)
+    }
+    pub fn strategy_input_with_trade_details(
+        &mut self,
+        driver: &mut PublicConsumptionStateV1,
+        details: bool,
+    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
         let Some(cutoff) = self.prepare_action_group(driver)? else {
             return Ok(None);
         };
         let decision = driver.decision().expect("原公共组");
         let frames = decision.frames();
-        Ok(self.input_from_frames(cutoff, &frames))
+        Ok(self.input_from_frames(cutoff, &frames, details))
     }
     /// 静默时刻及待发复核使用当前受信观察，旧 strategy_input 保留组快照语义。
     pub fn strategy_observation_input(
         &mut self,
         driver: &mut PublicConsumptionStateV1,
+    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+        self.strategy_observation_input_with_trade_details(driver, true)
+    }
+    pub fn strategy_observation_input_with_trade_details(
+        &mut self,
+        driver: &mut PublicConsumptionStateV1,
+        details: bool,
     ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
         self.apply_closed()?;
         let Some(cutoff) = driver.observation_cutoff() else {
@@ -240,29 +269,42 @@ impl SharedExecutionV2 {
         };
         let frames = driver.frames_at_observation();
         self.observe_group(&frames);
-        Ok(self.input_from_frames(cutoff, &frames))
+        Ok(self.input_from_frames(cutoff, &frames, details))
     }
     pub fn strategy_current_read<'a>(
         &mut self,
         driver: &'a PublicConsumptionStateV1,
     ) -> Result<Option<StrategyCurrentReadV1<'a>>, LedgerErrorV1> {
-        self.apply_closed()?;
+        let frames = self.strategy_current_observations(driver)?;
         let Some(cutoff) = driver.observation_cutoff() else {
             return Ok(None);
         };
+        Ok(self.current_read_from_frames(cutoff, frames, true))
+    }
+    /// 同一真实观察保留领取及登记副作用；期限消费者不需要冻结账户历史。
+    pub fn strategy_current_observations<'a>(
+        &mut self,
+        driver: &'a PublicConsumptionStateV1,
+    ) -> Result<Vec<PublicObservationFrameV1<'a>>, LedgerErrorV1> {
+        self.apply_closed()?;
         let frames = driver.frames_at_observation();
         self.observe_group(&frames);
-        Ok(self.current_read_from_frames(cutoff, frames))
+        Ok(frames)
     }
     fn current_read_from_frames<'a>(
         &self,
         cutoff: TrustedGroupDecisionCutoffV1,
         frames: Vec<PublicObservationFrameV1<'a>>,
+        details: bool,
     ) -> Option<StrategyCurrentReadV1<'a>> {
         Some(StrategyCurrentReadV1 {
             action_before: self.freeze_action_before(cutoff, &frames)?,
             markets: frames,
-            trade_economics: self.freeze_trade_economics(),
+            trade_economics: if details {
+                self.freeze_trade_economics()
+            } else {
+                Vec::new()
+            },
         })
     }
     fn freeze_trade_economics(&self) -> Vec<FrozenTradeEconomicsV1> {
@@ -284,11 +326,16 @@ impl SharedExecutionV2 {
         &self,
         cutoff: TrustedGroupDecisionCutoffV1,
         frames: &[PublicObservationFrameV1<'_>],
+        details: bool,
     ) -> Option<StrategyInputV1> {
         let action_before = self.freeze_action_before(cutoff, frames)?;
         Some(StrategyInputV1 {
             action_before,
-            trade_economics: self.freeze_trade_economics(),
+            trade_economics: if details {
+                self.freeze_trade_economics()
+            } else {
+                Vec::new()
+            },
             markets: frames
                 .iter()
                 .map(|f| FrozenMarketReadV1 {
@@ -324,10 +371,11 @@ impl SharedExecutionV2 {
         &self,
         strategy: &mut S,
         calculation: &StrategyCalculationV1<S::Diagnostics>,
-        input: &StrategyCurrentReadV1<'_>,
+        frames: &[PublicObservationFrameV1<'_>],
         at: i64,
     ) -> Result<(Option<InvalidatedBatchV1>, u64), S::Error> {
         let mut calls = 0;
+        let mut input = None;
         if let StrategyOutputV1::Continue { intents, .. } = &calculation.output {
             for (index, intent) in intents.iter().enumerate() {
                 if self
@@ -336,6 +384,14 @@ impl SharedExecutionV2 {
                 {
                     continue;
                 }
+                let input = input.get_or_insert_with(|| {
+                    self.current_read_from_frames(
+                        frames[0].decision_cutoff.clone(),
+                        frames.to_vec(),
+                        strategy.requires_trade_economics_details(),
+                    )
+                    .expect("原已开户观察")
+                });
                 calls += 1;
                 if let IntentQualificationV1::Invalidated(reason) =
                     strategy.qualify_intent(input, calculation, index, at)?
@@ -378,7 +434,11 @@ impl SharedExecutionV2 {
                 |execution, current_decision, index, at| {
                     let frames = current_decision.frames_at_observation();
                     let input = execution
-                        .current_read_from_frames(frames[0].decision_cutoff.clone(), frames)
+                        .current_read_from_frames(
+                            frames[0].decision_cutoff.clone(),
+                            frames,
+                            strategy.requires_trade_economics_details(),
+                        )
                         .expect("合法观察与已开户账本");
                     qualification_calls += 1;
                     strategy.qualify_intent(&input, &calculation.calculation, index, at)
@@ -451,27 +511,24 @@ impl SharedExecutionV2 {
             i64,
         ) -> Result<IntentQualificationV1, E>,
     ) -> Result<QualifiedBatchResultV1, QualifiedBatchErrorV1<E>> {
-        let current: BTreeMap<_, _> = self
-            .ledger()
-            .funds_read_v1()
-            .requests()
-            .map(|r| (r.request_identity.clone(), r.reservation_state))
-            .collect();
+        let current = self.ledger().funds_read_v1();
+        let mut existing = BTreeSet::new();
         // 原Reserved结果是粘滞决定，不是当前资金承诺。全批检查先于任何新预留或发送。
         // 已发请求可凭原接收回执／NOE响应重读幂等结果，不要求其已转换的预留仍活动。
         for item in intents {
             for reserve in &item.reserves {
-                if current
-                    .get(&reserve.reserve.request_identity)
-                    .is_some_and(|state| {
-                        matches!(
-                            state,
-                            ReservationStatusV1::Released | ReservationStatusV1::Converted
-                        )
-                    })
-                    && !self
-                        .registry()
-                        .has_sim_submission_evidence(&item.context.global_request_id)
+                let request = current.request(&reserve.reserve.request_identity);
+                if request.is_some() {
+                    existing.insert(reserve.reserve.request_identity.clone());
+                }
+                if request.is_some_and(|state| {
+                    matches!(
+                        state.reservation_state,
+                        ReservationStatusV1::Released | ReservationStatusV1::Converted
+                    )
+                }) && !self
+                    .registry()
+                    .has_sim_submission_evidence(&item.context.global_request_id)
                 {
                     return Err(BatchExecutionErrorV1 {
                         error: SharedActionErrorV1::Sim(
@@ -492,7 +549,7 @@ impl SharedExecutionV2 {
             .iter()
             .flat_map(|i| i.reserves.iter())
             .map(|r| r.reserve.request_identity.clone())
-            .filter(|id| !current.contains_key(id))
+            .filter(|id| !existing.contains(id))
             .collect();
         let reserves: Vec<_> = intents
             .iter()
@@ -590,8 +647,7 @@ impl SharedExecutionV2 {
                 let id = &reserve.reserve.request_identity;
                 let funds = self.ledger().funds_read_v1();
                 if !batch_reserve_ids.insert(id.clone())
-                    || (current.contains_key(id)
-                        && funds.submission_request(&submission) != Some(id))
+                    || (existing.contains(id) && funds.submission_request(&submission) != Some(id))
                 {
                     return Err(BatchExecutionErrorV1 {
                         error: SharedActionErrorV1::Sim(
@@ -675,13 +731,12 @@ impl SharedExecutionV2 {
         for item in intents {
             for reserve in &item.reserves {
                 let id = &reserve.reserve.request_identity;
-                let active = self.ledger().funds_read_v1().requests().any(|r| {
-                    r.request_identity == id
-                        && matches!(
-                            r.reservation_state,
-                            ReservationStatusV1::ReservedBeforeSend
-                                | ReservationStatusV1::SubmittedUnknown
-                        )
+                let active = self.ledger().funds_read_v1().request(id).is_some_and(|r| {
+                    matches!(
+                        r.reservation_state,
+                        ReservationStatusV1::ReservedBeforeSend
+                            | ReservationStatusV1::SubmittedUnknown
+                    )
                 });
                 if active && owned.contains(id) {
                     let event = LedgerLocalEventIdentityV1(

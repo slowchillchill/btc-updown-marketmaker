@@ -111,7 +111,7 @@ def original_semantic(record,source):
             for member in value:locate(member)
     body=next(iter(record['record'].values()));locate(body.get('evidence') or body['fact']['disposition'])
     condition,token=found[0] if found else (conditions[0],next(iter(tokens)))
-    return expected_semantic(record,token_index=tokens[token],condition_index=conditions.index(condition))
+    return expected_semantic(record,token_index=tokens[token],token_slots=tokens,condition_index=conditions.index(condition))
 
 
 def public_open(source):
@@ -187,9 +187,11 @@ def check(source,codec,progress,after_posts=None,*,before_drive=None,defer_initi
     for post in posts:
         kind=post['item']['order']['kind']
         if 'GtcLimit' in kind:slots.add((tokens[post['item']['order']['token_id']],'bids',Fraction(kind['GtcLimit']['limit_price_pusd_per_share'])))
-    for event in source['changed']:
+    for event in source['changed']+source.get('bounded_public_events',[]):
         if event['payload']['event_type']=='level_execution_transition':
-            value=event['payload']['event'];slots.add((0,'asks' if value['side']=='ASK' else 'bids',Fraction(value['price_pusd_per_share'])))
+            value=event['payload']['event']
+            slots.add((tokens[value['asset']['token_id']],'asks' if value['side']=='ASK' else 'bids',
+                Fraction(value['price_pusd_per_share'])))
     for stage in source.get('cancellation',{}).get('stages',[]):
         if stage['late'] is not None:
             for post in stage['late']['request']['request']['items']:

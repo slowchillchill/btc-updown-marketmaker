@@ -52,6 +52,32 @@ def main():
     checkpoint('account_tail')
     queue,_=run_queue_batch(queue,lambda state:state.apply_level_transition(integers([2_000_000,10_000_000]),integers([7_000_000,10_000_000])))
     checkpoint('external_tail')
+    # 原有效段保持FIFO顺序，仅将一个empty物理槽放到中间；不合并B/Q。
+    # 保孔洞的物理位置、完整字段和原CPU正量对照，尾部仍空。
+    from dataclasses import replace, fields
+    from queues import _take
+    sparse=queue.resized(8)
+    permutation=torch.tensor([0,7,1,2,3,4,5,6],device='cuda')
+    flat=(torch.arange(sparse.rows,device='cuda')[:,None]*sparse.capacity+permutation[None,:]).flatten()
+    sparse=replace(sparse,kind=sparse.kind[:,permutation],order_ids=sparse.order_ids[:,permutation],
+        **{name:_take(getattr(sparse,name),flat) for name in
+           ('total_base','total_quote','consumed_base','account_remaining')})
+    assert sparse.kind[0,:4].cpu().tolist()==[1,0,2,1]
+    before,after=integers([7_000_000,10_000_000]),integers([4_000_000,10_000_000])
+    actual=Numbers.run_exact_batch(lambda:sparse.apply_level_transition(before,after))
+    fixed=Numbers.device_exact_batch(lambda:sparse.apply_level_transition(before,after),word_capacity=4,device='cuda')
+    assert fixed.fits.cpu().item()
+    def same(left,right):
+        if isinstance(left,torch.Tensor):torch.testing.assert_close(left,right,rtol=0,atol=0)
+        elif isinstance(left,tuple):
+            for a,b in zip(left,right,strict=True):same(a,b)
+        elif hasattr(left,'__dataclass_fields__'):
+            for field in fields(left):same(getattr(left,field.name),getattr(right,field.name))
+        else:assert left==right
+    same(actual,fixed.value)
+    assert actual[1].order_ids.shape==(2,8) and actual[1].maker_base_units.sign.shape==(16,)
+    assert values(actual[1].maker_base_units)[2]==int(reference['maker_depletion'])
+    assert values(actual[1].maker_base_units)[8:]==[0]*8
     queue,quote=Numbers.run_exact_batch(lambda:queue.apply_taker_slice(torch.zeros(2,dtype=torch.int64,device='cuda'),integers([0,4_000_000])))
     assert values(quote)==[0,int(reference['taker_quote'])]
     queue=Numbers.run_exact_batch(lambda:queue.finish_taker_plan(torch.ones(2,dtype=torch.bool,device='cuda')))

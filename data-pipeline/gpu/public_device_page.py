@@ -228,6 +228,7 @@ class PreparedPublicPage:
             raise ValueError('公共设备页原材料绑定错误')
         self.source_manifest_sha256=manifest['source_manifest_sha256']
         self.normal_end=source['normal_end']
+        self.received_range_utc_ms=source.get('received_range_utc_ms')
         self.columns=manifest['metadata']
         if self.columns['version'] != ('public_pm_device_columns_v2' if current else 'public_pm_device_columns_v1'):
             raise ValueError('公共设备页与消费列语义版本不一致')
@@ -512,6 +513,7 @@ class PreparedPublicBlocks:
                 or not source['normal_end'] or root['groups']!=source['groups'] or root['facts']!=source['facts']):
             raise ValueError('公共分块根来源绑定错误')
         self.source_manifest_sha256=root['source_manifest_sha256'];self.normal_end=source['normal_end']
+        self.received_range_utc_ms=source.get('received_range_utc_ms')
         self.parts=root['parts'];end=0
         for entry in self.parts:
             name=entry['directory']
@@ -547,7 +549,8 @@ class PreparedPublicBlocks:
 
     def ensure_group_lineage(self,binary=None):return
 
-    def load(self,index):
+    def read(self,index):
+        """同一原校验读出不可变页；不推进运行reader/current游标。"""
         entry=self.parts[index]
         child=PreparedPublicPage(self.directory/entry['directory'],self.material,device=self.device,_child=True)
         if (child.columns['group_base']!=entry['group_begin'] or child.columns['group_count']!=entry['group_end']
@@ -555,6 +558,10 @@ class PreparedPublicBlocks:
                 or not np.array_equal(child.columns['groups'],self.columns['groups'][entry['group_begin']:entry['group_end']])
                 or not np.array_equal(child.arrays['causal_visible_at'],self.causal[entry['group_begin']:entry['group_end']])):
             raise ValueError('公共子块与全根原组关联错误')
+        return child
+
+    def load(self,index):
+        child=self.read(index)
         self.current_index,self.current=index,child
         return child
 

@@ -32,13 +32,20 @@ class ActorRuntime:
     population: SubmittedActorRequests
     receiver: PublicLedgerReceiver
     authority: dict
+    execution: ContinuousExecution | None = None
 
 
 def open_continuous_runtime(public,hidden,codec,request,rule,sampler,*,capacities,
         page_groups,hidden_page_buckets,taker_rate,maker_rate,fill_paths,cancel_scenario,gtd,auto_redemption):
-    """场景/时延/物理容量显式供给；不准备材料或重判其EOF/资格。"""
+    """场景/时延/物理容量显式供给；冷装配按实际模型取typed输入，不重判EOF/资格。"""
+    # 新建B运行显式派生新规则。旧活动恢复不经过冷开户；旧兼容验证可显式None。
+    if request['session']['caller_role']=='MODEL_TRAIN' and 'model_train_maker_snapshot' not in request:
+        from pathlib import Path
+        request={**request,'model_train_maker_snapshot':str(Path(request['log_path']).with_suffix('.model-train-rules.json'))}
     opening=open_actor_root(public,hidden,codec,request,page_groups=page_groups,
         hidden_page_buckets=hidden_page_buckets,auto_redemption=auto_redemption,capacities=capacities)
+    from rules import PublicRuleGpu
+    rule=PublicRuleGpu(opening.authority["rule_context"])
     sources=opening.sources;block=sources.block;device=block.level_assets.device
     t=lambda value,dtype=torch.int64:torch.tensor(value,dtype=dtype,device=device)
     rows=[[i for i,(asset,side) in enumerate(zip(block.level_assets.cpu().tolist(),block.level_sides.cpu().tolist()))
@@ -59,8 +66,8 @@ def open_continuous_runtime(public,hidden,codec,request,rule,sampler,*,capacitie
     bank=lambda projection:projection.normalizer.bank if projection.normalizer is not None else EvidenceBank.empty(device)
     clock=BoundedSendClock(sources.runtime,opening.projection,public_state,source,{},gtd,bank,
         hidden_page_buckets=hidden_page_buckets)
-    configure_continuous_execution(clock,directory,population,rule,codec,sampler,taker_rate,maker_rate,fill_paths,cancel_scenario)
-    return ActorRuntime(clock,directory,population,PublicLedgerReceiver(),opening.authority)
+    execution=configure_continuous_execution(clock,directory,population,rule,codec,sampler,taker_rate,maker_rate,fill_paths,cancel_scenario)
+    return ActorRuntime(clock,directory,population,PublicLedgerReceiver(),opening.authority,execution)
 
 
 def configure_continuous_execution(clock,directory,population,rule,codec,sampler,taker_rate,maker_rate,fill_paths,cancel_scenario):

@@ -1,5 +1,5 @@
 """原紧凑TWAP、有或无初始Book→无订单Terminal/Resolved→真实后继Lifecycle对照。"""
-from dataclasses import replace
+from dataclasses import replace,fields,is_dataclass
 from pathlib import Path
 import json
 import os
@@ -22,6 +22,95 @@ from rebate_coordinator import RebateCoordinator
 from taker_days import TakerDays
 from validate_base_execution import integers, rational, values
 from validate_base_orders import compare, progress
+
+
+def reference_loop_check(initial,projection,sampler,source,tensor):
+    """真实TWAP桶经生产handler；局部精度探针只产生原Numbers请求，不改经济。"""
+    from continuous_execution import ContinuousExecution
+    from scheduling import SimDriveChoice
+    from hidden_reference_loop import _CapturedReferences,HiddenReferenceDeviceLoop
+    from queues import ExactInt
+    def exact_same(a,b,path='reference'):
+        if isinstance(a,ExactInt):
+            width=max(a.words.size(1),b.words.size(1));a=a.with_capacity(width);b=b.with_capacity(width)
+            for name in ('words','sign','fault'):exact_same(getattr(a,name),getattr(b,name),path+'.'+name)
+        elif isinstance(a,torch.Tensor):assert torch.equal(a,b),path
+        elif is_dataclass(a):
+            for f in fields(a):
+                if f.name not in ('source','columns'):exact_same(getattr(a,f.name),getattr(b,f.name),path+'.'+f.name)
+        elif isinstance(a,(tuple,list)):
+            assert len(a)==len(b),path
+            for i,(left,right) in enumerate(zip(a,b,strict=True)):exact_same(left,right,path+str(i))
+        else:assert a==b,path
+    choice=SimDriveChoice(tensor([21000]),tensor([4]),tensor([True],torch.bool),tensor([0],torch.int32),
+        initial.requests,initial.fills,initial.calendars,initial.hidden_frontier,
+        initial.settlement_registrations,initial.order_query_history)
+    backend=ContinuousExecution(None,None,None,sampler,None,tensor([0,1]),tensor([source['market_end']]*2),
+        None,None,tensor([0,0]),tensor([0,1]),None,None)
+    before=BaseRuntimeStorage(initial,initial).snapshot()
+    expected=initial.begin_hidden_bucket(choice)
+    end=int(expected.hidden_frontier.columns.reference_offsets[1].cpu());assert end==2
+    for i in range(end):
+        expected=Numbers.run_exact_batch(lambda:expected.apply_hidden_reference(
+            backend.refresh(expected,choice),tensor([i]),backend.source_assets))
+    expected,_=Numbers.run_exact_batch(expected.finish_hidden_bucket)
+    started=time.perf_counter()
+    actual,out_projection,batches,effect=backend.hidden(initial,projection,choice)
+    torch.cuda.synchronize();elapsed=time.perf_counter()-started
+    exact_same(actual,expected);exact_same(initial,before);exact_same(out_projection,projection)
+    assert not batches and effect is None
+    assert int(backend.reference_loop.captured.index.cpu())==end
+    held=BaseRuntimeStorage(actual,actual).snapshot()
+    again,_,_,_=backend.hidden(initial,projection,choice)
+    exact_same(actual,held);exact_same(again,expected)
+    # 原禁用入口仍逐物理项调用纯函数及表示整理，不能将fault当循环提前终止。
+    disabled=replace(choice,fault=tensor([1],torch.int32))
+    entered=initial.begin_hidden_bucket(choice)
+    expected_disabled=entered
+    for i in range(end):
+        expected_disabled=Numbers.run_exact_batch(lambda:expected_disabled.apply_hidden_reference(
+            backend.refresh(expected_disabled,disabled),tensor([i]),backend.source_assets))
+    disabled_result,index=backend.reference_loop.run(entered,backend.refresh(entered,disabled),0,end,backend.source_assets)
+    assert index==end;exact_same(disabled_result,expected_disabled)
+    # 第二物理列的真实128位×2请求需5字；首列成功前缀保留，8字从第二列续接。
+    large=integers([1<<127]);zero=integers([0]);two=integers([2])
+    original=BaseSimRuntime.apply_hidden_reference
+    def precision_probe(world,current,indices,assets=None):
+        product=large.select(indices==1,zero)*two
+        assert product.words.size(0)==1
+        return original(world,current,indices,assets)
+    try:
+        BaseSimRuntime.apply_hidden_reference=precision_probe
+        narrow=_CapturedReferences(entered,choice,backend.source_assets,4)
+        prefix,at,required,fits=narrow.replay(entered,choice,0,end)
+        assert int(at.cpu())==1 and int(required.cpu())==5 and not bool(fits.cpu())
+        assert prefix.hidden_frontier.next_reference.cpu().tolist()==[1]
+        prefix_held=BaseRuntimeStorage(prefix,prefix).snapshot()
+        wide=_CapturedReferences(prefix,backend.refresh(prefix,choice),backend.source_assets,8)
+        result,at,required,fits=wide.replay(prefix,backend.refresh(prefix,choice),1,end)
+        assert int(at.cpu())==end and int(required.cpu())==0 and bool(fits.cpu())
+        pure=entered
+        for i in range(end):pure=Numbers.run_exact_batch(lambda:pure.apply_hidden_reference(
+            backend.refresh(pure,choice),tensor([i]),backend.source_assets))
+        exact_same(result,pure)
+        wide.replay(prefix,backend.refresh(prefix,choice),1,end)
+        narrow.replay(entered,choice,0,end)
+        exact_same(prefix,prefix_held);exact_same(result,pure);exact_same(initial,before)
+        # 同一精度注入必须实际穿过生产owner的自动选宽与未执行索引续接。
+        owner=HiddenReferenceDeviceLoop()
+        automatic,index=owner.run(entered,choice,0,end,backend.source_assets)
+        assert owner.width==8 and index==end
+        exact_same(automatic,pure)
+        held_automatic=BaseRuntimeStorage(automatic,automatic).snapshot()
+        owner.run(entered,choice,0,end,backend.source_assets)
+        exact_same(automatic,held_automatic);exact_same(prefix,prefix_held)
+        exact_same(result,pure);exact_same(initial,before)
+    finally:BaseSimRuntime.apply_hidden_reference=original
+    return dict(production_handler_references=end,whole_handler_seconds=elapsed,
+        exact_words_sign_fault_and_tail=True,disabled_physical_iterations=end,
+        resource_probe='real second-column ExactInt 128bit multiplication, no economic change',
+        narrow_required=5,narrow_index=1,wide_required=0,wide_index=end,
+        private_success_prefix_preserved=True,input_and_previous_outputs_unchanged=True)
 
 
 def main():
@@ -166,6 +255,8 @@ def main():
         return PublicLedgerState(pending,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),
             ClosedAdmission.empty(columns),admission)
     public=Numbers.run_exact_batch(assemble)
+    reference_loop_report=reference_loop_check(initial,projection,sampler,source,tensor)
+    progress('reference_device_loop_checked',**reference_loop_report)
     storage = BaseRuntimeStorage(initial, initial)
     frozen = storage.snapshot()
     horizon, enabled = tensor([21000]), tensor([False], torch.bool)
@@ -433,6 +524,7 @@ def main():
         'Resolved_Ledger_consumer_and_request_settlement_complete':False,
         'first_disabled_reference_entry_and_old_freeze_checked':True,
         'market_fact_handler_complete':False, 'full_unified_host_clock_complete':False,
+        'reference_device_loop':reference_loop_report,
         'elapsed_seconds':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),**page_report}
     if page_mode:

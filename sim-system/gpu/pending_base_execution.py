@@ -6,7 +6,7 @@
 from dataclasses import dataclass, fields, replace
 import torch
 from queues import Numbers, ExactInt
-from base_execution import prepare_base_order, prepare_buy_order, append_base_remainder
+from base_execution import prepare_base_order, prepare_buy_order, append_base_remainder, collect_base_fills
 from base_acceptance import accept_base_with_fills, _coordinate_queue, _coordinate_pool
 from base_orders import put_quantity
 from account_state import grouped_fault
@@ -45,6 +45,8 @@ class PendingBaseEffects:
 
 
 def _coordinate_orders(candidate, original, fault):
+    if candidate is original:
+        return replace(original, fault=fault)
     valid = fault == 0
     flat = valid.repeat_interleave(candidate.capacity)
     index = torch.arange(flat.numel(), device=fault.device)
@@ -90,6 +92,7 @@ def accept_pending_base(requests, pending, orders, queue, account, fills, terms,
     # 不存在pending的padding terms不是新的业务错误；实际人口仍保存全部原故障。
     prepared = replace(prepared, fault=source_fault | prepared.fault*active.to(torch.int32),
         quantity=replace(prepared.quantity, fault=prepared.quantity.fault*active.to(torch.int32)))
+    prepared, selected_paths = collect_base_fills(prepared, selected_paths)
     original_queue, original_account, original_fills, original_orders = queue, account, fills, orders
     original_calendars = calendars
     queue, account, fills, accepted = accept_base_with_fills(prepared, queue, account, fills,

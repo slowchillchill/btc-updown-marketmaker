@@ -126,6 +126,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
         compact_hidden_material::{prepare_compact_hidden_material_v1, CompactHiddenMaterialReaderV1},
         compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1, gpu_initial_sort::GpuInitialRunOrderV1};
     let conflict = auto_mode && std::env::var_os("B_GPU_TERMINAL_CONFLICT").is_some();
+    let reference_cache = auto_mode && std::env::var_os("B_GPU_REFERENCE_CACHE").is_some();
     let payable_maker = with_pending && std::env::var_os("B_GPU_CONTINUOUS_TAIL").is_some();
     let late_maker = payable_maker && std::env::var_os("B_GPU_TAIL_LATE_CONFIRMATION").is_some();
     let confirmed_at = if late_maker {90_027_000} else {33000};
@@ -163,6 +164,19 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
         inputs.insert(6,pm(6,3,26000,delta(if payable_maker {"300"} else {"3"})));
         inputs.insert(7,pm(7,4,27000,delta("0")));
     }
+    if reference_cache {
+        assert!(with_order && with_pending && !conflict);
+        for (offset,at) in [24000,25000].into_iter().enumerate() {
+            let mut input=reference(30,4+offset as u64);
+            input.common.message_timestamp=at;
+            input.common.payload_timestamp=at;
+            input.common.timestamp_received=at+1;
+            input.common.age_ms=Some(1);
+            input.collector_admission_time_utc_ms=at+2;
+            inputs.insert(6+offset,record(0,TypedRawRowV2::PolymarketRtdsChainlinkTwap(input)));
+        }
+        for (position,input) in inputs.iter_mut().enumerate() {input.input_position=position as u64;}
+    }
     if conflict {
         assert!(with_pending);
         let mut row = terminal_orderbook_row(&market());
@@ -190,7 +204,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
         inputs.push(record(10, TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata)))));
         inputs.push(record(11, TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row))));
     }
-    inputs.push(end(if conflict {12} else if with_pending {10} else {8}));
+    inputs.push(end(inputs.len() as u64));
     if without_initial_books {
         assert!(!with_order && !with_pending);
         inputs.drain(4..6);
@@ -240,7 +254,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool, withou
         }
         buckets.push(bucket);
     }
-    assert_eq!(buckets.iter().map(|b| b.bucket.bucket_time_utc_ms).collect::<Vec<_>>(), if without_initial_books {vec![21000,31000]} else if conflict {vec![21000,22000,26000,27000,31000,31500]} else if with_pending {vec![21000,22000,26000,27000,31000]} else {vec![21000,22000,31000]});
+    assert_eq!(buckets.iter().map(|b| b.bucket.bucket_time_utc_ms).collect::<Vec<_>>(), if without_initial_books {vec![21000,31000]} else if conflict {vec![21000,22000,26000,27000,31000,31500]} else if reference_cache {vec![21000,22000,24000,25000,26000,27000,31000]} else if with_pending {vec![21000,22000,26000,27000,31000]} else {vec![21000,22000,31000]});
     assert_eq!(buckets[0].references.len(), 2);
     assert!(buckets[0].steps.is_empty());
     assert!(buckets[0].references.iter().all(|r| matches!(r.payload,

@@ -434,7 +434,8 @@ async fn actual_orphan_cost_and_fak_bound_do_not_require_profit_or_a_premium_gat
         .asks = fact(vec![PriceLevelV1 {
         price_pusd_per_share: ExactDecimal("0.4".into()),
         quantity_shares: ExactDecimal("10".into()),
-    }]);
+    }])
+    .into();
     let mut c = config();
     c.quote.base_half_spread = Decimal::new(1, 2);
     c.repair.base_loss_allowance_per_share = Decimal::new(2, 1);
@@ -795,7 +796,8 @@ async fn active_repair_cancels_same_side_then_recalculates_and_does_not_resend_u
             .asks = fact(vec![PriceLevelV1 {
             price_pusd_per_share: ExactDecimal("0.4".into()),
             quantity_shares: ExactDecimal("2.5".into()),
-        }]);
+        }])
+        .into();
         input
     };
     let input = adjust(input);
@@ -1281,7 +1283,8 @@ async fn fak_minimum_principal_is_independent_of_maker_minimum_shares() {
             .asks = fact(vec![PriceLevelV1 {
             price_pusd_per_share: ExactDecimal("0.4".into()),
             quantity_shares: ExactDecimal("2.5".into()),
-        }]);
+        }])
+        .into();
         let now = input
             .action_before
             .cutoff()
@@ -1385,6 +1388,7 @@ async fn health_dependencies_follow_enabled_algorithm_and_asset_scope() {
         .collect::<Vec<_>>()
         .into();
     let mut s = strategy(c.clone(), rules.clone());
+    assert!(s.observation_requirements().binance_depth_quantities);
     let output = s.decide(&input, 22_000).unwrap();
     assert!(
         diagnostic(&output).markets[0]
@@ -1398,6 +1402,7 @@ async fn health_dependencies_follow_enabled_algorithm_and_asset_scope() {
     );
     c.probability.binance_trade_pressure_weight_usd = 0.0;
     let mut disabled = strategy(c, rules);
+    assert!(!disabled.observation_requirements().binance_depth_quantities);
     let output = disabled.decide(&input, 22_000).unwrap();
     assert!(diagnostic(&output).markets[0].source_health.is_empty());
     assert!(!intents(&output).is_empty());
@@ -1832,9 +1837,9 @@ async fn pending_twap_deadline_survives_spot_arrival() {
         s.qualify_intent(&current, &calculation, 0, 23000).unwrap(),
         IntentQualificationV1::Qualified
     );
-    let next = s.next_health_evaluation_at(&current, Some(&calculation), 23000);
+    let next = s.next_health_evaluation_at(&current.markets, Some(&calculation), 23000);
     assert_eq!(
-        s.next_health_evaluation_at(&current, None, 23000),
+        s.next_health_evaluation_at(&current.markets, None, 23000),
         Some(28000),
         "没有待发决定时仍按当前spot经营依赖排期限"
     );
@@ -1851,5 +1856,77 @@ async fn pending_twap_deadline_survives_spot_arrival() {
     assert_eq!(
         serde_json::to_value(diagnostic(&calculation.output)).unwrap(),
         frozen_diagnostic
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn qualified_chainlink_history_survives_binance_failure_at_original_decide() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver, rules) = setup(temp.path(), "2000");
+    let mut input = estimated(
+        shared.strategy_input(&mut driver).unwrap().unwrap(),
+        "100000",
+    );
+    let mut c = config();
+    c.probability.binance_innovation_weight = 1.0;
+    c.probability.binance_pressure_weight_usd = 0.0;
+    c.probability.binance_trade_pressure_weight_usd = 0.0;
+    c.probability.volatility_window_ms = 1000;
+    let condition = input.markets[0].observation.market.condition_id.0.clone();
+    let mut strategy = strategy(c, rules);
+    let reference = input.markets[0].observation.effective_reference.clone();
+    input.markets[0].observation.effective_reference = EffectiveMarketReferenceV1::Missing;
+    for (at, price) in [(21000, "100000"), (22000, "100002"), (23000, "100001")] {
+        let o = &mut input.markets[0].observation;
+        let mut progress = o.source_progress.to_vec();
+        progress.retain(|p| p.scope.source != SourceStreamKindV1::BinanceAggregateTrade);
+        let spot = progress
+            .iter_mut()
+            .find(|p| p.scope.source == SourceStreamKindV1::ChainlinkSpot)
+            .unwrap();
+        let evidence = spot.last_valid_business_message.as_mut().unwrap();
+        evidence.received_at_utc_ms = at;
+        evidence.source_event_at_utc_ms = Some(at);
+        o.chainlink_spot = fact(ChainlinkBtcUsdReferenceV1 {
+            symbol: "btc/usd".into(),
+            price_usd_per_btc: ExactDecimal(price.into()),
+            message_timestamp_utc_ms: at,
+        });
+        o.chainlink_spot.direct_anchors = vec![DirectObservationAnchorV1 {
+            field_path: "chainlink_spot".into(),
+            position: PublicFactPositionV1 {
+                input_stream_id: "test".into(),
+                closed_at_input_position: 0,
+                fact_ordinal: 0,
+            },
+            group_id: Sha256Hex("1".repeat(64)),
+            source_message_id: evidence.source_message_id.clone(),
+            source_event_at_utc_ms: Some(at),
+            received_at_utc_ms: at,
+        }];
+        o.source_progress = progress.into();
+        let output = strategy.decide(&input, at).unwrap();
+        assert!(matches!(
+            diagnostic(&output).markets[0].probability,
+            ProbabilityEstimateV1::Unavailable(EstimateUnavailableV1::UnhealthySource)
+        ));
+        assert!(intents(&output).is_empty(), "综合健康失败仍限制新增风险");
+        input.markets[0].observation.effective_reference = reference.clone();
+    }
+    let saved = serde_json::to_value(strategy.checkpoint()).unwrap();
+    assert_eq!(
+        saved["signals"][&condition]["chainlink"],
+        serde_json::json!([[21000, 100000.0], [22000, 100002.0], [23000, 100001.0]])
+    );
+    assert!(
+        saved["signals"][&condition]["binance_baseline"].is_null(),
+        "历史维护不提早建立创新基差"
+    );
+    // 没有新spot（同接收毫秒）仍按窗口清理，并保留原左前驱。
+    strategy.decide(&input, 25000).unwrap();
+    let saved = serde_json::to_value(strategy.checkpoint()).unwrap();
+    assert_eq!(
+        saved["signals"][&condition]["chainlink"],
+        serde_json::json!([[22000, 100002.0], [23000, 100001.0]])
     );
 }

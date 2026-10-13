@@ -1105,7 +1105,8 @@ fn prepared_binance_inputs_keep_stateful_results_before_late_materialization() {
     );
     let prepared =
         prepare_ingress_v1(&first, None, &Default::default(), &[], RULE_VERSION).unwrap();
-    let PreparedCanonicalInputV1::BinanceDepthSnapshot { row, source } = prepared.current else {
+    let PreparedCanonicalInputV1::BinanceDepthSnapshot { row, source, .. } = prepared.current
+    else {
         panic!("snapshot")
     };
     let direct = source.source().clone();
@@ -1128,7 +1129,7 @@ fn prepared_binance_inputs_keep_stateful_results_before_late_materialization() {
     );
     let prepared =
         prepare_ingress_v1(&second, None, &Default::default(), &[], RULE_VERSION).unwrap();
-    let PreparedCanonicalInputV1::BinanceDepthUpdate { row, source } = prepared.current else {
+    let PreparedCanonicalInputV1::BinanceDepthUpdate { row, source, .. } = prepared.current else {
         panic!("update")
     };
     let updated = depth.compute_update(row, source).unwrap();

@@ -22,6 +22,7 @@ struct FileCursorV1 {
 struct FileStreamV1<'a> {
     file: &'a ValidatedDirectSourceParquetFileV3,
     saved: FileCursorV1,
+    opened: crate::typed_raw::OpenedParquetV1,
     stream: Option<crate::typed_raw::TypedRawParquetStream<TypedRawRowV2>>,
 }
 impl FileStreamV1<'_> {
@@ -36,8 +37,12 @@ impl FileStreamV1<'_> {
             if self.stream.is_none() {
                 let mut cursor = self.saved.cursor.clone();
                 cursor.physical_row = physical;
-                self.stream = Some(open_validated_public_input_at_v1(
-                    self.file, rows, bytes, &cursor,
+                self.stream = Some(open_public_input_from_opened(
+                    self.file,
+                    self.opened.clone(),
+                    rows,
+                    bytes,
+                    cursor.physical_row,
                 )?);
             }
             let stream = self.stream.as_mut().unwrap();
@@ -77,19 +82,26 @@ struct DayOrderReferenceV1 {
     path: std::path::PathBuf,
     sha256: String,
 }
-fn index_hash(path: &std::path::Path) -> RecordingResult<String> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let mut hash = Sha256::new();
-    let mut bytes = vec![0u8; 1 << 20];
-    loop {
-        let count = file.read(&mut bytes)?;
-        if count == 0 {
-            break;
-        }
-        hash.update(&bytes[..count]);
+struct DigestIo<T> {
+    inner: T,
+    digest: Sha256,
+}
+impl<T: std::io::Read> std::io::Read for DigestIo<T> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(bytes)?;
+        self.digest.update(&bytes[..n]);
+        Ok(n)
     }
-    Ok(format!("{:x}", hash.finalize()))
+}
+impl<T: std::io::Write> std::io::Write for DigestIo<T> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(bytes)?;
+        self.digest.update(&bytes[..n]);
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 /// 六个逻辑来源的首项归并；快照和更新共用 BinanceDepth 来源。
 pub struct DayIngressV1<'a> {
@@ -162,8 +174,12 @@ impl<'a> DayIngressV1<'a> {
                 pending: BTreeMap::new(),
             })
             .collect();
-        let epochs = epoch_ranks(files, rows, &received_range, max_epochs)?;
-        let order = crate::day_order::locate(files, rows, &received_range, &epochs)?;
+        let opened = files
+            .iter()
+            .map(|file| file.take_opened())
+            .collect::<Result<Vec<_>, _>>()?;
+        let (order, epochs) =
+            crate::day_order::locate(files, rows, &received_range, &opened, max_epochs)?;
         let mut keyed = initial
             .into_iter()
             .map(|(row, binding)| {
@@ -187,22 +203,39 @@ impl<'a> DayIngressV1<'a> {
             initial: initial.into(),
             twap: Vec::new(),
         };
-        Self::restore(files, saved, rows, bytes, received_range)
+        Self::from_opened(files, saved, rows, bytes, opened)
     }
     pub fn restore(
         files: &[&'a ValidatedDirectSourceParquetFileV3],
-        mut saved: DayIngressCheckpointV1,
+        saved: DayIngressCheckpointV1,
         rows: usize,
         bytes: usize,
         _received_range: std::ops::Range<i64>,
     ) -> RecordingResult<Self> {
+        let opened = files
+            .iter()
+            .map(|file| file.take_opened())
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_opened(files, saved, rows, bytes, opened)
+    }
+    fn from_opened(
+        files: &[&'a ValidatedDirectSourceParquetFileV3],
+        mut saved: DayIngressCheckpointV1,
+        rows: usize,
+        bytes: usize,
+        opened: Vec<crate::typed_raw::OpenedParquetV1>,
+    ) -> RecordingResult<Self> {
         if let Some(reference) = &saved.order_reference {
-            if index_hash(&reference.path)? != reference.sha256 {
+            let mut reader = std::io::BufReader::new(DigestIo {
+                inner: std::fs::File::open(&reference.path)?,
+                digest: Sha256::new(),
+            });
+            let order = ciborium::de::from_reader(&mut reader)?;
+            std::io::copy(&mut reader, &mut std::io::sink())?;
+            if format!("{:x}", reader.get_ref().digest.clone().finalize()) != reference.sha256 {
                 return Err("原日顺序索引损坏".into());
             }
-            saved.order = ciborium::de::from_reader(std::io::BufReader::new(std::fs::File::open(
-                &reference.path,
-            )?))?;
+            saved.order = order;
         }
         let mut source_minima = Vec::new();
         let mut pm_minima = Vec::new();
@@ -233,6 +266,7 @@ impl<'a> DayIngressV1<'a> {
                 .map(|cursor| FileStreamV1 {
                     file: files[cursor.file],
                     saved: cursor.clone(),
+                    opened: opened[cursor.file].clone(),
                     stream: None,
                 })
                 .collect(),
@@ -258,16 +292,20 @@ impl<'a> DayIngressV1<'a> {
             suffix += 1;
             path = path.with_file_name(format!("source-order-{suffix:020}.cbor"));
         }
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&path)?;
-        ciborium::ser::into_writer(&self.saved.order, &mut file)?;
-        file.flush()?;
-        file.sync_all()?;
+        let mut writer = std::io::BufWriter::new(DigestIo {
+            inner: file,
+            digest: Sha256::new(),
+        });
+        ciborium::ser::into_writer(&self.saved.order, &mut writer)?;
+        writer.flush()?;
+        writer.get_ref().inner.sync_all()?;
         std::fs::File::open(path.parent().unwrap())?.sync_all()?;
         self.saved.order_reference = Some(DayOrderReferenceV1 {
-            sha256: index_hash(&path)?,
+            sha256: format!("{:x}", writer.get_ref().digest.clone().finalize()),
             path,
         });
         Ok(())
@@ -283,10 +321,9 @@ impl<'a> DayIngressV1<'a> {
     /// 全部未消费的原行都在最小顺序索引中；批次预读不推进消费位置。
     pub fn unread_source_lower_bound(&self) -> RecordingResult<Option<i64>> {
         let mut minimum = self
-            .files
-            .iter()
-            .enumerate()
-            .filter_map(|(i, f)| self.source_minima[i][f.saved.order_position])
+            .heads
+            .keys()
+            .filter_map(|key| self.source_minima[key.4][self.files[key.4].saved.order_position])
             .min();
         for (row, _) in &self.saved.initial {
             minimum = minimum
@@ -297,10 +334,9 @@ impl<'a> DayIngressV1<'a> {
         Ok(minimum)
     }
     pub fn unread_pm_lower_bound(&self) -> Option<(u64, i64, u64, u64)> {
-        self.files
-            .iter()
-            .enumerate()
-            .filter_map(|(i, f)| self.pm_minima[i][f.saved.order_position])
+        self.heads
+            .keys()
+            .filter_map(|key| self.pm_minima[key.4][self.files[key.4].saved.order_position])
             .min()
     }
     pub fn epochs(&self) -> &BTreeMap<(u8, String), u64> {
@@ -417,12 +453,14 @@ impl<'a> DayIngressV1<'a> {
             &[],
             &market,
             |cursor| {
-                let values: Vec<_> = self
+                let start = self
                     .saved
                     .twap
+                    .partition_point(|(position, _, _)| *position < cursor.next_input_position);
+                let page = &self.saved.twap
+                    [start..self.saved.twap.len().min(start.saturating_add(self.rows))];
+                let values: Vec<_> = page
                     .iter()
-                    .filter(|(position, _, _)| *position >= cursor.next_input_position)
-                    .take(self.rows)
                     .map(|(position, row, source)| {
                         let event = canonicalize_chainlink_twap_v1(
                             row,
@@ -459,11 +497,7 @@ impl<'a> DayIngressV1<'a> {
                     .last()
                     .map(|v| v.record_ref.input_position + 1)
                     .unwrap_or(cursor.next_input_position);
-                let exhausted = self
-                    .saved
-                    .twap
-                    .iter()
-                    .all(|(position, _, _)| *position < next_input_position);
+                let exhausted = start + page.len() == self.saved.twap.len();
                 Ok((
                     values,
                     TemporaryReferenceCursorV1 {
@@ -477,133 +511,3 @@ impl<'a> DayIngressV1<'a> {
 }
 
 // 只扫真实准入窄列，不解码盘口、编码宽录制或归约公共前缀。
-fn epoch_ranks(
-    files: &[&ValidatedDirectSourceParquetFileV3],
-    rows: usize,
-    range: &std::ops::Range<i64>,
-    limit: usize,
-) -> RecordingResult<BTreeMap<(u8, String), u64>> {
-    use crate::canonical_run::{CaptureCoordinate, rank_epochs, update_epoch_start};
-    use arrow_array::{Array, StringArray, TimestampMillisecondArray, UInt64Array};
-    use parquet::arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder};
-    use rayon::prelude::*;
-    let parts: Vec<RecordingResult<_>> = files
-        .par_iter()
-        .filter(|file| {
-            matches!(
-                file.source_kind(),
-                "polymarket_market" | "binance_depth_snapshot" | "binance_depth_update"
-            )
-        })
-        .map(|file| {
-            let source = if file.source_kind() == "polymarket_market" {
-                1u8
-            } else {
-                2u8
-            };
-            let kind = if source == 1 {
-                "polymarket_market"
-            } else {
-                "binance_depth"
-            };
-            let builder =
-                ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file.file_path())?)?;
-            let projection = ProjectionMask::columns(
-                builder.parquet_schema(),
-                [
-                    "timestamp_received",
-                    "source_sequence_epoch_id",
-                    "collector_admission_sequence",
-                    "collector_admission_time_utc_ms",
-                ],
-            );
-            let mut starts = BTreeMap::new();
-            for batch in builder
-                .with_projection(projection)
-                .with_batch_size(rows)
-                .build()?
-            {
-                let batch = batch?;
-                let epoch = batch
-                    .column_by_name("source_sequence_epoch_id")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap();
-                let received = batch
-                    .column_by_name("timestamp_received")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .unwrap();
-                let admitted = batch
-                    .column_by_name("collector_admission_time_utc_ms")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .unwrap();
-                let sequence = batch
-                    .column_by_name("collector_admission_sequence")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap();
-                for row in 0..batch.num_rows() {
-                    if !range.contains(&received.value(row)) {
-                        continue;
-                    }
-                    if epoch.is_null(row)
-                        || received.is_null(row)
-                        || admitted.is_null(row)
-                        || sequence.is_null(row)
-                    {
-                        continue;
-                    }
-                    update_epoch_start(
-                        &mut starts,
-                        epoch.value(row),
-                        CaptureCoordinate {
-                            admitted_at_utc_ms: admitted.value(row),
-                            received_at_utc_ms: received.value(row),
-                            collector_admission_sequence: sequence.value(row),
-                        },
-                        kind,
-                        limit,
-                    )?;
-                }
-            }
-            Ok((source, starts))
-        })
-        .collect();
-    let mut starts = [BTreeMap::new(), BTreeMap::new()];
-    for part in parts {
-        let (source, entries) = part?;
-        for (epoch, coordinate) in entries {
-            update_epoch_start(
-                &mut starts[(source - 1) as usize],
-                &epoch,
-                coordinate,
-                if source == 1 {
-                    "polymarket_market"
-                } else {
-                    "binance_depth"
-                },
-                limit,
-            )?;
-        }
-    }
-    let mut epochs = BTreeMap::new();
-    for (index, entries) in starts.into_iter().enumerate() {
-        for (epoch, rank) in rank_epochs(
-            entries,
-            if index == 0 {
-                "polymarket_market"
-            } else {
-                "binance_depth"
-            },
-        )? {
-            epochs.insert(((index + 1) as u8, epoch), rank as u64);
-        }
-    }
-    Ok(epochs)
-}

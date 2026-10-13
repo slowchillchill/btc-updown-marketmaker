@@ -10,6 +10,14 @@ use sim_system::{execution::*, platform_rules::*};
 use std::sync::Arc;
 #[derive(Default)]
 struct Probe {
+    no_trade_only: bool,
+    exit_immediately: bool,
+    block_next_publication: Option<std::path::PathBuf>,
+    source_health: bool,
+    trade_details: Option<bool>,
+    quantity_demand: Option<bool>,
+    expected_quantity_projection: Option<bool>,
+    saw_depth: Option<Arc<std::sync::atomic::AtomicBool>>,
     checkpoint_capture: Option<(std::path::PathBuf, std::path::PathBuf)>,
     checkpoint_publication_interrupt: Option<std::path::PathBuf>,
     rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
@@ -54,11 +62,33 @@ fn sim_log_values(path: &std::path::Path) -> Vec<serde_json::Value> {
 impl StrategyV1 for Probe {
     type Error = &'static str;
     type Diagnostics = ();
+    fn uses_source_health(&self) -> bool {
+        self.source_health
+    }
+    fn requires_trade_economics_details(&self) -> bool {
+        self.trade_details.unwrap_or(true)
+    }
+    fn observation_requirements(&self) -> contracts::PublicObservationRequirementsV1 {
+        contracts::PublicObservationRequirementsV1 {
+            binance_depth_quantities: self.quantity_demand.unwrap_or(true),
+        }
+    }
     fn decide(
         &mut self,
         input: &StrategyInputV1,
         at: i64,
     ) -> Result<StrategyOutputV1, Self::Error> {
+        if let Some(full) = self.expected_quantity_projection {
+            for market in &input.markets {
+                if let Some(depth) = &market.observation.binance_depth.value {
+                    assert_eq!(depth.full().is_some(), full, "共享日采用全部候选需求并集");
+                    self.saw_depth
+                        .as_ref()
+                        .unwrap()
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
         // 仅测试的有界失败探针：旧实现重复即时计算时直接失败，避免挂住回归。
         if self
             .calculation_budget
@@ -89,6 +119,16 @@ impl StrategyV1 for Probe {
         self.first_economics
             .get_or_insert_with(|| input.action_before.economics().clone());
         self.last_economics = Some(input.action_before.economics().clone());
+        if self.exit_immediately {
+            return Ok(StrategyOutputV1::Exit { diagnostics: () });
+        }
+        if self.no_trade_only {
+            return Ok(StrategyOutputV1::Continue {
+                intents: vec![],
+                next_evaluation_at_utc_ms: None,
+                diagnostics: (),
+            });
+        }
         if ask.is_some() {
             if self.fail {
                 return Err("original-strategy-failure");
@@ -988,6 +1028,7 @@ async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_
     )
     .unwrap();
     let depth = last_depth.unwrap();
+    let depth = depth.full().unwrap();
     assert_eq!(depth.last_update_id, 102);
     assert!(
         depth
@@ -1223,7 +1264,7 @@ impl StrategyV1 for HealthProbe {
     }
     fn next_health_evaluation_at(
         &self,
-        _: &StrategyCurrentReadV1<'_>,
+        _: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
         calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
         at: i64,
     ) -> Option<i64> {
@@ -1473,7 +1514,7 @@ impl StrategyV1 for QuietDeadlineProbe {
     }
     fn next_health_evaluation_at(
         &self,
-        _: &StrategyCurrentReadV1<'_>,
+        _: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
         _: Option<&StrategyCalculationV1>,
         at: i64,
     ) -> Option<i64> {
@@ -1544,7 +1585,7 @@ impl StrategyV1 for MeasurementProbe {
     }
     fn next_health_evaluation_at(
         &self,
-        _: &StrategyCurrentReadV1<'_>,
+        _: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
         _: Option<&StrategyCalculationV1>,
         at: i64,
     ) -> Option<i64> {
@@ -1678,6 +1719,22 @@ fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
         std::fs::File::open(day.checkpoint_root.join("checkpoint.json")).unwrap(),
     )
     .unwrap();
+    let completed_day = day.checkpoint_root.join(format!(
+        "checkpoint-{:020}/day.cbor",
+        latest["generation"].as_u64().unwrap()
+    ));
+    let completed: serde_json::Value =
+        ciborium::from_reader(std::fs::File::open(&completed_day).unwrap()).unwrap();
+    assert_eq!(completed["state"], "Complete");
+    assert!(completed.get("core").is_none());
+    assert!(completed.get("producer").is_none());
+    assert!(
+        latest["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["path"] == "day.cbor")
+    );
     let latest_generation = latest["generation"].as_u64().unwrap();
     assert!(latest_generation > 1);
     let mut target = None;
@@ -1825,6 +1882,9 @@ impl CheckpointStrategyV1 for Probe {
         &self,
         writer: &mut dyn std::io::Write,
     ) -> Result<(), MaterialError> {
+        if let Some(root) = &self.block_next_publication {
+            std::fs::create_dir(root.join(".checkpoint.json.tmp"))?;
+        }
         if let Some(root) = &self.checkpoint_publication_interrupt {
             if self.saw_cancel_in_flight_after_one_leg_fill
                 && root.join("checkpoint.json").exists()
@@ -2063,4 +2123,509 @@ fn two_original_dates_keep_two_thousand_and_same_day_cross_market_continuity() {
             .public()
         )
     );
+}
+
+#[test]
+fn original_day_quantity_demand_union_preserves_complete_and_quantity_free_candidates() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for any_full in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, rules) = setup(tmp.path());
+        add_binance_depth_to_reuse_material(&config);
+        let first = HistoricalPreparedRunConfigV1::from(&config);
+        let mut second = first.clone();
+        second.session.run_id = "quantity-second".into();
+        second.session.account_id = "quantity-second-account".into();
+        second.sim_log = tmp.path().join("second-sim.jsonl");
+        second.noe_root = tmp.path().join("second-noe");
+        second.ledger_root = tmp.path().join("second-ledger");
+        second.metadata_path = tmp.path().join("second-metadata.json");
+        second.result_path = tmp.path().join("second-result.json");
+        second.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(300);
+        let day = HistoricalDayConfigV1 {
+            preparation: config.preparation.clone(),
+            candidates: vec![first, second],
+            checkpoint_root: tmp.path().join("day-state"),
+            checkpoint_interval_seconds: 0,
+            progress_interval_seconds: 0,
+            checkpoint_every_applied_inputs: None,
+            checkpoint_every_candidate_events: None,
+            producer_lead_groups: Some(1),
+        };
+        let seen = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        let results = run_historical_days_v1(&[day], rules.clone(), &|candidate| {
+            let index = usize::from(candidate.session.run_id == "quantity-second");
+            Ok(Probe {
+                quantity_demand: Some(any_full && index == 0),
+                expected_quantity_projection: Some(any_full),
+                saw_depth: Some(seen[index].clone()),
+                rules: Some(rules.clone()),
+                ..Default::default()
+            })
+        })
+        .unwrap();
+        assert_eq!(results[0].candidates.len(), 2);
+        assert!(
+            seen.iter().all(|seen| seen.load(Ordering::Relaxed)),
+            "两种独立交付前沿均实际读到深度描述"
+        );
+        for candidate in &results[0].candidates {
+            assert_eq!(candidate.report["end_reason"], "RangeEnd");
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn source_health_host_honors_trade_detail_demand_without_changing_observation_or_economics() {
+    let mut outputs = Vec::new();
+    for details in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, rules) = setup(temp.path());
+        // 原首市场序列足以生成真实成交；不进入依赖完整明细的第二市场探针。
+        config.preparation.scope.received_end_utc_ms = BASE + 4000;
+        let mut probe = Probe {
+            source_health: true,
+            trade_details: Some(details),
+            rules: Some(rules.clone()),
+            ..Default::default()
+        };
+        let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
+        assert!(report.source_health.is_some(), "实际宿主须走健康观察入口");
+        assert!(probe.bought_first);
+        if details {
+            assert!(
+                probe.observed.iter().any(|(_, _, _, trades)| *trades > 0),
+                "完整消费者确实见到原成交明细，不能以空历史自证省略"
+            );
+        } else {
+            assert!(probe.observed.iter().all(|(_, _, _, trades)| *trades == 0));
+        }
+        outputs.push((
+            probe
+                .observed
+                .iter()
+                .map(|(at, count, ask, _)| (*at, *count, ask.clone()))
+                .collect::<Vec<_>>(),
+            serde_json::to_value(&report.account_economics_memory).unwrap(),
+            serde_json::to_value(&report.day_economics).unwrap(),
+            report.calculation_count,
+            probe.dispatched,
+            serde_json::to_value(&report.source_health).unwrap(),
+        ));
+    }
+    assert_eq!(
+        outputs[0], outputs[1],
+        "健康入口同前沿/观察、真实账户及资金积分保持"
+    );
+}
+
+fn research_day(config: &HistoricalRunConfigV1, root: &std::path::Path) -> HistoricalDayConfigV1 {
+    HistoricalDayConfigV1 {
+        preparation: config.preparation.clone(),
+        candidates: vec![HistoricalPreparedRunConfigV1::from(config)],
+        checkpoint_root: root.to_owned(),
+        checkpoint_interval_seconds: 60,
+        progress_interval_seconds: 0,
+        checkpoint_every_applied_inputs: None,
+        checkpoint_every_candidate_events: Some(1),
+        producer_lead_groups: Some(1),
+    }
+}
+
+#[test]
+fn research_hours_exclude_same_millisecond_boundary_and_keep_empty_hours() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = setup(tmp.path());
+    config.preparation.scope.received_end_utc_ms = BASE + 3 * 3_600_000;
+    config.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(3_598_900);
+    let mut day = research_day(&config, &tmp.path().join("state"));
+    let mut second = reuse_outputs(&config, &tmp.path().join("second"));
+    second.session.run_id = "independent-research".into();
+    second.session.account_id = "other-account".into();
+    day.candidates.push(second);
+    let results = run_historical_days_with_options_v1(
+        &[day],
+        rules.clone(),
+        &|_| {
+            Ok(Probe {
+                no_trade_only: true,
+                rules: Some(rules.clone()),
+                ..Default::default()
+            })
+        },
+        1,
+        &HistoricalDayRunOptionsV1 {
+            research_summary: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for result in &results[0].candidates {
+        let r = &result.report;
+        let research = &r["research"];
+        let hours = research["hours"].as_array().unwrap();
+        assert_eq!(hours.len(), 3);
+        assert_eq!(research["decisions"]["successful"], r["calculation_count"]);
+        assert_eq!(research["decisions"]["no_trade"], r["calculation_count"]);
+        assert_eq!(research["decisions"]["actions"], 0);
+        let cutoff = &hours[0]["cumulative"]["observation_cutoff"];
+        assert!(
+            cutoff["decision_time"]["logical_time_utc_ms"]
+                .as_i64()
+                .unwrap()
+                < BASE + 3_600_000
+        );
+        assert!(hours[1]["decision_changes"]["successful"].as_u64().unwrap() > 0);
+        assert_eq!(hours[2]["decision_changes"]["successful"], 0);
+        assert_eq!(
+            hours[1]["cumulative"]["decisions"],
+            hours[2]["cumulative"]["decisions"]
+        );
+        assert_eq!(
+            hours[1]["cumulative"]["day_economics"]["maximum_nav_drawdown_pusd"],
+            hours[2]["cumulative"]["day_economics"]["maximum_nav_drawdown_pusd"]
+        );
+    }
+    let a = &results[0].candidates[0].report["research"]["final_snapshot"];
+    let b = &results[0].candidates[1].report["research"]["final_snapshot"];
+    for field in ["metrics", "counters", "decisions", "day_economics"] {
+        assert_eq!(a[field], b[field]);
+    }
+    assert_ne!(
+        a["observation_cutoff"]["decision_time"]["run_id"],
+        b["observation_cutoff"]["decision_time"]["run_id"]
+    );
+}
+
+#[test]
+fn research_budget_retains_pending_and_resumes_without_recount_or_business_change() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (config, rules) = setup(tmp.path());
+    let day = research_day(&config, &tmp.path().join("state"));
+    let factory = |_: &HistoricalPreparedRunConfigV1| {
+        Ok(Probe {
+            rules: Some(rules.clone()),
+            ..Default::default()
+        })
+    };
+    let stopped = run_historical_days_with_options_v1(
+        &[day.clone()],
+        rules.clone(),
+        &factory,
+        1,
+        &HistoricalDayRunOptionsV1 {
+            research_summary: true,
+            budget_save_after: Some(std::time::Duration::ZERO),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(stopped[0].candidates[0].report["end_reason"], "BudgetStop");
+    assert!(
+        !stopped[0].candidates[0].report["recording_drained"]
+            .as_bool()
+            .unwrap()
+    );
+    let pointer: serde_json::Value = serde_json::from_reader(
+        std::fs::File::open(day.checkpoint_root.join("checkpoint.json")).unwrap(),
+    )
+    .unwrap();
+    let directory = day.checkpoint_root.join(format!(
+        "checkpoint-{:020}",
+        pointer["generation"].as_u64().unwrap()
+    ));
+    #[derive(serde::Deserialize)]
+    enum DayState {
+        Running {},
+        Complete,
+    }
+    #[derive(serde::Deserialize)]
+    struct SavedDay {
+        state: DayState,
+        completed: Vec<Option<serde_json::Value>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct State {
+        pending: Option<serde_json::Value>,
+        research: serde_json::Value,
+    }
+    #[derive(serde::Deserialize)]
+    struct SavedCandidate {
+        state: State,
+    }
+    let saved: SavedDay =
+        ciborium::from_reader(std::fs::File::open(directory.join("day.cbor")).unwrap()).unwrap();
+    assert!(matches!(saved.state, DayState::Running {}));
+    assert!(saved.completed.iter().all(Option::is_none));
+    let candidate: SavedCandidate = ciborium::from_reader(
+        std::fs::File::open(directory.join("candidate-000000.cbor")).unwrap(),
+    )
+    .unwrap();
+    assert!(candidate.state.pending.is_some());
+    assert_eq!(
+        candidate.state.research["decisions"],
+        stopped[0].candidates[0].report["research"]["decisions"]
+    );
+    assert_eq!(
+        candidate.state.research["hours"],
+        stopped[0].candidates[0].report["research"]["hours"]
+    );
+    let published_before = std::fs::read(day.checkpoint_root.join("checkpoint.json")).unwrap();
+    let failure = run_historical_days_with_options_v1(
+        &[day.clone()],
+        rules.clone(),
+        &|_| {
+            Ok(Probe {
+                rules: Some(rules.clone()),
+                block_next_publication: Some(day.checkpoint_root.clone()),
+                ..Default::default()
+            })
+        },
+        1,
+        &HistoricalDayRunOptionsV1 {
+            research_summary: true,
+            budget_save_after: Some(std::time::Duration::ZERO),
+            ..Default::default()
+        },
+    );
+    assert!(failure.is_err(), "发布失败不能返回预算完成报告");
+    assert_eq!(
+        published_before,
+        std::fs::read(day.checkpoint_root.join("checkpoint.json")).unwrap()
+    );
+    std::fs::remove_dir(day.checkpoint_root.join(".checkpoint.json.tmp")).unwrap();
+    assert!(stopped[0].public_applied_inputs < 9, "预算保留未消费来源");
+    let resumed = run_historical_days_with_options_v1(
+        &[day.clone()],
+        rules.clone(),
+        &factory,
+        1,
+        &HistoricalDayRunOptionsV1 {
+            research_summary: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let expected = resumed[0].candidates[0].report.clone();
+    let sim = std::fs::read(&config.sim_log).unwrap();
+    // 同一小夹具同一路径重新运行原默认入口，比较原业务报告及逐帧输出。
+    std::fs::remove_dir_all(&day.checkpoint_root).unwrap();
+    for root in [&config.noe_root, &config.ledger_root] {
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    for path in [&config.sim_log, &config.metadata_path, &config.result_path] {
+        std::fs::remove_file(path).unwrap();
+    }
+    let original = run_historical_days_v1(&[day], rules.clone(), &factory).unwrap();
+    assert!(original[0].candidates[0].report.get("research").is_none());
+    let mut business = expected.clone();
+    business.as_object_mut().unwrap().remove("research");
+    assert_eq!(business, original[0].candidates[0].report);
+    assert_eq!(sim, std::fs::read(&config.sim_log).unwrap());
+    assert_eq!(
+        expected["research"]["decisions"]["successful"],
+        expected["calculation_count"]
+    );
+    assert!(
+        expected["research"]["decisions"]["actions"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        expected["research"]["decisions"]["no_trade"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+}
+
+#[test]
+fn research_budget_mixed_completed_candidate_keeps_hour_cursor_and_exit_time() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = setup(tmp.path());
+    config.preparation.scope.received_end_utc_ms = BASE + 3 * 3_600_000;
+    config.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(3_598_900);
+    let mut day = research_day(&config, &tmp.path().join("state"));
+    let mut second = reuse_outputs(&config, &tmp.path().join("second"));
+    second.session.run_id = "continue-research".into();
+    second.session.account_id = "continue-account".into();
+    second.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(3_599_200);
+    day.candidates.push(second);
+    let archive = tmp.path().join("retained-points");
+    let factory = |run: &HistoricalPreparedRunConfigV1| {
+        Ok(Probe {
+            no_trade_only: run.session.run_id == "continue-research",
+            exit: run.session.run_id != "continue-research",
+            rules: Some(rules.clone()),
+            checkpoint_capture: Some((day.checkpoint_root.clone(), archive.clone())),
+            ..Default::default()
+        })
+    };
+    let options = HistoricalDayRunOptionsV1 {
+        research_summary: true,
+        ..Default::default()
+    };
+    let complete =
+        run_historical_days_with_options_v1(&[day.clone()], rules.clone(), &factory, 1, &options)
+            .unwrap();
+    assert_eq!(
+        complete[0].candidates[0].report["end_reason"],
+        "StrategyExit"
+    );
+    assert_eq!(
+        complete[0].candidates[0].report["research"]["decisions"]["exits"],
+        1
+    );
+    assert_eq!(
+        complete[0].candidates[0].report["research"]["hours"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        complete[0].candidates[0].report["last_observed_at_utc_ms"]
+            .as_i64()
+            .unwrap()
+            < BASE + 2 * 3_600_000
+    );
+    #[derive(serde::Deserialize)]
+    struct DaySaved {
+        completed: Vec<Option<serde_json::Value>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Loop {
+        research: serde_json::Value,
+    }
+    #[derive(serde::Deserialize)]
+    struct CandidateSaved {
+        state: Loop,
+    }
+    let mut selected = None;
+    for entry in std::fs::read_dir(&archive).unwrap() {
+        let directory = entry.unwrap().path();
+        let saved: DaySaved =
+            ciborium::from_reader(std::fs::File::open(directory.join("day.cbor")).unwrap())
+                .unwrap();
+        if saved.completed[0].is_some() && saved.completed[1].is_none() {
+            let candidate: CandidateSaved = ciborium::from_reader(
+                std::fs::File::open(directory.join("candidate-000001.cbor")).unwrap(),
+            )
+            .unwrap();
+            if candidate.state.research["hours"].as_array().unwrap().len() == 1 {
+                selected = Some(directory);
+                break;
+            }
+        }
+    }
+    let selected = selected.expect("保留点须真实含已退出候选及另一候选第一小时状态");
+    let generation: u64 = selected
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_start_matches("checkpoint-")
+        .parse()
+        .unwrap();
+    let latest: serde_json::Value = serde_json::from_reader(
+        std::fs::File::open(day.checkpoint_root.join("checkpoint.json")).unwrap(),
+    )
+    .unwrap();
+    let directory = day
+        .checkpoint_root
+        .join(format!("checkpoint-{generation:020}"));
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut files = vec![];
+    for name in ["day.cbor", "candidate-000001.cbor"] {
+        std::fs::copy(selected.join(name), directory.join(name)).unwrap();
+        files.push(serde_json::json!({"path":name,"sha256":format!("{:x}",sha2::Sha256::digest(std::fs::read(directory.join(name)).unwrap()))}));
+    }
+    std::fs::write(day.checkpoint_root.join("checkpoint.json"),serde_json::to_vec(&serde_json::json!({"format":latest["format"],"identity":latest["identity"],"generation":generation,"files":files})).unwrap()).unwrap();
+    let stopped = run_historical_days_with_options_v1(
+        &[day.clone()],
+        rules.clone(),
+        &factory,
+        1,
+        &HistoricalDayRunOptionsV1 {
+            research_summary: true,
+            budget_save_after: Some(std::time::Duration::ZERO),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(stopped[0].candidates[0].reused);
+    assert_eq!(
+        stopped[0].candidates[0].report,
+        complete[0].candidates[0].report
+    );
+    assert_eq!(stopped[0].candidates[1].report["end_reason"], "BudgetStop");
+    assert_eq!(
+        stopped[0].candidates[1].report["research"]["hours"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let resumed =
+        run_historical_days_with_options_v1(&[day.clone()], rules.clone(), &factory, 1, &options)
+            .unwrap();
+    for (a, b) in complete[0].candidates.iter().zip(&resumed[0].candidates) {
+        assert_eq!(a.report, b.report, "已保存小时/分类在恢复后不得重计");
+    }
+}
+
+#[test]
+fn research_zero_duration_exit_keeps_original_terminal_boundary_on_budget_save() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = setup(tmp.path());
+    config.timing.calculation_duration_ms = DelayScheduleV1::Fixed(0);
+    let day = research_day(&config, &tmp.path().join("state"));
+    let factory = |_: &HistoricalPreparedRunConfigV1| {
+        Ok(Probe {
+            exit_immediately: true,
+            rules: Some(rules.clone()),
+            ..Default::default()
+        })
+    };
+    let result = run_historical_days_with_options_v1(
+        &[day.clone()],
+        rules.clone(),
+        &factory,
+        1,
+        &HistoricalDayRunOptionsV1 {
+            research_summary: true,
+            budget_save_after: Some(std::time::Duration::ZERO),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let report = &result[0].candidates[0].report;
+    assert_eq!(
+        report["end_reason"], "StrategyExit",
+        "已到期Exit不能被预算分类遮断"
+    );
+    assert_eq!(report["research"]["decisions"]["exits"], 1);
+    assert_eq!(report["research"]["decisions"]["successful"], 1);
+    assert_eq!(
+        report["research"]["final_snapshot"]["boundary_utc_ms"],
+        report["pending_calculation_timing"]["calculation_completed_at_utc_ms"]
+    );
+    assert!(report["research"]["hours"].as_array().unwrap().is_empty());
+    // 保存点仍是Running；恢复会在原到期毫秒终止，不提前推进任何未到期计算。
+    let resumed = run_historical_days_with_options_v1(
+        &[day],
+        rules.clone(),
+        &factory,
+        1,
+        &HistoricalDayRunOptionsV1 {
+            research_summary: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(report, &resumed[0].candidates[0].report);
 }

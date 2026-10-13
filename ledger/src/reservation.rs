@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use contracts::{ConditionId, ExactDecimal};
 use rust_decimal::Decimal;
@@ -66,6 +66,8 @@ pub(crate) struct MarketLocalPendingV1 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ReservationStateV1 {
     pub(crate) requests: BTreeMap<LedgerRequestIdentityV1, CachedReservationRequestV1>,
+    #[serde(default)]
+    pub(crate) active_requests: Option<BTreeSet<LedgerRequestIdentityV1>>,
     pub(crate) applied_local_events: BTreeMap<LedgerLocalEventIdentityV1, u64>,
     pub(crate) principal_pusd: Decimal,
     pub(crate) immediate_fee_pusd: Decimal,
@@ -82,6 +84,7 @@ impl Default for ReservationStateV1 {
     fn default() -> Self {
         Self {
             requests: BTreeMap::new(),
+            active_requests: Some(BTreeSet::new()),
             applied_local_events: BTreeMap::new(),
             principal_pusd: Decimal::ZERO,
             immediate_fee_pusd: Decimal::ZERO,
@@ -93,5 +96,27 @@ impl Default for ReservationStateV1 {
             after_send_unknown_count: 0,
             markets: BTreeMap::new(),
         }
+    }
+}
+
+impl ReservationStateV1 {
+    pub(crate) fn insert_request(
+        &mut self,
+        id: LedgerRequestIdentityV1,
+        request: CachedReservationRequestV1,
+    ) {
+        if let Some(active) = &mut self.active_requests {
+            if request.reservation.as_ref().is_some_and(|r| {
+                !matches!(
+                    r.status,
+                    ReservationStatusV1::Converted | ReservationStatusV1::Released
+                )
+            }) {
+                active.insert(id.clone());
+            } else {
+                active.remove(&id);
+            }
+        }
+        self.requests.insert(id, request);
     }
 }

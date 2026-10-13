@@ -21,8 +21,8 @@ fn cross_prices(o: &MarketBusinessObservationV1, at: i64) -> Value {
     json!({"spot":{"source":source_summary(&o.chainlink_spot,at),"price_usd_per_btc":o.chainlink_spot.value.as_ref().map(|v|&v.price_usd_per_btc)},
         "binance_trade":{"source":source_summary(&o.binance_trade,at),"price_usdt_per_btc":o.binance_trade.value.as_ref().map(|v|&v.price_usdt_per_btc)},
         "binance_depth":{"source":source_summary(&o.binance_depth,at),
-            "best_bid_price_usdt_per_btc":o.binance_depth.value.as_ref().and_then(|v|v.bids.first()).map(|v|&v.price_usdt_per_btc),
-            "best_ask_price_usdt_per_btc":o.binance_depth.value.as_ref().and_then(|v|v.asks.first()).map(|v|&v.price_usdt_per_btc)}})
+            "best_bid_price_usdt_per_btc":o.binance_depth.value.as_ref().and_then(contracts::BinanceDepthObservationV1::full).and_then(|v|v.bids.first()).map(|v|&v.price_usdt_per_btc),
+            "best_ask_price_usdt_per_btc":o.binance_depth.value.as_ref().and_then(contracts::BinanceDepthObservationV1::full).and_then(|v|v.asks.first()).map(|v|&v.price_usdt_per_btc)}})
 }
 fn target_features(o: &MarketBusinessObservationV1, at: i64) -> Value {
     json!({"group_position":o.group_position,"first_visible_at_utc_ms":at,"reference":reference(o),

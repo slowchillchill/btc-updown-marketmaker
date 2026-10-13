@@ -138,7 +138,12 @@ def main():
         sys.path[:0]=[str(root/path) for path in ('model-train','shared-run/gpu','data-pipeline/gpu',
             'ledger/gpu','model-train/native-inputs/gpu')]
         from validate_continuous_tail import verify
-        verify(source,runtime,projection,accepted_batch,block,sampler,receipt,kind,asset,fee,rebate,started)
+        if os.environ.get('B_GPU_REFERENCE_CACHE'):
+            from validate_reference_cache import verify_cache,verify_tail
+            verify_cache(source,runtime,projection,sampler,rebate)
+            verify_tail(verify,source,runtime,projection,accepted_batch,block,sampler,receipt,kind,asset,fee,rebate,started)
+        else:
+            verify(source,runtime,projection,accepted_batch,block,sampler,receipt,kind,asset,fee,rebate,started)
         return
     maker_batches=[]
     if with_pending:

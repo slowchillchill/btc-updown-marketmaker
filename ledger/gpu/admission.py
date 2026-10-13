@@ -8,7 +8,7 @@ from dataclasses import dataclass,replace,fields
 import torch
 from queues import ExactInt,ExactRational,Numbers,_take
 from asset_buy import take_ratio
-from admission_lifecycle import LifecycleColumns,LifecycleDirectory
+from admission_lifecycle import LifecycleColumns,LifecycleDirectory,OrderLifecycleDirectory
 from reservation import ReservationBook,run_reserve_action,sequence_fault,RESERVED,BEFORE_SEND,SUBMITTED,PLATFORM_PENDING
 from success_pool import select
 from memory import EconomicColumns
@@ -113,7 +113,7 @@ class AdmissionLifecycle:
             if success_pools is None:raise ValueError('订单消费者须显式安装实际累计本金冷目录')
             accepted_principal=AcceptedPrincipal.open(roots,torch.unique(success_pools.condition_slots),known=False)
         return cls(platform,success_pools,TradeSuccess.open(roots,capacity,empty.device),position_costs,unresolved_markets,
-            RebateContributions.empty(roots,max(1,width),empty.device),rebate_days,opening_cash,book,LifecycleDirectory.empty(roots,capacity,device=empty.device),order_funds,
+            RebateContributions.empty(roots,max(1,width),empty.device),rebate_days,opening_cash,book,OrderLifecycleDirectory.empty(roots,capacity,device=empty.device),order_funds,
             LifecycleDirectory.empty(roots,capacity,device=empty.device),columns,life,
             current_entry_sequence,current_local_prefix,empty,empty.clone(),torch.zeros_like(columns.enabled),
             ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=empty.device)),
@@ -133,7 +133,7 @@ class AdmissionLifecycle:
         fault=self.fault | actual.fault | maker.fault | reserved.fault
         return CashFunds(actual,maker,reserved,reserved,local,platform_pending,fault)
 
-    def append_columns(self,bank,incoming):
+    def append_columns(self,bank,incoming,*,lifecycle=None):
         """持续接入新NOE批；账户、原三序、旧position及资金关联原样承接。
 
         新记录人口给目录提供保守物理扩容上界，不作为业务数量上界。
@@ -143,7 +143,7 @@ class AdmissionLifecycle:
         roots,width=self.columns.row_refs.shape
         extra=incoming.row_refs.size(1)
         columns=self.columns.append(incoming)
-        life=self.lifecycle.append(LifecycleColumns.from_projection(bank,incoming))
+        life=self.lifecycle.append(LifecycleColumns.from_projection(bank,incoming) if lifecycle is None else lifecycle)
         blank=torch.zeros_like(incoming.enabled)
         zero=ExactInt.from_i64_tensor(torch.zeros(roots*extra,dtype=torch.int64,device=blank.device))
         order_capacity=max(self.orders.occupied.size(1),self.order_funds.occupied.size(1))+extra
@@ -415,21 +415,30 @@ class AdmissionLifecycle:
         accepted_principal,principal_ready=self.accepted_principal.add(accepted_condition,principal,count_principal)
         fault|=accepted_principal.fault
         fault=fault | book.fault
-        order_event=(lifecycle_use&((tag==7)|(tag==19)|accepted|canceled))|(use&(is_order_economic|is_order_release))
-        open_flag=torch.where((tag==7)|(tag==19)|accepted,self.lifecycle.open_orders[root,local],old_open)
-        open_flag=open_flag & ~(canceled|is_order_release)
-        request=torch.where((accepted&bound)|(is_order_economic&has_request),request,old_request)
-        # Target控制没有condition字段；沿原set_order_open保留已有关联，未知不猜。
-        condition=torch.where(canceled,torch.where(found,self.orders.conditions[root,order_at],-1),
-            self.lifecycle.conditions[root,local])
-        orders,error=self.orders.set(order,condition,open_flag,next_entry,order_event,
-            request=request,economic=old_applied | is_order_economic,counted=old_counted|count_principal)
-        fault=fault | torch.where(order_event,error,0)
         trade_event=lifecycle_use&(tag==8)
         economic_trade=use & economic & ((self.lifecycle.economic_tags[root,local]>=6)&(self.lifecycle.economic_tags[root,local]<=8))
         trade_at,trade_found,trade_error=self.trades.lookup(fill)
         fault=fault | torch.where(trade_event|economic_trade,Numbers.combine_fault_rows(trade_error),0)
         known_fact=self.trade_success.has_fact[root,trade_at]
+        # 共同提交前的首次Trade事实；经济先到或最终性更新不能重复耗减Maker余量。
+        first_maker=trade_event&(self.lifecycle.trade_roles[root,local]==1)&~(trade_found&known_fact)
+        # 原CPU数量适配在Control关联处理后独立执行；Base计量不猜本地预留关联。
+        quantity_submission=lifecycle_use&self.lifecycle.submission_open_known[root,local]
+        order_event=(lifecycle_use&((tag==7)|(tag==19)|accepted|canceled))|(use&(is_order_economic|is_order_release))|first_maker|quantity_submission
+        open_flag=torch.where((tag==7)|(tag==19)|accepted|quantity_submission,self.lifecycle.open_orders[root,local],old_open)
+        open_flag=open_flag & ~(canceled|is_order_release)
+        request=torch.where((accepted&bound)|(is_order_economic&has_request),request,old_request)
+        # Target控制没有condition字段；沿原set_order_open保留已有关联，未知不猜。
+        condition=torch.where(canceled,torch.where(found,self.orders.conditions[root,order_at],-1),
+            self.lifecycle.conditions[root,local])
+        base=_take(self.lifecycle.trade_base_units,index)
+        terminal=canceled|is_order_release|(lifecycle_use&((tag==7)|(tag==19)|accepted|quantity_submission)&~self.lifecycle.open_orders[root,local])
+        orders,error=self.orders.set(order,condition,open_flag,next_entry,order_event,
+            request=request,economic=old_applied | is_order_economic,counted=old_counted|count_principal,
+            submission_known=quantity_submission,
+            submission_base=_take(self.lifecycle.submission_open_base_units,index),
+            maker_match=first_maker,maker_base=base,terminal=terminal)
+        fault=fault | torch.where(order_event,error,0)
         pending=self.lifecycle.pending_trades[root,local] & (~known_fact | self.trades.flags[root,trade_at])
         trades,error=self.trades.set(fill,self.lifecycle.conditions[root,local],
             torch.where(trade_event,pending,self.trades.flags[root,trade_at]),
@@ -440,7 +449,6 @@ class AdmissionLifecycle:
         trade_event &= lifecycle_ready
         economic_trade &= lifecycle_ready
         # 真实份额/本金保持精确；D-0295只发生在成功池的派生成本分配端。
-        base=_take(self.lifecycle.trade_base_units,index)
         quote=_take(self.lifecycle.trade_quote_units,index)
         quantity=ExactRational.ratio(base,base.constant(1_000_000))
         cost=ExactRational.ratio(quote,quote.constant(1_000_000))
@@ -529,7 +537,7 @@ class AdmissionLifecycle:
             # 原空经济delta也创建account.market；仅保存终态订单/成交索引不会创建lifecycle.market。
             actual_condition = self.lifecycle.conditions[root,local]
             creates_market = (result.applied & (actual_condition >= 0)) | (
-                order_event & (~submission | bound) & (actual_condition >= 0) & (old_open | open_flag)) | (
+                order_event & (~submission | bound | quantity_submission) & (actual_condition >= 0) & (old_open | orders.flags[root,order_at])) | (
                 trade_event & (actual_condition >= 0) & (self.trades.flags[root,trade_at] | pending))
             population, population_ready = population.admit(actual_condition, creates_market & use & (fault == 0))
             fault |= population.fault

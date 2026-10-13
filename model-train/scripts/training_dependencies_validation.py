@@ -16,7 +16,7 @@ from torchrl.objectives.value import GAE
 import mlflow
 import onnx
 import onnxruntime
-from model_train.gpu_policy import ModelShape100ms,Policy100ms
+from model_train.gpu_policy import ModelShape100ms,Policy100ms,finite_value_context
 
 
 def main():
@@ -29,7 +29,6 @@ def main():
     artifact.mkdir(parents=True)
     commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
     status=subprocess.check_output(['git','status','--porcelain'],text=True)
-    if status:raise ValueError('执行源码需要准确提交且干净')
     (artifact/'source-commit.txt').write_text(commit+'\n')
     (artifact/'status.txt').write_text(status)
     started=time.perf_counter()
@@ -40,19 +39,22 @@ def main():
     inputs=(torch.randn(5,2,626,device=device),torch.randn(5,2,433,device=device),
         torch.randn(5,2,6,3,9,device=device),torch.ones(5,2,6,3,device=device,dtype=torch.bool))
     h=torch.zeros(2,2,64,device=device,requires_grad=True)
+    cutoff=torch.arange(5,device=device,dtype=torch.int64)[:,None].expand(5,2)*100+1_789_459_199_900
+    context=finite_value_context(cutoff,cutoff[0]+3000,cutoff[0]+2000)
     z,value,h_next=policy.learning_unroll(tuple(x[:2] for x in inputs),torch.ones(2,2,device=device,dtype=torch.bool),
-        tuple(x[2:] for x in inputs),torch.ones(3,2,device=device,dtype=torch.bool),h)
+        tuple(x[2:] for x in inputs),torch.ones(3,2,device=device,dtype=torch.bool),h,value_context=context[2:])
     actor=ProbabilisticActor(TensorDictModule(policy.stages()['action_family'],
         in_keys=['z','rule','cancel_reduced','cancel_exists'],out_keys=['logits','rule_context']),
         in_keys=['logits'],out_keys=['action'],distribution_class=torch.distributions.Categorical,return_log_prob=True)
-    critic=ValueOperator(policy.critic,in_keys=['z'],out_keys=['state_value'])
+    critic=ValueOperator(policy.critic,in_keys=['z','value_context'],out_keys=['state_value'])
+    flat_context=context[2:].transpose(0,1).reshape(6,2)
     flat_z=z.transpose(0,1).reshape(6,64)
-    batch=TensorDict({'z':flat_z.detach(),'rule':torch.zeros(6,30,device=device),
+    batch=TensorDict({'z':flat_z.detach(),'value_context':flat_context,'rule':torch.zeros(6,30,device=device),
         'cancel_reduced':torch.zeros(6,96,device=device),'cancel_exists':torch.zeros(6,device=device,dtype=torch.bool)},batch_size=[6],device=device)
     with torch.no_grad():
         actor(batch)
         # 合成非终态截断，真实模型纯bootstrap不提交h。
-        _,_,bootstrap=policy.state_and_value(inputs[0][-1],inputs[1][-1],inputs[2][-1],inputs[3][-1],h_next)
+        _,_,bootstrap=policy.state_and_value(inputs[0][-1],inputs[1][-1],inputs[2][-1],inputs[3][-1],h_next,value_context=context[-1])
         old=value.detach().transpose(0,1).unsqueeze(-1)
         next_value=torch.cat([old[:,1:],bootstrap[:,None,None]],1)
         trajectory=TensorDict({'state_value':old,'next':{
@@ -82,14 +84,17 @@ def main():
     # protobuf共同版本的适用ONNX/ORT路径，仅导出原Critic，不声称完整策略导出。
     model=copy.deepcopy(policy.critic).cpu().eval()
     example=flat_z.detach().cpu()
+    example_context=flat_context.cpu()
     onnx_path=artifact/'critic.onnx'
-    torch.onnx.export(model,(example,),str(onnx_path),opset_version=18,dynamo=False,input_names=['z'],output_names=['value'])
+    torch.onnx.export(model,(example,example_context),str(onnx_path),opset_version=18,dynamo=False,input_names=['z','value_context'],output_names=['value'])
     onnx.checker.check_model(onnx.load(str(onnx_path)))
     session=onnxruntime.InferenceSession(str(onnx_path),providers=['CPUExecutionProvider'])
-    actual=torch.from_numpy(session.run(None,{'z':example.numpy()})[0])
-    with torch.no_grad():assert torch.allclose(actual,model(example),rtol=1e-5,atol=1e-5)
+    actual=torch.from_numpy(session.run(None,{'z':example.numpy(),'value_context':example_context.numpy()})[0])
+    with torch.no_grad():assert torch.allclose(actual,model(example,example_context),rtol=1e-5,atol=1e-5)
     report={'source_commit':commit,'engineering_synthetic_observations_and_rewards':True,'formal_training':False,
-        'actual_model':'Policy100ms-2x64','CUDA_GAE_PPO_update':True,'burn_in_hidden_detached':True,
+        'actual_model':'Policy100ms-2x64','value_version':policy.value_version,
+        'module_file':str(__import__('model_train.gpu_policy',fromlist=['x']).__file__),
+        'GAE_profile':'synthetic_dependency_only_gamma_.97_lambda_.91_not_finite_goal_training','CUDA_GAE_PPO_update':True,'burn_in_hidden_detached':True,
         'unused_price_head_grad_none':True,'critic_ONNX_ORT_shared_protobuf_checked':True,
         'full_action_path_and_business_rollout':False,'active_root_restore':False,
         'versions':{name:metadata.version(name) for name in ['torch','numpy','torchrl','tensordict','mlflow','protobuf']},

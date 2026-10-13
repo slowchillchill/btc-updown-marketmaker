@@ -35,6 +35,18 @@ class EconomicColumns:
     outcome_list: object
     projection_batches: tuple  # 同一不可变共享列，保留source参考和实际收到时刻。
 
+    def select_records(self,order,*,batches=None):
+        """整阶段私有容量的稳定选择；返回原列类型，不生成新的自然批。"""
+        from transport import select_root_fields,take_record_list
+        roots,width=self.row_refs.shape
+        coordinates=(torch.arange(roots,device=order.device)[:,None]*width+order).flatten()
+        return replace(self,row_refs=self.row_refs.gather(1,order),positions=self.positions[coordinates],
+            sequences=select_root_fields(self.sequences,order,width),
+            balances=select_root_fields(self.balances,order,width,fields=8),
+            outcomes=select_root_fields(self.outcomes,order,width),asset_indices=self.asset_indices.gather(1,order),
+            enabled=self.enabled.gather(1,order),outcome_list=take_record_list(self.outcome_list,coordinates),
+            projection_batches=self.projection_batches if batches is None else tuple(batches))
+
     @classmethod
     def empty(cls, roots, device):
         """公开账户可在首个真实NOE批之前安装；没有未来记录或已应用人口。"""

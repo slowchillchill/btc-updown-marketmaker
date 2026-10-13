@@ -16,14 +16,21 @@ from .continuous_inputs import ContinuousActorInputs
 from .continuous_actor import ActorModelQueue
 from .action_inputs import ActorPolicyInputs
 from .device_actor import CapturedDeviceActor,ActorSelection
+from .gpu_exact import run_exact_batch
+from .interval_reward import RewardIntervalMemory
+from portfolio_economics import read_portfolio_economics
+from exposure import read_portfolio_exposure
 
 
 class ContinuousActorRoot:
-    def __init__(self,runtime,codec,rule,sampler,*,started_at,first_observation,trading_until,
-            request_namespace,policy_at_start,timing,random,model_shape,word_capacity,path_capacity):
+    def __init__(self,runtime,codec,rule,sampler,*,started_at,first_observation,trading_until,goal_until,
+            request_namespace,policy_at_start,timing,random,model_shape,word_capacity,path_capacity,reward_a_pusd=None):
         self.runtime=runtime;self.input_requirement=None
+        self.reward_a_pusd=reward_a_pusd;self.reward_memory=None
+        self.trading_until=trading_until;self.goal_until=goal_until;self.learning=None
         self.clock=runtime.clock;self.directory=runtime.directory;self.population=runtime.population
-        self.receiver=runtime.receiver;self.codec=codec;self.rule=rule;self.sampler=sampler
+        self.receiver=runtime.receiver;self.codec=codec;self.rule=runtime.execution.rule if runtime.execution is not None else rule;self.sampler=sampler
+        rule=self.rule
         self.initial_observation=first_observation;self.initialized=False
         self.started_at=started_at;self.random=random;self.word_capacity=word_capacity;self.path_capacity=path_capacity
         device=started_at.device
@@ -48,7 +55,7 @@ class ContinuousActorRoot:
             word_capacity=word_capacity,row_roots=roots,root_prefix=initial_prefix,root_previous_at=first_observation-100)
         self.models=ActorModelQueue(torch.zeros((model_shape.layers,0,model_shape.hidden),device=device),identities[:0],
             first_observation,policy_at_start,timing,self.sender_factory,row_roots=roots[:0],market_ends=market.times[:0,1],
-            release_markets=self.inputs.release_markets,request_identities=self.task_requests)
+            release_markets=self.inputs.release_markets,request_identities=self.task_requests,trading_until=trading_until,goal_until=goal_until)
         self.run=ContinuousActorRun(self.clock,first_observation,self.models,self.freeze,self.receive,
             trading_until=trading_until,inputs=self.inputs,initialize=self.initialize)
 
@@ -67,8 +74,64 @@ class ContinuousActorRoot:
         self.initialized=bool(completed.all().cpu())
         return stage
 
+    def reward_reads(self,public):
+        """同一已接纳Ledger前缀的原WCM/E读面；不另归约经济事实。"""
+        portfolio=read_portfolio_economics(public.ledger,**{name:self.yes for name in (
+            'economic_prefix_known','success_prefix_known','settlement_prefix_known',
+            'rebate_prefix_known','economic_liability_prefix_known')})
+        exposure=read_portfolio_exposure(public.ledger,success_prefix_known=self.yes,settlement_prefix_known=self.yes)
+        return portfolio,exposure
+
+    def report_economics(self):
+        """同一已提交前缀的纯读小报告；不推进时钟或领取NOE。"""
+        from portfolio_nav import read_portfolio_nav
+        from .training_report import exact_report
+        at=self.clock.gates.public_visible_at
+        def read():
+            ledger=self.clock.public.ledger
+            portfolio,exposure=self.reward_reads(self.clock.public)
+            pm=self.inputs.encoder.shared
+            valuation=PortfolioValuation(pm,self.directory.tokens,ledger.success_pools.asset_roots)
+            quoted=valuation.freeze(pm.prefix_at(at),at)
+            nav=read_portfolio_nav(ledger,quoted,at,portfolio=portfolio,
+                economic_prefix_known=self.yes,success_prefix_known=self.yes,settlement_prefix_known=self.yes,
+                rebate_prefix_known=self.yes,economic_liability_prefix_known=self.yes)
+            return portfolio,exposure,nav,ledger.funds()
+        portfolio,exposure,nav,funds=run_exact_batch(read)
+        return dict(at_ms=at.cpu().tolist(),ledger_prefix=exact_values(self.clock.public.ledger.current_entry_sequence),
+            local_prefix=exact_values(self.clock.public.ledger.current_local_prefix),
+            platform_prefix=exact_values(self.clock.public.ledger.platform.platform_source_prefix),
+            unit='pUSD',wcm=exact_report(portfolio.amounts[0]),wcm_known=portfolio.known[:,0].cpu().tolist(),
+            exposure=exact_report(exposure.amount),exposure_known=exposure.known.cpu().tolist(),
+            actual_available=exact_report(funds.actual_available),actual_reserved=exact_report(funds.actual_reserved),
+            nav_conservative=exact_report(nav.conservative),nav_directional=exact_report(nav.directional),
+            nav_known=nav.known.cpu().tolist(),fault=(portfolio.fault|exposure.fault|nav.fault|funds.fault).cpu().tolist(),
+            nav_scope='original full-account valuation at the same committed public prefix; cash is not profit')
+
     def receive(self,public,delivery,enabled):
-        return self.receiver(public,delivery,enabled)
+        # 原receiver只调用一次。资源不足仍可能带回已成功提交的前缀。
+        public,ready=self.receiver(public,delivery,enabled)
+        if self.reward_memory is not None:
+            def observe():
+                exposure=read_portfolio_exposure(public.ledger,success_prefix_known=self.yes,settlement_prefix_known=self.yes)
+                return self.reward_memory.observe(self.clock.gates.public_visible_at,exposure,enabled)
+            self.reward_memory=run_exact_batch(observe)
+        return public,ready
+
+    def read_interval_reward(self,cutoff,enabled,*,progress=None):
+        """推进开放端点并真实领取，纯读起点至端点累计训练分；不重置区间。"""
+        advance=self.run.advance_before(cutoff,enabled,progress=progress)
+        if not bool((~enabled|advance.complete).all().cpu()):return advance,None
+        delivery=self.clock.receive_first(enabled=enabled)
+        self.clock.public,ready=self.receive(self.clock.public,delivery,enabled)
+        fault=advance.fault|delivery.fault|self.clock.public.ledger.fault|self.clock.public.waiting.fault
+        advance=replace(advance,complete=advance.complete&ready,blocked=advance.blocked|(enabled&~ready),fault=fault)
+        if self.reward_memory is None or not bool((~enabled|ready).all().cpu()):return advance,None
+        def close():
+            portfolio,_=self.reward_reads(self.clock.public)
+            _,reward=self.reward_memory.close(cutoff,portfolio,self.reward_a_pusd,enabled)
+            return reward
+        return advance,run_exact_batch(close)
 
     def account_builder(self,encoder,public,frozen,bank,market_indices,row_identities):
         population=self.population;request_directory=self.request_directory
@@ -134,7 +197,54 @@ class ContinuousActorRoot:
     def freeze(self,world,at,enabled):
         frozen,accepted=self.inputs.freeze(world,at,enabled)
         self.input_requirement=None if frozen is None or bool(accepted.all().cpu()) else frozen.market.required.max(0).values
+        if (self.reward_a_pusd is not None and self.reward_memory is None and frozen is not None
+                and bool(accepted.all().cpu())):
+            def open_interval():
+                portfolio,exposure=self.reward_reads(world.public)
+                return RewardIntervalMemory.open(at,portfolio,exposure)
+            self.reward_memory=run_exact_batch(open_interval)
+        if self.learning is not None and frozen is not None and bool(accepted.all().cpu()):
+            def endpoint():
+                portfolio,_=self.reward_reads(world.public)
+                return self.reward_memory.endpoint(at,portfolio,accepted)
+            self.reward_memory,point=run_exact_batch(endpoint)
+            frozen=replace(frozen,reward_endpoint=point)
         return frozen,accepted
+
+    def enable_learning(self,policy,optimizer,config,version,*,reporter=None):
+        """单根也由同一共同学习器消费；不是另一套更新算法。"""
+        from .logical_batch import JointLearner
+        return self.join_learning(JointLearner(policy,optimizer,config,version,reporter=reporter),config)
+
+    def join_learning(self,learner,config):
+        from .logical_batch import LogicalBatch
+        self.learning=LogicalBatch(self,learner.policy,learner.optimizer,config,learner.version,learner=learner)
+        self.models.learning_consumer=self.learning
+        self.models.policy_at_start=self.learning.policy_at_start
+        return self.learning
+
+    def collect_learning_batch(self,horizon,enabled,*,progress=None):
+        """原事件循环到真实学习停点；不为排空推进尚未到期的发送。"""
+        if self.learning.boundary():return None
+        return self.run.advance_before(horizon,enabled,progress=progress,learning_boundary=self.learning.boundary)
+
+    def prepare_learning_batch(self,enabled,*,target_end=False,progress=None):
+        """普通批纯自举；目标末批只在显式有限目标实际推进/领取后关闭。"""
+        if self.learning.ended:return None,None
+        endpoint=None
+        if target_end:
+            advance,reward=self.read_interval_reward(self.goal_until,enabled,progress=progress)
+            if reward is None:return advance,None
+            def close_endpoint():
+                portfolio,_=self.reward_reads(self.clock.public)
+                return self.reward_memory.endpoint(self.goal_until,portfolio,enabled)
+            self.reward_memory,endpoint=run_exact_batch(close_endpoint)
+        return None,self.learning.prepare(target_end=target_end,endpoint=endpoint)
+
+    def update_learning_batch(self,enabled,*,target_end=False,progress=None):
+        advance,prepared=self.prepare_learning_batch(enabled,target_end=target_end,progress=progress)
+        if prepared is None:return advance,None
+        return None,self.learning.learner.update()[self.learning]
 
     def grow_inputs(self):
         if self.input_requirement is None:return False

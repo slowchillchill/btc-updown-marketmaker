@@ -71,6 +71,24 @@ class CancelTargetFeedback:
 
 
 @dataclass(frozen=True)
+class AutoBatchContext:
+    start: object
+    continued: torch.Tensor
+    count: torch.Tensor
+
+    def after(self,batch):
+        from queues import _take
+        roots,width=batch.emitted.shape
+        present=batch.emitted.any(1)
+        location=torch.arange(roots,device=batch.rows.device)*width+batch.emitted.to(torch.int64).argmax(1)
+        start=_take(batch.batch_sequences,location).select(present,self.start)
+        selected=_take(start,torch.arange(roots,device=batch.rows.device).repeat_interleave(width))
+        same=batch.batch_sequences.compare(selected)
+        count=self.count+(batch.emitted&(same.order.reshape(roots,width)==0)).to(torch.int64).sum(1)
+        return AutoBatchContext(start,self.continued|present,count)
+
+
+@dataclass(frozen=True)
 class Projection:
     emitter: object
     normalizer: object
@@ -121,8 +139,12 @@ class Projection:
             (order.request_keys<0) | (order.item_ordinals<0) | (order.item_ordinals>65535)).to(torch.int32)
         fault=self.emitter.fault | order.fault | torch.where(enabled,error,0)
         return replace(self,emitter=replace(self.emitter,fault=fault),
-            condition_slots=order.conditions,token_slots=token,asset_indices=order.assets,
-            order_sequence=order.sequence,request_slots=order.request_keys,item_ordinals=order.item_ordinals)
+            condition_slots=torch.where(enabled,order.conditions,self.condition_slots),
+            token_slots=torch.where(enabled,token,self.token_slots),
+            asset_indices=torch.where(enabled,order.assets,self.asset_indices),
+            order_sequence=order.sequence.select(enabled,self.order_sequence),
+            request_slots=torch.where(enabled,order.request_keys,self.request_slots),
+            item_ordinals=torch.where(enabled,order.item_ordinals,self.item_ordinals))
 
     def market_resolution(self,sampler,effect,condition,columns,asset_tokens):
         """整市场原订单字符串序关闭反馈，最后首次Resolved；共同失败则整批不发。"""
@@ -320,17 +342,12 @@ class Projection:
             (economic,ECONOMIC,private,batch,received,torch.full_like(conditions,3),at,delta.emitted)]
         return self._finish(emitter,records,fault | frame.root_fault | ordinals.fault)
 
-    def auto_redeem(self,sampler,condition,resolution,source_at,assets,tokens,delta,at,emitted,fault,*,preceding=None):
-        """原Auto生命周期及Option(delta)，沿实际private序和收到时刻发射。"""
-        from lifecycle import map_auto_redeem
-        from economic import map_resolution_redemption
-        active=emitted[:,None];categories=torch.full_like(active,3,dtype=torch.int64)
-        ordinals=map_source_ordinals(active,categories,(1+delta.emitted.to(torch.int64))[:,None],fault[:,None])
+    def auto_batch_context(self,preceding,at):
         # Auto属于触发事件的原自然批。只有该批实际已有记录时续用其坐标。
         from queues import _take
         preceding=() if preceding is None else preceding
         start=self.emitter.next_batch_sequence
-        continued=torch.zeros_like(emitted)
+        continued=torch.zeros_like(at,dtype=torch.bool)
         for prior in preceding:
             width=prior.emitted.size(1)
             location=torch.arange(at.numel(),device=at.device)*width+prior.emitted.to(torch.int64).argmax(1)
@@ -343,6 +360,16 @@ class Projection:
             selected=_take(start,torch.arange(at.numel(),device=at.device).repeat_interleave(width))
             same=prior.batch_sequences.compare(selected)
             count += (prior.emitted&(same.order.reshape(at.numel(),width)==0)).to(torch.int64).sum(1)
+        return AutoBatchContext(start,continued,count)
+
+    def auto_redeem(self,sampler,condition,resolution,source_at,assets,tokens,delta,at,emitted,fault,*,preceding=None,context=None):
+        """原Auto生命周期及Option(delta)，沿实际private序和收到时刻发射。"""
+        from lifecycle import map_auto_redeem
+        from economic import map_resolution_redemption
+        active=emitted[:,None];categories=torch.full_like(active,3,dtype=torch.int64)
+        ordinals=map_source_ordinals(active,categories,(1+delta.emitted.to(torch.int64))[:,None],fault[:,None])
+        context=self.auto_batch_context(preceding,at) if context is None else context
+        start,continued,count=context.start,context.continued,context.count
         original_emitter=self.emitter
         emitting=replace(original_emitter,next_batch_sequence=start)
         emitter,frame=emitting.emit(sampler,active,torch.zeros_like(active),at[:,None],at[:,None],
@@ -419,6 +446,19 @@ class Projection:
             (economic,ECONOMIC,*common,active&economic_present)],fault | frame.root_fault | ordinals.fault |
                 torch.where(active&economic_present,economic.fault,0),record_ordinal_base=record_ordinal)
 
+    def _append_records(self,incoming):
+        normalizer=Normalizer.empty(incoming,self.account_slots.numel()) if self.normalizer is None else self.normalizer.append_bank(incoming)
+        return replace(self,normalizer=normalizer),normalizer.bank.kinds.numel()-incoming.kinds.numel()
+
+    def reserve_records(self,incoming,addition):
+        """一次私有设备循环的尾区；共享原自然批实际基址及Normalizer。"""
+        from dataclasses import fields
+        old=self.normalizer or Normalizer.empty(EvidenceBank.empty(self.account_slots.device),self.account_slots.numel())
+        values={f.name:getattr(self,f.name) for f in fields(Projection)}
+        values['normalizer']=old.reserve(incoming,addition)
+        return _ReservedProjection(**values,row_base=old.bank.kinds.numel(),
+            rows_used=torch.zeros((),dtype=torch.int64,device=self.account_slots.device))
+
     def _finish(self,emitter,records,source_fault,*,record_ordinal_base=None,record_requests=None,record_items=None):
         from queues import ExactInt,ExactRational
         def cat_integer(values):
@@ -444,18 +484,17 @@ class Projection:
             received.append(received_at)
         incoming=EvidenceBank.concatenate(banks)
         roots=self.account_slots.numel()
-        normalizer=Normalizer.empty(incoming,roots) if self.normalizer is None else self.normalizer.append_bank(incoming)
-        offset=normalizer.bank.kinds.numel()-incoming.kinds.numel()
+        working,offset=self._append_records(incoming)
         rows=offset+torch.arange(roots,device=self.account_slots.device)[:,None]+roots*torch.arange(len(records),device=self.account_slots.device)[None,:]
         enabled=torch.stack(active,dim=1)
-        working=replace(self,emitter=emitter,normalizer=normalizer)
+        working=replace(working,emitter=emitter)
         # emitter错误或任何已实际生成证据错误不能静默少一条记录。
         error=source_fault.clone()
         for mapped,_,_,_,_,_,_,wanted in records:
             error=error | torch.where(wanted,mapped.fault,0)
         working=replace(working,normalizer=replace(working.normalizer,fault=working.normalizer.fault | error))
         candidate,normalized=working.normalizer.prepare(rows,enabled)
-        order=normalized.rows-self.normalizer.bank.kinds.numel() if self.normalizer is not None else normalized.rows
+        order=normalized.rows-offset
         # append布局逐记录[root]；映射回本批原column，根序号不会参与排序。
         order=torch.div(order,self.account_slots.numel(),rounding_mode='floor')
         private_values=cat_integer(private)
@@ -699,7 +738,7 @@ class Projection:
             1+frame.event.rebate_delta.emitted.to(torch.int64),
             *[1+result.account_delta.emitted.to(torch.int64) for result in maker_results],
             *[1+result.account_delta.emitted.to(torch.int64) for result,_,_ in population]],dim=1)
-        categories=torch.tensor([2,3]+[3]*(len(maker_results)+len(population)),device=at.device).expand(roots,width)
+        categories=torch.where(torch.arange(width,device=at.device)==0,2,3).expand(roots,width)
         ordinals=map_source_ordinals(emission.emitted,categories,counts,source_fault)
         def sequence(column):
             positions=torch.arange(roots,device=at.device)*width+column
@@ -819,3 +858,14 @@ class Projection:
                 records.extend(self._rebate_records(result,is_payment,torch.full_like(at,kind),
                     at,private,batch,received,ordinals.first_ordinals[:,column]))
         return self._finish(emitter,records,emission.root_fault | ordinals.fault | frame.fault)
+
+
+@dataclass(frozen=True)
+class _ReservedProjection(Projection):
+    row_base: int = 0
+    rows_used: object = None
+
+    def _append_records(self,incoming):
+        offset=self.row_base+self.rows_used
+        return replace(self,normalizer=self.normalizer.write_reserved(offset,incoming),
+            rows_used=self.rows_used+incoming.kinds.numel()),offset

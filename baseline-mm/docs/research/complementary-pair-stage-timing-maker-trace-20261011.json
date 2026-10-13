@@ -1,0 +1,3106 @@
+{
+  "format": "issue185-finite-stage-timing-maker-trace-v1",
+  "host": {
+    "base_head": "c8c3c8807e04186de6433105d8bf6940cf2e378b",
+    "candidates_sha256": "35017b5563398ef2f8d019f78b817312d3791f9978fcd21a3d6ec500e17c4936",
+    "finality_sha256": "b98102f86cbd2e0d635bdc5074dcb1d7c1fb1a84de61d419d07a475c2e8533ef",
+    "format": "issue185-host-stage-timing-v2",
+    "history_points": 301,
+    "history_span_ms": 300000,
+    "markets": 866,
+    "rules_sha256": "4397d7b3a102616c93484892a1cdb5bfa1a6de23c9383e52a04bbb1d480ae422",
+    "sample_count": 96,
+    "samples_per_cell": 32,
+    "source_identity_sha256": "e4772280bb23bf8b827a4ac444b3bb2db49abd014e24bec7e53e28475a84ad2f",
+    "timed_path": "separate strategy_observation_input_with_trade_details and pure StrategyV1::decide",
+    "warmup_per_cell": 1,
+    "cells": [
+      {
+        "candidate": "center",
+        "state": "empty",
+        "requires_trade_economics_details": false,
+        "assembly_samples_ns": [
+          7444355,
+          7590590,
+          7449364,
+          7499648,
+          7248516,
+          7393419,
+          7284554,
+          7365737,
+          7419047,
+          7503907,
+          7380625,
+          8452743,
+          7947843,
+          7723961,
+          7314951,
+          7495792,
+          7472027,
+          7440327,
+          7463631,
+          7380033,
+          7342172,
+          7426291,
+          7878132,
+          8652099,
+          7707600,
+          7592214,
+          7464833,
+          7524185,
+          7514446,
+          7400171,
+          7414248,
+          7696209
+        ],
+        "decide_samples_ns": [
+          4193384,
+          4023745,
+          3912125,
+          4000531,
+          3862381,
+          4040106,
+          3969233,
+          3946820,
+          4002145,
+          4027883,
+          4035718,
+          4359296,
+          3967118,
+          4019858,
+          3959524,
+          4039385,
+          3955176,
+          4051838,
+          3928917,
+          3950528,
+          4001443,
+          4047880,
+          5439100,
+          4158438,
+          3921894,
+          4008667,
+          3893761,
+          4095681,
+          4007975,
+          3993819,
+          4015820,
+          4038723
+        ],
+        "assembly_nearest_rank": {
+          "max_ns": 8652099,
+          "p50_ns": 7463631,
+          "p95_ns": 8452743
+        },
+        "decide_nearest_rank": {
+          "max_ns": 5439100,
+          "p50_ns": 4007975,
+          "p95_ns": 4359296
+        },
+        "paired_assembly_plus_decide_nearest_rank_ns": {
+          "p50": 11474171,
+          "p95": 12812039,
+          "max": 13317232
+        }
+      },
+      {
+        "candidate": "center",
+        "state": "resting",
+        "requires_trade_economics_details": false,
+        "assembly_samples_ns": [
+          7669259,
+          10459080,
+          8283074,
+          8103917,
+          7668818,
+          7440778,
+          7488838,
+          7528774,
+          7546336,
+          7597263,
+          7384082,
+          7687633,
+          7426221,
+          8260882,
+          7628872,
+          7715966,
+          7609225,
+          7521140,
+          7559972,
+          7420851,
+          7445858,
+          7769106,
+          7584348,
+          7805013,
+          7543351,
+          7848436,
+          7504257,
+          9634819,
+          8264369,
+          8061026,
+          7708001,
+          8028214
+        ],
+        "decide_samples_ns": [
+          4956241,
+          6251038,
+          4803854,
+          4779118,
+          4704757,
+          4772765,
+          4752437,
+          4887291,
+          4780069,
+          4800478,
+          4823681,
+          4753068,
+          5007387,
+          4743811,
+          4732089,
+          4875920,
+          4755713,
+          4806739,
+          4702233,
+          4709265,
+          4675201,
+          4850782,
+          4723934,
+          4819423,
+          4760713,
+          4770411,
+          4687776,
+          5185331,
+          4743860,
+          4834542,
+          4708013,
+          6490379
+        ],
+        "assembly_nearest_rank": {
+          "max_ns": 10459080,
+          "p50_ns": 7628872,
+          "p95_ns": 9634819
+        },
+        "decide_nearest_rank": {
+          "max_ns": 6490379,
+          "p50_ns": 4772765,
+          "p95_ns": 6251038
+        },
+        "paired_assembly_plus_decide_nearest_rank_ns": {
+          "p50": 12416014,
+          "p95": 14820150,
+          "max": 16710118
+        }
+      },
+      {
+        "candidate": "center",
+        "state": "single_leg",
+        "requires_trade_economics_details": false,
+        "assembly_samples_ns": [
+          7591071,
+          7505580,
+          7460826,
+          7528152,
+          7548031,
+          7740012,
+          7428545,
+          7706188,
+          7496423,
+          7570373,
+          7502875,
+          7411072,
+          7773254,
+          7580381,
+          7981596,
+          7682853,
+          7727819,
+          7883471,
+          7571624,
+          7642518,
+          7670861,
+          7513835,
+          7546978,
+          7428675,
+          7329508,
+          7371738,
+          8247447,
+          7753346,
+          7368131,
+          7399289,
+          7268844,
+          8227359
+        ],
+        "decide_samples_ns": [
+          3964994,
+          3952100,
+          3963282,
+          4019417,
+          4129213,
+          4068529,
+          3990863,
+          4109888,
+          4042010,
+          4122701,
+          4026981,
+          4031390,
+          4063831,
+          3991925,
+          4075723,
+          4042460,
+          4069301,
+          4132891,
+          4063110,
+          4190679,
+          4078709,
+          4068258,
+          4045376,
+          3983590,
+          3968601,
+          4001564,
+          3971837,
+          4080852,
+          4266432,
+          4037571,
+          3950448,
+          4769659
+        ],
+        "assembly_nearest_rank": {
+          "max_ns": 8247447,
+          "p50_ns": 7548031,
+          "p95_ns": 8227359
+        },
+        "decide_nearest_rank": {
+          "max_ns": 4769659,
+          "p50_ns": 4042460,
+          "p95_ns": 4266432
+        },
+        "paired_assembly_plus_decide_nearest_rank_ns": {
+          "p50": 11592354,
+          "p95": 12219284,
+          "max": 12997018
+        }
+      }
+    ],
+    "measurement_boundary_note": "计时外仅指测量包装器额外输出、结果复制和返回对象析构；装配内部必要复制在装配时间内，decide内部必要工作在decide时间内。"
+  },
+  "synthetic_day": {
+    "maker": {
+      "actual_requests": [
+        [
+          1787529602101,
+          "pair"
+        ],
+        [
+          1787529602713,
+          "cancel"
+        ],
+        [
+          1787529603501,
+          "maker"
+        ],
+        [
+          1787529610600,
+          "cancel"
+        ]
+      ],
+      "callbacks": {
+        "full_qualification": {
+          "count": 11,
+          "max_ns": 8015,
+          "total_ns": 23204
+        },
+        "next_health_evaluation": {
+          "count": 49,
+          "max_ns": 3747,
+          "total_ns": 34127
+        },
+        "public_qualification": {
+          "count": 1,
+          "max_ns": 1443,
+          "total_ns": 1443
+        },
+        "pure_decide": {
+          "count": 14,
+          "max_ns": 97865,
+          "total_ns": 558100
+        }
+      },
+      "deadline_wakeups": 1,
+      "decisions": 14,
+      "input_manifest_sha256": "812a6c740777b86c74766693aa2fde383d4775a3bbb46cc63c0908132680c7a9",
+      "invalidated_batches": 2,
+      "markets_with_actual_trades": 1,
+      "purpose": "有限合成工程实耗，不是盈利或在线性能结论",
+      "qualification_calls": 12,
+      "timing_note": "生产day有限合成负载；actual_requests为发送前资格的at，decisions为计算开始；回调仅计原委托调用，嵌套/并行阶段不相加；不是旧小时调用分布、在线尾延迟或线上积压证据",
+      "whole_run_elapsed_ns": 120806621,
+      "stage_summaries": [
+        {
+          "scope": "candidate:synthetic-history",
+          "scope_wall_ns": 105709599,
+          "stages": {
+            "apply_closed_including_noe_claim_and_ledger": {
+              "count": 36,
+              "max_ns": 1543,
+              "total_ns": 8005
+            },
+            "calculation_including_cutoff_copy_and_decide": {
+              "count": 14,
+              "max_ns": 108053,
+              "total_ns": 642797
+            },
+            "current_public_observation_assembly": {
+              "count": 35,
+              "max_ns": 136567,
+              "total_ns": 545235
+            },
+            "dispatch_including_reserve_full_qualification_bridge_sim": {
+              "count": 12,
+              "max_ns": 111139,
+              "total_ns": 322056
+            },
+            "hidden_source_wait_and_acquisition": {
+              "count": 6,
+              "max_ns": 1975098,
+              "total_ns": 1983914
+            },
+            "next_health_evaluation_including_dependency_lookup": {
+              "count": 49,
+              "max_ns": 8106,
+              "total_ns": 58699
+            },
+            "public_qualification": {
+              "count": 1,
+              "max_ns": 1493,
+              "total_ns": 1493
+            },
+            "recording_stabilization_wait": {
+              "count": 98,
+              "max_ns": 902,
+              "total_ns": 6571
+            },
+            "recording_stop_and_drain": {
+              "count": 1,
+              "max_ns": 22263313,
+              "total_ns": 22263313
+            },
+            "revalidation_including_current_read_and_full_qualification": {
+              "count": 15,
+              "max_ns": 70051,
+              "total_ns": 288210
+            },
+            "runtime_open_and_account_assembly": {
+              "count": 1,
+              "max_ns": 1479546,
+              "total_ns": 1479546
+            },
+            "sim_advance_before_including_noe": {
+              "count": 42,
+              "max_ns": 72904310,
+              "total_ns": 73225783
+            },
+            "sim_hidden_bucket_including_noe": {
+              "count": 5,
+              "max_ns": 35748,
+              "total_ns": 70563
+            },
+            "sim_next_group_at_including_source_wait": {
+              "count": 80,
+              "max_ns": 2845,
+              "total_ns": 16349
+            },
+            "sim_next_group_including_noe": {
+              "count": 9,
+              "max_ns": 45476,
+              "total_ns": 157508
+            },
+            "strategy_input_assembly": {
+              "count": 14,
+              "max_ns": 99467,
+              "total_ns": 587616
+            }
+          }
+        },
+        {
+          "scope": "day_producer",
+          "scope_wall_ns": 114847763,
+          "stages": {
+            "checkpoint_capture_write_and_publish": {
+              "count": 1,
+              "max_ns": 8722602,
+              "total_ns": 8722602
+            },
+            "delivery_assembly_and_publish_including_lock": {
+              "count": 10,
+              "max_ns": 10189,
+              "total_ns": 31780
+            },
+            "next_applied_including_decode_core_hidden": {
+              "count": 11,
+              "max_ns": 1132372,
+              "total_ns": 2296985
+            },
+            "producer_wait_startup_checkpoint_or_completion": {
+              "count": 17,
+              "max_ns": 20057902,
+              "total_ns": 103730653
+            }
+          }
+        }
+      ],
+      "feature_on_off_business_comparison": {
+        "report_json_equal": true,
+        "sim_bytes_equal": true,
+        "sim_bytes": 12448
+      }
+    },
+    "same_millisecond": {
+      "actual_requests": [
+        [
+          1787529602101,
+          "pair"
+        ]
+      ],
+      "callbacks": {
+        "full_qualification": {
+          "count": 2,
+          "max_ns": 2124,
+          "total_ns": 3016
+        },
+        "next_health_evaluation": {
+          "count": 19,
+          "max_ns": 2394,
+          "total_ns": 11440
+        },
+        "public_qualification": {
+          "count": 1,
+          "max_ns": 1843,
+          "total_ns": 1843
+        },
+        "pure_decide": {
+          "count": 6,
+          "max_ns": 30037,
+          "total_ns": 119876
+        }
+      },
+      "decisions": 6,
+      "invalidated_at": [
+        [
+          1787529601301,
+          1787529601701
+        ]
+      ],
+      "purpose": "生产day有限同毫秒失效夹具，不是旧小时分布或线上尾延迟",
+      "whole_run_elapsed_ns": 58409302,
+      "stage_summaries": [
+        {
+          "scope": "candidate:synthetic-history",
+          "scope_wall_ns": 42552640,
+          "stages": {
+            "apply_closed_including_noe_claim_and_ledger": {
+              "count": 14,
+              "max_ns": 97413,
+              "total_ns": 101350
+            },
+            "calculation_including_cutoff_copy_and_decide": {
+              "count": 6,
+              "max_ns": 46928,
+              "total_ns": 147787
+            },
+            "current_public_observation_assembly": {
+              "count": 13,
+              "max_ns": 20249,
+              "total_ns": 27645
+            },
+            "dispatch_including_reserve_full_qualification_bridge_sim": {
+              "count": 4,
+              "max_ns": 69200,
+              "total_ns": 75862
+            },
+            "hidden_source_wait_and_acquisition": {
+              "count": 4,
+              "max_ns": 1807513,
+              "total_ns": 1810377
+            },
+            "next_health_evaluation_including_dependency_lookup": {
+              "count": 19,
+              "max_ns": 3927,
+              "total_ns": 18412
+            },
+            "public_qualification": {
+              "count": 1,
+              "max_ns": 1893,
+              "total_ns": 1893
+            },
+            "recording_stabilization_wait": {
+              "count": 41,
+              "max_ns": 221,
+              "total_ns": 2628
+            },
+            "recording_stop_and_drain": {
+              "count": 1,
+              "max_ns": 37478738,
+              "total_ns": 37478738
+            },
+            "revalidation_including_current_read_and_full_qualification": {
+              "count": 6,
+              "max_ns": 18805,
+              "total_ns": 19185
+            },
+            "runtime_open_and_account_assembly": {
+              "count": 1,
+              "max_ns": 1410154,
+              "total_ns": 1410154
+            },
+            "sim_advance_before_including_noe": {
+              "count": 14,
+              "max_ns": 67317,
+              "total_ns": 88253
+            },
+            "sim_hidden_bucket_including_noe": {
+              "count": 3,
+              "max_ns": 9327,
+              "total_ns": 20939
+            },
+            "sim_next_group_at_including_source_wait": {
+              "count": 34,
+              "max_ns": 1172,
+              "total_ns": 5790
+            },
+            "sim_next_group_including_noe": {
+              "count": 7,
+              "max_ns": 34505,
+              "total_ns": 102504
+            },
+            "strategy_input_assembly": {
+              "count": 6,
+              "max_ns": 45456,
+              "total_ns": 149092
+            }
+          }
+        },
+        {
+          "scope": "day_producer",
+          "scope_wall_ns": 51830817,
+          "stages": {
+            "checkpoint_capture_write_and_publish": {
+              "count": 1,
+              "max_ns": 8855692,
+              "total_ns": 8855692
+            },
+            "delivery_assembly_and_publish_including_lock": {
+              "count": 8,
+              "max_ns": 8325,
+              "total_ns": 24234
+            },
+            "next_applied_including_decode_core_hidden": {
+              "count": 9,
+              "max_ns": 1023407,
+              "total_ns": 2054179
+            },
+            "producer_wait_startup_checkpoint_or_completion": {
+              "count": 10,
+              "max_ns": 20064514,
+              "total_ns": 40847881
+            }
+          }
+        }
+      ],
+      "feature_on_off_business_comparison": {
+        "report_json_equal": true,
+        "sim_bytes_equal": true,
+        "sim_bytes": 5492
+      }
+    }
+  },
+  "old_early_maker_trace": {
+    "old_implementation_head": "665159d2c3efcfe7f943ef5937526299125d44f4",
+    "native_noe_contract": "execution_normalization_v4",
+    "account_relative_reference_base": "runs/2026-09-12/accounts/center-p50",
+    "sim_prefix": {
+      "groups_read": 7447,
+      "bytes_read_through": 305930,
+      "last_at": 1789171205001,
+      "reading_boundary_note": "7447组为解码/输出前缀，305930为最后完整组逻辑字节偏移，不是精确磁盘物理读取量；缓冲读取可有读放大。"
+    },
+    "pm_prefix": {
+      "rows_read": 4096,
+      "matched_market_rows": 1211,
+      "last_trade_price_records": 15,
+      "reading_boundary_note": "4096为解码/输出行前缀，不是精确物理读取量；Parquet row group可有读放大。"
+    },
+    "ledger_prefix_segment": "ledger/ledger-parquet-00000000000000000001.parquet",
+    "ledger_prefix_rows": 128,
+    "sim_requests": [
+      {
+        "cutoff": {
+          "decision_time": {
+            "drive_position": 1831,
+            "logical_time_utc_ms": 1789171202769,
+            "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+          },
+          "private_feedback_sequence": 13,
+          "receipt": {
+            "actor_input_sequence": 2492,
+            "execution_time": {
+              "drive_position": 1829,
+              "logical_time_utc_ms": 1789171202769,
+              "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+            },
+            "group": {
+              "applied_prefix": {
+                "input_stream_id": "issue185-hour-optimized-20261011-public-2026-09-12",
+                "next_input_position": 543
+              },
+              "closed_at_input_position": 542,
+              "group_id": "54c519eba0a96ee8d57b549b6c3c0f4f0747efd1b2c82e8ad991c6de0c969661",
+              "group_position": 513,
+              "input_stream_id": "issue185-hour-optimized-20261011-public-2026-09-12"
+            },
+            "session_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-session"
+          }
+        },
+        "request": {
+          "method": "POST_ORDERS",
+          "request": {
+            "context": {
+              "caller_correlation_id": null,
+              "global_request_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-requests:4"
+            },
+            "items": [
+              {
+                "batch_item_ordinal": 0,
+                "item": {
+                  "item_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-requests:4:0",
+                  "order": {
+                    "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                    "kind": {
+                      "GtcLimit": {
+                        "limit_price_pusd_per_share": "0.49",
+                        "post_only": true,
+                        "size_shares": "50"
+                      }
+                    },
+                    "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                  }
+                }
+              },
+              {
+                "batch_item_ordinal": 1,
+                "item": {
+                  "item_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-requests:4:1",
+                  "order": {
+                    "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                    "kind": {
+                      "GtcLimit": {
+                        "limit_price_pusd_per_share": "0.48",
+                        "post_only": true,
+                        "size_shares": "50"
+                      }
+                    },
+                    "token_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "send_time": {
+          "drive_position": 1855,
+          "logical_time_utc_ms": 1789171202784,
+          "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+        }
+      },
+      {
+        "cutoff": {
+          "decision_time": {
+            "drive_position": 4059,
+            "logical_time_utc_ms": 1789171203954,
+            "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+          },
+          "private_feedback_sequence": 22,
+          "receipt": {
+            "actor_input_sequence": 5360,
+            "execution_time": {
+              "drive_position": 4044,
+              "logical_time_utc_ms": 1789171203948,
+              "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+            },
+            "group": {
+              "applied_prefix": {
+                "input_stream_id": "issue185-hour-optimized-20261011-public-2026-09-12",
+                "next_input_position": 1068
+              },
+              "closed_at_input_position": 1067,
+              "group_id": "7b9ffba27604b6e535d5d01f1482290c0e4c72c12c1084fe48ff8485ac9e43c4",
+              "group_position": 1038,
+              "input_stream_id": "issue185-hour-optimized-20261011-public-2026-09-12"
+            },
+            "session_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-session"
+          }
+        },
+        "request": {
+          "method": "POST_ORDERS",
+          "request": {
+            "context": {
+              "caller_correlation_id": null,
+              "global_request_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-requests:5"
+            },
+            "items": [
+              {
+                "batch_item_ordinal": 0,
+                "item": {
+                  "item_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-requests:5:0",
+                  "order": {
+                    "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                    "kind": {
+                      "GtcLimit": {
+                        "limit_price_pusd_per_share": "0.50",
+                        "post_only": true,
+                        "size_shares": "50"
+                      }
+                    },
+                    "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                  }
+                }
+              },
+              {
+                "batch_item_ordinal": 1,
+                "item": {
+                  "item_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-requests:5:1",
+                  "order": {
+                    "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                    "kind": {
+                      "GtcLimit": {
+                        "limit_price_pusd_per_share": "0.43",
+                        "post_only": true,
+                        "size_shares": "50"
+                      }
+                    },
+                    "token_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "send_time": {
+          "drive_position": 4085,
+          "logical_time_utc_ms": 1789171203969,
+          "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+        }
+      }
+    ],
+    "samples": [
+      {
+        "source_order_id": "sim-6",
+        "source_trade_id": "sim-1",
+        "outcome": "Down",
+        "native_matched_result": {
+          "base_quantity_shares": "50",
+          "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+          "economic_application_account_transition_seq": null,
+          "economic_disposition": "PendingUnapplied",
+          "fill_sequence": 1,
+          "immediate_taker_fee_pusd": "0",
+          "liquidity_role": "MakerInferred",
+          "matched_at_utc_ms": 1789171203032,
+          "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-6\"}}]",
+          "quote_amount_pusd": "24",
+          "source_price_pusd_per_share": "0.48",
+          "state": "Matched",
+          "token_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+          "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-1\"}}]"
+        },
+        "submission": {
+          "reference": {
+            "commit_container": {
+              "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000009.parquet"
+            },
+            "record_ordinal": 5
+          },
+          "boundary": {
+            "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+            "durable_available_at_utc_ms": 1791703890698,
+            "source_watermark": {
+              "projection_batch_sequence": 10,
+              "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+            }
+          },
+          "record": {
+            "Evidence": {
+              "evidence": {
+                "Control": {
+                  "result": {
+                    "Submission": {
+                      "outcome": {
+                        "Accepted": {
+                          "effective_processing_at_utc_ms": 1789171202792,
+                          "measurement": {
+                            "Base": {
+                              "matched_base_quantity_shares": "0",
+                              "open_base_quantity_shares": "50"
+                            }
+                          },
+                          "order": {
+                            "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                            "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-6\"}}]",
+                            "state": "Open",
+                            "token_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"SubmissionItem\":{\"global_request_id\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-requests:4\",\"batch_item_ordinal\":1}}]",
+              "source_order": {
+                "ordinal": 1,
+                "sequence": {
+                  "PrivateFeedback": {
+                    "private_feedback_sequence": 16
+                  }
+                }
+              },
+              "source_reference": {
+                "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                "record": {
+                  "DirectResponse": {
+                    "association": {
+                      "SubmissionItem": {
+                        "batch_item_ordinal": 1,
+                        "global_request_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-requests:4"
+                      }
+                    },
+                    "platform_responded_at_utc_ms": 1789171202792,
+                    "private_feedback_sequence": 16,
+                    "response_received_at_utc_ms": 1789171202802
+                  }
+                },
+                "watermark": {
+                  "projection_batch_sequence": 10,
+                  "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                }
+              }
+            }
+          }
+        },
+        "noe_records": [
+          {
+            "reference": {
+              "commit_container": {
+                "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000010.parquet"
+              },
+              "record_ordinal": 0
+            },
+            "boundary": {
+              "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+              "durable_available_at_utc_ms": 1791703890703,
+              "source_watermark": {
+                "projection_batch_sequence": 11,
+                "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+              }
+            },
+            "record": {
+              "Evidence": {
+                "evidence": {
+                  "TradeLifecycleV3": {
+                    "result": {
+                      "maker_fee_equivalent_pusd": {
+                        "Known": "0.8736"
+                      },
+                      "result": {
+                        "base_quantity_shares": "50",
+                        "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                        "economic_application_account_transition_seq": null,
+                        "economic_disposition": "PendingUnapplied",
+                        "fill_sequence": 1,
+                        "immediate_taker_fee_pusd": "0",
+                        "liquidity_role": "MakerInferred",
+                        "matched_at_utc_ms": 1789171203032,
+                        "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-6\"}}]",
+                        "quote_amount_pusd": "24",
+                        "source_price_pusd_per_share": "0.48",
+                        "state": "Matched",
+                        "token_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+                        "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-1\"}}]"
+                      }
+                    }
+                  }
+                },
+                "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"TradeLifecycle\":{\"trade_identity\":\"sim-1\",\"occurrence\":17}}]",
+                "source_order": {
+                  "ordinal": 0,
+                  "sequence": {
+                    "PrivateFeedback": {
+                      "private_feedback_sequence": 17
+                    }
+                  }
+                },
+                "source_reference": {
+                  "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                  "record": {
+                    "TradeLifecycle": {
+                      "feedback_received_at_utc_ms": 1789171203041,
+                      "platform_event_at_utc_ms": 1789171203032,
+                      "private_feedback_sequence": 17
+                    }
+                  },
+                  "watermark": {
+                    "projection_batch_sequence": 11,
+                    "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "reference": {
+              "commit_container": {
+                "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000011.parquet"
+              },
+              "record_ordinal": 0
+            },
+            "boundary": {
+              "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+              "durable_available_at_utc_ms": 1791703890709,
+              "source_watermark": {
+                "projection_batch_sequence": 12,
+                "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+              }
+            },
+            "record": {
+              "Evidence": {
+                "evidence": {
+                  "TradeLifecycleV3": {
+                    "result": {
+                      "maker_fee_equivalent_pusd": {
+                        "Known": "0.8736"
+                      },
+                      "result": {
+                        "base_quantity_shares": "50",
+                        "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                        "economic_application_account_transition_seq": 11,
+                        "economic_disposition": "PendingApplied",
+                        "fill_sequence": 1,
+                        "immediate_taker_fee_pusd": "0",
+                        "liquidity_role": "MakerInferred",
+                        "matched_at_utc_ms": 1789171203032,
+                        "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-6\"}}]",
+                        "quote_amount_pusd": "24",
+                        "source_price_pusd_per_share": "0.48",
+                        "state": "Mined",
+                        "token_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+                        "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-1\"}}]"
+                      }
+                    }
+                  }
+                },
+                "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"TradeLifecycle\":{\"trade_identity\":\"sim-1\",\"occurrence\":18}}]",
+                "source_order": {
+                  "ordinal": 0,
+                  "sequence": {
+                    "PrivateFeedback": {
+                      "private_feedback_sequence": 18
+                    }
+                  }
+                },
+                "source_reference": {
+                  "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                  "record": {
+                    "TradeLifecycle": {
+                      "feedback_received_at_utc_ms": 1789171203051,
+                      "platform_event_at_utc_ms": 1789171203042,
+                      "private_feedback_sequence": 18
+                    }
+                  },
+                  "watermark": {
+                    "projection_batch_sequence": 12,
+                    "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "reference": {
+              "commit_container": {
+                "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000011.parquet"
+              },
+              "record_ordinal": 1
+            },
+            "boundary": {
+              "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+              "durable_available_at_utc_ms": 1791703890709,
+              "source_watermark": {
+                "projection_batch_sequence": 12,
+                "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+              }
+            },
+            "record": {
+              "EconomicFact": {
+                "fact": {
+                  "disposition": {
+                    "AccountTransition": {
+                      "balance_delta": {
+                        "available_pusd_delta": "0",
+                        "cash_pusd_delta": "-24",
+                        "immediate_taker_fee_encumbrance_pusd_delta": "0",
+                        "maker_rebate_locked_remainder_pusd_delta": "0",
+                        "maker_rebate_receivable_pusd_delta": "0",
+                        "outcome_balance_deltas": [
+                          {
+                            "balance_shares_delta": "50",
+                            "token_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098"
+                          }
+                        ],
+                        "principal_encumbrance_pusd_delta": "-24",
+                        "taker_rebate_locked_remainder_pusd_delta": "0",
+                        "taker_rebate_receivable_pusd_delta": "0"
+                      },
+                      "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                      "economic_effective_at_utc_ms": 1789171203042,
+                      "transition": {
+                        "FillFinalityEconomicApplied": {
+                          "path_ordinal": 1,
+                          "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-1\"}}]"
+                        }
+                      }
+                    }
+                  },
+                  "economic_identity": {
+                    "AccountTransition": {
+                      "account_identity": {
+                        "account_scope": "{\"run_id\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"caller_role\":\"HISTORICAL_BACKTEST\",\"caller_instance_id\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\",\"account_id\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\",\"platform_source\":\"SIMULATED\"}",
+                        "environment": "simulation",
+                        "run_scope": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50",
+                        "source_category": "platform"
+                      },
+                      "account_transition_seq": 11
+                    }
+                  },
+                  "fact_reference": "noe-economic-fact-v1:[\"normalization_core_v1\",{\"AccountTransition\":{\"account_identity\":{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"account_transition_seq\":11}}]",
+                  "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"AccountTransition\":{\"account_transition_seq\":11}}]",
+                  "source_reference": {
+                    "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                    "record": {
+                      "TradeLifecycle": {
+                        "feedback_received_at_utc_ms": 1789171203051,
+                        "platform_event_at_utc_ms": 1789171203042,
+                        "private_feedback_sequence": 18
+                      }
+                    },
+                    "watermark": {
+                      "projection_batch_sequence": 12,
+                      "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                    }
+                  }
+                },
+                "source_order": {
+                  "ordinal": 1,
+                  "sequence": {
+                    "PrivateFeedback": {
+                      "private_feedback_sequence": 18
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "reference": {
+              "commit_container": {
+                "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000012.parquet"
+              },
+              "record_ordinal": 0
+            },
+            "boundary": {
+              "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+              "durable_available_at_utc_ms": 1791703890714,
+              "source_watermark": {
+                "projection_batch_sequence": 13,
+                "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+              }
+            },
+            "record": {
+              "Evidence": {
+                "evidence": {
+                  "TradeLifecycleV3": {
+                    "result": {
+                      "maker_fee_equivalent_pusd": {
+                        "Known": "0.8736"
+                      },
+                      "result": {
+                        "base_quantity_shares": "50",
+                        "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                        "economic_application_account_transition_seq": 11,
+                        "economic_disposition": "FinalSuccess",
+                        "fill_sequence": 1,
+                        "immediate_taker_fee_pusd": "0",
+                        "liquidity_role": "MakerInferred",
+                        "matched_at_utc_ms": 1789171203032,
+                        "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-6\"}}]",
+                        "quote_amount_pusd": "24",
+                        "source_price_pusd_per_share": "0.48",
+                        "state": "Confirmed",
+                        "token_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+                        "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-1\"}}]"
+                      }
+                    }
+                  }
+                },
+                "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"TradeLifecycle\":{\"trade_identity\":\"sim-1\",\"occurrence\":19}}]",
+                "source_order": {
+                  "ordinal": 0,
+                  "sequence": {
+                    "PrivateFeedback": {
+                      "private_feedback_sequence": 19
+                    }
+                  }
+                },
+                "source_reference": {
+                  "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                  "record": {
+                    "TradeLifecycle": {
+                      "feedback_received_at_utc_ms": 1789171203061,
+                      "platform_event_at_utc_ms": 1789171203052,
+                      "private_feedback_sequence": 19
+                    }
+                  },
+                  "watermark": {
+                    "projection_batch_sequence": 13,
+                    "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "ledger_records": [
+          {
+            "record_sequence": 50,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [
+                [
+                  {
+                    "LocalPendingPrincipal": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784"
+                  },
+                  "Pusd",
+                  "-24.0"
+                ],
+                [
+                  "Balancing",
+                  "Pusd",
+                  "24.0"
+                ]
+              ],
+              "ledger_entry_seq": 49,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000009.parquet"
+                    },
+                    "record_ordinal": 5
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171202803,
+                      "delivery_sequence": 16
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": []
+          },
+          {
+            "record_sequence": 51,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [],
+              "ledger_entry_seq": 50,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000010.parquet"
+                    },
+                    "record_ordinal": 0
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171203041,
+                      "delivery_sequence": 17
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": []
+          },
+          {
+            "record_sequence": 52,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [],
+              "ledger_entry_seq": 51,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000011.parquet"
+                    },
+                    "record_ordinal": 0
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171203052,
+                      "delivery_sequence": 18
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": []
+          },
+          {
+            "record_sequence": 53,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [
+                [
+                  "Cash",
+                  "Pusd",
+                  "-24"
+                ],
+                [
+                  "Balancing",
+                  "Pusd",
+                  "24"
+                ],
+                [
+                  {
+                    "PrincipalEncumbrance": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784"
+                  },
+                  "Pusd",
+                  "-24"
+                ],
+                [
+                  "Balancing",
+                  "Pusd",
+                  "24"
+                ],
+                [
+                  {
+                    "OutcomeBalance": {
+                      "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                      "token_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098"
+                    }
+                  },
+                  {
+                    "Outcome": "19032856667784098829291953695654902969996580284236420719127791921975594839098"
+                  },
+                  "50"
+                ],
+                [
+                  "Balancing",
+                  {
+                    "Outcome": "19032856667784098829291953695654902969996580284236420719127791921975594839098"
+                  },
+                  "-50"
+                ],
+                [
+                  {
+                    "OutcomeCostBasis": {
+                      "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                      "token_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098"
+                    }
+                  },
+                  "Pusd",
+                  "24"
+                ],
+                [
+                  "Balancing",
+                  "Pusd",
+                  "-24"
+                ]
+              ],
+              "ledger_entry_seq": 52,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000011.parquet"
+                    },
+                    "record_ordinal": 1
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171203052,
+                      "delivery_sequence": 18
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": [
+              [
+                [
+                  {
+                    "memory": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-1\"}}]"
+                  },
+                  1
+                ],
+                {
+                  "active": true,
+                  "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                  "cost_basis_pusd": "24",
+                  "fee_pusd": "0",
+                  "token_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098"
+                }
+              ]
+            ]
+          },
+          {
+            "record_sequence": 54,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [],
+              "ledger_entry_seq": 53,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000012.parquet"
+                    },
+                    "record_ordinal": 0
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171203061,
+                      "delivery_sequence": 19
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": []
+          }
+        ],
+        "possible_public_level_transitions": [
+          {
+            "collector_admission_sequence": 24679801,
+            "collector_admission_time_utc_ms": 1789171203041,
+            "event": {
+              "price_changes": [
+                {
+                  "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+                  "best_ask": "0.5",
+                  "best_bid": "0.49",
+                  "price": "0.48",
+                  "side": "BUY",
+                  "size": "110"
+                },
+                {
+                  "asset_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+                  "best_ask": "0.51",
+                  "best_bid": "0.5",
+                  "price": "0.52",
+                  "side": "SELL",
+                  "size": "110"
+                }
+              ]
+            },
+            "event_type": "price_change",
+            "file_row": 629,
+            "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+            "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+            "timestamp": 1789171203004,
+            "timestamp_received": 1789171203040
+          },
+          {
+            "collector_admission_sequence": 24679828,
+            "collector_admission_time_utc_ms": 1789171203071,
+            "event": {
+              "price_changes": [
+                {
+                  "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+                  "best_ask": "0.5",
+                  "best_bid": "0.49",
+                  "price": "0.48",
+                  "side": "BUY",
+                  "size": "30"
+                },
+                {
+                  "asset_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+                  "best_ask": "0.51",
+                  "best_bid": "0.5",
+                  "price": "0.52",
+                  "side": "SELL",
+                  "size": "30"
+                }
+              ]
+            },
+            "event_type": "price_change",
+            "file_row": 656,
+            "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+            "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+            "timestamp": 1789171203032,
+            "timestamp_received": 1789171203071
+          }
+        ],
+        "sim_hidden_bucket": [
+          {
+            "applied_input_position": 1443,
+            "bucket_time_utc_ms": 1789171203032,
+            "closure": {
+              "NextGlobalEventAt": 1789171203033
+            },
+            "index_end": 1198,
+            "index_start": 1190
+          }
+        ],
+        "public_trade_comparison": {
+          "checked_records": 15,
+          "same_token_same_price_file_rows": [],
+          "conclusion": "有限前缀中无同token同价格的Down 0.48 LastTradePrice。本轮仅完成同token、同价格的逐条对照，尚未核验互补撮合关联及公开事件字段语义。不同token不自动排除关联；现有时点、数量和身份信息也不足以确认这些公开成交对应所选SIM成交。不证明真实成交不存在或模型错误。"
+        }
+      },
+      {
+        "source_order_id": "sim-5",
+        "source_trade_id": "sim-2",
+        "outcome": "Up",
+        "native_matched_result": {
+          "base_quantity_shares": "50",
+          "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+          "economic_application_account_transition_seq": null,
+          "economic_disposition": "PendingUnapplied",
+          "fill_sequence": 2,
+          "immediate_taker_fee_pusd": "0",
+          "liquidity_role": "MakerInferred",
+          "matched_at_utc_ms": 1789171203716,
+          "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-5\"}}]",
+          "quote_amount_pusd": "24.5",
+          "source_price_pusd_per_share": "0.49",
+          "state": "Matched",
+          "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+          "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-2\"}}]"
+        },
+        "submission": {
+          "reference": {
+            "commit_container": {
+              "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000009.parquet"
+            },
+            "record_ordinal": 4
+          },
+          "boundary": {
+            "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+            "durable_available_at_utc_ms": 1791703890698,
+            "source_watermark": {
+              "projection_batch_sequence": 10,
+              "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+            }
+          },
+          "record": {
+            "Evidence": {
+              "evidence": {
+                "Control": {
+                  "result": {
+                    "Submission": {
+                      "outcome": {
+                        "Accepted": {
+                          "effective_processing_at_utc_ms": 1789171202792,
+                          "measurement": {
+                            "Base": {
+                              "matched_base_quantity_shares": "0",
+                              "open_base_quantity_shares": "50"
+                            }
+                          },
+                          "order": {
+                            "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                            "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-5\"}}]",
+                            "state": "Open",
+                            "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"SubmissionItem\":{\"global_request_id\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-requests:4\",\"batch_item_ordinal\":0}}]",
+              "source_order": {
+                "ordinal": 0,
+                "sequence": {
+                  "PrivateFeedback": {
+                    "private_feedback_sequence": 16
+                  }
+                }
+              },
+              "source_reference": {
+                "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                "record": {
+                  "DirectResponse": {
+                    "association": {
+                      "SubmissionItem": {
+                        "batch_item_ordinal": 0,
+                        "global_request_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-requests:4"
+                      }
+                    },
+                    "platform_responded_at_utc_ms": 1789171202792,
+                    "private_feedback_sequence": 16,
+                    "response_received_at_utc_ms": 1789171202802
+                  }
+                },
+                "watermark": {
+                  "projection_batch_sequence": 10,
+                  "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                }
+              }
+            }
+          }
+        },
+        "noe_records": [
+          {
+            "reference": {
+              "commit_container": {
+                "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000013.parquet"
+              },
+              "record_ordinal": 0
+            },
+            "boundary": {
+              "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+              "durable_available_at_utc_ms": 1791703890720,
+              "source_watermark": {
+                "projection_batch_sequence": 14,
+                "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+              }
+            },
+            "record": {
+              "Evidence": {
+                "evidence": {
+                  "TradeLifecycleV3": {
+                    "result": {
+                      "maker_fee_equivalent_pusd": {
+                        "Known": "0.87465"
+                      },
+                      "result": {
+                        "base_quantity_shares": "50",
+                        "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                        "economic_application_account_transition_seq": null,
+                        "economic_disposition": "PendingUnapplied",
+                        "fill_sequence": 2,
+                        "immediate_taker_fee_pusd": "0",
+                        "liquidity_role": "MakerInferred",
+                        "matched_at_utc_ms": 1789171203716,
+                        "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-5\"}}]",
+                        "quote_amount_pusd": "24.5",
+                        "source_price_pusd_per_share": "0.49",
+                        "state": "Matched",
+                        "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+                        "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-2\"}}]"
+                      }
+                    }
+                  }
+                },
+                "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"TradeLifecycle\":{\"trade_identity\":\"sim-2\",\"occurrence\":20}}]",
+                "source_order": {
+                  "ordinal": 0,
+                  "sequence": {
+                    "PrivateFeedback": {
+                      "private_feedback_sequence": 20
+                    }
+                  }
+                },
+                "source_reference": {
+                  "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                  "record": {
+                    "TradeLifecycle": {
+                      "feedback_received_at_utc_ms": 1789171203728,
+                      "platform_event_at_utc_ms": 1789171203716,
+                      "private_feedback_sequence": 20
+                    }
+                  },
+                  "watermark": {
+                    "projection_batch_sequence": 14,
+                    "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "reference": {
+              "commit_container": {
+                "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000014.parquet"
+              },
+              "record_ordinal": 0
+            },
+            "boundary": {
+              "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+              "durable_available_at_utc_ms": 1791703890725,
+              "source_watermark": {
+                "projection_batch_sequence": 15,
+                "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+              }
+            },
+            "record": {
+              "Evidence": {
+                "evidence": {
+                  "TradeLifecycleV3": {
+                    "result": {
+                      "maker_fee_equivalent_pusd": {
+                        "Known": "0.87465"
+                      },
+                      "result": {
+                        "base_quantity_shares": "50",
+                        "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                        "economic_application_account_transition_seq": 12,
+                        "economic_disposition": "PendingApplied",
+                        "fill_sequence": 2,
+                        "immediate_taker_fee_pusd": "0",
+                        "liquidity_role": "MakerInferred",
+                        "matched_at_utc_ms": 1789171203716,
+                        "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-5\"}}]",
+                        "quote_amount_pusd": "24.5",
+                        "source_price_pusd_per_share": "0.49",
+                        "state": "Mined",
+                        "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+                        "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-2\"}}]"
+                      }
+                    }
+                  }
+                },
+                "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"TradeLifecycle\":{\"trade_identity\":\"sim-2\",\"occurrence\":21}}]",
+                "source_order": {
+                  "ordinal": 0,
+                  "sequence": {
+                    "PrivateFeedback": {
+                      "private_feedback_sequence": 21
+                    }
+                  }
+                },
+                "source_reference": {
+                  "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                  "record": {
+                    "TradeLifecycle": {
+                      "feedback_received_at_utc_ms": 1789171203735,
+                      "platform_event_at_utc_ms": 1789171203726,
+                      "private_feedback_sequence": 21
+                    }
+                  },
+                  "watermark": {
+                    "projection_batch_sequence": 15,
+                    "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "reference": {
+              "commit_container": {
+                "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000014.parquet"
+              },
+              "record_ordinal": 1
+            },
+            "boundary": {
+              "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+              "durable_available_at_utc_ms": 1791703890725,
+              "source_watermark": {
+                "projection_batch_sequence": 15,
+                "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+              }
+            },
+            "record": {
+              "EconomicFact": {
+                "fact": {
+                  "disposition": {
+                    "AccountTransition": {
+                      "balance_delta": {
+                        "available_pusd_delta": "0",
+                        "cash_pusd_delta": "-24.5",
+                        "immediate_taker_fee_encumbrance_pusd_delta": "0",
+                        "maker_rebate_locked_remainder_pusd_delta": "0",
+                        "maker_rebate_receivable_pusd_delta": "0",
+                        "outcome_balance_deltas": [
+                          {
+                            "balance_shares_delta": "50",
+                            "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                          }
+                        ],
+                        "principal_encumbrance_pusd_delta": "-24.5",
+                        "taker_rebate_locked_remainder_pusd_delta": "0",
+                        "taker_rebate_receivable_pusd_delta": "0"
+                      },
+                      "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                      "economic_effective_at_utc_ms": 1789171203726,
+                      "transition": {
+                        "FillFinalityEconomicApplied": {
+                          "path_ordinal": 1,
+                          "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-2\"}}]"
+                        }
+                      }
+                    }
+                  },
+                  "economic_identity": {
+                    "AccountTransition": {
+                      "account_identity": {
+                        "account_scope": "{\"run_id\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"caller_role\":\"HISTORICAL_BACKTEST\",\"caller_instance_id\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\",\"account_id\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\",\"platform_source\":\"SIMULATED\"}",
+                        "environment": "simulation",
+                        "run_scope": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50",
+                        "source_category": "platform"
+                      },
+                      "account_transition_seq": 12
+                    }
+                  },
+                  "fact_reference": "noe-economic-fact-v1:[\"normalization_core_v1\",{\"AccountTransition\":{\"account_identity\":{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"account_transition_seq\":12}}]",
+                  "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"AccountTransition\":{\"account_transition_seq\":12}}]",
+                  "source_reference": {
+                    "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                    "record": {
+                      "TradeLifecycle": {
+                        "feedback_received_at_utc_ms": 1789171203735,
+                        "platform_event_at_utc_ms": 1789171203726,
+                        "private_feedback_sequence": 21
+                      }
+                    },
+                    "watermark": {
+                      "projection_batch_sequence": 15,
+                      "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                    }
+                  }
+                },
+                "source_order": {
+                  "ordinal": 1,
+                  "sequence": {
+                    "PrivateFeedback": {
+                      "private_feedback_sequence": 21
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "reference": {
+              "commit_container": {
+                "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000015.parquet"
+              },
+              "record_ordinal": 0
+            },
+            "boundary": {
+              "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+              "durable_available_at_utc_ms": 1791703890731,
+              "source_watermark": {
+                "projection_batch_sequence": 16,
+                "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+              }
+            },
+            "record": {
+              "Evidence": {
+                "evidence": {
+                  "TradeLifecycleV3": {
+                    "result": {
+                      "maker_fee_equivalent_pusd": {
+                        "Known": "0.87465"
+                      },
+                      "result": {
+                        "base_quantity_shares": "50",
+                        "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                        "economic_application_account_transition_seq": 12,
+                        "economic_disposition": "FinalSuccess",
+                        "fill_sequence": 2,
+                        "immediate_taker_fee_pusd": "0",
+                        "liquidity_role": "MakerInferred",
+                        "matched_at_utc_ms": 1789171203716,
+                        "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-5\"}}]",
+                        "quote_amount_pusd": "24.5",
+                        "source_price_pusd_per_share": "0.49",
+                        "state": "Confirmed",
+                        "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+                        "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-2\"}}]"
+                      }
+                    }
+                  }
+                },
+                "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"TradeLifecycle\":{\"trade_identity\":\"sim-2\",\"occurrence\":22}}]",
+                "source_order": {
+                  "ordinal": 0,
+                  "sequence": {
+                    "PrivateFeedback": {
+                      "private_feedback_sequence": 22
+                    }
+                  }
+                },
+                "source_reference": {
+                  "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                  "record": {
+                    "TradeLifecycle": {
+                      "feedback_received_at_utc_ms": 1789171203745,
+                      "platform_event_at_utc_ms": 1789171203736,
+                      "private_feedback_sequence": 22
+                    }
+                  },
+                  "watermark": {
+                    "projection_batch_sequence": 16,
+                    "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "ledger_records": [
+          {
+            "record_sequence": 49,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [
+                [
+                  {
+                    "LocalPendingPrincipal": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784"
+                  },
+                  "Pusd",
+                  "-24.5"
+                ],
+                [
+                  "Balancing",
+                  "Pusd",
+                  "24.5"
+                ]
+              ],
+              "ledger_entry_seq": 48,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000009.parquet"
+                    },
+                    "record_ordinal": 4
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171202803,
+                      "delivery_sequence": 16
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": []
+          },
+          {
+            "record_sequence": 55,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [],
+              "ledger_entry_seq": 54,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000013.parquet"
+                    },
+                    "record_ordinal": 0
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171203731,
+                      "delivery_sequence": 20
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": []
+          },
+          {
+            "record_sequence": 56,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [],
+              "ledger_entry_seq": 55,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000014.parquet"
+                    },
+                    "record_ordinal": 0
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171203736,
+                      "delivery_sequence": 21
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": []
+          },
+          {
+            "record_sequence": 57,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [
+                [
+                  "Cash",
+                  "Pusd",
+                  "-24.5"
+                ],
+                [
+                  "Balancing",
+                  "Pusd",
+                  "24.5"
+                ],
+                [
+                  {
+                    "PrincipalEncumbrance": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784"
+                  },
+                  "Pusd",
+                  "-24.5"
+                ],
+                [
+                  "Balancing",
+                  "Pusd",
+                  "24.5"
+                ],
+                [
+                  {
+                    "OutcomeBalance": {
+                      "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                      "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                    }
+                  },
+                  {
+                    "Outcome": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                  },
+                  "50"
+                ],
+                [
+                  "Balancing",
+                  {
+                    "Outcome": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                  },
+                  "-50"
+                ],
+                [
+                  {
+                    "OutcomeCostBasis": {
+                      "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                      "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                    }
+                  },
+                  "Pusd",
+                  "24.5"
+                ],
+                [
+                  "Balancing",
+                  "Pusd",
+                  "-24.5"
+                ]
+              ],
+              "ledger_entry_seq": 56,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000014.parquet"
+                    },
+                    "record_ordinal": 1
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171203736,
+                      "delivery_sequence": 21
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": [
+              [
+                [
+                  {
+                    "memory": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-2\"}}]"
+                  },
+                  1
+                ],
+                {
+                  "active": true,
+                  "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                  "cost_basis_pusd": "24.5",
+                  "fee_pusd": "0",
+                  "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                }
+              ]
+            ]
+          },
+          {
+            "record_sequence": 58,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [],
+              "ledger_entry_seq": 57,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000015.parquet"
+                    },
+                    "record_ordinal": 0
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171203746,
+                      "delivery_sequence": 22
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": []
+          }
+        ],
+        "possible_public_level_transitions": [
+          {
+            "collector_admission_sequence": 24680073,
+            "collector_admission_time_utc_ms": 1789171203609,
+            "event": {
+              "price_changes": [
+                {
+                  "asset_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+                  "best_ask": "0.51",
+                  "best_bid": "0.5",
+                  "price": "0.49",
+                  "side": "BUY",
+                  "size": "253"
+                },
+                {
+                  "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+                  "best_ask": "0.5",
+                  "best_bid": "0.49",
+                  "price": "0.51",
+                  "side": "SELL",
+                  "size": "253"
+                }
+              ]
+            },
+            "event_type": "price_change",
+            "file_row": 901,
+            "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+            "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+            "timestamp": 1789171203595,
+            "timestamp_received": 1789171203608
+          },
+          {
+            "collector_admission_sequence": 24680110,
+            "collector_admission_time_utc_ms": 1789171203727,
+            "event": {
+              "price_changes": [
+                {
+                  "asset_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+                  "best_ask": "0.51",
+                  "best_bid": "0.5",
+                  "price": "0.49",
+                  "side": "BUY",
+                  "size": "105"
+                },
+                {
+                  "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+                  "best_ask": "0.5",
+                  "best_bid": "0.49",
+                  "price": "0.51",
+                  "side": "SELL",
+                  "size": "105"
+                }
+              ]
+            },
+            "event_type": "price_change",
+            "file_row": 938,
+            "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+            "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+            "timestamp": 1789171203716,
+            "timestamp_received": 1789171203727
+          }
+        ],
+        "sim_hidden_bucket": [
+          {
+            "applied_input_position": 1443,
+            "bucket_time_utc_ms": 1789171203716,
+            "closure": {
+              "NextGlobalEventAt": 1789171203724
+            },
+            "index_end": 1762,
+            "index_start": 1760
+          }
+        ],
+        "public_trade_comparison": {
+          "checked_records": 15,
+          "same_token_same_price_file_rows": [],
+          "conclusion": "有限前缀中无同token同价格的Up 0.49 LastTradePrice。本轮仅完成同token、同价格的逐条对照，尚未核验互补撮合关联及公开事件字段语义。不同token不自动排除关联；现有时点、数量和身份信息也不足以确认这些公开成交对应所选SIM成交。不证明真实成交不存在或模型错误。"
+        }
+      },
+      {
+        "source_order_id": "sim-7",
+        "source_trade_id": "sim-3",
+        "outcome": "Up",
+        "native_matched_result": {
+          "base_quantity_shares": "19",
+          "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+          "economic_application_account_transition_seq": null,
+          "economic_disposition": "PendingUnapplied",
+          "fill_sequence": 3,
+          "immediate_taker_fee_pusd": "0",
+          "liquidity_role": "MakerInferred",
+          "matched_at_utc_ms": 1789171204789,
+          "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-7\"}}]",
+          "quote_amount_pusd": "9.5",
+          "source_price_pusd_per_share": "0.5",
+          "state": "Matched",
+          "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+          "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-3\"}}]"
+        },
+        "submission": {
+          "reference": {
+            "commit_container": {
+              "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000016.parquet"
+            },
+            "record_ordinal": 4
+          },
+          "boundary": {
+            "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+            "durable_available_at_utc_ms": 1791703890735,
+            "source_watermark": {
+              "projection_batch_sequence": 17,
+              "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+            }
+          },
+          "record": {
+            "Evidence": {
+              "evidence": {
+                "Control": {
+                  "result": {
+                    "Submission": {
+                      "outcome": {
+                        "Accepted": {
+                          "effective_processing_at_utc_ms": 1789171203978,
+                          "measurement": {
+                            "Base": {
+                              "matched_base_quantity_shares": "0",
+                              "open_base_quantity_shares": "50"
+                            }
+                          },
+                          "order": {
+                            "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                            "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-7\"}}]",
+                            "state": "Open",
+                            "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"SubmissionItem\":{\"global_request_id\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-requests:5\",\"batch_item_ordinal\":0}}]",
+              "source_order": {
+                "ordinal": 0,
+                "sequence": {
+                  "PrivateFeedback": {
+                    "private_feedback_sequence": 25
+                  }
+                }
+              },
+              "source_reference": {
+                "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                "record": {
+                  "DirectResponse": {
+                    "association": {
+                      "SubmissionItem": {
+                        "batch_item_ordinal": 0,
+                        "global_request_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-requests:5"
+                      }
+                    },
+                    "platform_responded_at_utc_ms": 1789171203978,
+                    "private_feedback_sequence": 25,
+                    "response_received_at_utc_ms": 1789171204053
+                  }
+                },
+                "watermark": {
+                  "projection_batch_sequence": 17,
+                  "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                }
+              }
+            }
+          }
+        },
+        "noe_records": [
+          {
+            "reference": {
+              "commit_container": {
+                "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000017.parquet"
+              },
+              "record_ordinal": 0
+            },
+            "boundary": {
+              "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+              "durable_available_at_utc_ms": 1791703890739,
+              "source_watermark": {
+                "projection_batch_sequence": 18,
+                "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+              }
+            },
+            "record": {
+              "Evidence": {
+                "evidence": {
+                  "TradeLifecycleV3": {
+                    "result": {
+                      "maker_fee_equivalent_pusd": {
+                        "Known": "0.3325"
+                      },
+                      "result": {
+                        "base_quantity_shares": "19",
+                        "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                        "economic_application_account_transition_seq": null,
+                        "economic_disposition": "PendingUnapplied",
+                        "fill_sequence": 3,
+                        "immediate_taker_fee_pusd": "0",
+                        "liquidity_role": "MakerInferred",
+                        "matched_at_utc_ms": 1789171204789,
+                        "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-7\"}}]",
+                        "quote_amount_pusd": "9.5",
+                        "source_price_pusd_per_share": "0.5",
+                        "state": "Matched",
+                        "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+                        "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-3\"}}]"
+                      }
+                    }
+                  }
+                },
+                "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"TradeLifecycle\":{\"trade_identity\":\"sim-3\",\"occurrence\":26}}]",
+                "source_order": {
+                  "ordinal": 0,
+                  "sequence": {
+                    "PrivateFeedback": {
+                      "private_feedback_sequence": 26
+                    }
+                  }
+                },
+                "source_reference": {
+                  "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                  "record": {
+                    "TradeLifecycle": {
+                      "feedback_received_at_utc_ms": 1789171204799,
+                      "platform_event_at_utc_ms": 1789171204789,
+                      "private_feedback_sequence": 26
+                    }
+                  },
+                  "watermark": {
+                    "projection_batch_sequence": 18,
+                    "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "reference": {
+              "commit_container": {
+                "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000018.parquet"
+              },
+              "record_ordinal": 0
+            },
+            "boundary": {
+              "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+              "durable_available_at_utc_ms": 1791703890744,
+              "source_watermark": {
+                "projection_batch_sequence": 19,
+                "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+              }
+            },
+            "record": {
+              "Evidence": {
+                "evidence": {
+                  "TradeLifecycleV3": {
+                    "result": {
+                      "maker_fee_equivalent_pusd": {
+                        "Known": "0.3325"
+                      },
+                      "result": {
+                        "base_quantity_shares": "19",
+                        "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                        "economic_application_account_transition_seq": 15,
+                        "economic_disposition": "PendingApplied",
+                        "fill_sequence": 3,
+                        "immediate_taker_fee_pusd": "0",
+                        "liquidity_role": "MakerInferred",
+                        "matched_at_utc_ms": 1789171204789,
+                        "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-7\"}}]",
+                        "quote_amount_pusd": "9.5",
+                        "source_price_pusd_per_share": "0.5",
+                        "state": "Mined",
+                        "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+                        "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-3\"}}]"
+                      }
+                    }
+                  }
+                },
+                "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"TradeLifecycle\":{\"trade_identity\":\"sim-3\",\"occurrence\":27}}]",
+                "source_order": {
+                  "ordinal": 0,
+                  "sequence": {
+                    "PrivateFeedback": {
+                      "private_feedback_sequence": 27
+                    }
+                  }
+                },
+                "source_reference": {
+                  "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                  "record": {
+                    "TradeLifecycle": {
+                      "feedback_received_at_utc_ms": 1789171204810,
+                      "platform_event_at_utc_ms": 1789171204799,
+                      "private_feedback_sequence": 27
+                    }
+                  },
+                  "watermark": {
+                    "projection_batch_sequence": 19,
+                    "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "reference": {
+              "commit_container": {
+                "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000018.parquet"
+              },
+              "record_ordinal": 1
+            },
+            "boundary": {
+              "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+              "durable_available_at_utc_ms": 1791703890744,
+              "source_watermark": {
+                "projection_batch_sequence": 19,
+                "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+              }
+            },
+            "record": {
+              "EconomicFact": {
+                "fact": {
+                  "disposition": {
+                    "AccountTransition": {
+                      "balance_delta": {
+                        "available_pusd_delta": "0",
+                        "cash_pusd_delta": "-9.5",
+                        "immediate_taker_fee_encumbrance_pusd_delta": "0",
+                        "maker_rebate_locked_remainder_pusd_delta": "0",
+                        "maker_rebate_receivable_pusd_delta": "0",
+                        "outcome_balance_deltas": [
+                          {
+                            "balance_shares_delta": "19",
+                            "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                          }
+                        ],
+                        "principal_encumbrance_pusd_delta": "-9.5",
+                        "taker_rebate_locked_remainder_pusd_delta": "0",
+                        "taker_rebate_receivable_pusd_delta": "0"
+                      },
+                      "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                      "economic_effective_at_utc_ms": 1789171204799,
+                      "transition": {
+                        "FillFinalityEconomicApplied": {
+                          "path_ordinal": 1,
+                          "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-3\"}}]"
+                        }
+                      }
+                    }
+                  },
+                  "economic_identity": {
+                    "AccountTransition": {
+                      "account_identity": {
+                        "account_scope": "{\"run_id\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"caller_role\":\"HISTORICAL_BACKTEST\",\"caller_instance_id\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\",\"account_id\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\",\"platform_source\":\"SIMULATED\"}",
+                        "environment": "simulation",
+                        "run_scope": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50",
+                        "source_category": "platform"
+                      },
+                      "account_transition_seq": 15
+                    }
+                  },
+                  "fact_reference": "noe-economic-fact-v1:[\"normalization_core_v1\",{\"AccountTransition\":{\"account_identity\":{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"account_transition_seq\":15}}]",
+                  "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"AccountTransition\":{\"account_transition_seq\":15}}]",
+                  "source_reference": {
+                    "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                    "record": {
+                      "TradeLifecycle": {
+                        "feedback_received_at_utc_ms": 1789171204810,
+                        "platform_event_at_utc_ms": 1789171204799,
+                        "private_feedback_sequence": 27
+                      }
+                    },
+                    "watermark": {
+                      "projection_batch_sequence": 19,
+                      "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                    }
+                  }
+                },
+                "source_order": {
+                  "ordinal": 1,
+                  "sequence": {
+                    "PrivateFeedback": {
+                      "private_feedback_sequence": 27
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "reference": {
+              "commit_container": {
+                "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000019.parquet"
+              },
+              "record_ordinal": 0
+            },
+            "boundary": {
+              "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+              "durable_available_at_utc_ms": 1791703890748,
+              "source_watermark": {
+                "projection_batch_sequence": 20,
+                "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+              }
+            },
+            "record": {
+              "Evidence": {
+                "evidence": {
+                  "TradeLifecycleV3": {
+                    "result": {
+                      "maker_fee_equivalent_pusd": {
+                        "Known": "0.3325"
+                      },
+                      "result": {
+                        "base_quantity_shares": "19",
+                        "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                        "economic_application_account_transition_seq": 15,
+                        "economic_disposition": "FinalSuccess",
+                        "fill_sequence": 3,
+                        "immediate_taker_fee_pusd": "0",
+                        "liquidity_role": "MakerInferred",
+                        "matched_at_utc_ms": 1789171204789,
+                        "order_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Order\":{\"source_order_id\":\"sim-7\"}}]",
+                        "quote_amount_pusd": "9.5",
+                        "source_price_pusd_per_share": "0.5",
+                        "state": "Confirmed",
+                        "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+                        "trade_identity": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-3\"}}]"
+                      }
+                    }
+                  }
+                },
+                "logical_identity": "noe-logical-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},{\"TradeLifecycle\":{\"trade_identity\":\"sim-3\",\"occurrence\":28}}]",
+                "source_order": {
+                  "ordinal": 0,
+                  "sequence": {
+                    "PrivateFeedback": {
+                      "private_feedback_sequence": 28
+                    }
+                  }
+                },
+                "source_reference": {
+                  "context_reference": "noe-context-v1:407572ef32a0713031758b01cab2f902f42c67dda27f5fb0aa4fad96d6c1da28",
+                  "record": {
+                    "TradeLifecycle": {
+                      "feedback_received_at_utc_ms": 1789171204818,
+                      "platform_event_at_utc_ms": 1789171204809,
+                      "private_feedback_sequence": 28
+                    }
+                  },
+                  "watermark": {
+                    "projection_batch_sequence": 20,
+                    "run_id": "issue185-hour-optimized-20261011-f0-2026-09-12-center-p50"
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "ledger_records": [
+          {
+            "record_sequence": 67,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [
+                [
+                  {
+                    "LocalPendingPrincipal": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784"
+                  },
+                  "Pusd",
+                  "-25.0"
+                ],
+                [
+                  "Balancing",
+                  "Pusd",
+                  "25.0"
+                ]
+              ],
+              "ledger_entry_seq": 66,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000016.parquet"
+                    },
+                    "record_ordinal": 4
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171204055,
+                      "delivery_sequence": 25
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": []
+          },
+          {
+            "record_sequence": 69,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [],
+              "ledger_entry_seq": 68,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000017.parquet"
+                    },
+                    "record_ordinal": 0
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171204800,
+                      "delivery_sequence": 26
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": []
+          },
+          {
+            "record_sequence": 70,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [],
+              "ledger_entry_seq": 69,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000018.parquet"
+                    },
+                    "record_ordinal": 0
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171204810,
+                      "delivery_sequence": 27
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": []
+          },
+          {
+            "record_sequence": 71,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [
+                [
+                  "Cash",
+                  "Pusd",
+                  "-9.5"
+                ],
+                [
+                  "Balancing",
+                  "Pusd",
+                  "9.5"
+                ],
+                [
+                  {
+                    "PrincipalEncumbrance": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784"
+                  },
+                  "Pusd",
+                  "-9.5"
+                ],
+                [
+                  "Balancing",
+                  "Pusd",
+                  "9.5"
+                ],
+                [
+                  {
+                    "OutcomeBalance": {
+                      "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                      "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                    }
+                  },
+                  {
+                    "Outcome": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                  },
+                  "19"
+                ],
+                [
+                  "Balancing",
+                  {
+                    "Outcome": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                  },
+                  "-19"
+                ],
+                [
+                  {
+                    "OutcomeCostBasis": {
+                      "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                      "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                    }
+                  },
+                  "Pusd",
+                  "9.5"
+                ],
+                [
+                  "Balancing",
+                  "Pusd",
+                  "-9.5"
+                ]
+              ],
+              "ledger_entry_seq": 70,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000018.parquet"
+                    },
+                    "record_ordinal": 1
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171204810,
+                      "delivery_sequence": 27
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": [
+              [
+                [
+                  {
+                    "memory": "noe-entity-v1:[\"normalization_core_v1\",{\"source_category\":\"platform\",\"environment\":\"simulation\",\"run_scope\":\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\",\"account_scope\":\"{\\\"run_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50\\\",\\\"caller_role\\\":\\\"HISTORICAL_BACKTEST\\\",\\\"caller_instance_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-host\\\",\\\"account_id\\\":\\\"issue185-hour-optimized-20261011-f0-2026-09-12-center-p50-account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\"},\"entity\",{\"Trade\":{\"source_trade_id\":\"sim-3\"}}]"
+                  },
+                  1
+                ],
+                {
+                  "active": true,
+                  "condition_id": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+                  "cost_basis_pusd": "9.5",
+                  "fee_pusd": "0",
+                  "token_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754"
+                }
+              ]
+            ]
+          },
+          {
+            "record_sequence": 72,
+            "variant": "TRANSACTION",
+            "transaction": {
+              "entries": [],
+              "ledger_entry_seq": 71,
+              "source": {
+                "NoeConsumed": {
+                  "result": {
+                    "commit_container": {
+                      "location": "noe/context-509b242ea9166a4ffe7ed3fddb97dcf72ba1cfcee50cdf79e00154e90dff87d2/commits/00000000000000000019.parquet"
+                    },
+                    "record_ordinal": 0
+                  },
+                  "visibility": {
+                    "Feedback": {
+                      "available_at_utc_ms": 1789171204818,
+                      "delivery_sequence": 28
+                    }
+                  }
+                }
+              }
+            },
+            "applied_fills": []
+          }
+        ],
+        "possible_public_level_transitions": [
+          {
+            "collector_admission_sequence": 24680353,
+            "collector_admission_time_utc_ms": 1789171204793,
+            "event": {
+              "price_changes": [
+                {
+                  "asset_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+                  "best_ask": "0.51",
+                  "best_bid": "0.5",
+                  "price": "0.5",
+                  "side": "BUY",
+                  "size": "65"
+                },
+                {
+                  "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+                  "best_ask": "0.5",
+                  "best_bid": "0.49",
+                  "price": "0.5",
+                  "side": "SELL",
+                  "size": "65"
+                }
+              ]
+            },
+            "event_type": "price_change",
+            "file_row": 1181,
+            "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+            "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+            "timestamp": 1789171204782,
+            "timestamp_received": 1789171204793
+          },
+          {
+            "collector_admission_sequence": 24680358,
+            "collector_admission_time_utc_ms": 1789171204804,
+            "event": {
+              "price_changes": [
+                {
+                  "asset_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+                  "best_ask": "0.51",
+                  "best_bid": "0.49",
+                  "price": "0.5",
+                  "side": "BUY",
+                  "size": "0"
+                },
+                {
+                  "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+                  "best_ask": "0.51",
+                  "best_bid": "0.49",
+                  "price": "0.5",
+                  "side": "SELL",
+                  "size": "0"
+                }
+              ]
+            },
+            "event_type": "price_change",
+            "file_row": 1186,
+            "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+            "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+            "timestamp": 1789171204789,
+            "timestamp_received": 1789171204804
+          }
+        ],
+        "sim_hidden_bucket": [
+          {
+            "applied_input_position": 1683,
+            "bucket_time_utc_ms": 1789171204789,
+            "closure": {
+              "NextGlobalEventAt": 1789171204794
+            },
+            "index_end": 2268,
+            "index_start": 2260
+          }
+        ],
+        "public_trade_comparison": {
+          "checked_records": 15,
+          "same_token_same_price_file_rows": [],
+          "conclusion": "有限前缀中无同token同价格的Up 0.5 LastTradePrice。本轮仅完成同token、同价格的逐条对照，尚未核验互补撮合关联及公开事件字段语义。不同token不自动排除关联；现有时点、数量和身份信息也不足以确认这些公开成交对应所选SIM成交。不证明真实成交不存在或模型错误。"
+        }
+      }
+    ],
+    "conclusion": "订单、NOE、Ledger身份/金额/时间链一致。L2下降仅为可能触发行；未取得绑定该笔驱动步骤的隐藏队列段，撮合依据不足，不能证明真实FIFO/我方必成交，也不能断言错误。第三笔仅证明此前缀内19/50部分成交，不能认定最终孤腿或剩余31最终未成交。",
+    "public_last_trade_price_records": [
+      {
+        "collector_admission_sequence": 24679222,
+        "collector_admission_time_utc_ms": 1789171202352,
+        "event": {
+          "asset_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+          "fee_rate_bps": "0",
+          "price": "0.51",
+          "side": "BUY",
+          "size": "60"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 50,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171200224,
+        "timestamp_received": 1789171200238
+      },
+      {
+        "collector_admission_sequence": 24679277,
+        "collector_admission_time_utc_ms": 1789171202355,
+        "event": {
+          "asset_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+          "fee_rate_bps": "0",
+          "price": "0.51",
+          "side": "BUY",
+          "size": "18.52"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 105,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171200428,
+        "timestamp_received": 1789171200440
+      },
+      {
+        "collector_admission_sequence": 24679330,
+        "collector_admission_time_utc_ms": 1789171202364,
+        "event": {
+          "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+          "fee_rate_bps": "0",
+          "price": "0.5",
+          "side": "BUY",
+          "size": "6"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 158,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171200728,
+        "timestamp_received": 1789171200740
+      },
+      {
+        "collector_admission_sequence": 24679368,
+        "collector_admission_time_utc_ms": 1789171202365,
+        "event": {
+          "asset_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+          "fee_rate_bps": "0",
+          "price": "0.51",
+          "side": "BUY",
+          "size": "9.803922"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 196,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171200912,
+        "timestamp_received": 1789171200926
+      },
+      {
+        "collector_admission_sequence": 24679499,
+        "collector_admission_time_utc_ms": 1789171202368,
+        "event": {
+          "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+          "fee_rate_bps": "0",
+          "price": "0.5",
+          "side": "BUY",
+          "size": "41"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 327,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171201318,
+        "timestamp_received": 1789171201337
+      },
+      {
+        "collector_admission_sequence": 24679572,
+        "collector_admission_time_utc_ms": 1789171202382,
+        "event": {
+          "asset_id": "107908796001205601126362103961466850840177701751257482698676558640773709147754",
+          "fee_rate_bps": "0",
+          "price": "0.51",
+          "side": "BUY",
+          "size": "1.960785"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 400,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171201732,
+        "timestamp_received": 1789171201746
+      },
+      {
+        "collector_admission_sequence": 24679799,
+        "collector_admission_time_utc_ms": 1789171203006,
+        "event": {
+          "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+          "fee_rate_bps": "0",
+          "price": "0.5",
+          "side": "BUY",
+          "size": "10.4"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 627,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171202984,
+        "timestamp_received": 1789171203006
+      },
+      {
+        "collector_admission_sequence": 24679824,
+        "collector_admission_time_utc_ms": 1789171203071,
+        "event": {
+          "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+          "fee_rate_bps": "0",
+          "price": "0.5",
+          "side": "BUY",
+          "size": "10.4"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 652,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171203029,
+        "timestamp_received": 1789171203071
+      },
+      {
+        "collector_admission_sequence": 24679849,
+        "collector_admission_time_utc_ms": 1789171203074,
+        "event": {
+          "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+          "fee_rate_bps": "0",
+          "price": "0.5",
+          "side": "BUY",
+          "size": "10.4"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 677,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171203046,
+        "timestamp_received": 1789171203071
+      },
+      {
+        "collector_admission_sequence": 24679895,
+        "collector_admission_time_utc_ms": 1789171203129,
+        "event": {
+          "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+          "fee_rate_bps": "0",
+          "price": "0.5",
+          "side": "BUY",
+          "size": "10"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 723,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171203069,
+        "timestamp_received": 1789171203116
+      },
+      {
+        "collector_admission_sequence": 24680063,
+        "collector_admission_time_utc_ms": 1789171203537,
+        "event": {
+          "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+          "fee_rate_bps": "0",
+          "price": "0.5",
+          "side": "BUY",
+          "size": "10"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 891,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171203524,
+        "timestamp_received": 1789171203537
+      },
+      {
+        "collector_admission_sequence": 24680381,
+        "collector_admission_time_utc_ms": 1789171204825,
+        "event": {
+          "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+          "fee_rate_bps": "0",
+          "price": "0.5",
+          "side": "BUY",
+          "size": "10.4"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 1209,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171204807,
+        "timestamp_received": 1789171204824
+      },
+      {
+        "collector_admission_sequence": 24680403,
+        "collector_admission_time_utc_ms": 1789171204843,
+        "event": {
+          "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+          "fee_rate_bps": "0",
+          "price": "0.51",
+          "side": "BUY",
+          "size": "10.196079"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 1231,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171204826,
+        "timestamp_received": 1789171204843
+      },
+      {
+        "collector_admission_sequence": 24680413,
+        "collector_admission_time_utc_ms": 1789171204854,
+        "event": {
+          "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+          "fee_rate_bps": "0",
+          "price": "0.5",
+          "side": "BUY",
+          "size": "10.4"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 1241,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171204837,
+        "timestamp_received": 1789171204854
+      },
+      {
+        "collector_admission_sequence": 24680430,
+        "collector_admission_time_utc_ms": 1789171204890,
+        "event": {
+          "asset_id": "19032856667784098829291953695654902969996580284236420719127791921975594839098",
+          "fee_rate_bps": "0",
+          "price": "0.5",
+          "side": "BUY",
+          "size": "65"
+        },
+        "event_type": "last_trade_price",
+        "file_row": 1258,
+        "market": "0x094426c14d2742346e7e2b3f5f3c4620e5e140a8c2a32dd22f76a5e3d471d784",
+        "source_sequence_epoch_id": "2c8534678df0e1a21812eed94cd0a8e9a4d2c437308afd1c5e3b19b75a9bd237",
+        "timestamp": 1789171204876,
+        "timestamp_received": 1789171204890
+      }
+    ],
+    "public_trade_conclusion": "15条原LastTradePrice仅含Up 0.51、Down 0.50/0.51，分别没有Down 0.48、Up 0.49、Up 0.50的同token同价格记录。本轮仅完成同token、同价格的逐条对照，尚未核验互补撮合关联及公开事件字段语义。不同token不自动排除关联；现有时点、数量和身份信息也不足以确认这些公开成交对应所选SIM成交。此前缀公开成交尚不能直接支持三笔，不证明真实成交不存在或模型错误。",
+    "proposed_necessary_control": {
+      "execution": "仅提案，未执行；须用户后续继续授权。",
+      "sample": "sim-3 / sim-7，Up 19@0.50；原请求50份。",
+      "fixed_inputs": [
+        "旧源码665159d2c3efcfe7f943ef5937526299125d44f4及原规则/finality、参数（含15ms）、请求命名空间与:5:0请求、原时序均固定。",
+        "只用足以建立3.978秒接单前队列起点并推进至4.789秒该笔成交的最短必要旧输入前缀；前缀起点依实际队列恢复需要确定，不扩大到完整小时。"
+      ],
+      "checks": [
+        "核对接单时的外部排队量、我方订单位置和此前消费/补充形成的队列起点。",
+        "逐步核对外部排队量/我方数量的消耗归属及具体触发步骤，绑定SIM隐藏索引、原输入位置和源消息。",
+        "核对适用撮合类型及公开事件字段语义；无法建立映射时保留未知。",
+        "与已有盘口和15条公开成交对照，说明19份在旧模型中的产生原因或保留不能解释之处。"
+      ],
+      "limits": "只解释旧模型为何成交，不能证明真实FIFO或我方真实必成交。新模型、完整小时或扩样另行裁决；不加追踪平台、新统一门槛或业务保护。"
+    },
+    "complementary_matching_capability": {
+      "official_source": "https://github.com/Polymarket/ctf-exchange/blob/main/docs/Overview.md#scenario-2---mint",
+      "capability": "官方CTF Exchange MINT场景允许互补token的两笔BUY通过MINT匹配。",
+      "limit": "仅援引平台能力，不据此断言本样本发生MINT；尚未核验互补撮合关联或公开事件字段语义。"
+    }
+  }
+}

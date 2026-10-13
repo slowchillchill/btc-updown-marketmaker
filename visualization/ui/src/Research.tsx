@@ -1,5 +1,8 @@
+import { displayError } from "./i18n";
+import { displayFact as fact } from "./i18n";
+import { useTranslation } from "react-i18next";
 import { useEffect, useRef, useState } from "react";
-import { at, fact, statusLabel, type Json } from "./facts";
+import { at, statusLabel, type Json } from "./facts";
 import { get, Tree } from "./evidence";
 import { type Evidence } from "./browse";
 export type ResearchFragment = {
@@ -96,6 +99,7 @@ export function ResearchPanel({
   state: ReturnType<typeof useResearch>;
   onSelect: (e: Evidence) => void;
 }) {
+  const { t: tr } = useTranslation();
   const {
     market,
     setMarket,
@@ -123,12 +127,19 @@ export function ResearchPanel({
     <div key={f.path} data-research-path={f.path}>
       <code>{f.path}</code>
       {f.exact !== undefined && (
-        <Tree name="原字段" path={f.path} value={f.exact} onSelect={select} />
+        <Tree
+          name={tr("原字段")}
+          path={f.path}
+          value={f.exact}
+          onSelect={select}
+        />
       )}
       {f.rows && (
         <>
           <p>
-            原数组 [{f.start}, {f.end}) / {f.total} · 原序与原索引
+            {tr("原数组 [")}
+            {f.start}, {f.end}) / {f.total}
+            {tr(" · 原序与原索引")}
           </p>
           {f.rows.map((row) => (
             <div key={row.path}>
@@ -158,7 +169,8 @@ export function ResearchPanel({
                             )
                           }
                         >
-                          查原全局 update index {fact(i)}
+                          {tr("查原全局 update index ")}
+                          {fact(i)}
                         </button>
                       ))}
                   </div>
@@ -169,13 +181,21 @@ export function ResearchPanel({
       )}
       {!!f.omitted_arrays.length && (
         <details>
-          <summary>未读取的原数组 · {f.omitted_arrays.length} 项</summary>
+          <summary>
+            {tr("未读取的原数组 · ")}
+            {f.omitted_arrays.length}
+            {tr(" 项")}
+          </summary>
           {f.omitted_arrays.map((a) => (
             <div key={a.path}>
               <code>{a.path}</code>
-              <span> · {a.length} 原项 </span>
+              <span>
+                {" "}
+                · {a.length}
+                {tr(" 原项 ")}
+              </span>
               <button onClick={() => state.load(a.path, offset, count)}>
-                读取原区段
+                {tr("读取原区段")}
               </button>
             </div>
           ))}
@@ -185,32 +205,38 @@ export function ResearchPanel({
   );
   return (
     <section className="research-panel" data-research-status={status.status}>
-      <h2>真实历史描述研究 · 只读原产物</h2>
+      <h2>{tr("真实历史描述研究 · 只读原产物")}</h2>
       <p className={status.status === "ready" ? "muted" : "gap"}>
-        {status.source ?? "未指定"} ·{" "}
-        {statusLabel[status.status] ?? status.status} {status.detail}
+        {status.source ?? tr("未指定")} ·{" "}
+        {tr(statusLabel[status.status] ?? status.status)}{" "}
+        {displayError(status.detail)}
       </p>
       {status.status === "ready" && (
         <>
           <p>
-            {fact(status.catalog?.length.toString())} 目录成员 /{" "}
-            {fact(status.targets?.length.toString())} 完整目标 ·{" "}
-            {fact(status.global_update_count)} 原全局 spot 状态更新（含初始化）
+            {fact(status.catalog?.length.toString())}
+            {tr(" 目录成员 /")} {fact(status.targets?.length.toString())}
+            {tr(" 完整目标 ·")} {fact(status.global_update_count)}
+            {tr(" 原全局 spot 状态更新（含初始化）")}
           </p>
           <p className="muted">
-            冻结采样不是策略触发。事后标签独立保存，不回填冻结
-            特征；窗口描述量不是 sigma、概率、官方 TWAP 或盈利结果。USD/BTC 与
-            USDT/BTC 保留原字段单位。
+            {tr(
+              "冻结采样不是策略触发。事后标签独立保存，不回填冻结 特征；窗口描述量不是 sigma、概率、官方 TWAP 或盈利结果。USD/BTC 与 USDT/BTC 保留原字段单位。",
+            )}
           </p>
           <div className="timing-deltas">
             {[
-              ["冻结采样点", "/result_summary", "sampling_points"],
-              ["描述窗口", "/result_summary", "window_rows"],
-              ["独立右边界", "/result_summary", "right_boundary_points"],
-              ["初始化组", "/research/counts", "initialization/groups"],
-              ["初始化观察", "/research/counts", "initialization/observations"],
-              ["研究组", "/research/counts", "research/groups"],
-              ["研究观察", "/research/counts", "research/observations"],
+              [tr("冻结采样点"), "/result_summary", "sampling_points"],
+              [tr("描述窗口"), "/result_summary", "window_rows"],
+              [tr("独立右边界"), "/result_summary", "right_boundary_points"],
+              [tr("初始化组"), "/research/counts", "initialization/groups"],
+              [
+                tr("初始化观察"),
+                "/research/counts",
+                "initialization/observations",
+              ],
+              [tr("研究组"), "/research/counts", "research/groups"],
+              [tr("研究观察"), "/research/counts", "research/observations"],
             ].map(([label, path, key]) => {
               const value = at(
                 status.summary?.find((f) => f.path === path)?.exact,
@@ -232,20 +258,29 @@ export function ResearchPanel({
           </div>
           <details>
             <summary>
-              摘要与原来源 · 单文档 {status.bytes_read} B · 读取{" "}
-              {status.read_attempts} 次 / 解码 {status.decode_attempts} 次 ·
-              初始化 {status.load_elapsed_us} μs
+              {tr("摘要与原来源 · 单文档 ")}
+              {status.bytes_read}
+              {tr(" B · 读取")} {status.read_attempts}
+              {tr(" 次 / 解码 ")}
+              {status.decode_attempts}
+              {tr(" 次 · 初始化 ")}
+              {status.load_elapsed_us} μs
             </summary>
             {status.summary?.map(tree)}
           </details>
           <details>
             <summary>
-              实际市场目录 · {status.catalog?.length} 成员（不等于完整目标数）
+              {tr("实际市场目录 · ")}
+              {status.catalog?.length}
+              {tr(" 成员（不等于完整目标数）")}
             </summary>
             {status.catalog?.map((m, i) => (
               <Tree
                 key={i}
-                name={`目录 ${i} · ${fact(at(m, "clob_market_id"))}`}
+                name={tr("目录 {{v0}} · {{v1}}", {
+                  v0: i,
+                  v1: fact(at(m, "clob_market_id")),
+                })}
                 value={m}
                 path={`/research/actual_market_catalog/${i}`}
                 onSelect={select}
@@ -254,9 +289,9 @@ export function ResearchPanel({
           </details>
           <div className="range-controls">
             <label>
-              完整目标
+              {tr("完整目标")}
               <select
-                aria-label="研究目标"
+                aria-label={tr("研究目标")}
                 value={market}
                 onChange={(e) => {
                   setMarket(e.target.value);
@@ -271,9 +306,9 @@ export function ResearchPanel({
               </select>
             </label>
             <label>
-              原冻结索引
+              {tr("原冻结索引")}
               <select
-                aria-label="研究冻结索引"
+                aria-label={tr("研究冻结索引")}
                 value={freeze}
                 onChange={(e) => setFreeze(e.target.value)}
               >
@@ -288,43 +323,47 @@ export function ResearchPanel({
               </select>
             </label>
             <label>
-              描述窗
+              {tr("描述窗")}
               <select
-                aria-label="研究窗口索引"
+                aria-label={tr("研究窗口索引")}
                 value={window}
                 onChange={(e) => setWindow(e.target.value)}
               >
                 {[15, 30, 60, 120, 300].map((seconds, i) => (
                   <option key={i} value={i}>
-                    {seconds} s（原索引 {i}）
+                    {seconds}
+                    {tr(" s（原索引 ")}
+                    {i}）
                   </option>
                 ))}
               </select>
             </label>
-            <button onClick={() => state.load(base)}>市场 / 事后标签</button>
-            <button onClick={() => state.load(frozen)}>冻结特征</button>
-            <button onClick={() => state.load(w)}>描述窗口</button>
+            <button onClick={() => state.load(base)}>
+              {tr("市场 / 事后标签")}
+            </button>
+            <button onClick={() => state.load(frozen)}>{tr("冻结特征")}</button>
+            <button onClick={() => state.load(w)}>{tr("描述窗口")}</button>
             <button
               onClick={() =>
                 state.load(base + "/right_boundary_hold_diagnostic")
               }
             >
-              独立右边界
+              {tr("独立右边界")}
             </button>
           </div>
           <div className="range-controls">
             <label>
-              原数组起点
+              {tr("原数组起点")}
               <input
-                aria-label="研究数组起点"
+                aria-label={tr("研究数组起点")}
                 value={offset}
                 onChange={(e) => setOffset(e.target.value)}
               />
             </label>
             <label>
-              区段长度
+              {tr("区段长度")}
               <input
-                aria-label="研究数组长度"
+                aria-label={tr("研究数组长度")}
                 value={count}
                 onChange={(e) => setCount(e.target.value)}
               />
@@ -334,14 +373,14 @@ export function ResearchPanel({
                 state.load(w + "/price_pair_update_indices", offset, count)
               }
             >
-              价格对原索引列
+              {tr("价格对原索引列")}
             </button>
             <button
               onClick={() =>
                 state.load(w + "/hold_coverage/segment_rows", offset, count)
               }
             >
-              持价原区段列
+              {tr("持价原区段列")}
             </button>
             <button
               onClick={() =>
@@ -352,31 +391,34 @@ export function ResearchPanel({
                 )
               }
             >
-              全局更新原区段
+              {tr("全局更新原区段")}
             </button>
             <button onClick={() => state.load("/measurement")}>
-              源端资源测量（非 C 成本）
+              {tr("源端资源测量（非 C 成本）")}
             </button>
             <button onClick={() => state.load("/storage_snapshot")}>
-              源端存储快照
+              {tr("源端存储快照")}
             </button>
             <button
               onClick={() => state.load("/first_two_market_finite_comparison")}
             >
-              原有限对照
+              {tr("原有限对照")}
             </button>
           </div>
           <button onClick={() => state.load("/build_identity")}>
-            原代码与构建身份
+            {tr("原代码与构建身份")}
           </button>
           <p className="muted">
-            price_pair_update_indices 原列：{fact(pairColumns)}；segment_rows
-            原列：{fact(holdColumns)}。索引指原全局更新数组，不是
-            group_position；未公开 classification
-            等字段不能补算。详情只保留最近一份响应，所选事实独立保留。
+            {tr("price_pair_update_indices 原列：")}
+            {fact(pairColumns)}
+            {tr("；segment_rows 原列：")}
+            {fact(holdColumns)}
+            {tr(
+              "。索引指原全局更新数组，不是 group_position；未公开 classification 等字段不能补算。详情只保留最近一份响应，所选事实独立保留。",
+            )}
           </p>
-          {state.busy && <p role="status">读取明确原字段区段…</p>}
-          {state.error && <p role="alert">{state.error}</p>}
+          {state.busy && <p role="status">{tr("读取明确原字段区段…")}</p>}
+          {state.error && <p role="alert">{displayError(state.error)}</p>}
           {state.loaded && tree(state.loaded)}
         </>
       )}

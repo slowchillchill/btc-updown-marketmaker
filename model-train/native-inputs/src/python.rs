@@ -313,6 +313,9 @@ fn model_intent_requests_v2(input: &str) -> PyResult<String> {
 
 #[pymodule]
 fn model_native_inputs(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(normalization_identities_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(cpu_noe_posterior_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(public_rule_context_v1, module)?)?;
     module.add_function(wrap_pyfunction!(open_actor_account_v2, module)?)?;
     module.add_function(wrap_pyfunction!(sim_order_ids_v1, module)?)?;
     module.add_function(wrap_pyfunction!(post_terms_batch_v2, module)?)?;
@@ -323,12 +326,257 @@ fn model_native_inputs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+/// 冷端使用原身份编码器；调用方只传真实来源键，不复制字符串协议。
+#[pyfunction]
+fn normalization_identities_v1(input: &str) -> PyResult<String> {
+    use execution_normalization::{NormalizationIdentity, SourceNeutralEntityKeyV1,
+        SourceNeutralLogicalKeyV1};
+    use contracts::execution_normalization::{SourceNeutralAccountIdentityV1,
+        StableLogicalIdentityV1, NoeEconomicFactReferenceV1};
+    #[derive(serde::Deserialize)]
+    struct Request {
+        account: SourceNeutralAccountIdentityV1,
+        entities: Vec<SourceNeutralEntityKeyV1>,
+        logical: Vec<SourceNeutralLogicalKeyV1>,
+    }
+    let request: Request = serde_json::from_str(input).map_err(error)?;
+    let account = Arc::new(request.account);
+    type Identity = StableLogicalIdentityV1;
+    let entities = request.entities.iter().map(|key|
+        <Identity as NormalizationIdentity<NoeEconomicFactReferenceV1>>::entity(&account, key))
+        .collect::<Result<Vec<_>, _>>().map_err(error)?;
+    let logical = request.logical.iter().map(|key|
+        <Identity as NormalizationIdentity<NoeEconomicFactReferenceV1>>::logical(&account, key))
+        .collect::<Result<Vec<_>, _>>().map_err(error)?;
+    serde_json::to_string(&(entities, logical)).map_err(error)
+}
+
+/// 有限后验只接实际记录的表示交接；不产生撮合、反馈或资金期望。
+#[pyfunction]
+fn cpu_noe_posterior_v1(input: &str) -> PyResult<String> {
+    use contracts::execution_normalization::ExecutionNormalizationContextV1;
+    use execution_normalization::{MemoryLogicalIdentityV1, MemoryEconomicFactReferenceV1,
+        NormalizationBatch, NormalizationBatchInput, NormalizationCore, NoeConsumptionSourceV2,
+        NoeRecordPositionV1};
+    use sim_system::execution::{MemoryNoeRecord, MeasuredCancellationEvidence};
+    type Trade = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2<MemoryLogicalIdentityV1>;
+    type Control = contracts::execution_normalization::SourceNeutralControlResult<
+        contracts::execution_normalization::SourceNeutralSubmissionOutcomeV2<MemoryLogicalIdentityV1>,
+        contracts::execution_normalization::SourceNeutralOrderSnapshotV2<MemoryLogicalIdentityV1>,
+        MemoryLogicalIdentityV1, contracts::execution_normalization::CancellationRequestCompletedV1>;
+    type Input = NormalizationBatchInput<Trade, Control, MemoryLogicalIdentityV1>;
+    #[derive(serde::Deserialize)]
+    struct Request {
+        context: ExecutionNormalizationContextV1,
+        opening_position: NoeRecordPositionV1,
+        opening_record: MemoryNoeRecord<MeasuredCancellationEvidence>,
+        batches: Vec<Input>,
+        deliveries: Vec<[i64; 2]>,
+        // 有限低层代表保留实际发布/领取交错；不是新的生产可见性门。
+        #[serde(default)]
+        accepted_through: Option<Vec<contracts::execution_normalization::SimV2SourceWatermarkV1>>,
+        #[serde(default)]
+        initial_noe_container: Option<std::path::PathBuf>,
+        // 仅选择报告读面；不截断原source领取或Ledger消费。
+        #[serde(default)]
+        report_consumed: Option<Vec<Option<usize>>>,
+    }
+    let request: Request = serde_json::from_str(input).map_err(error)?;
+    let context = Arc::new(request.context);
+    let mut source = NoeConsumptionSourceV2::default();
+    // 可选冷容器仅来自本次实际唯一开户批。正式耐久读口完成身份映射，
+    // 不打开可写store，也不把耐久视图直接当消费能力。
+    let initial = if let Some(path) = request.initial_noe_container {
+        use contracts::execution_normalization::{NoePublishedContainerReferenceV1,
+            NoeResultReferenceV1};
+        use execution_normalization::{read_durable_noe_record_v2,
+            read_durable_noe_record_position, NormalizationRecord, SourceNeutralEvidenceKind};
+        let (_, rows) = execution_normalization::record_file::read(&path,
+            "noe_arrow_parquet_v1").map_err(error)?;
+        let mut records = Vec::new();
+        for (ordinal, _, _) in rows {
+            let reference = NoeResultReferenceV1 {
+                commit_container: NoePublishedContainerReferenceV1 {
+                    location: path.to_string_lossy().into_owned(),
+                }, record_ordinal: ordinal,
+            };
+            let view = read_durable_noe_record_v2(&reference).map_err(error)?;
+            let position = read_durable_noe_record_position(&reference).map_err(error)?;
+            if view.context() != context.as_ref() || view.position() != position ||
+                position.source_watermark != request.opening_position.source_watermark ||
+                position.record_ordinal != records.len() as u64 {
+                return Err(error("后验冷批与实际开户来源/ordinal不一致"));
+            }
+            if ordinal == request.opening_position.record_ordinal {
+                if position != request.opening_position || view.record() != &request.opening_record {
+                    return Err(error("后验冷批与实际开户记录不一致"));
+                }
+            } else if !matches!(view.record(), NormalizationRecord::Evidence {
+                evidence: SourceNeutralEvidenceKind::InitialMarket { .. }, .. }) {
+                return Err(error("有限后验冷批只支持本次开户及InitialMarket"));
+            }
+            records.push(view.record().clone());
+        }
+        if records.get(request.opening_position.record_ordinal as usize) != Some(&request.opening_record) {
+            return Err(error("后验冷批缺实际开户记录"));
+        }
+        NormalizationBatch {source_watermark: request.opening_position.source_watermark, records}
+    } else {
+        NormalizationBatch {source_watermark: request.opening_position.source_watermark,
+            records: vec![request.opening_record]}
+    };
+    let initial_records = initial.records.len();
+    let initial_market_records = initial.records.iter().filter(|record| matches!(record,
+        execution_normalization::NormalizationRecord::Evidence {
+            evidence: execution_normalization::SourceNeutralEvidenceKind::InitialMarket { .. }, .. }
+    )).count();
+    source.accept(context.clone(), Arc::new(initial));
+    let mut ledger = ledger::LedgerWriterV1::new_with_admission_v2(
+        ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    ledger.apply_noe_memory_v2(&source.opening_record().ok_or_else(||error("后验缺实际开户记录"))?)
+        .map_err(error)?;
+    let opening_projection = ledger.economic_read().ok_or_else(||error("后验缺原开户读面"))?
+        .base().clone();
+    let mut core = NormalizationCore::<Trade, Control, MemoryLogicalIdentityV1,
+        MemoryEconomicFactReferenceV1>::new((*context).clone());
+    let mut normalized = Vec::new();
+    for input in request.batches {
+        let batch = Arc::new(core.normalize_and_accept(input).map_err(error)?);
+        normalized.push(batch);
+    }
+    if let Some(bounds) = &request.accepted_through {
+        if bounds.len() != request.deliveries.len() {
+            return Err(error("有限后验发布位置与实际领取人口不一致"));
+        }
+    } else {
+        for batch in &normalized { source.accept(context.clone(), batch.clone()); }
+    }
+    // 本有限材料的admission均为实际开户InitialMarket；先经所属消费口
+    // 交给Ledger，不为未来MarketEnrollment建立提前可见协议。
+    for record in source.take_admitted_records() {
+        ledger.apply_noe_memory_v2(&record).map_err(error)?;
+    }
+    let read = ledger.economic_read().ok_or_else(||error("后验缺原冷经济读面"))?;
+    let initial_projection = serde_json::json!({"projection":read.base(),"cash":read.cash(),
+        "markets":read.market_totals().collect::<Vec<_>>()});
+    let mut pending = Vec::new();
+    let mut checkpoints = Vec::new();
+    let mut accepted = 0;
+    let mut received_population = 0;
+    let mut last_position = None;
+    let mut consumed_population = 0;
+    fn snapshot(ledger: &ledger::LedgerWriterV1,
+        position: &Option<NoeRecordPositionV1>, consumed_population: usize, compact: bool) -> PyResult<serde_json::Value> {
+        let read = ledger.economic_read().ok_or_else(||error("后验缺原经济读面"))?;
+        let base = read.base();
+        let projection = if compact { serde_json::json!({
+            "platform_source_prefix":base.platform_source_prefix,
+            "platform_confirmed_projection":base.platform_confirmed_projection
+        }) } else { serde_json::json!(base) };
+        let mut value = serde_json::json!({"entry":ledger.applied_entry_sequence(),
+            "last_position":position,"consumed_population":consumed_population,"projection":projection,"cash":read.cash()});
+        if !compact { value["markets"] = serde_json::json!(read.market_totals().collect::<Vec<_>>()); }
+        Ok(value)
+    }
+    if let Some(counts) = &request.report_consumed {
+        if counts.len() != request.deliveries.len() {
+            return Err(error("后验报告人口须对应原领取顺序"));
+        }
+    }
+    let targets = request.report_consumed.as_ref().map(|counts|
+        counts.iter().flatten().copied().collect::<std::collections::BTreeSet<_>>());
+    let mut prefixes = Vec::new();
+    if targets.as_ref().is_some_and(|values|values.contains(&0)) {
+        prefixes.push(snapshot(&ledger, &last_position, 0, true)?);
+    }
+    for (delivery, [closed, visible]) in request.deliveries.into_iter().enumerate() {
+        let mut committed = Vec::new();
+        if let Some(bounds) = &request.accepted_through {
+            let bound = &bounds[delivery];
+            while let Some(batch) = normalized.get(accepted) {
+                if batch.source_watermark.run_id != bound.run_id {
+                    return Err(error("有限后验发布位置与原运行不一致"));
+                }
+                if batch.source_watermark.projection_batch_sequence > bound.projection_batch_sequence { break; }
+                source.accept(context.clone(), batch.clone());
+                accepted += 1;
+            }
+            for record in source.take_admitted_records() {
+                ledger.apply_noe_memory_v2(&record).map_err(error)?;
+            }
+        }
+        let received = source.take_closed(closed, visible);
+        received_population += received.len();
+        pending.extend(received);
+        // 有限后验只调原Ledger消费口；合法前驱未齐保同一原引用。
+        loop {
+            let mut waiting = Vec::new();
+            let mut progressed = false;
+            for record in std::mem::take(&mut pending) {
+                let before = ledger.applied_entry_sequence();
+                let position = record.position();
+                let outcome = ledger.apply_noe_memory_v2(&record).map_err(error)?;
+                let consumed = match outcome {
+                    ledger::LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation |
+                    ledger::LedgerMemoryApplyOutcomeV1::Applied(
+                        ledger::LedgerApplyOutcomeV1::MissingPlatformPredecessor { .. }) => { waiting.push(record); false },
+                    _ => { progressed = true; consumed_population += 1; true },
+                };
+                if ledger.applied_entry_sequence() != before { last_position = Some(position); }
+                if consumed && targets.as_ref().is_some_and(|values|values.contains(&consumed_population)) {
+                    prefixes.push(snapshot(&ledger, &last_position, consumed_population, true)?);
+                } else if targets.is_none() && ledger.applied_entry_sequence() != before {
+                    committed.push(snapshot(&ledger, &last_position, consumed_population, false)?);
+                }
+            }
+            pending = waiting;
+            if pending.is_empty() || !progressed { break; }
+        }
+        let mut point = if targets.is_some() { serde_json::json!({
+            "entry":ledger.applied_entry_sequence(),"last_position":last_position,
+            "consumed_population":consumed_population
+        }) } else { snapshot(&ledger, &last_position, consumed_population, false)? };
+        point["closed"] = serde_json::json!(closed);
+        point["visible"] = serde_json::json!(visible);
+        point["received_population"] = serde_json::json!(received_population);
+        point["waiting"] = serde_json::json!(pending.len());
+        point["committed"] = serde_json::json!(committed);
+        checkpoints.push(point);
+    }
+    serde_json::to_string(&serde_json::json!({"normalized":normalized,
+        "initial_records":initial_records,"initial_market_records":initial_market_records,
+        "opening_projection":opening_projection,"initial":initial_projection,
+        "checkpoints":checkpoints,"prefixes":prefixes,
+        "final":snapshot(&ledger, &last_position, consumed_population, true)?,
+        "waiting":pending.len()})).map_err(error)
+}
+
+/// 冷装配只读同一封存快照；规则与市场身份仍由原公共构造器解释。
+#[pyfunction]
+fn public_rule_context_v1(input: &str) -> PyResult<String> {
+    use sim_system::platform_rules::{HistoricalProcessSnapshotRequestV1,
+        load_historical_process_snapshot_v3};
+    #[derive(serde::Deserialize)]
+    struct Request {
+        rule_path: std::path::PathBuf,
+        rule_sha256: contracts::Sha256Hex,
+        rules_as_of_utc_ms: i64,
+        market: contracts::MarketIdentityV2,
+    }
+    let request: Request = serde_json::from_str(input).map_err(error)?;
+    let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+        snapshot_path: request.rule_path, expected_file_sha256: request.rule_sha256,
+        replay_causal_start_utc_ms: request.rules_as_of_utc_ms,
+    }).map_err(error)?;
+    serde_json::to_string(&rules.public_rule_context(request.market)).map_err(error)
+}
+
 /// 冷端只调用公共开户链；返回原事实和前沿后释放CPU活动对象。
 #[pyfunction]
 fn open_actor_account_v2(input: &str) -> PyResult<String> {
     use sim_system::execution::*;
     use sim_system::platform_rules::{HistoricalProcessSnapshotRequestV1, ImplementationIdentityV1,
-        load_historical_process_snapshot_v3};
+        load_historical_process_snapshot_v3, derive_model_train_maker_snapshot_v3};
     #[derive(serde::Deserialize)]
     struct Request {
         log_path: std::path::PathBuf,
@@ -342,12 +590,20 @@ fn open_actor_account_v2(input: &str) -> PyResult<String> {
         finality_policy: serde_json::Value,
         session: SessionSpecV3,
         activation_id: String,
+        #[serde(default)]
+        model_train_maker_snapshot: Option<std::path::PathBuf>,
     }
     let request: Request = serde_json::from_str(input).map_err(error)?;
-    let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+    let source = HistoricalProcessSnapshotRequestV1 {
         snapshot_path: request.rule_path, expected_file_sha256: request.rule_sha256,
         replay_causal_start_utc_ms: request.rules_as_of_utc_ms,
-    }).map_err(error)?;
+    };
+    let rules = if let Some(target) = request.model_train_maker_snapshot {
+        derive_model_train_maker_snapshot_v3(source, target, request.implementation_identity.clone())
+    } else { load_historical_process_snapshot_v3(source) }.map_err(error)?;
+    let maker_model = rules.maker_model_version_for(request.session.caller_role).to_owned();
+    let rule_path = rules.path().to_owned();
+    let rule_sha256 = rules.file_sha256().clone();
     let finality = Arc::new(sim_system::finality::TradeFinalityPolicyV2::decode_and_seal(
         &serde_json::to_vec(&request.finality_policy).map_err(error)?).map_err(error)?);
     // 原构造器形成正式资产次序；GPU物理槽次序不决定场景身份。
@@ -357,6 +613,7 @@ fn open_actor_account_v2(input: &str) -> PyResult<String> {
             sim_system::scenario::PlatformMarketV1::try_new(market.market().clone(), market.assets().clone()))
             .collect::<Result<Vec<_>, _>>().map_err(error)?,
     };
+    let rule_context = rules.public_rule_context(scenario_artifact.markets[0].market().clone());
     let scenario = Arc::new(sim_system::scenario::SealedPlatformScenarioV1::decode_and_seal(
         &serde_json::to_vec(&scenario_artifact).map_err(error)?).map_err(error)?);
     let latency = sim_system::latency_profile::load_embedded_proxy_latency_profile().map_err(error)?;
@@ -394,6 +651,7 @@ fn open_actor_account_v2(input: &str) -> PyResult<String> {
     let opening = observation.opening_record().ok_or_else(||error("原SIM缺开户记录"))?;
     let read = shared.ledger().economic_read().ok_or_else(|| error("开户账本缺少经济读面"))?;
     let result = serde_json::to_string(&serde_json::json!({
+        "rule_context": rule_context, "maker_model": maker_model, "rule_path": rule_path, "rule_sha256": rule_sha256,
         "opening_record": opening.record(), "opening_position": opening.position(),
         "opening_context": opening.context(), "ledger_projection": read.base(),
         "session_sequences": execution.session_sequences().map_err(error)?,

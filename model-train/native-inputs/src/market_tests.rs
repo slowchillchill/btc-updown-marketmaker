@@ -341,6 +341,18 @@ fn binance_partial_update_retains_prices_without_inventing_level_time_or_history
         collector_region: "eu-west-1".into(),
         schema_version: "binance_depth_snapshot_v3".into(),
     };
+    let mut compact_core = core();
+    let missing = push(&mut compact_core, meta(0));
+    compact_core.set_observation_requirements(PublicObservationRequirementsV1 {
+        binance_depth_quantities: false,
+    });
+    let compact = push(
+        &mut compact_core,
+        record(
+            1,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot.clone())),
+        ),
+    );
     let a = push(
         &mut c,
         record(
@@ -348,6 +360,41 @@ fn binance_partial_update_retains_prices_without_inventing_level_time_or_history
             TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot)),
         ),
     );
+    assert!(missing.binance_depth.value.is_none());
+    assert!(matches!(
+        compact.binance_depth.value,
+        Some(BinanceDepthObservationV1::NotMaterialized)
+    ));
+    assert!(a.binance_depth.value.as_ref().unwrap().full().is_some());
+    assert_eq!(compact.binance_depth.quality, a.binance_depth.quality);
+    let projection = crate::exact::InputProjection::default();
+    let (full_values, full_books) = super::market::encode(
+        &projection,
+        &a,
+        &[0.; 30],
+        23000,
+        &mut MarketHistory::default(),
+    );
+    let (compact_values, compact_books) = super::market::encode(
+        &projection,
+        &compact,
+        &[0.; 30],
+        23000,
+        &mut MarketHistory::default(),
+    );
+    let (missing_values, _) = super::market::encode(
+        &projection,
+        &missing,
+        &[0.; 30],
+        23000,
+        &mut MarketHistory::default(),
+    );
+    // 省略数量仍是同一深度事件与来源；质量不会被读成缺失。
+    assert_eq!(&full_values[258..439], &compact_values[258..439]);
+    assert_eq!(&full_values[113..119], &compact_values[113..119]);
+    assert_ne!(&missing_values[113..119], &compact_values[113..119]);
+    assert!(full_books[4..].iter().all(|side| !side.is_empty()));
+    assert!(compact_books[4..].iter().all(|side| side.is_empty()));
     let update = BinanceDepthUpdateRow {
         timestamp_received: 22000,
         event_type: "depthUpdate".into(),

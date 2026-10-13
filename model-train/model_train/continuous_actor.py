@@ -33,7 +33,7 @@ class ActorModelQueue:
     timing返回显式有限逻辑calculation/dispatch，不使用GPU墙钟。
     sender_factory将本任务已经绑定的评估/版本接原FrozenActorSend。
     """
-    def __init__(self,hidden,identities,initial_completed_at,policy_at_start,timing,sender_factory,*,row_roots=None,market_ends=None,release_markets=None,request_identities=None,on_started=None,on_completed=None):
+    def __init__(self,hidden,identities,initial_completed_at,policy_at_start,timing,sender_factory,*,row_roots=None,market_ends=None,release_markets=None,request_identities=None,on_started=None,on_completed=None,trading_until=None,goal_until=None):
         self.hidden=hidden.clone();self.identities=identities.clone()
         self.last_completed_at=initial_completed_at.clone()
         self.policy_at_start=policy_at_start;self.timing=timing;self.sender_factory=sender_factory
@@ -43,6 +43,11 @@ class ActorModelQueue:
         self.request_identities=request_identities
         self.on_started=on_started;self.on_completed=on_completed
         self.input_owner=None
+        self.trading_until=trading_until
+        self.goal_until=goal_until
+        self.start_paused=torch.zeros_like(initial_completed_at,dtype=torch.bool)
+        self.learning_consumer=None
+        self.start_frontier=None
 
     def bind_inputs(self, owner):
         self.input_owner=owner
@@ -78,18 +83,53 @@ class ActorModelQueue:
         self.tasks.append(FrozenActorTask(observation,accepted.clone(),torch.zeros_like(active,dtype=torch.int64),
             calculation.clone(),dispatch.clone(),request_identity=identity))
 
+    def _start_floor(self):
+        # 只读原时钟已提交前沿；不改真实完成时刻或旧发送时刻。
+        return self.last_completed_at if self.start_frontier is None else torch.maximum(
+            self.last_completed_at,self.start_frontier())
+
+    def eligible_starts(self):
+        """只读FIFO开始计划；前序真实计算时长参与下一项截止资格。"""
+        available=self._start_floor().clone()
+        for task in self.tasks:
+            if task.completed_at is not None:
+                available=torch.where(task.active&(task.stage==1),
+                    torch.maximum(available,task.completed_at),available)
+        plan=[]
+        for task in self.tasks:
+            cutoff=task.observation.account.cutoff if task.observation.root_cutoffs is None else task.observation.root_cutoffs
+            at=torch.maximum(cutoff,available)
+            active=task.active&(task.stage==0)
+            if self.trading_until is not None:active &= at<self.trading_until
+            if bool(active.any().cpu()):
+                plan.append((task,active,at))
+                available=torch.where(active,at+task.calculation_duration,available)
+        return plan
+
+    def retire_unstartable(self):
+        floor=self._start_floor()
+        # 下界随真实完成及原公开前沿前进；已不可能在截止前开始的根不保留冻结。
+        if self.trading_until is not None:
+            for task in self.tasks:
+                cutoff=task.observation.account.cutoff if task.observation.root_cutoffs is None else task.observation.root_cutoffs
+                expired=task.active&(task.stage==0)&(torch.maximum(cutoff,floor)>=self.trading_until)
+                task.stage=torch.where(expired,3,task.stage)
+            self._retire_completed()
+
     def next_event(self):
+        self.retire_unstartable()
+        floor=self._start_floor()
         at=torch.full_like(self.last_completed_at,torch.iinfo(torch.int64).max)
         kind=torch.zeros_like(at);task_index=torch.full_like(at,-1);present=torch.zeros_like(at,dtype=torch.bool)
         running=torch.zeros_like(present)
         for task in self.tasks:running |= task.active&(task.stage==1)
         for index,task in enumerate(self.tasks):
             row=task.observation.account
-            waiting=task.active&(task.stage==0)&~running
+            waiting=task.active&(task.stage==0)&~running&~self.start_paused
             completing=task.active&(task.stage==1)
             sending=task.active&(task.stage==2)
             cutoff=row.cutoff if task.observation.root_cutoffs is None else task.observation.root_cutoffs
-            candidate=torch.maximum(cutoff,self.last_completed_at)
+            candidate=torch.maximum(cutoff,floor)
             if task.completed_at is not None:candidate=torch.where(completing,task.completed_at,candidate)
             if task.send_at is not None:candidate=torch.where(sending,task.send_at,candidate)
             k=torch.where(completing,2,torch.where(sending,3,1))
@@ -110,16 +150,20 @@ class ActorModelQueue:
             from .frozen_inputs import FrozenPolicyEvaluation
             frozen=task.observation.frozen;rows=self._task_rows(task.observation);positions=self._hot_rows(task.observation)
             state=torch.zeros((len(rows),self.hidden.size(2)),device=self.hidden.device)
-            value=torch.zeros(len(rows),device=self.hidden.device)
+            value=None if self.goal_until is None else torch.zeros(len(rows),device=self.hidden.device)
             next_hidden=self.hidden[:,positions].clone();row_fault=torch.zeros_like(rows,dtype=torch.int32)
             row_ready=torch.ones_like(rows,dtype=torch.bool)
             # 独立市场批量递推；ContextOnly批先于DecisionRequired批。
             for role in (0,1):
                 indices=torch.nonzero(active[rows]&(frozen.role==role)).flatten()
                 if not indices.numel():continue
+                from .gpu_policy import finite_value_context
+                context=None if self.goal_until is None else finite_value_context(frozen.cutoff[indices],
+                    self.goal_until[rows[indices]],self.trading_until[rows[indices]])
                 with torch.no_grad():part=policy.frozen_state_and_value(frozen.rows(indices),
-                    self.hidden[:,positions[indices]],frozen.identities[indices],version[rows[indices]])
-                state[indices]=part.state;value[indices]=part.value;next_hidden[:,indices]=part.hidden
+                    self.hidden[:,positions[indices]],frozen.identities[indices],version[rows[indices]],value_context=context)
+                state[indices]=part.state;next_hidden[:,indices]=part.hidden
+                if value is not None:value[indices]=part.value
                 row_fault[indices]=part.fault;row_ready[indices]=part.ready
             evaluation=FrozenPolicyEvaluation(state,value,next_hidden,version[rows].clone(),row_ready,row_fault)
             failure=torch.zeros_like(active,dtype=torch.int32).scatter_reduce(0,rows,
@@ -133,6 +177,8 @@ class ActorModelQueue:
                 request_identity=task.request_identity)
             if bool(accepted.any().cpu()):
                 self.tasks.append(started)
+                if self.learning_consumer is not None:
+                    self.learning_consumer.started(started,self.hidden[:,positions].clone())
                 if self.on_started is not None:self.on_started(started)
             task.stage=torch.where(accepted,3,task.stage)
         self._retire_completed()
@@ -156,6 +202,8 @@ class ActorModelQueue:
                     inactive=publication.action.family<1
                     task.sender.complete |= accepted&inactive
                     actionable &= ~inactive
+            if self.learning_consumer is not None and bool(accepted.any().cpu()):
+                self.learning_consumer.published(task,accepted)
             positions=self._hot_rows(observation)
             selected=torch.nonzero(accepted[rows]).flatten()
             self.hidden[:,positions[selected]]=task.evaluation.hidden[:,selected]
@@ -202,7 +250,7 @@ class ActorModelQueue:
     def make_sender(self, task):
         observation=task.observation.actor_view();indices=task.observation.decision_rows
         evaluation=replace(task.evaluation,state=task.evaluation.state[indices],
-            value=task.evaluation.value[indices],hidden=task.evaluation.hidden[:,indices],
+            value=None if task.evaluation.value is None else task.evaluation.value[indices],hidden=task.evaluation.hidden[:,indices],
             policy_version=task.evaluation.policy_version[indices],ready=task.evaluation.ready[indices],
             fault=task.evaluation.fault[indices])
         return self.sender_factory(replace(task,observation=observation,evaluation=evaluation))

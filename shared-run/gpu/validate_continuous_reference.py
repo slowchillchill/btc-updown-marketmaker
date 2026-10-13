@@ -15,9 +15,14 @@ from validate_pending_post import original_semantic,run,units,BALANCES
 def integer(column,index=0):return column['integer'][index]
 
 
-def check(actual,source,requests):
+def check(actual,source,requests,initial=None,authority=None,catalog=None):
     started=time.perf_counter()
     extension=source['continuation'];stages=extension['stages']
+    if extension.get('goal'):
+        assert initial==source['initial_actual_request']
+        assert initial['sent_at']==source['sent_at'] and initial['input_sequence']==source['input_sequence']
+        assert initial['body']['request']['context']['global_request_id']==source['request_id']
+        assert initial['body']['request']['items']==source['posts']
     assert len(stages)==len(requests)
     post=actual['post_results'];seen_posts=set();seen_cancels=set()
     for request,stage in zip(requests,stages,strict=True):
@@ -95,19 +100,42 @@ def check(actual,source,requests):
         assert row['private']==metadata['private_feedback_sequence']
         assert row['received']==metadata['response_received_at_utc_ms' if kind=='DirectResponse' else 'feedback_received_at_utc_ms']
         if count%4==0 or count==len(actual['noe']):print(json.dumps(dict(stage='independent_noe',processed=count,total=len(actual['noe']),elapsed_seconds=time.perf_counter()-started)),flush=True)
-    ledger=stages[-1]['ledger'];projection=ledger['projection'];got=actual['ledger']
-    assert got['entry']==[projection['ledger_entry_seq']] and got['local']==[projection['ledger_local_prefix']]
+    ledger=extension['goal']['ledger'] if extension.get('goal') else stages[-1]['ledger'];projection=ledger['projection'];got=actual['ledger']
+    if extension.get('goal'):
+        # 真实冷消费路径不同；比较各自首次预留前基线之后的提交数，不从最终差额反推偏移。
+        gpu_initial=authority['ledger_projection'];cpu_initial=source['opening_ledger']['projection']
+        assert gpu_initial['account_instance_key']==cpu_initial['account_instance_key']
+        for field in ('ledger_local_prefix','platform_source_prefix'):
+            assert gpu_initial[field]==cpu_initial[field]
+        assert got['entry'][0]-gpu_initial['ledger_entry_seq']==projection['ledger_entry_seq']-cpu_initial['ledger_entry_seq']
+        # GPU实际目录与CPU正式消费的InitialMarket需表达同一市场、窗口和token/outcome。
+        initialized=[r['record']['Evidence']['evidence']['InitialMarket']['result']
+            for r in source['cold_directory_records_consumed'] if 'Evidence' in r['record'] and
+            'InitialMarket' in r['record']['Evidence']['evidence']]
+        expected=[dict(market=market,assets=[catalog['assets'][asset] for owner,asset,outcome in catalog['market_assets']
+            if owner==index]) for index,market in enumerate(catalog['markets'])]
+        assert initialized==expected,(initialized,expected)
+    else:
+        assert got['entry']==[projection['ledger_entry_seq']]
+    assert got['local']==[projection['ledger_local_prefix']]
     assert got['platform_prefix']==[projection['platform_source_prefix']]
     assert list(map(Fraction,got['balances']))==[Fraction(projection['platform_confirmed_projection'][name]) for name in BALANCES]
     for field,key in (('actual_available','actual_available_pusd'),('maker_available','maker_available_pusd'),
         ('actual_reserved','actual_reserved_pusd'),('maker_reserved','maker_reserved_pusd')):
         assert list(map(Fraction,got['funds'][field]))==[Fraction(ledger['cash'][key])],(field,got['funds'][field],ledger['cash'][key])
     return dict(passed=True,scope='original CPU actual emitted requests→results/NOE/Ledger posterior; no device event driving',
-        requests=len(requests),post_items=len(seen_posts),cancel_targets=len(seen_cancels),noe=len(original_records),elapsed_seconds=time.perf_counter()-started)
+        complete_finite_goal=extension['goal']['cutoff'] if extension.get('goal') else None,
+        entry_baselines=dict(gpu=gpu_initial['ledger_entry_seq'],cpu=cpu_initial['ledger_entry_seq'],
+            gpu_final=got['entry'][0],cpu_final=projection['ledger_entry_seq']) if extension.get('goal') else None,requests=len(requests),post_items=len(seen_posts),cancel_targets=len(seen_cancels),noe=len(original_records),elapsed_seconds=time.perf_counter()-started)
 
 
 if __name__=='__main__':
     actual_path,source_path=map(Path,sys.argv[1:])
-    report=check(json.loads(actual_path.read_text()),json.loads(source_path.read_text()),
-        json.loads((actual_path.parent/'actual-continuous-requests.json').read_text()))
+    initial_path=actual_path.parent/'actual-continuous-initial-request.json'
+    initial=json.loads(initial_path.read_text()) if initial_path.exists() else None
+    source=json.loads(source_path.read_text());finite=bool(source['continuation'].get('goal'))
+    authority=json.loads((actual_path.parent/'cold-authority.json').read_text()) if finite else None
+    catalog=json.loads((actual_path.parent/'public-page/manifest.json').read_text())['catalog'] if finite else None
+    report=check(json.loads(actual_path.read_text()),source,
+        json.loads((actual_path.parent/'actual-continuous-requests.json').read_text()),initial,authority,catalog)
     print(json.dumps(report),flush=True)

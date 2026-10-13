@@ -35,7 +35,7 @@ def install_actor_sources(public,hidden,runtime,condition_ids,*,page_groups=256,
     hidden_conditions=torch.tensor([conditions[condition] for condition,_ in scene],device=device)
     market_indices=torch.tensor([public_markets[condition] for condition in condition_ids],device=device)
     runtime=replace(runtime,
-        hidden=Numbers.run_exact_batch(lambda:block.empty_state(segment_capacity=runtime.hidden.queues.capacity)),
+        hidden=Numbers.run_exact_batch(lambda:block.empty_state(segment_capacity=runtime.hidden.queues.capacity,maker_model=runtime.hidden.maker_model)),
         hidden_frontier=HiddenBucketFrontier.open(HiddenBucketColumns.from_block(block),runtime.orders.roots))
     runtime=runtime.install_hidden_market_controls()
     return ActorSources(runtime,source,states,block,market_indices,hidden_conditions[block.asset_markets])

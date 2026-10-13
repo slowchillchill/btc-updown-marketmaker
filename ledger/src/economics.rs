@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 type R = EconomicRational;
+#[path = "economics/read_index.rs"]
+mod read_index;
+use read_index::EconomicReadIndex;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Pool {
     pub quantity: Decimal,
@@ -45,6 +48,8 @@ pub(crate) struct Market {
     // 只读成本解释的原成交贡献；旧持久补丁无此索引时保留未知，不猜测历史次序。
     #[serde(default)]
     pub pool_contribution_shares: Option<[BTreeMap<Identity, R>; 2]>,
+    #[serde(default)]
+    pub orphan_fee: Option<[R; 2]>,
     pub success_quantity: [Decimal; 2],
     pub success_cost: [R; 2],
     pub executed_quantity: [Decimal; 2],
@@ -65,6 +70,8 @@ pub(crate) struct RebateDay {
     pub contributions: Vec<(Identity, RebateContributionFactV1<Identity>)>,
     pub result: Option<(Identity, RebateDayResultV1<Identity>)>,
     pub paid: Decimal,
+    #[serde(default)]
+    pub contribution_totals: Option<BTreeMap<String, R>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Cost {
@@ -80,7 +87,7 @@ pub(crate) struct CashAttribution {
     pub unpaid_taker: Decimal,
     pub unpaid_settlement: Decimal,
 }
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub(crate) struct EconomicsState {
     pub external_cash: BTreeMap<Identity, bool>,
     pub cash: CashAttribution,
@@ -90,6 +97,22 @@ pub(crate) struct EconomicsState {
     pub costs: BTreeMap<Identity, Cost>,
     // 经济效果可能先于首次 trade 详情公开；只保留尚待关联的原身份。
     pub unapportioned_trades: BTreeMap<Identity, (bool, Decimal)>,
+    #[serde(default)]
+    read_index: Option<EconomicReadIndex>,
+}
+impl Default for EconomicsState {
+    fn default() -> Self {
+        Self {
+            external_cash: Default::default(),
+            cash: Default::default(),
+            markets: Default::default(),
+            trades: Default::default(),
+            days: Default::default(),
+            costs: Default::default(),
+            unapportioned_trades: Default::default(),
+            read_index: Some(EconomicReadIndex::default()),
+        }
+    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct EconomicsPatch {
@@ -193,12 +216,16 @@ impl Market {
             && self.success_quantity.iter().all(Decimal::is_zero)
         {
             self.pool_contribution_shares = Some(std::array::from_fn(|_| BTreeMap::new()));
+            self.orphan_fee = Some(std::array::from_fn(|_| R::zero()));
         }
         if let Some(contributions) = &mut self.pool_contribution_shares {
             contributions[leg].insert(trade.fact.trade_identity.clone(), R::from_decimal(q));
         }
         self.success_quantity[leg] = add(self.success_quantity[leg], q)?;
         self.success_cost[leg] = self.success_cost[leg].add(&c);
+        if let Some(fees) = &mut self.orphan_fee {
+            fees[leg] = fees[leg].add(&R::from_decimal(trade.net_fee));
+        }
         let pool = &mut self.pools[leg];
         pool.quantity = add(pool.quantity, q)?;
         pool.cost = pool.cost.add(&c);
@@ -220,6 +247,12 @@ impl Market {
                     });
                 }
                 self.paired_cost[i] = self.paired_cost[i].add(&cost);
+                if let Some(fees) = &mut self.orphan_fee {
+                    fees[i] = fees[i].mul(
+                        &R::from_decimal(self.pools[i].quantity - quantity)
+                            .divided_by(&R::from_decimal(self.pools[i].quantity)),
+                    );
+                }
                 self.pools[i].quantity -= quantity;
                 self.pools[i].cost = self.pools[i].cost.sub(&cost);
             }
@@ -230,6 +263,13 @@ impl Market {
 impl EconomicsState {
     // 原结算读取与 Auto 归属共用本地已应用的经济前驱；平台发生与反馈可见分别推进。
     fn economic_predecessors_closed(&self, condition: &str) -> bool {
+        if let Some(index) = &self.read_index {
+            return self
+                .markets
+                .get(condition)
+                .is_some_and(|m| m.maker_accrual_finalized)
+                && index.markets.get(condition).is_none_or(|m| m.unclosed == 0);
+        }
         self.markets
             .get(condition)
             .is_some_and(|market| market.maker_accrual_finalized)
@@ -894,12 +934,47 @@ impl EconomicsState {
         Ok(())
     }
     pub(crate) fn commit(&mut self, patch: EconomicsPatch) {
+        let mut index = self
+            .read_index
+            .take()
+            .unwrap_or_else(|| EconomicReadIndex::from_state(self));
+        for (id, trade) in &patch.trades {
+            index.replace_trade(id, self.trades.get(id), Some(trade));
+        }
         if let Some(cash) = patch.cash {
             self.cash = cash;
         }
         self.external_cash.extend(patch.external_cash);
         self.markets.extend(patch.markets);
-        self.trades.extend(patch.trades);
+        for (id, trade) in patch.trades {
+            // 已配对后的费调整只按该原成交尚余贡献归属，不重扫所有成交。
+            if let Some(old) = self.trades.get(&id)
+                && old.success_applied
+                && trade.success_applied
+                && old.net_fee != trade.net_fee
+                && let Some(market) = self.markets.get_mut(&trade.fact.condition_id.0)
+                && let (Some(assets), Some(pools), Some(fees)) = (
+                    &market.assets,
+                    &market.pool_contribution_shares,
+                    &mut market.orphan_fee,
+                )
+                && let Some(leg) = assets
+                    .iter()
+                    .position(|a| a.token_id == trade.fact.token_id)
+                && let Some(q) = pools[leg].get(&id)
+            {
+                let quantity =
+                    R::from_decimal(decimal(&trade.fact.base_quantity_shares).expect("原份额"));
+                if !quantity.is_zero() {
+                    fees[leg] = fees[leg].add(
+                        &R::from_decimal(trade.net_fee - old.net_fee)
+                            .mul(q)
+                            .divided_by(&quantity),
+                    );
+                }
+            }
+            self.trades.insert(id, trade);
+        }
         for (key, update) in patch.day_updates {
             let day = self.days.entry(key).or_insert_with(|| RebateDay {
                 kind: key.0,
@@ -907,14 +982,50 @@ impl EconomicsState {
                 contributions: Vec::new(),
                 result: None,
                 paid: Decimal::ZERO,
+                contribution_totals: Some(BTreeMap::new()),
             });
             match update {
-                RebateDayUpdate::Contributions { additions } => day.contributions.extend(additions),
+                RebateDayUpdate::Contributions { additions } => {
+                    let totals = day.contribution_totals.get_or_insert_with(|| {
+                        day.contributions
+                            .iter()
+                            .fold(BTreeMap::new(), |mut sums, (_, c)| {
+                                let sum =
+                                    sums.entry(c.condition_id.0.clone()).or_insert_with(R::zero);
+                                *sum = sum.add(&R::from_decimal(
+                                    decimal(&c.contribution_pusd).expect("原贡献"),
+                                ));
+                                sums
+                            })
+                    });
+                    for (_, c) in &additions {
+                        let sum = totals
+                            .entry(c.condition_id.0.clone())
+                            .or_insert_with(R::zero);
+                        *sum = sum.add(&R::from_decimal(
+                            decimal(&c.contribution_pusd).expect("原贡献"),
+                        ));
+                        index.mark_contributed(
+                            &c.trade_identity,
+                            self.trades.get(&c.trade_identity),
+                        );
+                    }
+                    day.contributions.extend(additions);
+                }
                 RebateDayUpdate::Finalized { result } => day.result = Some(result),
                 RebateDayUpdate::Paid { paid } => day.paid = paid,
-                RebateDayUpdate::Existing(previous) => *day = previous,
+                RebateDayUpdate::Existing(previous) => {
+                    for (_, c) in &previous.contributions {
+                        index.mark_contributed(
+                            &c.trade_identity,
+                            self.trades.get(&c.trade_identity),
+                        );
+                    }
+                    *day = previous;
+                }
             }
         }
+        self.read_index = Some(index);
         self.costs.extend(patch.costs);
         for (identity, value) in patch.unapportioned_trades {
             if let Some(value) = value {
@@ -1018,6 +1129,8 @@ pub struct MarketEconomicTotalsReadV1 {
     pub confirmed_net_loss_pusd: ExactRationalV1,
     pub maximum_confirmed_net_loss_pusd: ExactRationalV1,
     pub unresolved_orphan_principal_cost_pusd: ExactRationalV1,
+    pub unpaired_success_fee_pusd: ExecutionReadValueV1<ExactRationalV1>,
+    pub successful_investment_pusd: ExactRationalV1,
 }
 pub struct LedgerEconomicReadV1<'a> {
     base: crate::projection::LedgerProjectionV2,
@@ -1065,6 +1178,66 @@ impl LedgerWriterV1 {
     }
 }
 impl LedgerEconomicReadV1<'_> {
+    /// 原经济已应用但尚未归还的本金；不含预留，不生成现金或费用分录。
+    pub fn committed_principal_pusd(&self) -> ExactRationalV1 {
+        if let Some(index) = &self.state.read_index {
+            let mut principal = R::zero();
+            for (condition, m) in &self.state.markets {
+                if !m.resolution.as_ref().is_some_and(|r| {
+                    r.redeemed_pair > Decimal::ZERO
+                        || r.redeemed_orphan.iter().any(|q| *q > Decimal::ZERO)
+                }) {
+                    principal = principal.add(&m.success_cost[0]).add(&m.success_cost[1]);
+                }
+                if let Some(totals) = index.markets.get(condition) {
+                    principal = principal.add(&totals.pending_principal);
+                }
+            }
+            return principal.public();
+        }
+        let mut principal = R::zero();
+        for trade in self.successful_trades() {
+            principal =
+                principal.add(&R::try_from(&trade.remaining_principal_cost_pusd).expect("原成本"));
+        }
+        for trade in self
+            .trades()
+            .filter(|t| t.economic_applied && !t.success_applied)
+        {
+            principal = principal.add(&R::from_decimal(
+                decimal(&trade.fact.quote_amount_pusd).expect("原本金"),
+            ));
+        }
+        principal.public()
+    }
+    fn unpaired_fee(
+        &self,
+        condition: &str,
+        market: &Market,
+    ) -> ExecutionReadValueV1<ExactRationalV1> {
+        if let Some(fees) = &market.orphan_fee {
+            return ExecutionReadValueV1::Known(fees[0].add(&fees[1]).public());
+        }
+        // 旧稀疏补丁没有此字段，沿原实际贡献读取，不伪造为零。
+        let mut fee = R::zero();
+        for trade in self.trades().filter(|t| {
+            t.fact.condition_id.0 == condition && t.success_applied && t.economic_applied
+        }) {
+            let ExecutionReadValueV1::Known(q) = trade.unpaired_contribution_shares else {
+                return ExecutionReadValueV1::Unavailable;
+            };
+            let original =
+                R::from_decimal(decimal(&trade.fact.base_quantity_shares).expect("原份额"));
+            if !original.is_zero() {
+                fee = fee.add(
+                    &R::from_decimal(decimal(&trade.actual_net_fee_pusd).expect("原费用"))
+                        .mul(&R::try_from(&q).expect("原贡献"))
+                        .divided_by(&original),
+                );
+            }
+        }
+        ExecutionReadValueV1::Known(fee.public())
+    }
     pub fn base(&self) -> &crate::projection::LedgerProjectionV2 {
         &self.base
     }
@@ -1145,16 +1318,20 @@ impl LedgerEconomicReadV1<'_> {
     }
     pub fn rebate_days(&self) -> impl Iterator<Item = RebateDayReadV1<'_>> {
         let mut keys: std::collections::BTreeSet<_> = self.state.days.keys().copied().collect();
-        keys.extend(self.state.trades.values().map(|t| {
-            (
-                if role(t.fact.liquidity_role) == 0 {
-                    RebateKindV1::Maker
-                } else {
-                    RebateKindV1::Taker
-                },
-                t.fact.matched_at_utc_ms.div_euclid(86_400_000) * 86_400_000,
-            )
-        }));
+        if let Some(index) = &self.state.read_index {
+            keys.extend(index.estimates.keys().copied());
+        } else {
+            keys.extend(self.state.trades.values().map(|t| {
+                (
+                    if role(t.fact.liquidity_role) == 0 {
+                        RebateKindV1::Maker
+                    } else {
+                        RebateKindV1::Taker
+                    },
+                    t.fact.matched_at_utc_ms.div_euclid(86_400_000) * 86_400_000,
+                )
+            }));
+        }
         keys.into_iter().map(|(kind, day)| {
             let stored = self.state.days.get(&(kind, day));
             let amounts = RebateAmountsReadV1::from_amounts(
@@ -1178,6 +1355,9 @@ impl LedgerEconomicReadV1<'_> {
         condition: Option<&str>,
         day: Option<i64>,
     ) -> ExecutionReadValueV1<ExactRationalV1> {
+        if let Some(index) = &self.state.read_index {
+            return index.estimated(kind, condition, day);
+        }
         let r = if kind == RebateKindV1::Maker { 0 } else { 1 };
         let mut estimated = R::zero();
         for (id, trade) in self.state.trades.iter().filter(|(_, t)| {
@@ -1263,17 +1443,28 @@ impl LedgerEconomicReadV1<'_> {
             // 修复缺口只看已公开终局实际份额；经济成功池仍沿原入账条件更新。
             let mut final_success_quantity = [Decimal::ZERO; 2];
             if let Some(assets) = &m.assets {
-                for trade in self.state.trades.values().filter(|t| {
-                    t.fact.condition_id.0 == *condition
-                        && t.fact.economic_disposition
-                            == SourceNeutralTradeEconomicDispositionV1::FinalSuccess
-                }) {
-                    if let Some(i) = assets
-                        .iter()
-                        .position(|a| a.token_id == trade.fact.token_id)
-                    {
-                        final_success_quantity[i] +=
-                            decimal(&trade.fact.base_quantity_shares).expect("原真实成交份额");
+                if let Some(index) = &self.state.read_index {
+                    if let Some(totals) = index.markets.get(condition) {
+                        final_success_quantity = std::array::from_fn(|i| {
+                            *totals
+                                .final_success
+                                .get(&assets[i].token_id.0)
+                                .unwrap_or(&Decimal::ZERO)
+                        });
+                    }
+                } else {
+                    for trade in self.state.trades.values().filter(|t| {
+                        t.fact.condition_id.0 == *condition
+                            && t.fact.economic_disposition
+                                == SourceNeutralTradeEconomicDispositionV1::FinalSuccess
+                    }) {
+                        if let Some(i) = assets
+                            .iter()
+                            .position(|a| a.token_id == trade.fact.token_id)
+                        {
+                            final_success_quantity[i] +=
+                                decimal(&trade.fact.base_quantity_shares).expect("原真实成交份额");
+                        }
                     }
                 }
             }
@@ -1348,6 +1539,30 @@ impl LedgerEconomicReadV1<'_> {
                 confirmed_net_pnl_pusd: m.pi.public(),
                 confirmed_net_loss_pusd: R::zero().sub(&m.pi).max(R::zero()).public(),
                 maximum_confirmed_net_loss_pusd: m.maximum_loss.public(),
+                unpaired_success_fee_pusd: self.unpaired_fee(condition, m),
+                successful_investment_pusd: if let Some(index) = &self.state.read_index {
+                    index
+                        .markets
+                        .get(condition)
+                        .map_or_else(R::zero, |t| t.investment.clone())
+                        .public()
+                } else {
+                    self.state
+                        .trades
+                        .values()
+                        .filter(|t| {
+                            t.fact.condition_id.0 == *condition
+                                && t.success_applied
+                                && t.economic_applied
+                        })
+                        .fold(R::zero(), |sum, t| {
+                            sum.add(&R::from_decimal(
+                                decimal(&t.fact.quote_amount_pusd).expect("原本金"),
+                            ))
+                            .add(&R::from_decimal(t.net_fee))
+                        })
+                        .public()
+                },
                 unresolved_orphan_principal_cost_pusd: if m.resolution.is_some() {
                     R::zero().public()
                 } else {
@@ -1389,15 +1604,21 @@ impl RebateAmountsReadV1 {
 }
 impl RebateDay {
     fn amounts(&self, condition: Option<&str>) -> [R; 5] {
-        let contribution = self
-            .contributions
-            .iter()
-            .filter(|(_, c)| condition.is_none_or(|m| m == c.condition_id.0))
-            .fold(R::zero(), |sum, (_, c)| {
-                sum.add(&R::from_decimal(
-                    decimal(&c.contribution_pusd).expect("已验证贡献"),
-                ))
-            });
+        let contribution = if let Some(totals) = &self.contribution_totals {
+            condition.map_or_else(
+                || totals.values().fold(R::zero(), |sum, value| sum.add(value)),
+                |c| totals.get(c).cloned().unwrap_or_else(R::zero),
+            )
+        } else {
+            self.contributions
+                .iter()
+                .filter(|(_, c)| condition.is_none_or(|m| m == c.condition_id.0))
+                .fold(R::zero(), |sum, (_, c)| {
+                    sum.add(&R::from_decimal(
+                        decimal(&c.contribution_pusd).expect("已验证贡献"),
+                    ))
+                })
+        };
         let mut amounts = std::array::from_fn(|_| R::zero());
         if let Some((_, result)) = &self.result {
             let accrued = decimal(&result.accrued_pusd).expect("已验证日累计");
@@ -1428,6 +1649,34 @@ impl RebateDay {
 #[cfg(test)]
 mod rational_tests {
     use super::*;
+
+    #[test]
+    fn exact_zero_identities_keep_normalized_nonterminating_values_and_reject_zero_divisor() {
+        let zero = EconomicRational::ratio(0.into(), (-7).into());
+        assert_eq!(
+            zero.public(),
+            ExactRationalV1 {
+                numerator: "0".into(),
+                denominator: "1".into()
+            }
+        );
+        for (n, d, expected_n, expected_d) in
+            [(2, 3, "2", "3"), (-7, 3, "-7", "3"), (7, -3, "-7", "3")]
+        {
+            let value = EconomicRational::ratio(n.into(), d.into());
+            let expected = ExactRationalV1 {
+                numerator: expected_n.into(),
+                denominator: expected_d.into(),
+            };
+            assert_eq!(value.add(&zero).public(), expected);
+            assert_eq!(zero.add(&value).public(), expected);
+            assert_eq!(value.sub(&zero), value);
+            assert_eq!(value.mul(&zero), zero);
+            assert_eq!(zero.divided_by(&value), zero);
+        }
+        assert!(std::panic::catch_unwind(|| EconomicRational::ratio(0.into(), 0.into())).is_err());
+        assert!(std::panic::catch_unwind(|| zero.divided_by(&zero)).is_err());
+    }
 
     #[test]
     fn integer_ratios_normalize_for_arithmetic_and_persistence() {

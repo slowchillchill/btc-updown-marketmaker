@@ -21,6 +21,38 @@ use sha2::{Digest, Sha256};
 use shared_run::*;
 use std::{path::Path, sync::Arc, time::Instant};
 
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+struct CallbackSamples {
+    count: u64,
+    total_ns: u128,
+    max_ns: u128,
+}
+impl CallbackSamples {
+    fn record(&mut self, elapsed: std::time::Duration) {
+        self.count += 1;
+        let ns = elapsed.as_nanos();
+        self.total_ns += ns;
+        self.max_ns = self.max_ns.max(ns);
+    }
+}
+#[derive(serde::Serialize)]
+struct DecideSample {
+    started_at_utc_ms: i64,
+    elapsed_ns: u128,
+    outcome: &'static str,
+}
+#[derive(serde::Serialize)]
+struct TraceSummary {
+    decisions: Vec<(i64, ComplementaryPairDiagnosticV1, Vec<String>)>,
+    sent: Vec<(i64, String)>,
+    invalidated: usize,
+    invalidated_at: Vec<(i64, i64)>,
+    pure_decide: CallbackSamples,
+    decide_samples: Vec<DecideSample>,
+    public_qualification: CallbackSamples,
+    full_qualification: CallbackSamples,
+    next_health_evaluation: CallbackSamples,
+}
 // 只观测真实策略，所有业务决定、期限、资格和通知仍委托同一实现。
 struct Trace {
     checkpoint_capture: Option<(std::path::PathBuf, std::path::PathBuf)>,
@@ -28,27 +60,53 @@ struct Trace {
     decisions: Vec<(i64, ComplementaryPairDiagnosticV1, Vec<String>)>,
     sent: Vec<(i64, String)>,
     invalidated: usize,
-    qualify_ns: u128,
-    deadline_ns: std::cell::Cell<u128>,
+    pure_decide: CallbackSamples,
+    decide_samples: Vec<DecideSample>,
+    public_qualification: std::cell::Cell<CallbackSamples>,
+    full_qualification: CallbackSamples,
+    next_health_evaluation: std::cell::Cell<CallbackSamples>,
+    invalidated_at: Vec<(i64, i64)>,
+    summary_sink: Option<Arc<std::sync::Mutex<Option<TraceSummary>>>>,
     qualified_at: std::collections::BTreeMap<String, i64>,
     qualification_invalidations: Vec<(i64, i64)>,
 }
 impl StrategyV1 for Trace {
     type Error = StrategyErrorV1;
     type Diagnostics = ComplementaryPairDiagnosticV1;
+    fn requires_trade_economics_details(&self) -> bool {
+        self.strategy.requires_trade_economics_details()
+    }
+    fn observation_requirements(&self) -> PublicObservationRequirementsV1 {
+        self.strategy.observation_requirements()
+    }
     fn uses_source_health(&self) -> bool {
         self.strategy.uses_source_health()
     }
     fn next_health_evaluation_at(
         &self,
-        input: &StrategyCurrentReadV1<'_>,
+        input: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
         c: Option<&StrategyCalculationV1<Self::Diagnostics>>,
         at: i64,
     ) -> Option<i64> {
         let started = Instant::now();
         let result = self.strategy.next_health_evaluation_at(input, c, at);
-        self.deadline_ns
-            .set(self.deadline_ns.get() + started.elapsed().as_nanos());
+        let mut samples = self.next_health_evaluation.get();
+        samples.record(started.elapsed());
+        self.next_health_evaluation.set(samples);
+        result
+    }
+    fn qualify_intent_public(
+        &self,
+        group: &ClosedBusinessGroupV1,
+        c: &StrategyCalculationV1<Self::Diagnostics>,
+        index: usize,
+        at: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        let started = Instant::now();
+        let result = self.strategy.qualify_intent_public(group, c, index, at);
+        let mut samples = self.public_qualification.get();
+        samples.record(started.elapsed());
+        self.public_qualification.set(samples);
         result
     }
     fn qualify_intent(
@@ -60,7 +118,7 @@ impl StrategyV1 for Trace {
     ) -> Result<IntentQualificationV1, Self::Error> {
         let start = Instant::now();
         let result = self.strategy.qualify_intent(input, c, index, at);
-        self.qualify_ns += start.elapsed().as_nanos();
+        self.full_qualification.record(start.elapsed());
         if matches!(result, Ok(IntentQualificationV1::Invalidated(_))) {
             self.qualification_invalidations
                 .push((c.calculation_started_at_utc_ms, at));
@@ -78,7 +136,22 @@ impl StrategyV1 for Trace {
         input: &StrategyInputV1,
         at: i64,
     ) -> Result<StrategyOutputV1<Self::Diagnostics>, Self::Error> {
-        let result = self.strategy.decide(input, at)?;
+        let started = Instant::now();
+        let result = self.strategy.decide(input, at);
+        let elapsed = started.elapsed();
+        self.pure_decide.record(elapsed);
+        let outcome = match &result {
+            Ok(StrategyOutputV1::Continue { intents, .. }) if intents.is_empty() => "NoTrade",
+            Ok(StrategyOutputV1::Continue { .. }) => "Actions",
+            Ok(StrategyOutputV1::Exit { .. }) => "Exit",
+            Err(_) => "Error",
+        };
+        self.decide_samples.push(DecideSample {
+            started_at_utc_ms: at,
+            elapsed_ns: elapsed.as_nanos(),
+            outcome,
+        });
+        let result = result?;
         if let StrategyOutputV1::Continue {
             diagnostics,
             intents,
@@ -176,8 +249,108 @@ impl StrategyV1 for Trace {
             result.reason.reason_code
         );
         self.invalidated += 1;
+        self.invalidated_at
+            .push((c.calculation_started_at_utc_ms, result.detected_at_utc_ms));
         self.strategy.invalidated(c, result);
     }
+}
+impl Drop for Trace {
+    fn drop(&mut self) {
+        if let Some(sink) = &self.summary_sink {
+            *sink.lock().unwrap() = Some(TraceSummary {
+                decisions: std::mem::take(&mut self.decisions),
+                sent: std::mem::take(&mut self.sent),
+                invalidated: self.invalidated,
+                invalidated_at: std::mem::take(&mut self.invalidated_at),
+                pure_decide: self.pure_decide,
+                decide_samples: std::mem::take(&mut self.decide_samples),
+                public_qualification: self.public_qualification.get(),
+                full_qualification: self.full_qualification,
+                next_health_evaluation: self.next_health_evaluation.get(),
+            });
+        }
+    }
+}
+// 两个有限代表入口都走生产 day 链。仅收集包装器观测，不改变业务返回值。
+fn run_day_trace(
+    config: &HistoricalRunConfigV1,
+    rules: Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
+    c: ComplementaryPairConfigV1,
+    root: &Path,
+) -> (serde_json::Value, TraceSummary) {
+    run_day_trace_with_research(config, rules, c, root, false)
+}
+fn run_day_trace_with_research(
+    config: &HistoricalRunConfigV1,
+    rules: Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
+    c: ComplementaryPairConfigV1,
+    root: &Path,
+    research: bool,
+) -> (serde_json::Value, TraceSummary) {
+    let mut candidate = HistoricalPreparedRunConfigV1::from(config);
+    candidate.strategy.effective_parameters = serde_json::to_value(&c).unwrap();
+    candidate.strategy_request_namespace = Some("health-history".into());
+    let day = HistoricalDayConfigV1 {
+        preparation: config.preparation.clone(),
+        candidates: vec![candidate],
+        checkpoint_root: root.join("daily-state"),
+        checkpoint_interval_seconds: 60,
+        progress_interval_seconds: 0,
+        checkpoint_every_applied_inputs: None,
+        checkpoint_every_candidate_events: None,
+        producer_lead_groups: None,
+    };
+    let sink = Arc::new(std::sync::Mutex::new(None));
+    let factory = |_: &HistoricalPreparedRunConfigV1| -> Result<Trace, MaterialError> {
+        let trace = Trace {
+            checkpoint_capture: None,
+            strategy: ComplementaryPairV1::new(
+                c.clone(),
+                rules.clone(),
+                "health-history".into(),
+                StrategyContinuityV1::new_account(),
+            )?,
+            decisions: vec![],
+            sent: vec![],
+            invalidated: 0,
+            pure_decide: Default::default(),
+            decide_samples: Vec::new(),
+            public_qualification: Default::default(),
+            full_qualification: Default::default(),
+            next_health_evaluation: Default::default(),
+            invalidated_at: vec![],
+            summary_sink: Some(sink.clone()),
+            qualified_at: Default::default(),
+            qualification_invalidations: vec![],
+        };
+        assert_eq!(
+            trace.requires_trade_economics_details(),
+            trace.strategy.requires_trade_economics_details()
+        );
+        assert!(!trace.requires_trade_economics_details());
+        Ok(trace)
+    };
+    let results = run_historical_days_with_options_v1(
+        &[day],
+        rules.clone(),
+        &factory,
+        1,
+        &HistoricalDayRunOptionsV1 {
+            research_summary: research,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(results[0].public_applied_inputs > 0);
+    let report = results[0].candidates[0].report.clone();
+    let trace = sink.lock().unwrap().take().unwrap();
+    assert!(
+        trace.pure_decide.count > 0
+            && trace.public_qualification.count > 0
+            && trace.full_qualification.count > 0
+            && trace.next_health_evaluation.count > 0
+    );
+    (report, trace)
 }
 fn strategy_config() -> ComplementaryPairConfigV1 {
     let mut c = ComplementaryPairConfigV1::parse_toml(include_str!(
@@ -354,8 +527,13 @@ async fn run(
         decisions: vec![],
         sent: vec![],
         invalidated: 0,
-        qualify_ns: 0,
-        deadline_ns: std::cell::Cell::new(0),
+        pure_decide: Default::default(),
+        decide_samples: Vec::new(),
+        public_qualification: Default::default(),
+        full_qualification: Default::default(),
+        next_health_evaluation: Default::default(),
+        invalidated_at: vec![],
+        summary_sink: None,
         qualified_at: std::collections::BTreeMap::new(),
         qualification_invalidations: vec![],
     };
@@ -743,9 +921,9 @@ async fn real_strategy_pending_twap_expiry_recalculates_after_spot_arrival() {
 }
 
 /// 真实请求的有限重复测量；分别报告期限/资格回调实耗，不将整轮耗时差称为纯检查开销。
-#[tokio::test(flavor = "current_thread")]
+#[test]
 #[ignore]
-async fn real_strategy_finite_health_callback_measurement() {
+fn real_strategy_finite_health_callback_measurement() {
     let root = std::path::PathBuf::from(std::env::var("STRATEGY_HEALTH_MEASUREMENT_ROOT").unwrap());
     std::fs::create_dir(&root).unwrap();
     let (mut config, rules) = fixture(&root, "100010", &[800]);
@@ -782,28 +960,34 @@ async fn real_strategy_finite_health_callback_measurement() {
         Sha256::digest(std::fs::read(&config.preparation.scope.manifest_paths[0]).unwrap())
     );
     let started = Instant::now();
-    let (report, trace) = run(&config, rules, c).await;
+    let (report, trace) = run_day_trace(&config, rules, c, &root);
     let elapsed_ns = started.elapsed().as_nanos();
-    let health = report.source_health.as_ref().unwrap();
-    assert!(health.qualification_calls > 0 && trace.sent.iter().any(|(_, kind)| kind == "maker"));
-    let current_trade_count = report
-        .account_economics_memory
-        .as_ref()
+    let health = &report["source_health"];
+    assert!(
+        health["qualification_calls"].as_u64().unwrap() > 0
+            && trace.sent.iter().any(|(_, kind)| kind == "maker")
+    );
+    let current_trade_count = report["account_economics_memory"]["markets"]
+        .as_array()
         .unwrap()
-        .markets
         .iter()
-        .filter(|m| m.success_shares.iter().any(|q| q.0 != "0"))
+        .filter(|m| {
+            m["success_shares"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|q| q.as_str().unwrap() != "0")
+        })
         .count();
     assert!(
         current_trade_count > 0,
         "新增当前费用读取实际消费非空原交易事实"
     );
     let measurement = json!({"purpose":"有限合成工程实耗，不是盈利或在线性能结论", "input_manifest_sha256":identity,
-        "whole_run_elapsed_ns":elapsed_ns, "qualification_callback_ns":trace.qualify_ns,
-        "deadline_callback_ns":trace.deadline_ns.get(), "qualification_calls":health.qualification_calls,
-        "deadline_wakeups":health.deadline_wakeups, "invalidated_batches":health.invalidated_batches,
+        "whole_run_elapsed_ns":elapsed_ns, "decide_samples":trace.decide_samples, "callbacks":{"pure_decide":trace.pure_decide,"public_qualification":trace.public_qualification,"full_qualification":trace.full_qualification,"next_health_evaluation":trace.next_health_evaluation}, "qualification_calls":health["qualification_calls"],
+        "deadline_wakeups":health["deadline_wakeups"], "invalidated_batches":health["invalidated_batches"],
         "decisions":trace.decisions.len(), "markets_with_actual_trades":current_trade_count,"actual_requests":trace.sent,
-        "timing_note":"actual_requests取提交前最后一次资格回调的合法at；decisions取计算开始；两类回调时间不包含当前读取构造或decide内部健康判断；整轮包含新增逐交易读取构造但无法单独归因，整轮时间不是纯健康开销"});
+        "timing_note":"生产day有限合成负载；actual_requests为发送前资格的at，decisions为计算开始；回调仅计原委托调用，嵌套/并行阶段不相加；不是旧小时调用分布、在线尾延迟或线上积压证据"});
     std::fs::write(
         root.join("measurement.json"),
         serde_json::to_vec_pretty(&measurement).unwrap(),
@@ -1167,8 +1351,13 @@ fn actual_baseline_day_restores_signal_memory_pending_calculation_and_execution_
             decisions: vec![],
             sent: vec![],
             invalidated: 0,
-            qualify_ns: 0,
-            deadline_ns: std::cell::Cell::new(0),
+            pure_decide: Default::default(),
+            decide_samples: Vec::new(),
+            public_qualification: Default::default(),
+            full_qualification: Default::default(),
+            next_health_evaluation: Default::default(),
+            invalidated_at: vec![],
+            summary_sink: None,
             qualified_at: Default::default(),
             qualification_invalidations: vec![],
         })
@@ -1227,4 +1416,134 @@ fn actual_baseline_day_restores_signal_memory_pending_calculation_and_execution_
         after[0].candidates[0].report
     );
     assert_eq!(std::fs::read(&config.sim_log).unwrap(), original);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn same_millisecond_epoch_failure_then_recovery_invalidates_due_frozen_pair_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, rules) = same_millisecond_fixture(temp.path());
+    let (report, trace) = run(&config, rules, strategy_config()).await;
+    println!(
+        "scenario_decisions={:?}",
+        trace
+            .decisions
+            .iter()
+            .map(|(at, d, intents)| (
+                at - BASE,
+                d.markets
+                    .iter()
+                    .map(|m| (&m.probability, &m.choice, &m.source_health))
+                    .collect::<Vec<_>>(),
+                intents
+            ))
+            .collect::<Vec<_>>()
+    );
+    let health = report.source_health.unwrap();
+    assert_eq!(trace.invalidated, 1);
+    assert_eq!(health.invalidated_batches, 1);
+    let invalidated = health.last_invalidated_calculation_timing.unwrap();
+    assert_eq!(invalidated.scheduled_send_at_utc_ms, BASE + 1701);
+    assert!(invalidated.actual_sent_at_utc_ms.is_none());
+    assert!(
+        !trace.sent.iter().any(|(at, _)| *at == BASE + 1701),
+        "旧冻结请求不发送"
+    );
+    assert!(
+        trace
+            .decisions
+            .iter()
+            .any(|(at, d, intents)| *at == BASE + 1701
+                && !intents.is_empty()
+                && d.markets.iter().all(|m| m.source_health.is_empty())),
+        "消费同毫秒恢复组后在最早合法时刻重算"
+    );
+    assert!(
+        trace
+            .sent
+            .iter()
+            .any(|(at, kind)| *at == BASE + 2101 && kind == "pair"),
+        "新计算继续支付原200ms计算和200ms发送等待"
+    );
+}
+
+fn same_millisecond_fixture(
+    root: &Path,
+) -> (
+    HistoricalRunConfigV1,
+    Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
+) {
+    let (mut config, rules) = fixture(root, "100000", &[800]);
+    // 初始双腿asks均0.6满足原经营比较；健康配对在1301计算、1701发送到期。
+    // 新epoch的两条独立消息均公开于1701，先要求另一腿快照，后恢复。
+    config.preparation.scope.received_end_utc_ms = BASE + 2200;
+    replace_books(
+        &config,
+        &[
+            book("20", 1100, 1100, 1, "epoch-a", "0.6"),
+            book("3", 1100, 1100, 2, "epoch-a", "0.6"),
+            book("20", 1600, 1600, 1, "epoch-b", "0.6"),
+            book("3", 1600, 1600, 2, "epoch-b", "0.6"),
+        ],
+    );
+    (config, rules)
+}
+#[test]
+#[ignore]
+fn same_millisecond_day_stage_measurement() {
+    let root = std::path::PathBuf::from(std::env::var("STRATEGY_HEALTH_MEASUREMENT_ROOT").unwrap());
+    std::fs::create_dir(&root).unwrap();
+    let (config, rules) = same_millisecond_fixture(&root);
+    let started = Instant::now();
+    let (report, trace) = run_day_trace(&config, rules, strategy_config(), &root);
+    let elapsed = started.elapsed().as_nanos();
+    let health = &report["source_health"];
+    assert_eq!(trace.invalidated_at, vec![(BASE + 1301, BASE + 1701)]);
+    assert_eq!(health["invalidated_batches"], 1);
+    assert!(!trace.sent.iter().any(|(at, _)| *at == BASE + 1701));
+    assert!(
+        trace
+            .decisions
+            .iter()
+            .any(|(at, d, intents)| *at == BASE + 1701
+                && !intents.is_empty()
+                && d.markets.iter().all(|m| m.source_health.is_empty()))
+    );
+    assert!(
+        trace
+            .sent
+            .iter()
+            .any(|(at, kind)| *at == BASE + 2101 && kind == "pair")
+    );
+    let measurement = json!({"purpose":"生产day有限同毫秒失效夹具，不是旧小时分布或线上尾延迟", "whole_run_elapsed_ns":elapsed,"callbacks":{"pure_decide":trace.pure_decide,"public_qualification":trace.public_qualification,"full_qualification":trace.full_qualification,"next_health_evaluation":trace.next_health_evaluation},"invalidated_at":trace.invalidated_at,"actual_requests":trace.sent,"decisions":trace.decisions.len()});
+    std::fs::write(
+        root.join("measurement.json"),
+        serde_json::to_vec_pretty(&measurement).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("report.json"),
+        serde_json::to_vec_pretty(&report).unwrap(),
+    )
+    .unwrap();
+    println!("{measurement}");
+}
+
+#[test]
+fn research_counts_successful_decisions_even_when_frozen_batch_is_invalidated() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, rules) = same_millisecond_fixture(temp.path());
+    let (report, trace) =
+        run_day_trace_with_research(&config, rules, strategy_config(), temp.path(), true);
+    assert_eq!(trace.invalidated, 1);
+    let counts = &report["research"]["decisions"];
+    let no_trade = trace
+        .decisions
+        .iter()
+        .filter(|(_, _, intents)| intents.is_empty())
+        .count();
+    assert_eq!(counts["successful"], trace.decisions.len());
+    assert_eq!(counts["no_trade"], no_trade);
+    assert_eq!(counts["actions"], trace.decisions.len() - no_trade);
+    assert_eq!(counts["exits"], 0);
+    assert_eq!(counts["successful"], report["calculation_count"]);
 }

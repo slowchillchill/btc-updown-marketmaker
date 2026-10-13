@@ -1,7 +1,10 @@
+import { displayError } from "./i18n";
+import { displayFact as fact } from "./i18n";
+import { useTranslation } from "react-i18next";
 import type { ResearchStatus } from "./Research";
 import type { NoeIndex } from "./Noe";
 import { useState } from "react";
-import { fact, statusLabel, type Json } from "./facts";
+import { statusLabel, type Json } from "./facts";
 export type Doc = {
   source: string | null;
   status: string;
@@ -17,6 +20,7 @@ export type Snapshot = {
   label: string;
   existing_source?: import("./Existing").ExistingStatus;
   report: Doc;
+  report_provenance: Doc;
   research: ResearchStatus;
   report_kind: "historical_backtest" | "engineering_ledger_projection";
   metadata: Doc;
@@ -52,6 +56,7 @@ export function Tree({
   path?: string;
   onSelect: (p: string, v: Json) => void;
 }) {
+  const { t: tr } = useTranslation();
   const [open, setOpen] = useState(false);
   if (value === null || typeof value !== "object")
     return (
@@ -66,7 +71,7 @@ export function Tree({
       <summary>
         <span>{name}</span>
         <small>
-          {Array.isArray(value) ? "数组" : "对象"} · {entries.length}
+          {Array.isArray(value) ? tr("数组") : tr("对象")} · {entries.length}
         </small>
         <button
           onClick={(e) => {
@@ -74,7 +79,7 @@ export function Tree({
             onSelect(path, value);
           }}
         >
-          查原值
+          {tr("查原值")}
         </button>
       </summary>
       {open &&
@@ -91,25 +96,35 @@ export function Tree({
   );
 }
 export function Source({ title, doc }: { title: string; doc: Doc }) {
+  const { t: tr } = useTranslation();
   return (
     <div className="document-source">
       <strong>{title}</strong>
       <span className={`status ${doc.status === "ready" ? "ok" : "warn"}`}>
-        {statusLabel[doc.status] ?? doc.status}
+        {tr(statusLabel[doc.status] ?? doc.status)}
       </span>
-      <p className="source-path">{doc.source ?? "未指定来源"}</p>
-      {doc.detail && <p className="error">{doc.detail}</p>}
+      <p className="source-path">{doc.source ?? tr("未指定来源")}</p>
+      {doc.detail && <p className="error">{displayError(doc.detail)}</p>}
       <small>
-        读取 {doc.read_attempts} 次 · 解码 {doc.decode_attempts} 次 ·{" "}
-        {doc.bytes_read} B · 启动读取 {doc.load_elapsed_us} μs
+        {tr("读取 ")}
+        {doc.read_attempts}
+        {tr(" 次 · 解码 ")}
+        {doc.decode_attempts}
+        {tr(" 次 ·")} {doc.bytes_read}
+        {tr(" B · 启动读取 ")}
+        {doc.load_elapsed_us} μs
       </small>
     </div>
   );
 }
 export function Raw({ doc, title }: { doc: Doc; title: string }) {
+  const { t: tr } = useTranslation();
   return doc.raw_json !== null ? (
     <details className="raw">
-      <summary>{title} · 原 JSON 文本（数字未改写）</summary>
+      <summary>
+        {title}
+        {tr(" · 原 JSON 文本（数字未改写）")}
+      </summary>
       <pre>{doc.raw_json}</pre>
     </details>
   ) : null;

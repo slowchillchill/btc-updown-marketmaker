@@ -19,6 +19,8 @@ class LifecycleColumns:
     fills: object
     conditions: torch.Tensor
     open_orders: torch.Tensor
+    submission_open_known: torch.Tensor
+    submission_open_base_units: object
     canceled_orders: torch.Tensor
     pending_trades: torch.Tensor
     accepted: torch.Tensor
@@ -67,6 +69,24 @@ class LifecycleColumns:
     source_bank: object  # 原不可变NOE bank，SourceOrder沿row_refs读取，不复制整段来源列。
     emitted: torch.Tensor
     fault: torch.Tensor
+
+    def select_records(self,order):
+        """原解码列的本次容量选择；只读source_bank继续借用。"""
+        from transport import select_root_fields,take_record_list
+        roots,width=self.schemas.shape
+        coordinates=(torch.arange(roots,device=order.device)[:,None]*width+order).flatten()
+        updates={}
+        for member in fields(self):
+            value=getattr(self,member.name)
+            if member.name=='source_bank':continue
+            if isinstance(value,RecordList):updates[member.name]=take_record_list(value,coordinates)
+            elif isinstance(value,IntegerList):
+                count=value.present.size(1)
+                index=(coordinates[:,None]*count+torch.arange(count,device=order.device)).flatten()
+                updates[member.name]=IntegerList(_take(value.values,index),value.present[coordinates])
+            elif isinstance(value,torch.Tensor):updates[member.name]=value.gather(1,order)
+            else:updates[member.name]=select_root_fields(value,order,width)
+        return replace(self,**updates)
 
     def append(self, incoming):
         """只合并已解码的新批；变长正文保留原人口和成员顺序。"""
@@ -256,7 +276,8 @@ class LifecycleColumns:
         item=(torch.cat([batch.item_ordinals for batch in columns.projection_batches],dim=1)
             if columns.projection_batches else torch.full_like(columns.row_refs,-1))
         return cls(schemas.reshape(roots,width),outcomes.reshape(roots,width),orders,fills,conditions.reshape(roots,width),
-            open_orders.reshape(roots,width),canceled_orders.reshape(roots,width),pending.reshape(roots,width),accepted.reshape(roots,width),
+            open_orders.reshape(roots,width),((schemas==3)&accepted).reshape(roots,width),decoded[3][7],
+            canceled_orders.reshape(roots,width),pending.reshape(roots,width),accepted.reshape(roots,width),
             torch.where(enabled[25],decoded[25][1],-1).reshape(roots,width),decoded[25][5].reshape(roots,width),
             torch.where(enabled[24],decoded[24][3]+15,torch.where(economic,decoded[11][3],-1)).reshape(roots,width),decoded[11][5].reshape(roots,width),
             torch.where(enabled[24],decoded[24][15].present.any(1),
@@ -341,3 +362,57 @@ class LifecycleDirectory:
             requests=self.requests if request is None else torch.where(mask,request[:,None],self.requests),
             economic_applied=self.economic_applied if economic is None else torch.where(mask,economic[:,None],self.economic_applied),
             accepted_principal_counted=self.accepted_principal_counted if counted is None else torch.where(mask,counted[:,None],self.accepted_principal_counted)),fault
+
+
+@dataclass(frozen=True)
+class OrderLifecycleDirectory(LifecycleDirectory):
+    """仅订单拥有提交后余量、唯一Maker耗减和不可重开的真实终态。"""
+    submission_open_known: torch.Tensor
+    submission_open_base_units: object
+    maker_matched_base_units: object
+    closed: torch.Tensor
+
+    @classmethod
+    def empty(cls,roots,capacity,*,device='cuda'):
+        base=LifecycleDirectory.empty(roots,capacity,device=device)
+        zero=ExactInt.from_i64_tensor(torch.zeros(roots*capacity,dtype=torch.int64,device=device))
+        return cls(**vars(base),submission_open_known=base.occupied.clone(),
+            submission_open_base_units=zero,maker_matched_base_units=zero,closed=base.occupied.clone())
+
+    def resized(self,capacity):
+        roots,old=self.occupied.shape
+        grown=super().resized(capacity)
+        return replace(grown,
+            submission_open_known=torch.nn.functional.pad(self.submission_open_known,(0,capacity-old)),
+            submission_open_base_units=grow_integer(self.submission_open_base_units,roots,old,capacity),
+            maker_matched_base_units=grow_integer(self.maker_matched_base_units,roots,old,capacity),
+            closed=torch.nn.functional.pad(self.closed,(0,capacity-old)))
+
+    def set(self,key,condition,flag,ledger_sequence,enabled,*,submission_known,submission_base,
+            maker_match,maker_base,terminal,**metadata):
+        roots,width=self.occupied.shape
+        at,found,_=self.lookup(key)
+        root=torch.arange(roots,device=at.device)
+        index=root*width+at
+        known=self.submission_open_known[root,at]&found
+        initial=_take(self.submission_open_base_units,index)
+        initial=initial.select(found,initial.constant(0))
+        initial=submission_base.select(submission_known&~known,initial)
+        known=known|submission_known
+        matched=_take(self.maker_matched_base_units,index)
+        matched=matched.select(found,matched.constant(0))
+        matched=matched+maker_base.select(maker_match,maker_base.constant(0))
+        exhausted=initial.compare(matched)
+        error=initial.fault|matched.fault|exhausted.fault
+        closed=(self.closed[root,at]&found)|terminal|(known&(exhausted.order<=0))
+        candidate,fault=super().set(key,condition,flag&~closed,ledger_sequence,enabled&(error==0),**metadata)
+        fault=fault|torch.where(enabled,error,0)
+        # 目录/精度不足只保原候选；最终原admission.valid统一提交所有数量和成交去重。
+        use=enabled&(fault==0)&(candidate.capacity_required<=width)
+        mask=torch.zeros_like(self.occupied).scatter(1,at[:,None],use[:,None])
+        repeated=root.repeat_interleave(width)
+        return replace(candidate,
+            submission_open_known=torch.where(mask,known[:,None],self.submission_open_known),
+            submission_open_base_units=_take(initial,repeated).select(mask.flatten(),self.submission_open_base_units),
+            maker_matched_base_units=_take(matched,repeated).select(mask.flatten(),self.maker_matched_base_units),
+            closed=torch.where(mask,closed[:,None],self.closed)),fault

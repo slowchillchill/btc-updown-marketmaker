@@ -45,6 +45,7 @@ def progress(stage, **population):
 
 def main(source=None):
     source = json.load(sys.stdin) if source is None else source
+    maker_exhaustion=source.get('maker_exhaustion',False)
     started = time.perf_counter()
     tensor = lambda values, dtype=torch.int64: torch.tensor(values, dtype=dtype, device='cuda')
     active, zero_fault = tensor([True], torch.bool), tensor([0], torch.int32)
@@ -118,7 +119,7 @@ def main(source=None):
         slots=[('1','ASK','0.2'),('1','BID','0.3'),('1','BID','0.4'),('2','BID','0.4'),('2','ASK','0.6')]
         block=HiddenPmBlock(material['assets'],slots,source_binding=material['source_binding'])
         assert all(not value['references'] for value in block.buckets), '该有限源尚未接市场reference处理器'
-        assert len(block.buckets)==2, '初始双Book一桶，七条Maker消息同一完整桶'
+        assert len(block.buckets)==2, '初始双Book一桶，实际Maker消息同一完整桶'
         if os.environ.get('B_GPU_HIDDEN_ORDER_PAGES') in ('1','bounded'):
             from hidden_device_page import build_hidden_device_columns,PreparedHiddenMaterial
             destination=Path(os.environ['B_GPU_ORDER_ARTIFACT_DIR'])/'hidden-order-columns'
@@ -310,7 +311,9 @@ def main(source=None):
                         runtime.hidden.queues,runtime.account,runtime.fills,runtime.calendars)
                     hidden_source=replace(hidden_source,present=tensor([False],torch.bool))
                     hidden_eof=active
-                    observed_pending_zero_quote=True  # 原reference中间前缀已核零quote pending。
+                    observed_pending_zero_quote=any(
+                        checkpoint['state']['quantities']['Base']['pending_maker_depletion_base_units']>0
+                        for checkpoint in source['checkpoints'] if checkpoint['stage']=='hidden_step')
                     checked_captured_maker=True
                     for number in range(int(hidden_page.count.cpu().item())):
                         feedback=hidden_page.read(number)
@@ -387,7 +390,9 @@ def main(source=None):
             runtime=runtime.advance_role_time(choice,tensor([source['market_end']]*2))
             runtime,canceled=runtime.cancel_base(choice,target,row_roots,tensor([1]))
             requests,orders,queue,account=(runtime.requests,runtime.orders,runtime.hidden.queues,runtime.account)
-            assert canceled.delta.emitted.cpu().tolist()==[True] and canceled.response.emitted.cpu().tolist()==[True]
+            assert canceled.delta.emitted.cpu().tolist()==[not maker_exhaustion]
+            assert canceled.response.emitted.cpu().tolist()==[True]
+            assert canceled.outcome.cpu().tolist()==[int(maker_exhaustion)]
             from projection import CancelTargetFeedback
             from fields import RecordList
             refs=RecordList((zero,zero),active[:,None])
@@ -399,7 +404,11 @@ def main(source=None):
                 canceled.pending.effective_at,canceled.response.received_at,canceled.response.method,canceled.response.emitted))
         assert_checkpoint(checkpoint['state'], orders.read(slot).quantity, account)
         assert orders.read(slot).last_updated_at.cpu().tolist()==[checkpoint['state']['last_updated_at']],stage
-    assert observed_pending_zero_quote and maker_record is not None
+    assert maker_record is not None
+    if maker_exhaustion:
+        assert values(orders.read(slot).quantity.open_base_units)==[0]
+    else:
+        assert observed_pending_zero_quote
     assert values(fills.next_sequence) == [3] and values(orders.next_sequence) == [2]
     assert fills.origins.roles.cpu().tolist() == [[0,1]]
     assert values(fills.origins.order_sequences) == [1,1]
@@ -455,6 +464,11 @@ def main(source=None):
         Numbers.run_exact_batch(lambda:rational([original_kind['size_shares']])),cancel_batch,
         return_state=source.get('order_queries') is not None,
         return_opening=source.get('rebate_tail_reference') is not None)
+    if maker_exhaustion:
+        print(json.dumps({'maker_exhaustion':account_report,
+            'SIM_open_base_units':values(orders.read(slot).quantity.open_base_units),
+            'seconds':time.perf_counter()-started}),flush=True)
+        return
     if source.get('rebate_tail_reference') is not None:
         sys.path[:0]=[str(root/p) for p in ('model-train','shared-run/gpu','data-pipeline/gpu','model-train/native-inputs/gpu')]
         from validate_continuous_tail import verify_rebate_days
@@ -522,7 +536,7 @@ def main(source=None):
     torch.cuda.synchronize()
     print(json.dumps({'device_request_registration_to_real_GTC_acceptance_checked': True,
         'directory_routes_actual_hidden_maker_depletion_and_cancel_checked': True,
-        'zero_quote_pending_keeps_original_fill_population_checked': True,
+        'zero_quote_pending_keeps_original_fill_population_checked': observed_pending_zero_quote,
         'order_u64_identity_and_queue_slot_survive_growth_checked': True,
         'completed_request_inactive_zero_terms_no_effect_or_fault_checked': True,
         'controlled_order_only_growth_keeps_eight_queue_segments_checked': True,
@@ -719,7 +733,9 @@ def check_captured_hidden_bucket(runtime,source,tensor,fee_rate,fee_exponent,reb
             _,closed=reference.finish_hidden_bucket()
             assert not closed.cpu().item()
     reference,closed=reference.finish_hidden_bucket()
-    assert closed.cpu().tolist()==[True] and saw_pending and len(frames)==1
+    expected_pending=any(checkpoint['state']['quantities']['Base']['pending_maker_depletion_base_units']>0
+        for checkpoint in checkpoints)
+    assert closed.cpu().tolist()==[True] and saw_pending==expected_pending and len(frames)==1
     # 仅安装参考所需物理容量，完整源/量/顺序仍交真实候选处理。
     runtime=replace(runtime,hidden=replace(runtime.hidden,queues=runtime.hidden.queues.resized(
         reference.hidden.queues.capacity)),fills=runtime.fills.resized(reference.fills.capacity),

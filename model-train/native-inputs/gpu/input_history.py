@@ -25,7 +25,7 @@ def _join(values, dim, shapes):
 class SourceIdentityRegistry:
     """跨材料块复用的冷身份表；完整原DirectObservationAnchor向量决定等价性。"""
     def __init__(self, *, directory=None):
-        # 运行所属临时目录；训练环境TMPDIR指向数据盘。不跨运行复用或恢复。
+        # 运行所属临时目录；检查点备份另有归属，close只删除运行临时库。
         self._directory = tempfile.TemporaryDirectory(prefix='source-identities-',dir=directory)
         self.path = Path(self._directory.name)/'identities.sqlite3'
         self._connection = self._connect()
@@ -36,6 +36,20 @@ class SourceIdentityRegistry:
         connection = sqlite3.connect(self.path,isolation_level=None,cached_statements=4)
         connection.execute('PRAGMA cache_size=-2048')
         return connection
+
+    def backup(self, destination, *, progress=None):
+        """原ID表的独立SQLite成员；不移动或延长运行临时库寿命。"""
+        with sqlite3.connect(destination) as target:
+            self._connection.backup(target, pages=256, progress=progress)
+
+    @classmethod
+    def from_backup(cls, source, markets, *, directory=None):
+        """复制到新的运行临时库，关闭不会删除已发布的检查点。"""
+        result=cls(directory=directory)
+        with sqlite3.connect('file:'+str(Path(source).resolve())+'?mode=ro',uri=True) as original:
+            original.backup(result._connection, pages=256)
+        result.markets=dict(markets)
+        return result
 
     @contextmanager
     def binding(self):

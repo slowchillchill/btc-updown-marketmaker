@@ -82,7 +82,7 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
     assets=hidden_source['assets'];tokens=[asset['token_id'] for asset in assets]
     hidden_columns=artifact/'hidden-pages'
     phase=phase_start()
-    build_hidden_device_pages(assets[::-1] if cold_request is not None else assets,[(tokens[a],side.upper().removesuffix('S'),_decimal(price)) for a,side,price in slots],
+    build_hidden_device_pages(assets[::-1] if source.get('continuous_two_markets') else assets,[(tokens[a],side.upper().removesuffix('S'),_decimal(price)) for a,side,price in slots],
         hidden_columns,hidden_source['source_binding'],buckets_per_part=2)
     prepared_hidden=PreparedHiddenPages(hidden_columns,hidden_source['source_binding'])
     phase_done('hidden_root_preparation',phase,buckets=len(prepared_hidden.arrays['bucket_times']),
@@ -123,6 +123,23 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
         source={**source,'cold_authority':root_runtime.authority,'cold_conditions':directory.conditions,'cold_tokens':directory.tokens,
             'cold_asset_ends':directory.asset_ends,'bounded_hidden':{**hidden_source,'assets':block.assets}}
         ask_directory=directory.ask_rows
+        if initial_submit is not None:
+            # 原初始正文按真实冷目录重投影，保原token、价位和ordinal。
+            token_at={token:i for i,token in enumerate(directory.tokens)}
+            asset_rows=[token_at[p['item']['order']['token_id']] for p in source['posts']]
+            original_bids=intents.bid_rows.cpu().tolist()[0]
+            actual_prices=amounts(runtime.hidden.queues.price)
+            actual_assets=runtime.hidden.level_assets.cpu().tolist()
+            actual_sides=runtime.hidden.level_sides.cpu().tolist()
+            bids=[next(i for i,(asset,side,price) in enumerate(zip(actual_assets,actual_sides,actual_prices,strict=True))
+                if asset==a and side==0 and price==slots[old][2]) for a,old in zip(asset_rows,original_bids,strict=True)]
+            intents=replace(intents,assets=T([asset_rows]),conditions=T([[directory.conditions.index(p['item']['order']['condition_id']) for p in source['posts']]]),bid_rows=T([bids]))
+            principal=[intent['requested_principal_pusd'] for intent in source['reserve_intents']]
+            fee=[intent['immediate_fee_reserve_pusd'] for intent in source['reserve_intents']]
+            ledger,reserved=run(lambda:public.ledger.reserve_action(T([list(range(len(principal)))]),T([[0]*len(principal)]),
+                rational(principal),rational(fee),T([[True]*len(principal)],torch.bool)))
+            assert reserved.fault.cpu().tolist()==[0]
+            public=replace(public,ledger=ledger);root_runtime.clock.public=public
         (artifact/'cold-authority.json').write_text(json.dumps(root_runtime.authority,indent=2))
         phase_done('actor_cold_opening_and_installation',phase)
         assert values(runtime.account.cash)==[2000000000]
@@ -162,7 +179,7 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
         projection,batch=run(lambda:projection.fill_from_origin(sampler,world.orders,world.fills,frame,
             T(list(range(len(assets)))),world.calendars,taker,choice.at))
         batches.append(batch);return world,projection,batch,effect
-    if initial_submit is not None:
+    if initial_submit is not None and root_runtime is None:
         frontier=run(lambda:InputCommitFrontier.open(1,source["run_id"],source["session_id"]))
         # 原来源实际CreateSession/ActivateSession的冷初始化已成功，不移植CPU物理编号。
         frontier,_=run(lambda:frontier.commit(yes));frontier,_=run(lambda:frontier.commit(yes))
@@ -183,6 +200,13 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
         assert not fault.any().cpu().item()
         clock.runtime=replace(clock.runtime,input_frontier=frontier);clock.public=replace(clock.public,ledger=ledger)
         stage("original_request_commit",gpu_input_sequence=values(receipt.input_sequence),cpu_reference_input=source["input_sequence"])
+        if source.get('finite_goal'):
+            # 正文和身份沿原初始submit的同一source；输入序来自实际成功receipt。
+            source['initial_actual_request']=dict(sent_at=source['sent_at'],
+                input_sequence=values(receipt.input_sequence)[0],
+                body=dict(method='POST_ORDERS',request=dict(context=dict(
+                    global_request_id=source['request_id'],caller_correlation_id=None),items=source['posts'])))
+            (artifact/'actual-continuous-initial-request.json').write_text(json.dumps(source['initial_actual_request'],indent=2)+'\n')
         assert receipt.arrived_at.cpu().tolist()==[source["receipt"]["arrived_at"]]
     if continuous is None or root_runtime is None:
         advance=clock.advance_before(ck,yes,progress=stage)
@@ -190,7 +214,8 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
         assert not clock.public.pending_noe.active.any().cpu().item()
     else:
         # 新生产冷入口直接交模型装配；首窗推进由其原时钟初始化负责。
-        assert clock.source.position.cpu().tolist()==[0]
+        if initial_submit is None:assert clock.source.position.cpu().tolist()==[0]
+        else:assert clock.source.position.cpu().item()>0
     if cold_request is None:checkpoint(clock.public.ledger,source['sent_ledger'])
     assert values(clock.runtime.account.cash)==[int(Fraction(source['cash'])*1000000)]
     if continuous is not None:
@@ -276,7 +301,8 @@ def bounded(source,runtime,public,noe,sampler,rule,slots,owners,receipt,intents,
     from model_train.action_inputs import ActorPolicyInputs
     frozen_model=FrozenPolicyInputs100ms.publish(market_freeze,native.inputs,T([[0,0,0]]),frozen.fits)
     assert frozen_model.provided.all().cpu().item()
-    with torch.no_grad():evaluation=policy.frozen_state_and_value(frozen_model,torch.zeros((1,1,32),device='cuda'),T([[0,0,0]]),zero+17)
+    policy.critic.register_forward_pre_hook(lambda *args: (_ for _ in ()).throw(AssertionError("state-only called Critic")))
+    with torch.no_grad():evaluation=policy.frozen_state_and_value(frozen_model,torch.zeros((1,1,32),device='cuda'),T([[0,0,0]]),zero+17,value_context=None)
     assert evaluation.ready.cpu().tolist()==[True] and evaluation.fault.cpu().tolist()==[0]
     from cancel_objects import global_cancel_slots
     slots_at=global_cancel_slots(actor.cancels)

@@ -13,10 +13,10 @@ from public_device_page import (DTYPES, IdentityBank, _json_bytes, _sha,
     store_array_member, load_array_members)
 from prepare import _numbers
 
-VERSION='hidden_device_columns_v1'
-PART_VERSION='hidden_device_columns_part_v1'
-PAGES_VERSION='hidden_device_pages_v1'
-TABLES={'event_indices':(14,2),'step_tags':(None,1),'snapshot_levels':(3,2),
+VERSION='hidden_device_columns_v2'
+PART_VERSION='hidden_device_columns_part_v2'
+PAGES_VERSION='hidden_device_pages_v2'
+TABLES={'event_indices':(15,2),'step_tags':(None,1),'snapshot_levels':(3,2),
     'snapshot_offsets':(None,1),'reference_rows':(12,2),'terminal_fields':(6,2),
     'terminal_payout_indices':(2,2),'level_assets':(None,1),'level_sides':(None,1),
     'asset_markets':(None,1),'slot_price_ids':(None,1),'operation_sources':(2,2),
@@ -134,7 +134,7 @@ class PreparedHiddenMaterial:
         self.directory=Path(directory); self.device=torch.device(device)
         data=(self.directory/'manifest.json').read_bytes()
         manifest=json.loads(data)
-        if (manifest['version']!=version
+        if (manifest['version'] not in (version,version.replace('_v2','_v1'))
                 or _sha(Path(source_binding['public'])/'manifest.json')!=manifest['public_manifest_sha256']
                 or _sha(Path(source_binding['hidden'])/'manifest.json')!=manifest['hidden_manifest_sha256']):
             raise ValueError('hidden列页原材料绑定错误')
@@ -145,11 +145,13 @@ class PreparedHiddenMaterial:
         expected=set(TABLES)|{name+'.'+field for name in EXACTS for field in ('words','sign','fault')}
         expected|={name+'.'+field for name in BANKS for field in ('utf8','offsets')}
         if set(manifest['members'])!=expected: raise ValueError('hidden列页成员人口错误')
+        self.typed_version=manifest['version']
         self.members=manifest['members']
         self.arrays=load_array_members(self.directory,self.members); self._tensors={}
         self.banks={}; self.market_count=manifest['market_count']
         for name,(width,ndim) in TABLES.items():
             value=self.array(name,'i8',ndim)
+            if name=='event_indices' and self.typed_version.endswith('_v1'):width=14
             if width is not None and value.shape[1]!=width: raise ValueError('hidden列页固定列宽错误')
         for name in BANKS:
             raw=self.array(name+'.utf8','u1',1); offsets=self.offsets(name+'.offsets',len(raw))
@@ -169,7 +171,7 @@ class PreparedHiddenMaterial:
         rows=self.arrays['event_indices']; tags=self.arrays['step_tags']; levels=self.arrays['snapshot_levels']
         asset_count=len(self.banks['assets']); level_count=len(self.banks['slots'])
         references=len(self.arrays['reference_rows'])-1
-        if (tags.shape!=(len(rows),) or np.any((tags<0)|(tags>4))
+        if (tags.shape!=(len(rows),) or np.any((tags<0)|(tags>(4 if self.typed_version.endswith('_v1') else 5)))
                 or self.arrays['operation_sources'].shape!=(len(rows),2)
                 or self.arrays['asset_markets'].shape!=(asset_count,)
                 or self.arrays['level_assets'].shape!=(level_count,)
@@ -180,7 +182,9 @@ class PreparedHiddenMaterial:
             raise ValueError('hidden设备行/目录人口错误')
         def domain(value,upper):
             if np.any((value<0)|(value>=upper)): raise ValueError('hidden设备字典引用越界')
-        domain(rows[:,2:8],n); domain(levels[:,1:],n); domain(self.arrays['slot_price_ids'],n)
+        domain(rows[:,2:8],n);
+        if rows.shape[1]>14:domain(rows[:,14],n)
+        domain(levels[:,1:],n); domain(self.arrays['slot_price_ids'],n)
         domain(rows[tags>0,0],asset_count); domain(self.arrays['level_assets'],asset_count)
         domain(self.arrays['asset_markets'],self.market_count); domain(self.arrays['level_sides'],2)
         domain(levels[:,0],2); domain(self.arrays['terminal_payout_indices'],n)
@@ -273,7 +277,7 @@ class PreparedHiddenPage:
         block.reference_ids=torch.cat((torch.arange(self.ref_begin,self.ref_end,device=device),
             torch.tensor([len(arrays['reference_rows'])-1],device=device)))
         block.operations=PreparedOperations(self)
-        block.event_lookup=torch.cat((block.event_indices,torch.zeros((1,14),dtype=torch.int64,device=device)))
+        block.event_lookup=torch.cat((block.event_indices,torch.zeros((1,block.event_indices.shape[1]),dtype=torch.int64,device=device)))
         block.tag_lookup=torch.cat((block.step_tags,torch.zeros(1,dtype=torch.int64,device=device)))
 
     def bucket_columns(self,block):
@@ -403,7 +407,7 @@ class PreparedHiddenPages:
         self.source_binding=source_binding
         m=json.loads((self.directory/'manifest.json').read_bytes())
         self.manifest=m
-        if (m['version']!=PAGES_VERSION
+        if (m['version'] not in (PAGES_VERSION,PAGES_VERSION.replace('_v2','_v1'))
             or m['verification']['source_manifest_sha256']!=_sha(Path(source_binding['public'])/'manifest.json')
             or m['verification']['material_manifest_sha256']!=_sha(Path(source_binding['hidden'])/'manifest.json')):
             raise ValueError('hidden完整块目录原材料绑定错误')
@@ -446,6 +450,32 @@ class PreparedHiddenPages:
             or len(self.arrays['bucket_times'])!=begin
             or (self.parts and self.parts[-1]['next_bucket_at'] is not None)):
             raise ValueError('hidden完整根结束或人口错误')
+
+    def for_public_trade(self,destination,*,progress=None):
+        """新冷模型从原已核compact来源取得v2；旧读面及来源文件不修改。"""
+        if self.manifest['version']==PAGES_VERSION and all(
+            json.loads((self.directory/p['directory']/'manifest.json').read_bytes())['version']==PART_VERSION
+            for p in self.parts):
+            return self
+        # 只读原固定目录，不移动调用者的当前页／游标。原writer恢复完整规范步骤。
+        first=self.parts[0]
+        catalog=PreparedHiddenMaterial._from_part(self.directory/first['directory'],self.source_binding,
+            device=self.device,next_bucket_at=first['next_bucket_at'])
+        assets=[catalog.banks['assets'][i] for i in range(len(catalog.banks['assets']))]
+        slots=[catalog.banks['slots'][i] for i in range(len(catalog.banks['slots']))]
+        if progress is None:
+            progress=lambda stage,**row:print(json.dumps(dict(stage=stage,**row)),flush=True)
+        import time
+        started=time.perf_counter()
+        progress('hidden_typed_rebuild_begin',source=str(self.directory),destination=str(destination),
+            buckets=self.manifest['buckets'])
+        build_hidden_device_pages(assets,slots,destination,self.source_binding,
+            buckets_per_part=max(1,max(p['end']-p['begin'] for p in self.parts)),
+            device=self.device,progress=progress)
+        result=PreparedHiddenPages(destination,self.source_binding,device=self.device)
+        progress('hidden_typed_rebuild_complete',buckets=result.manifest['buckets'],
+            parts=len(result.parts),seconds=time.perf_counter()-started)
+        return result
 
     def upload(self,value):
         return torch.from_numpy(np.array(value,copy=True)).pin_memory().to(self.device,non_blocking=True)

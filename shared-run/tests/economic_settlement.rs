@@ -916,7 +916,7 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
     );
     if let Ok(validator)=std::env::var("B_GPU_REBATE_DAY_VALIDATOR") {
         use contracts::economics::EconomicRational as R;
-        let records=gpu_day_observation.result_references().iter().map(|reference| {
+        let records=gpu_day_observation.result_references().unwrap().iter().map(|reference| {
             let record=::execution_normalization::read_durable_noe_record_v1(reference).unwrap();
             serde_json::json!({"position":record.position(),"context":record.context(),"record":record.record()})
         }).collect::<Vec<_>>();

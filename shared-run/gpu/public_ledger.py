@@ -36,22 +36,52 @@ class PublicLedgerState:
         bank为同一持续Normalizer的追加后只读存储，原物理row引用须保持。
         消费只在receive处理完整关闭来源；未来已预取材料不可借此提高公开时间。
         """
+        return self.append_batches(bank,(batch,))
+
+    def append_batches(self,bank,batches):
+        """完整阶段的纯追加候选；一次物理尺寸出口，不领取、不安装权威状态。
+
+        Pending/Economic/Lifecycle先按输入张量上界在设备准备；只用实际前缀
+        接原目录增长。自然批保各自来源与列，不把临时尾区发布为事实。
+        """
+        if not batches:return self
         from memory import EconomicColumns
-        from transport import select_batch_columns
-        # 只读取物理人口以分配缓存；空发射不添加padding历史，fault仍保留。
-        population=batch.emitted.to(torch.int64).sum(1)
-        width=int(population.max().cpu())
-        if width==0:
-            return replace(self,pending_noe=replace(self.pending_noe,fault=self.pending_noe.fault | batch.fault),
-                waiting=replace(self.waiting,fault=self.waiting.fault | batch.fault),
-                ledger=replace(self.ledger,fault=self.ledger.fault | batch.fault))
-        order=(~batch.emitted).to(torch.int64).argsort(dim=1,stable=True)[:,:width]
-        batch=select_batch_columns(batch,order)
-        incoming=EconomicColumns.from_projection_batches([batch])
-        ledger=self.ledger.append_columns(bank,incoming)
-        return replace(self,pending_noe=self.pending_noe.append_batch(bank,batch),
-            ledger=replace(ledger,fault=ledger.fault | batch.fault),
-            waiting=self.waiting.append_columns(incoming))
+        from admission_lifecycle import LifecycleColumns
+        from queues import ExactInt
+        from transport import stage_batch_layout,select_batch_columns,concatenate_root_fields
+        layout=stage_batch_layout(batches);selected=layout.batches
+        roots=self.pending_noe.active.size(0);upper=layout.order.size(1)
+        batch_fault=torch.stack([batch.fault for batch in batches],1)
+        from consumption import fault_rows
+        fault=fault_rows(batch_fault,roots,len(batches))
+        zero_fault=fault_rows(torch.where(layout.widths[None,:]==0,batch_fault,0),roots,len(batches))
+        if upper:
+            original=EconomicColumns.from_projection_batches(selected)
+            life=LifecycleColumns.from_projection(bank,original).select_records(layout.order)
+            incoming=original.select_records(layout.order)
+            private=concatenate_root_fields([batch.private_sequences for batch in selected],roots,
+                [batch.rows.size(1) for batch in selected])
+            pending=type(self.pending_noe).from_columns(
+                torch.cat([batch.emitted for batch in selected],1),
+                torch.cat([batch.received_at for batch in selected],1),private,
+                ExactInt.from_i64_tensor(bank.source_order[original.row_refs.flatten(),3]),
+                original.row_refs,self.pending_noe.delivered_through).select_records(layout.order)
+        # 只读一次各自然批实际物理宽；原动态类型仅使用已准备的前缀。
+        widths=layout.widths.cpu().tolist();used=sum(widths)
+        if not used:
+            return replace(self,pending_noe=replace(self.pending_noe,fault=self.pending_noe.fault|fault),
+                waiting=replace(self.waiting,fault=self.waiting.fault|fault),
+                ledger=replace(self.ledger,fault=self.ledger.fault|fault))
+        compact=tuple(select_batch_columns(batch,torch.arange(width,device=batch.rows.device)[None,:].expand(roots,-1))
+            for batch,width in zip(selected,widths,strict=True) if width)
+        prefix=torch.arange(used,device=layout.order.device)[None,:].expand(roots,-1)
+        incoming=incoming.select_records(prefix,batches=compact);life=life.select_records(prefix)
+        pending=pending.select_records(prefix)
+        ledger=self.ledger.append_columns(bank,incoming,lifecycle=life)
+        return replace(self,pending_noe=replace(self.pending_noe.append_records(pending),
+            fault=self.pending_noe.fault|pending.fault|fault),
+            ledger=replace(ledger,fault=ledger.fault|fault),
+            waiting=replace(self.waiting.append_columns(incoming),fault=self.waiting.fault|zero_fault))
 
     def receive_first(self, bank, gates):
         """首次公开领取/Registry接纳候选；不在本事务里重新领取Ledger waiting。

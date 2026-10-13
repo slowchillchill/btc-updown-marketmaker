@@ -70,25 +70,36 @@ class PendingRecords:
     delivered_through: object
     fault: torch.Tensor
 
+    def select_records(self,order):
+        from transport import select_root_fields
+        width=self.active.size(1)
+        return replace(self,active=self.active.gather(1,order),received_at=self.received_at.gather(1,order),
+            private_sequences=select_root_fields(self.private_sequences,order,width),
+            source_ordinals=select_root_fields(self.source_ordinals,order,width),record_refs=self.record_refs.gather(1,order))
+
+    def append_records(self,incoming):
+        """追加已经过原from_columns核对的本阶段前缀；不重领旧记录。"""
+        from transport import append_root_fields
+        roots,width=self.active.shape;extra=incoming.active.size(1)
+        return replace(self,active=torch.cat([self.active,incoming.active],1),
+            received_at=torch.cat([self.received_at,incoming.received_at],1),
+            record_refs=torch.cat([self.record_refs,incoming.record_refs],1),
+            private_sequences=append_root_fields(self.private_sequences,incoming.private_sequences,roots,width,extra),
+            source_ordinals=append_root_fields(self.source_ordinals,incoming.source_ordinals,roots,width,extra),
+            fault=self.fault|incoming.fault)
+
     def append_batch(self, bank, batch):
         """追加已规范化批；保留原交付前缀，不重新开启领取器。
 
         宿主须在关闭receive时间之前接齐该时间的完整来源；读入不推进时间门。
         """
         from queues import ExactInt
-        from transport import append_root_fields
-        roots,width=self.active.shape
+        roots=self.active.size(0)
         if batch.rows.size(0)!=roots or batch.rows.device!=self.active.device:
             raise ValueError('NOE新批须同根同设备')
         incoming=type(self).from_columns(batch.emitted,batch.received_at,batch.private_sequences,
             ExactInt.from_i64_tensor(bank.source_order[batch.rows.flatten(),3]),batch.rows,self.delivered_through)
-        extra=batch.rows.size(1)
-        return replace(self,active=torch.cat([self.active,incoming.active],1),
-            received_at=torch.cat([self.received_at,incoming.received_at],1),
-            record_refs=torch.cat([self.record_refs,incoming.record_refs],1),
-            private_sequences=append_root_fields(self.private_sequences,incoming.private_sequences,roots,width,extra),
-            source_ordinals=append_root_fields(self.source_ordinals,incoming.source_ordinals,roots,width,extra),
-            fault=self.fault | incoming.fault | batch.fault)
+        return replace(self.append_records(incoming),fault=self.fault|incoming.fault|batch.fault)
 
     @classmethod
     def from_columns(cls,active,received_at,private_sequences,source_ordinals,record_refs,delivered_through):

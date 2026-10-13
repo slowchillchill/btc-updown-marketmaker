@@ -64,6 +64,7 @@ impl ProjectionInputs {
         }
         if visible(observation.binance_depth.quality)
             && let Some(depth) = &observation.binance_depth.value
+            && let Some(depth) = depth.full()
         {
             for (side, levels) in [&depth.bids, &depth.asks].into_iter().enumerate() {
                 sides[4 + side] = levels

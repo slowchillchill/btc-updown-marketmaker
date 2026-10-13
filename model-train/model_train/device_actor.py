@@ -101,6 +101,18 @@ class CapturedDeviceActor:
             self.loop=self.numbers.public_extension().DeviceConditionalSequenceLoop(
                 self.graphs[0].raw_cuda_graph(),[g.raw_cuda_graph() for g in self.graphs[1:]],conditions,self.ready)
 
+    @classmethod
+    def from_published(cls, inputs, random, *, word_capacity, path_capacity):
+        """仅恢复已拥有完整candidate的发送消费者，不创建图或重选动作。"""
+        from actor_support import DeviceNativeActor
+        from prepare import _numbers
+        result=cls.__new__(cls)
+        result.inputs=inputs;result.random=random;result.numbers=_numbers()
+        result.actor=DeviceNativeActor(inputs.actor)
+        result.word_capacity=word_capacity;result.capacity=path_capacity
+        result.graphs=[];result.loop=None;result.support=None
+        return result
+
     def reset(self):
         initial=self.numbers.device_exact_batch(self.actor.initial,
             word_capacity=self.word_capacity,device=self.actor.device)

@@ -127,7 +127,9 @@ def validate_actual_cancel(source,delta):
         initial_order=before['order_lifecycle'][0]
         assert platform['open_order_count']==1 and initial_order['open']
         orders,error=ledger.orders.set(integers([1]),zero,active,
-            integers([initial_order['last_ledger_entry_seq']]),active,economic=active)
+            integers([initial_order['last_ledger_entry_seq']]),active,economic=active,
+            submission_known=~active,submission_base=integers([0]),
+            maker_match=~active,maker_base=integers([0]),terminal=~active)
         return replace(ledger,orders=orders,fault=ledger.fault|error)
     ledger=Numbers.run_exact_batch(prepare_ledger)
     cache=ClosedAdmission.empty(ledger.columns)

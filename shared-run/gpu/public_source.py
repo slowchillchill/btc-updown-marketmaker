@@ -68,25 +68,27 @@ class PublicGroupSource:
             self.page_at=torch.cummax(self.page_groups[:,2],dim=0).values
             if begin:self.page_at=torch.maximum(self.page_at,self.prepared.tensor('causal_visible_at')[begin-1])
 
-    def next(self):
+    def next(self,position=None):
+        """原同页读口也供私有候选位置使用；不安装或推进来源。"""
+        position=self.position if position is None else position
         count=len(self.prepared.columns['groups'])
-        eof=(self.position==count)&self.prepared.normal_end
-        present=(self.position>=self.page_begin)&(self.position<self.page_end)&~eof
+        eof=(position==count)&self.prepared.normal_end
+        present=(position>=self.page_begin)&(position<self.page_end)&~eof
         if hasattr(self.prepared,'parts'):
             # 当前页耗尽时只保留下一真实组下界；热路径不读设备位置回CPU。
-            at=torch.full_like(self.position,self.next_bound)
+            at=torch.full_like(position,self.next_bound)
         else:
             times=self.prepared.tensor('causal_visible_at')
-            at=times[self.position.clamp(0,count-1)] if count else torch.zeros_like(self.position)
+            at=times[position.clamp(0,count-1)] if count else torch.zeros_like(position)
         if self.page_end>self.page_begin:
-            offset=(self.position-self.page_begin).clamp(0,self.page_end-self.page_begin-1)
+            offset=(position-self.page_begin).clamp(0,self.page_end-self.page_begin-1)
             at=torch.where(present,self.page_at[offset],at)
         # 已加载时读取实际页header；页缺时next.at只证明该组之前的空档。
-        return PublicGroupNext(at,present,eof,self.position.clone(),self.fault)
+        return PublicGroupNext(at,present,eof,position.clone(),self.fault)
 
     def consume(self,enabled):
         next_group=self.next()
-        committed=enabled&next_group.present&(self.fault==0)
+        committed=group_committed(next_group,enabled)
         self.position=self.position+committed.to(torch.int64)
         return committed
 
@@ -104,3 +106,16 @@ class PublicGroupSource:
 
     def snapshot(self):
         return self.position.clone(),self.prepared.columns['input_stream_id'],self.prepared.source_manifest_sha256
+
+
+def group_committed(group,enabled):
+    """同一完整组的原来源提交人口，供宿主和设备候选共同复用。"""
+    return enabled&group.present&(group.fault==0)
+
+
+def public_group_selection(group,choice,hidden,eof,hidden_bound,at,enabled,*,before):
+    """只读原未屏蔽SIM选择；同刻SIM优先，完整组与开放端点保持。"""
+    due=enabled&~group.eof&((group.at<at) if before else (group.at<=at))
+    hidden_before=hidden.present|eof
+    if hidden_bound is not None:hidden_before=hidden_before|(hidden_bound.expand_as(at)>group.at)
+    return due,due&group.present&hidden_before&(~choice.present|(group.at<choice.at))

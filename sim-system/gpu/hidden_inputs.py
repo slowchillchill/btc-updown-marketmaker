@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'data-pipeline/gpu'
 from prepare import decimal_columns
 
 QUALITY = {'fresh': 0, 'stale': 1, 'missing': 2, 'unknown_not_observed': 3, 'confirmed_gap': 4, 'invalid': 5}
-STEP_TAG = {'InitialSnapshot': 1, 'LevelChange': 2, 'Tick': 3, 'Quality': 4}
+STEP_TAG = {'InitialSnapshot': 1, 'LevelChange': 2, 'Tick': 3, 'Quality': 4, 'PublicTrade': 5}
 from hidden_reference import reference_columns
 from hidden_resolution import TerminalColumns
 
@@ -115,6 +115,12 @@ class HiddenPmBlock:
                                  before=intern(transition['quantity_before_shares']),
                                  after=intern(transition['quantity_after_shares']),
                                  resync=transition['basis'] == 'BOOK_RESYNC_DELTA_INFERENCE')
+                elif tag == 'PublicTrade':
+                    trade = fields['trade']
+                    entry.update(asset=asset_ids[trade['asset']['token_id']],
+                        side=0 if trade['aggressor_side'] == 'BUY' else 1,
+                        price=intern(trade['price_pusd_per_share']),
+                        trade_quantity=intern(trade['quantity_shares']))
                 elif tag == 'Tick':
                     tick = fields['tick']
                     previous = tick['old_tick_size_pusd_per_share']
@@ -157,15 +163,15 @@ class HiddenPmBlock:
                 entry.get('before', 0), entry.get('after', 0), entry.get('tick', 0),
                 entry.get('previous', 0), entry.get('current', 0), int(entry.get('previous_present', False)),
                 int(entry.get('resync', False)), entry['quality'], entry.get('previous_quality', 3),
-                entry.get('current_quality', 3), int(entry['required'])])
-        self.event_indices = torch.tensor(events, dtype=torch.int64, device=device).reshape(-1, 14)
+                entry.get('current_quality', 3), int(entry['required']), entry.get('trade_quantity', 0)])
+        self.event_indices = torch.tensor(events, dtype=torch.int64, device=device).reshape(-1, 15)
         self.snapshot_levels = torch.tensor(snapshot_levels, dtype=torch.int64, device=device).reshape(-1, 3)
         self.step_tags = torch.tensor([STEP_TAG.get(entry['tag'], 0) for entry in pending],
                                       dtype=torch.int64, device=device)
         self.snapshot_offsets = torch.tensor([entry['snapshot_start'] for entry in pending] +
                                             [len(snapshot_levels)], dtype=torch.int64, device=device)
         # 补零哨兵在冷安装时建立一次；每步仅index_select，不复制整页源列。
-        self.event_lookup = torch.cat((self.event_indices, torch.zeros((1, 14), dtype=torch.int64, device=device)), 0)
+        self.event_lookup = torch.cat((self.event_indices, torch.zeros((1, 15), dtype=torch.int64, device=device)), 0)
         self.tag_lookup = torch.cat((self.step_tags, torch.zeros(1, dtype=torch.int64, device=device)), 0)
 
     @classmethod
@@ -227,8 +233,8 @@ class HiddenPmBlock:
         fault = self.price_fault | relation.fault
         return (self.level_assets == asset) & (self.level_sides == side) & (relation.order == 0) & (fault == 0), fault
 
-    def empty_state(self, *, segment_capacity=4):
-        state = HiddenAssetState.empty(self.level_assets, self.prices, self.asset_markets, self.market_count, segment_capacity=segment_capacity,level_sides=self.level_sides)
+    def empty_state(self, *, segment_capacity=4,maker_model="L2_BOOK_DELTA_FIFO_ESTIMATE_V1"):
+        state = HiddenAssetState.empty(self.level_assets, self.prices, self.asset_markets, self.market_count, segment_capacity=segment_capacity,level_sides=self.level_sides,maker_model=maker_model)
         cold_fault = state._asset_fault(getattr(self, 'price_fault', torch.zeros_like(self.level_assets, dtype=torch.int32)))
         decimal_fault = Numbers.combine_fault_rows(self.decimal_fault.reshape(1, -1))[0]
         return replace(state, fault=state.fault | cold_fault | decimal_fault)
