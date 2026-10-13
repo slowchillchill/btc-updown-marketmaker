@@ -3,7 +3,7 @@ from dataclasses import dataclass, fields, is_dataclass, replace
 import torch
 from queues import Numbers, _take
 from maker_execution import maker_column
-from base_runtime_storage import _owned, _tensor_pairs, _shared, SimFeedbackPage
+from base_runtime_storage import _owned, _tensor_pairs, _shared, _capacity_like, SimFeedbackPage
 
 
 @dataclass(frozen=True)
@@ -133,7 +133,7 @@ class _CapturedMaker:
 
     def replay(self, state, inputs, *, device_feedback=False):
         # 原池布局严格绑定，不用更大图pad较小fill/day/order池。
-        _copy(self.initial, _owned(state, self.initial))
+        _copy(self.initial, _capacity_like(state, self.initial))
         _copy(self.inputs, inputs)
         self.loop.replay()
         required = self.required.clone()

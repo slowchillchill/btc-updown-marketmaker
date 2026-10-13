@@ -66,7 +66,12 @@ def cost_observation_case(root,artifact,stage,observations,senders,model_records
     from public_ledger import PublicLedgerState
     from public_trade_loop import _CapturedTrade
     from maker_projection_loop import _CapturedMakerProjection
-    clock=root.clock;stats={};restore=[];segments=[];begins={};snapshot_seconds=0.
+    from hidden_reference_loop import _CapturedReferences
+    from hidden_level_loop import _CapturedLevels
+    from hidden_transaction_loop import _CapturedTransactions,HiddenTransactionDeviceLoop
+    from hidden_level_loop import HiddenLevelDeviceLoop
+    from hidden_reference_loop import HiddenReferenceDeviceLoop
+    clock=root.clock;stats={};restore=[];segments=[];begins={};snapshot_seconds=0.;device_inputs=None
     def measured(name,call):
         def invoke(*args,**kwargs):
             start=time.perf_counter()
@@ -75,6 +80,8 @@ def cost_observation_case(root,artifact,stage,observations,senders,model_records
                 seconds=time.perf_counter()-start
                 row=stats.setdefault(name,dict(calls=0,host_seconds=0.,max_host_seconds=0.))
                 row['calls']+=1;row['host_seconds']+=seconds;row['max_host_seconds']=max(row['max_host_seconds'],seconds)
+        # 计时包装仍委托原处理器的共同安装及设备分派入口。
+        invoke.__dict__.update(getattr(call,'__dict__',{}))
         return invoke
     def patch(owner,name,label):
         old=getattr(owner,name);setattr(owner,name,measured(label,old));restore.append((owner,name,old))
@@ -89,6 +96,47 @@ def cost_observation_case(root,artifact,stage,observations,senders,model_records
     for name in ('on_started','on_completed'):patch(root.models,name,'validation_'+name)
     patch(_CapturedTrade,'__init__','cold_public_trade_capture')
     patch(_CapturedMakerProjection,'__init__','cold_maker_projection_capture')
+    capture_layouts={name:[] for name in ('reference','level','transaction')}
+    def capture(owner,name):
+        old=owner.__init__;label='cold_hidden_'+name+'_capture'
+        timed=measured(label,old)
+        def construct(instance,world,*args,**kwargs):
+            queue=world.hidden.queues;columns=world.hidden_frontier.columns
+            row=dict(rows=queue.rows,capacity=queue.capacity,word_capacity=args[-1],
+                source_page_base=columns.bucket_base,source_page_buckets=columns.at.numel(),
+                source_columns_binding=id(columns),price_binding=id(queue.price),
+                exact_widths={field:getattr(queue,field).words.size(1) for field in
+                    ('total_base','total_quote','consumed_base','account_remaining','debt')})
+            previous=capture_layouts[name][-1] if capture_layouts[name] else None
+            row['reason']='first_capture' if previous is None else (
+                'queue_layout' if any(row[k]!=previous[k] for k in ('rows','capacity','exact_widths')) else
+                'physical_word_growth' if row['word_capacity']!=previous['word_capacity'] else
+                'source_page_or_material_binding' if row['source_columns_binding']!=previous['source_columns_binding'] else
+                'price_binding' if row['price_binding']!=previous['price_binding'] else 'other_input_or_owner_layout')
+            capture_layouts[name].append(row)
+            return timed(instance,world,*args,**kwargs)
+        owner.__init__=construct;restore.append((owner,'__init__',old))
+    for owner,name in ((_CapturedReferences,'reference'),(_CapturedLevels,'level'),(_CapturedTransactions,'transaction')):
+        capture(owner,name)
+    def key_changes(left,right,path='key'):
+        if isinstance(left,tuple) and isinstance(right,tuple) and len(left)==len(right):
+            if len(left)==2 and isinstance(left[0],str) and left[0]==right[0]:
+                return key_changes(left[1],right[1],path+'.'+left[0])
+            return [row for index,(a,b) in enumerate(zip(left,right,strict=True))
+                for row in key_changes(a,b,path+'['+str(index)+']')]
+        return [] if left==right else [dict(path=path,before=repr(left),after=repr(right))]
+    def capture_keys(owner,name):
+        old=owner.run
+        def invoke(loop,*args,**kwargs):
+            previous_key=loop.key;previous_capture=loop.captured
+            result=old(loop,*args,**kwargs)
+            if loop.captured is not None and loop.captured is not previous_capture:
+                row=capture_layouts[name][-1]
+                row['actual_key_changes']=key_changes(previous_key,loop.key)
+            return result
+        owner.run=invoke;restore.append((owner,'run',old))
+    for owner,name in ((HiddenReferenceDeviceLoop,'reference'),(HiddenLevelDeviceLoop,'level'),(HiddenTransactionDeviceLoop,'transaction')):
+        capture_keys(owner,name)
     def progress(name,**row):
         if name in ('sim_phase_begin','continuous_event_begin'):
             key=name+':'+str(row.get('phase',row.get('kind')));begins[key]=begins.get(key,0)+1
@@ -112,8 +160,15 @@ def cost_observation_case(root,artifact,stage,observations,senders,model_records
         assert not any(out['ledger_fault']+out['account_fault']+out['order_fault']),out
         snapshot_seconds+=time.perf_counter()-started;return out
     # Root/Native冷装配和材料准备在区间外；原initialize/prehistory在首段内。
+    queue_binding=None
     torch.cuda.synchronize();whole_start=time.perf_counter()
     try:
+        if os.environ.get('B_GPU_FRONTIER_FAILURE_CHECK'):
+            from validate_hidden_device_inputs import probe_frontier_failure
+            report=probe_frontier_failure(root,progress,resume_validation)
+            report['capture_layouts']=capture_layouts
+            (artifact/'frontier-failure-report.json').write_text(json.dumps(report,indent=2)+'\n')
+            return report
         for endpoint in (1301,1501,1535,1743,1792,1850,2001):
             start=time.perf_counter();attempts=0
             while True:
@@ -122,6 +177,12 @@ def cost_observation_case(root,artifact,stage,observations,senders,model_records
                 break
             row=snapshot(endpoint);row.update(attempts=attempts,host_seconds=time.perf_counter()-start)
             segments.append(row);progress('cost_observation_segment',**row)
+            if endpoint==1301 and os.environ.get('B_GPU_HIDDEN_DEVICE_INPUTS'):
+                from validate_hidden_device_inputs import probe_request
+                device_inputs=probe_request(root)
+            if endpoint==1301 and os.environ.get('B_GPU_QUEUE_BINDING_CHECK'):
+                from validate_hidden_device_inputs import probe_queue_binding
+                queue_binding=probe_queue_binding(root,json.loads((artifact/'original-actor-send.json').read_text()),artifact)
         assert [int(o.frozen.cutoff.cpu()[0]) for o in observations]==[1300,1400,1500,1600,1700,1800,1900]
         assert [r['started'] for r in model_records]==[1300,1414,1528,1642,1756,1870]
         assert sorted(completed_records)==[1300,1400,1500,1600,1700]
@@ -207,7 +268,7 @@ def cost_observation_case(root,artifact,stage,observations,senders,model_records
         clock.handlers=handlers
         for owner,name,old in reversed(restore):setattr(owner,name,old)
     native=Path(os.environ['CARGO_TARGET_DIR'])/'debug/libmodel_native_inputs.so'
-    report=dict(passed=True,segments=segments,calls=stats,begin_counts=begins,whole_seconds=whole_seconds,
+    report=dict(passed=True,segments=segments,calls=stats,begin_counts=begins,whole_seconds=whole_seconds,device_inputs=device_inputs,queue_binding=queue_binding,capture_layouts=capture_layouts,
         snapshot_host_seconds=snapshot_seconds,natural_batches=batches,maker_ledger=ledger_report,completed_cutoffs_in_actual_retirement_order=completed_records,requests=[dict(at=int(s.control.execute_at.cpu()[0]),
             input_sequence=values(s.receipt.input_sequence),body=s.requests) for s in senders if s.receipt is not None],
         events=evidence,receive_checks=received_checks,native=dict(path=str(native),sha256=hashlib.sha256(native.read_bytes()).hexdigest()),
@@ -227,9 +288,13 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     received_checks=[];reward_checks=[]
     reward_case=bool(os.environ.get("B_GPU_ACTOR_INTERVAL_REWARD"))
     finite_goal=source.get('finite_goal')
+    # #298的b48同开关定位中，fok_success/PublicTrade原NOE row141/142
+    # 为TakerRebatePaid(kind14)，received=87000011；87000008只是日确认。
+    # 旧L2代表的同刻付款是9。只改变此固定夹具，不改变生产观察或时延。
+    same_tick_at=87_000_011 if source['maker_model']=='PUBLIC_TRADE_CONSERVATIVE_FIFO_V1' else 87_000_009
     def stage(name,**row):
         nonlocal page_changes
-        if name=='publication_boundary' and os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL') and int(clock.gates.public_visible_at.cpu()[0])==87_000_009:
+        if name=='publication_boundary' and os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL') and int(clock.gates.public_visible_at.cpu()[0])==same_tick_at:
             actual=amounts(clock.public.ledger.platform.balances)[0]
             assert actual==same_tick_cash,('Sk不得读取同刻新增现金',actual,same_tick_cash)
             same_tick_boundaries.append(actual)
@@ -554,7 +619,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         at=int(observation.account.cutoff.cpu()[0])
         duration=150 if two else 114
         if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") and not two and at==1800:duration=214
-        if os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL') and at==1800:duration=87_000_009-1870
+        if os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL') and at==1800:duration=same_tick_at-1870
         if full_warmup and at!=1900+offset:duration=20
         return zero+duration,zero+(20 if reward_case else 120) if at==1300+offset else zero
     from model_train.continuous_root import ContinuousActorRoot
@@ -805,6 +870,10 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     # 新任务身份依法改变原经验时延；C1900不能读取1939才处理的取消。
     # 在原1901边界先保留模型/冻结，再只推进真实已发请求及其可见反馈。
     cancel_frozen=observations[-1].actor.cancels.present.clone()
+    from base_runtime_storage import _owned
+    from validate_maker_projection import raw_equal
+    frozen_orders=(observations[-1].account.orders,observations[-1].account.intent_orders)
+    frozen_order_values=_owned(frozen_orders,frozen_orders)
     pending_model_event=models.next_event()
     original_body=senders[4].requests;original_receipt=senders[4].receipt
     target_orders=[order for order,on in zip(values(senders[4].publication.action.cancel_orders),
@@ -856,7 +925,28 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     pairs=observations[3].account.cancel_directory
     assert pairs.paired_members[pairs.paired_present].cpu().tolist()==([[1,2],[3,4]] if second_buy else [[1,2]])
     assert observations[4].account.cancel_directory.paired_present.any().cpu().item()
-    assert observations[-1].account.orders.cancellable[target_columns].all().cpu().item()
+    # 取消使用C1700的原选择；C1900可已因1791的PublicTrade全部成交。
+    selected=observations[4].account
+    selected_columns=T([[order in target_orders for order in values(selected.intent_orders.identities)]],torch.bool)
+    assert selected_columns.sum().cpu().item()==len(target_orders)
+    assert selected.orders.cancellable_known[selected_columns].all().cpu().item()
+    assert selected.orders.cancellable[selected_columns].all().cpu().item()
+    raw_equal((observations[-1].account.orders,observations[-1].account.intent_orders),
+        frozen_order_values,'C1900_original_frozen_orders_after_cancel')
+    if second_buy and os.environ.get('B_GPU_PUBLIC_TRADE'):
+        # 原C1400请求9.05 shares先排FIFO，原12 shares成交先扣2外部深度，
+        # 所以Down先全部成交；金额依据是提交正文，非从GPU成交差额反推。
+        items=senders[1].requests[1][0]['request']['items']
+        early_base=Fraction(items[0]['item']['order']['kind']['GtcLimit']['size_shares'])
+        assert early_base==Fraction('9.05')
+        assert all(Fraction(item['item']['order']['kind']['GtcLimit']['size_shares'])==early_base for item in items)
+        ids=values(observations[-1].account.intent_orders.identities)
+        columns=[ids.index(order) for order in target_orders]
+        assert observations[-1].account.orders.cancellable[0,columns].cpu().tolist()==[True,False]
+        assert [amounts(observations[-1].account.orders.active)[i] for i in columns]==[early_base,Fraction(0)]
+        assert [amounts(observations[-1].account.orders.matched)[i] for i in columns]==[Fraction(0),early_base]
+    else:assert observations[-1].account.orders.cancellable[target_columns].all().cpu().item()
+    assert closed_orders.cancellable_known[target_columns].all().cpu().item()
     assert not closed_orders.cancellable[target_columns].any().cpu().item()
     # 相同原完整组一次批量消费是独立调度对照，不由增量合并结果生成期望。
     groups=torch.arange(int(material.memory.last_prefix.cpu()[0])+1,device='cuda')
@@ -871,7 +961,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     assert first_finish['published'][0]==[True] and not first_finish['receipts'][0]
     assert first_finish['business_random'][0][0]>0
     pending_models=[task for task in models.tasks if task.active.any().cpu().item() and (task.stage<3).any().cpu().item()]
-    expected_finish=87_000_009 if os.environ.get("B_GPU_ACTOR_SAME_TICK_TAIL") else (2084 if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") else 1984)
+    expected_finish=same_tick_at if os.environ.get("B_GPU_ACTOR_SAME_TICK_TAIL") else (2084 if os.environ.get("B_GPU_ACTOR_WINDOW_TAIL") else 1984)
     assert any(task.completed_at is not None and task.completed_at.cpu().tolist()==[expected_finish] for task in pending_models)
     if second_buy:
         assert senders[1].control.execute_at.cpu().tolist()==[1528] and senders[0].control.execute_at.cpu().tolist()==[1534]
@@ -920,7 +1010,7 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
     if os.environ.get('B_GPU_ACTOR_SAME_TICK_TAIL'):
         same_tick_boundaries=[]
         # C1800在1870已开始；有限长计算跨截止，finish=Sk且dispatch=0。
-        sk=T([87_000_009])
+        sk=T([same_tick_at])
         before=shared.advance_before(sk,yes,progress=stage)
         assert before.complete.cpu().tolist()==[True] and before.fault.cpu().tolist()==[0]
         same_tick_cash=amounts(clock.public.ledger.platform.balances)[0]
@@ -949,8 +1039,10 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         assert sender.publication.reservation.decision.outcomes.cpu().tolist()==[[1,1]]
         cpu_accrued=Fraction(source['received_ledger']['projection']['platform_confirmed_projection']['taker_rebate_receivable_pusd'])
         payable=Fraction((cpu_accrued*10000).numerator//(cpu_accrued*10000).denominator,10000)
-        assert amounts(clock.public.ledger.platform.balances)[0]==same_tick_cash+payable
-        result.update(same_tick_finish_send_and_cash_checked=True,send_at=87_000_009,
+        export_current()
+        assert amounts(clock.public.ledger.platform.balances)[0]==same_tick_cash+payable,dict(
+            actual=str(amounts(clock.public.ledger.platform.balances)[0]),before=str(same_tick_cash),taker_payable=str(payable))
+        result.update(same_tick_finish_send_and_cash_checked=True,send_at=same_tick_at,
             pre_send_cash=str(same_tick_cash),subsequent_payment=str(payable))
     elif os.environ.get('B_GPU_ACTOR_WINDOW_TAIL') and not two:
         original_observations=list(result['observations'])
@@ -1059,13 +1151,19 @@ def continuous(source,clock,pm,market,reference,binance,block,sampler,rule,recei
         if not finite_goal:assert values(clock.public.ledger.current_entry_sequence)==[pre_entry[0]+4]
         if finite_goal:
             assert clock.source.next().eof.cpu().item()
-            assert reward_endpoints[-1]['at']==finite_goal['goal_until']
-            assert Fraction(reward_checks[-1]['E'])==0
+            # 未配置奖励时仍从同一公开Ledger核对目标后暴露，不能读取不存在的评分人口。
+            _,goal_exposure=run(lambda:model_root.reward_reads(clock.public))
+            assert goal_exposure.known.cpu().tolist()==[True] and goal_exposure.fault.cpu().tolist()==[0]
+            assert amounts(goal_exposure.amount)==[Fraction()]
+            if reward_case:
+                assert reward_endpoints[-1]['at']==finite_goal['goal_until']
+                assert Fraction(reward_checks[-1]['E'])==0
             result['finite_goal']=dict(finite_goal,terminal_facts_count=len(finite_goal['terminal_facts']),
-                auto_cash_pusd=str(winner),goal_training_score=reward_endpoints[-1]['training_score'],
+                auto_cash_pusd=str(winner),interval_reward_configured=reward_case,
                 actual_final_prefix=values(clock.public.ledger.platform.platform_source_prefix),
                 actual_goal_ledger_entry=values(clock.public.ledger.current_entry_sequence),
                 no_tail_observations=True,complete_target_posterior_pending=True)
+            if reward_case:result['finite_goal']['goal_training_score']=reward_endpoints[-1]['training_score']
             del result['finite_goal']['terminal_facts']
             export_current()  # 完整目标后缀，原pre-tail人口不冒充最终后验。
             stage('finite_goal_endpoint',**result['finite_goal'])

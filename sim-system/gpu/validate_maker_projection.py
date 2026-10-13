@@ -163,6 +163,18 @@ def observe(backend,artifact,*,resources=False):
             resource_probe(world,projection,page,at,rebate,sampler,assets,actual,batches,artifact)
         Path(artifact,'maker-page-report.json').write_text(json.dumps(observations,indent=2)+'\n')
         return actual,batches,fault
+    trade_before={}
+    if os.environ.get('B_GPU_PUBLIC_TRADE'):
+        # 在原成交进入前取实际订单量；Level零页可留设备，不依赖宿主空页钩子。
+        from validate_base_execution import values
+        trade=backend.public_trade;original_trade=type(trade).run.__get__(trade,type(trade))
+        def observed_trade(world,choice,*args,**kwargs):
+            quantity=world.orders.quantities
+            trade_before[int(choice.at[0].cpu())]=dict(open_base_units=values(quantity.open_base_units),
+                pending_maker_depletion=values(quantity.pending_maker_depletion_base_units),
+                matched_base_units=values(quantity.matched_base_units))
+            return original_trade(world,choice,*args,**kwargs)
+        trade.run=observed_trade
     original_effects=type(owner).run_effects.__get__(owner,type(owner))
     def execute_effects(world,projection,effects,frames,at,rebate,sampler,assets):
         inputs=(world.orders,world.fills,world.calendars,world.account,projection,effects,at,rebate,assets)
@@ -222,6 +234,7 @@ def observe(backend,artifact,*,resources=False):
         if os.environ.get('B_GPU_PUBLIC_TRADE'):
             row['open_base_units']=values(world.orders.quantities.open_base_units)
             row['matched_base_units']=values(world.orders.quantities.matched_base_units)
+        if os.environ.get('B_GPU_PUBLIC_TRADE'):row['before_public_trade']=trade_before[int(at[0].cpu())]
         observations.append(row);print(json.dumps(dict(stage='actual_maker_projection_page',**row)),flush=True)
         if resources and feedback_any and not getattr(execute_effects,'probed',False):
             execute_effects.probed=True

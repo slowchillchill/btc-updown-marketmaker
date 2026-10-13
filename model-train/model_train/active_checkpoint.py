@@ -39,6 +39,7 @@ DEFERRED_SOURCES=('model-train/model_train/frozen_inputs.py','model-train/model_
  'sim-system/gpu/market_resolution_orders.py','execution-normalization/gpu/device_identity.py',
  'model-train/native-inputs/gpu/actor_features.py','model-train/native-inputs/gpu/actor_price_fee.py',
  'sim-system/gpu/public_trade_execution.py','sim-system/gpu/public_trade_loop.py','sim-system/gpu/conservative_rank.py',
+ 'sim-system/gpu/hidden_level_loop.py','sim-system/gpu/hidden_transaction_loop.py',
  'ledger/gpu/reservation.py','model-train/model_train/training_report.py')
 # 每个排除字段有原装配中的重新连接者；其余实际字段不能静默遗漏。
 OWNERS={
@@ -48,7 +49,7 @@ OWNERS={
  'continuous_actor.ContinuousActorRun':('freeze','receive','initialize','settlement'),
  'send_clock.BoundedSendClock':('handlers','bank','public_loop'),
  'public_source.PublicGroupSource':('install_listeners',),
- 'continuous_execution.ContinuousExecution':('codec','fill_paths','fifo_loop','maker_loop','maker_projection_loop','reference_loop','auto_loop','public_trade'),
+ 'continuous_execution.ContinuousExecution':('codec','fill_paths','fifo_loop','maker_loop','maker_projection_loop','reference_loop','level_loop','transaction_loop','auto_loop','public_trade','queue_stage','pending_queue_stage'),
  'actor_send.FrozenActorSend':('codec','receive'),
  'actor_send.ActorRequestSubmission':('codec',),
  'actor_send.SubmittedActorRequests':(),
@@ -405,10 +406,16 @@ def _reconnect(root,batch,codec,callbacks):
     backend.fifo_loop=FifoDeviceLoop();backend.maker_loop=MakerDeviceLoop(device_feedback=True)
     backend.maker_projection_loop=MakerProjectionDeviceLoop()
     backend.reference_loop=HiddenReferenceDeviceLoop()
+    from hidden_level_loop import HiddenLevelDeviceLoop
+    backend.level_loop=HiddenLevelDeviceLoop()
+    from hidden_transaction_loop import HiddenTransactionDeviceLoop
+    backend.transaction_loop=HiddenTransactionDeviceLoop()
     from auto_redemption_loop import AutoRedemptionDeviceLoop
     backend.auto_loop=AutoRedemptionDeviceLoop()
     from public_trade_execution import PublicTradeExecution
-    backend.public_trade=PublicTradeExecution();clock.handlers=backend.handlers()
+    backend.public_trade=PublicTradeExecution()
+    backend.queue_stage=None;backend.pending_queue_stage=None
+    clock.handlers=backend.handlers()
     root.receiver.captured=None;root.receiver.progress=None
     root.run.freeze=root.freeze;root.run.receive=root.receive;root.run.initialize=root.initialize;root.run.settlement=None
     for task in models.tasks:

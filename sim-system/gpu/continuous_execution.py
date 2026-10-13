@@ -26,10 +26,16 @@ class ContinuousExecution:
         self.maker_projection_loop=MakerProjectionDeviceLoop()
         from hidden_reference_loop import HiddenReferenceDeviceLoop
         self.reference_loop=HiddenReferenceDeviceLoop()
+        from hidden_level_loop import HiddenLevelDeviceLoop
+        self.level_loop=HiddenLevelDeviceLoop()
+        from hidden_transaction_loop import HiddenTransactionDeviceLoop
+        self.transaction_loop=HiddenTransactionDeviceLoop()
         from auto_redemption_loop import AutoRedemptionDeviceLoop
         self.auto_loop=AutoRedemptionDeviceLoop()
         from public_trade_execution import PublicTradeExecution
         self.public_trade=PublicTradeExecution()
+        self.queue_stage=None
+        self.pending_queue_stage=None
 
     @staticmethod
     def refresh(world,choice):
@@ -85,7 +91,57 @@ class ContinuousExecution:
         projection,batch=Numbers.run_exact_batch(lambda:projection.rebate_clock(self.sampler,frame,choice.at))
         return world,projection,batch,frame
 
-    def hidden(self,world,projection,choice):
+    def hidden(self,world,projection,choice,*,staged=False):
+        if not staged:return self._hidden(world,projection,choice)
+        from base_runtime_storage import BaseRuntimeStorage
+        queue=world.hidden.queues
+        if self.queue_stage is None or self.queue_stage.layout.kind.shape!=queue.kind.shape:
+            self.queue_stage=BaseRuntimeStorage.stage_queue(queue)
+        with self.queue_stage.begin(queue):
+            result=self._hidden(world,projection,choice)
+        self.pending_queue_stage=self.queue_stage
+        return result
+
+    def install_hidden_stage(self,world):
+        stage=self.pending_queue_stage
+        if stage is not None:
+            queue=stage.install(world.hidden.queues)
+            world=replace(world,hidden=replace(world.hidden,queues=queue))
+            self.pending_queue_stage=None
+        return world
+
+    def hidden_transactions(self,world,choice,group,gtd,at,enabled,*,before):
+        """原时钟的设备物理批；仅资源布局在进入时冷准备。"""
+        from hidden_level_loop import _state,_inputs
+        from public_trade_loop import _widths
+        from base_runtime_storage import BaseRuntimeStorage
+        queue=world.hidden.queues
+        paths=self.fill_paths('maker',world,None)
+        width=max([self.transaction_loop.width,*_widths(_state(world)),
+            *_widths(_inputs(world,choice,paths,self.taker_rate,self.taker_rate)),
+            *_widths(world.hidden_frontier.columns.source.decimals),*_widths(queue)])
+        # 上次未提交候选可能已扩过私有字宽；再次进入前沿用该物理需求，
+        # 不让旧宽scratch迫使同布局图读取不同大小的行。
+        if self.queue_stage is not None and self.queue_stage.scratch is not None:
+            width=max(width,*_widths(self.queue_stage.scratch))
+        self.transaction_loop.width=width
+        names=('total_base','total_quote','consumed_base','account_remaining','debt')
+        grow=any(getattr(queue,name).words.size(1)<width for name in names)
+        if queue.conservative is not None:grow|=queue.conservative.remaining.words.size(1)<width
+        if grow:
+            queue=replace(queue,**{name:getattr(queue,name).with_capacity(width) for name in names},
+                conservative=None if queue.conservative is None else replace(queue.conservative,
+                    remaining=queue.conservative.remaining.with_capacity(width)))
+            world=replace(world,hidden=replace(world.hidden,queues=queue))
+        if self.queue_stage is None or self.queue_stage.layout.kind.shape!=queue.kind.shape:
+            self.queue_stage=BaseRuntimeStorage.stage_queue(queue)
+        elif grow:self.queue_stage.rebind(queue)
+        with self.queue_stage.begin(queue):
+            self.queue_stage.segment_counts(queue)
+            world,count=self.transaction_loop.run(world,choice,self.queue_stage,self,group,gtd,at,enabled,before=before)
+        return world,count
+
+    def _hidden(self,world,projection,choice):
         from asset_buy import take_ratio
         world=world.begin_hidden_bucket(choice);block=world.hidden_frontier.columns.source
         batches=[];effect=None
@@ -115,11 +171,27 @@ class ContinuousExecution:
                     self.sampler,preceding=(batch,))
                 batches.extend(autos)
                 if autos and bool(torch.stack([value.fault for value in autos]).any().cpu()):return world,projection,tuple(batches),effect
+            else:
+                world=Numbers.run_exact_batch(lambda:world.apply_hidden_reference(
+                    self.refresh(world,choice),indices,self.source_assets))
             index+=1
-        for index in current_span('step'):
+        steps=current_span('step');index=steps.start
+        while index<steps.stop:
             selected=self.refresh(world,choice)
             fee=Numbers.run_exact_batch(lambda:take_ratio(self.rule.values,torch.full_like(choice.at,2)))
-            if world.hidden.queues.conservative is not None and int(block.step_tags[index].cpu())==5:
+            from base_runtime_storage import queue_stage_for
+            stage=queue_stage_for(world.hidden.queues)
+            if stage is not None:
+                world,index=self.level_loop.run(world,selected,index,steps.stop,stage,self.condition_by_asset,
+                    self.source_assets,self.fill_paths('maker',world,None),fee,self.rule.context['fee_exponent'],self.taker_rate)
+                if index==steps.stop:break
+                selected=self.refresh(world,choice)
+            tag=int(block.step_tags[index].cpu())
+            if stage is not None and tag not in (2,5):
+                queue=stage.materialize(world.hidden.queues)
+                world=replace(world,hidden=replace(world.hidden,queues=queue))
+                stage.original=queue;stage.dirty.zero_();stage.pending.clear()
+            if world.hidden.queues.conservative is not None and tag==5:
                 assets=world.hidden.asset_markets
                 axis=torch.arange(assets.numel(),device=assets.device)
                 roots=world.account.asset_roots
@@ -130,11 +202,16 @@ class ContinuousExecution:
                 world,effects,frames=self.public_trade.run(world,selected,index,self.condition_by_asset,self.source_assets,pairs,
                     self.fill_paths('maker',world,None),fee,self.rule.context['fee_exponent'],self.taker_rate,
                     fifo_loop=self.fifo_loop,maker_loop=self.maker_loop)
+                stage=queue_stage_for(world.hidden.queues)
+                if stage is not None:
+                    queue=stage.accept(world.hidden.queues)
+                    world=replace(world,hidden=replace(world.hidden,queues=queue))
                 projection,projected,stopped,page_fault=self.maker_projection_loop.run_effects(world,projection,effects,frames,
                     choice.at,self.taker_rate,self.sampler,self.asset_tokens)
                 batches.extend(projected)
                 if stopped is not None:effect=stopped
                 if bool(page_fault.any().cpu()):return world,projection,tuple(batches),effect
+                index+=1
                 continue
             else:
                 world,effect=self.maker_loop.run(lambda:self.fifo_loop.run(lambda:world.apply_hidden_selected(selected,torch.full_like(choice.at,index),
@@ -144,6 +221,10 @@ class ContinuousExecution:
                 effects=(effect,)
             for effect in effects:
                 if bool(effect.fault.any().cpu()):return world,projection,tuple(batches),effect
+                stage=queue_stage_for(world.hidden.queues)
+                if stage is not None:
+                    queue=stage.accept(world.hidden.queues)
+                    world=replace(world,hidden=replace(world.hidden,queues=queue))
                 if effect.maker_page is not None:
                     projection,projected,page_fault=self.maker_projection_loop.run(world,projection,effect.maker_page,
                         choice.at,self.taker_rate,self.sampler,self.asset_tokens)
@@ -163,6 +244,7 @@ class ContinuousExecution:
                         frame,self.asset_tokens,world.calendars,self.taker_rate,choice.at))
                     batches.append(batch)
                     if bool(batch.fault.any().cpu()):return world,projection,tuple(batches),effect
+            index+=1
         world,_=Numbers.run_exact_batch(world.finish_hidden_bucket)
         return world,projection,tuple(batches),effect
 
@@ -212,7 +294,7 @@ class ContinuousExecution:
     def handlers(self):
         def with_auto(method):
             def advance(world,projection,choice):
-                world,projection,batch,effect=method(world,projection,choice)
+                world,projection,batch,effect=method(world,projection,choice,staged=True) if method.__name__=='hidden' else method(world,projection,choice)
                 batches=() if batch is None else batch if isinstance(batch,tuple) else (batch,)
                 fault=choice.fault.clone()
                 for value in batches:fault |= value.fault
@@ -220,6 +302,9 @@ class ContinuousExecution:
                 world,projection,autos=self.auto_loop.run(world,projection,choice.at,choice.present&(fault==0),
                     self.sampler,preceding=batches)
                 return world,projection,batches+autos,effect
+            if method.__name__=='hidden':
+                advance.commit=self.install_hidden_stage
+                advance.device_batch=self.hidden_transactions
             return advance
         return {phase:with_auto(method) for phase,method in
             ((0,self.settlement),(2,self.finality),(3,self.rebate),(4,self.hidden),(5,self.mutation))}

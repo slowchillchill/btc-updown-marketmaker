@@ -7,6 +7,14 @@ from public_source import public_group_selection
 from public_group_loop import PublicGroupDeviceLoop
 
 
+def _progress(progress,stage,**row):
+    """原进度消费者先节流，再读取设备诊断列。"""
+    if progress is None:return
+    if hasattr(progress,'ready') and not progress.ready(stage):return
+    progress(stage,**{name:value.detach().cpu().tolist() if isinstance(value,torch.Tensor) else value
+        for name,value in row.items()})
+
+
 @dataclass(frozen=True)
 class SendAdvance:
     complete: torch.Tensor
@@ -97,12 +105,23 @@ class BoundedSendClock:
             # 同刻先原SIM；连续公开循环保未按当前组屏蔽的public_choice。
             fault=choice.fault|group.fault
             if bool((fault!=0).any().cpu()):
-                if progress:progress('drive_fault',fault=fault.cpu().tolist(),requests=self.runtime.requests.fault.cpu().tolist(),
-                    orders=self.runtime.orders.fault.cpu().tolist(),account=self.runtime.account.fault.cpu().tolist(),
-                    hidden=self.runtime.hidden.fault.cpu().tolist(),frontier=frontier.fault.cpu().tolist(),
-                    fills=self.runtime.fills.fault.cpu().tolist(),maker=self.runtime.calendars.maker.fault.cpu().tolist(),
-                    taker=self.runtime.calendars.taker.fault.cpu().tolist(),controls=self.runtime.market_controls.fault.cpu().tolist())
+                _progress(progress,'drive_fault',fault=fault,requests=self.runtime.requests.fault,
+                    orders=self.runtime.orders.fault,account=self.runtime.account.fault,
+                    hidden=self.runtime.hidden.fault,frontier=frontier.fault,
+                    fills=self.runtime.fills.fault,maker=self.runtime.calendars.maker.fault,
+                    taker=self.runtime.calendars.taker.fault,controls=self.runtime.market_controls.fault)
                 return SendAdvance(torch.zeros_like(enabled),missing_public,missing_hidden,fault,processed)
+            handler=self.handlers.get(4)
+            if at.is_cuda and handler is not None and hasattr(handler,'device_batch'):
+                runtime,count=handler.device_batch(self.runtime,choice,group,self.gtd,at,enabled,before=before)
+                self.runtime=runtime
+                if count:
+                    processed+=count
+                    _progress(progress,'sim_phase',processed=processed,phase=4,at=runtime.hidden_frontier.closed_at)
+                    continue
+                choice=replace(choice,requests=runtime.requests,fills=runtime.fills,calendars=runtime.calendars,
+                    hidden_frontier=runtime.hidden_frontier,settlement_registrations=runtime.settlement_registrations,
+                    order_query_history=runtime.order_query_history)
             if bool(take_public.any().cpu()):
                 input_frontier=self.runtime.input_frontier
                 # 首个真实receipt沿原入口产生；缺页冷装配也仍由原宿主处理。
@@ -113,7 +132,7 @@ class BoundedSendClock:
                     self.source.position=result.position
                     if input_frontier is not None:self.runtime=replace(self.runtime,input_frontier=result.frontier)
                     processed+=result.processed
-                    if progress:progress('public_group',processed=processed,position=self.source.position.detach().cpu().tolist())
+                    _progress(progress,'public_group',processed=processed,position=self.source.position)
                     if bool(result.fault.any().cpu()):
                         return SendAdvance(torch.zeros_like(enabled),missing_public,missing_hidden,result.fault,processed)
                     continue
@@ -123,7 +142,7 @@ class BoundedSendClock:
                     self.runtime=replace(self.runtime,input_frontier=frontier)
                 self.source.consume(take_public)
                 processed+=1
-                if progress:progress('public_group',processed=processed,position=self.source.position.detach().cpu().tolist())
+                _progress(progress,'public_group',processed=processed,position=self.source.position)
                 continue
             if not bool(choice.present.any().cpu()):
                 complete=enabled&~public_due&~missing_hidden
@@ -141,7 +160,7 @@ class BoundedSendClock:
             handler=self.handlers.get(phase)
             if handler is None:
                 raise NotImplementedError(f'本来源实际出现phase={phase}，原处理器尚未装配')
-            if progress:progress('sim_phase_begin',processed=processed,phase=phase)
+            _progress(progress,'sim_phase_begin',processed=processed,phase=phase)
             runtime,projection,batch,effect=handler(self.runtime,self.projection,choice)
             batches=() if batch is None else batch if isinstance(batch,tuple) else (batch,)
             handler_fault=torch.zeros_like(fault)
@@ -157,9 +176,10 @@ class BoundedSendClock:
                 frontier,commit_fault=Numbers.run_exact_batch(lambda:runtime.input_frontier.commit(active))
                 if bool(commit_fault.any().cpu()):return SendAdvance(torch.zeros_like(enabled),missing_public,missing_hidden,commit_fault,processed)
                 runtime=replace(runtime,input_frontier=frontier)
+            if hasattr(handler,'commit'):runtime=handler.commit(runtime)
             self.runtime,self.projection,self.public=runtime,projection,public
             processed+=1
-            if progress:progress('sim_phase',processed=processed,phase=phase,at=choice.at.detach().cpu().tolist())
+            _progress(progress,'sim_phase',processed=processed,phase=phase,at=choice.at)
 
     def receive_first(self,enabled=None):
         """按就绪根使用真实耗尽门；其它根保原首次领取/观察前缀。"""

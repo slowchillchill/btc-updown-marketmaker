@@ -4,6 +4,8 @@
 本模块只产生队列候选及maker depletion，不生成NOE或经济入账。
 """
 from dataclasses import dataclass, replace
+from contextvars import ContextVar
+from contextlib import contextmanager
 import torch
 from buy_cost import _public_numbers
 
@@ -11,6 +13,16 @@ from buy_cost import _public_numbers
 Numbers = _public_numbers()
 ExactInt = Numbers.ExactInt
 ExactRational = Numbers.ExactRational
+
+_level_dispatch = ContextVar('fifo_level_dispatch',default=None)
+
+
+@contextmanager
+def level_queue_dispatch(prepare):
+    """设备分段图供应同一原Level的队列候选；不改变源准入。"""
+    token=_level_dispatch.set(prepare)
+    try:yield
+    finally:_level_dispatch.reset(token)
 
 
 def _take(value, index):
@@ -83,6 +95,49 @@ class PriceQueueBatch:
     fault: torch.Tensor
     conservative: object = None
 
+    def take_rows(self, rows, *, staged=True):
+        """按原行坐标提取FIFO，保留每行段次序及原B/Q/c。"""
+        from base_runtime_storage import queue_stage_for
+        stage=queue_stage_for(self) if staged else None
+        if stage is not None:return stage.take_rows(self,rows)
+        flat=(rows[:,None]*self.capacity+torch.arange(self.capacity,device=rows.device)[None,:]).flatten()
+        rank=self.conservative
+        value = replace(self,price=ExactRational(_take(self.price.numerator,rows),_take(self.price.denominator,rows)),
+            kind=self.kind.index_select(0,rows),order_ids=self.order_ids.index_select(0,rows),
+            **{name:_take(getattr(self,name),flat) for name in
+                ('total_base','total_quote','consumed_base','account_remaining')},
+            debt=_take(self.debt,rows),fault=self.fault.index_select(0,rows),
+            conservative=None if rank is None else replace(rank,kind=rank.kind.index_select(0,rows),
+                order_ids=rank.order_ids.index_select(0,rows),remaining=_take(rank.remaining,flat)))
+        return value
+
+    def put_rows(self, rows, incoming, *, enabled=None):
+        """纯候选安装；阶段存储可在共同提交点使用同一原行坐标。"""
+        from base_runtime_storage import queue_stage_for
+        stage=queue_stage_for(self)
+        if stage is not None:return stage.propose(self,rows,incoming,enabled)
+        if enabled is not None:
+            from base_runtime_storage import _owned,StageQueueStorage
+            output=_owned(self,self,word_capacity=max(incoming.total_base.words.size(1),incoming.debt.words.size(1)))
+            StageQueueStorage._write(output,rows,incoming,enabled)
+            from account_state import grouped_fault
+            return replace(output,fault=self.fault|grouped_fault(incoming.fault*enabled.to(torch.int32),rows,self.rows))
+        flat=(rows[:,None]*self.capacity+torch.arange(self.capacity,device=rows.device)[None,:]).flatten()
+        rank=self.conservative
+        return replace(self,kind=self.kind.index_copy(0,rows,incoming.kind),
+            order_ids=self.order_ids.index_copy(0,rows,incoming.order_ids),
+            **{name:_put(getattr(self,name),flat,getattr(incoming,name)) for name in
+                ('total_base','total_quote','consumed_base','account_remaining')},
+            debt=_put(self.debt,rows,incoming.debt),fault=self.fault.index_copy(0,rows,incoming.fault),
+            conservative=None if rank is None else replace(rank,kind=rank.kind.index_copy(0,rows,incoming.conservative.kind),
+                order_ids=rank.order_ids.index_copy(0,rows,incoming.conservative.order_ids),
+                remaining=_put(rank.remaining,flat,incoming.conservative.remaining)))
+
+    def segment_counts(self):
+        from base_runtime_storage import queue_stage_for
+        stage=queue_stage_for(self)
+        return (self.kind!=0).sum(1) if stage is None else stage.segment_counts(self)
+
     @property
     def rows(self):
         return self.kind.shape[0]
@@ -116,6 +171,15 @@ class PriceQueueBatch:
         padding = capacity-self.capacity
         if not padding:
             return self
+        from base_runtime_storage import queue_stage_for,_queue_stage
+        stage=queue_stage_for(self)
+        if stage is not None:
+            current=stage.materialize(self)
+            token=_queue_stage.set(None)
+            try:result=current.resized(capacity)
+            finally:_queue_stage.reset(token)
+            stage.rebind(result)
+            return result
         # 仅物理表示改变，原字段/段顺序/债务不变。
         def enlarged(value):
             original = [self._at(value, column) for column in range(self.capacity)]
@@ -128,6 +192,8 @@ class PriceQueueBatch:
 
     def append_empty_rows(self, price):
         """为新合法报价建立空FIFO；旧行坐标、段与债务都不移动。"""
+        # 原FOK/已有GTC价位的新增目录人口可为空；不重造不可变价格或复制全FIFO。
+        if price.numerator.sign.numel()==0:return self
         empty=type(self).empty(price,self.capacity)
         def integer(left,right):
             capacity=max(left.words.size(1),right.words.size(1))
@@ -395,8 +461,8 @@ class PriceQueueBatch:
             debt=next_debt.select(enabled, self.debt), fault=roots_fault)
         return candidate.finish_taker_plan(enabled)
 
-    def apply_level_transition(self, before, after, *, fifo_loop=None):
-        """原减少先抵taker debt，再逐段耗尽；增加永远追加尾段，绝不合并原B/Q。"""
+    def prepare_level_transition(self, before, after):
+        """原Level的逐段循环入口；设备分派复用同一精确算术。"""
         zero = before.constant(0)
         relation = after.compare(before)
         added = (after-before).select(relation.order>0,zero)
@@ -406,6 +472,30 @@ class PriceQueueBatch:
         debt = self.debt-offset
         roots_fault = self.fault | before.fault | after.fault | relation.fault
         roots_fault = roots_fault | (before.sign<0).to(torch.int32) | (after.sign<0).to(torch.int32)
+        return dict(zero=zero,added=added,remaining=remaining,debt=debt,fault=roots_fault)
+
+    def finish_level_transition(self, prepared, consumed_after, account_after, maker, remaining):
+        """原循环结果的append/compact及故障归并；不合并外部段。"""
+        zero,added,debt=(prepared[name] for name in ('zero','added','debt'))
+        roots_fault = prepared['fault'] | remaining.fault | debt.fault | (remaining.sign>0).to(torch.int32)
+        state = replace(self,consumed_base=consumed_after,account_remaining=account_after,
+                        debt=debt,fault=roots_fault)
+        state,required = state.append_external(added)
+        roots_fault = roots_fault | state.fault | _row_fault(maker,self.rows,self.capacity)
+        if self.conservative is not None:
+            ranked=(self.conservative.kind==2).any(1)
+            rank,rank_required=self.conservative.append(added.select(ranked,zero))
+            state=replace(state,conservative=rank)
+            required=torch.maximum(required,rank_required)
+        effects = QueueEffects(self.order_ids,maker,zero,torch.zeros_like(self.fault,dtype=torch.bool),required,roots_fault)
+        return state,effects
+
+    def apply_level_transition(self, before, after, *, fifo_loop=None):
+        """原减少先抵taker debt，再逐段耗尽；增加永远追加尾段，绝不合并原B/Q。"""
+        dispatch=_level_dispatch.get()
+        if dispatch is not None:return dispatch(self,before,after)
+        prepared=self.prepare_level_transition(before,after)
+        zero,remaining=(prepared[name] for name in ('zero','remaining'))
         columns = self.capacity
         eager = not Numbers.device_batch_active() and self.rows > 0
         if eager and fifo_loop is not None:
@@ -471,18 +561,7 @@ class PriceQueueBatch:
                 maker_columns.append(take.select(kind==2,zero))
             consumed_after, account_after = _columns(consumed_columns), _columns(account_columns)
             maker = _columns(maker_columns)
-        roots_fault = roots_fault | remaining.fault | debt.fault | (remaining.sign>0).to(torch.int32)
-        state = replace(self,consumed_base=consumed_after,account_remaining=account_after,
-                        debt=debt,fault=roots_fault)
-        state,required = state.append_external(added)
-        roots_fault = roots_fault | state.fault | _row_fault(maker,self.rows,self.capacity)
-        if self.conservative is not None:
-            ranked=(self.conservative.kind==2).any(1)
-            rank,rank_required=self.conservative.append(added.select(ranked,zero))
-            state=replace(state,conservative=rank)
-            required=torch.maximum(required,rank_required)
-        effects = QueueEffects(self.order_ids,maker,zero,torch.zeros_like(self.fault,dtype=torch.bool),required,roots_fault)
-        return state,effects
+        return self.finish_level_transition(prepared,consumed_after,account_after,maker,remaining)
 
 
 def run_queue_batch(queue,compute):

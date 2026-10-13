@@ -21,6 +21,14 @@ class BaseAcceptanceEffects:
 
 
 def _coordinate_queue(candidate,original,row_roots,fault):
+    from base_runtime_storage import queue_stage_for
+    stage=queue_stage_for(candidate)
+    if stage is not None:
+        coordinated=stage.coordinate(candidate,original,row_roots,fault)
+        if coordinated is not None:return coordinated
+    if candidate is original or all(getattr(candidate,name) is getattr(original,name) for name in
+            ('kind','order_ids','total_base','total_quote','consumed_base','account_remaining','debt','conservative')):
+        return replace(original,fault=original.fault | fault[row_roots])
     enabled = fault[row_roots] == 0
     flat = enabled.repeat_interleave(candidate.capacity)
     return replace(candidate,

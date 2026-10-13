@@ -5,10 +5,238 @@ BaseSimRuntime生成。本层只提交已经共同协调的候选，不选择阶
 冻结观察必须取snapshot，不能借可原位提交的活动张量。
 """
 from dataclasses import dataclass, fields, is_dataclass, replace
+from contextvars import ContextVar
+from contextlib import contextmanager
 import torch
 from queues import ExactInt, ExactRational, Numbers
 from fill_finality import FillRecord
 from hidden_base_execution import HiddenBaseEffects
+
+
+_queue_stage = ContextVar('sim_queue_stage',default=None)
+
+
+def queue_stage_for(queue):
+    stage=_queue_stage.get()
+    return stage if stage is not None and stage.matches(queue) else None
+
+
+class StageQueueStorage:
+    """原hidden桶的私有行缓冲；未改行借进入态，共同安装前不写活动FIFO。
+
+    同行后继取最近成功候选。单步精度或池重算只产生pending行，不写scratch。
+    dirty仅是本次候选的物理写集，不进入检查点或经济状态。
+    """
+    def __init__(self, queue):
+        self.layout=queue
+        self.scratch=None
+        self.dirty=torch.zeros(queue.rows,dtype=torch.bool,device=queue.kind.device)
+        self.pending={}
+        self.counts=None
+        self.installed_counts=None
+        self.count_binding=None
+        self.addresses=None
+        self.address_values=None
+        self.binding_owners=()
+
+    @staticmethod
+    def _binding_fields(queue):
+        result=[(('kind',),queue.kind),(('order_ids',),queue.order_ids)]
+        for name in ('total_base','total_quote','consumed_base','account_remaining','debt'):
+            result.extend(((name,column),getattr(getattr(queue,name),column)) for column in ('words','sign','fault'))
+        if queue.conservative is not None:
+            result.extend((('conservative',name),getattr(queue.conservative,name)) for name in ('kind','order_ids'))
+            result.extend((('conservative','remaining',column),getattr(queue.conservative.remaining,column))
+                for column in ('words','sign','fault'))
+        return result
+
+    def _bind(self,queue):
+        # 派生物理地址，不保存业务值。拥有者保留至本次设备工作完成；
+        # raw CUDA读取同样登记当前流，释放不能早于该流中已排队的操作。
+        fields=self._binding_fields(queue)
+        self.binding_slots={path:index for index,(path,_) in enumerate(fields)}
+        self.binding_owners=tuple(value for _,value in fields)
+        values=tuple(value.data_ptr() for value in self.binding_owners)
+        stream=torch.cuda.current_stream(queue.kind.device)
+        for value in self.binding_owners:value.record_stream(stream)
+        if values!=self.address_values:
+            incoming=torch.tensor(values,dtype=torch.int64,device=queue.kind.device)
+            if self.addresses is None:self.addresses=incoming
+            else:self.addresses.copy_(incoming)
+            self.address_values=values
+
+    @staticmethod
+    def _allocate(value):
+        if isinstance(value,torch.Tensor):return torch.empty_like(value)
+        if is_dataclass(value):return replace(value,**{f.name:StageQueueStorage._allocate(getattr(value,f.name)) for f in fields(value)})
+        return value
+
+    def matches(self, queue):
+        return queue.price is self.original.price and queue.kind.shape==self.original.kind.shape
+
+    @contextmanager
+    def begin(self, queue):
+        self.original=queue;self.dirty.zero_();self.pending.clear()
+        self._bind(queue)
+        if self.count_binding!=queue.kind.data_ptr() and self.installed_counts is not None:
+            self.installed_counts.copy_((queue.kind!=0).sum(1))
+        self.count_binding=queue.kind.data_ptr()
+        if self.installed_counts is None:self.counts=None
+        elif self.counts is None:self.counts=self.installed_counts.clone()
+        else:self.counts.copy_(self.installed_counts)
+        if self.scratch is not None:
+            self.scratch=replace(self.scratch,price=queue.price,fault=queue.fault)
+        token=_queue_stage.set(self)
+        try:yield self
+        finally:_queue_stage.reset(token)
+
+    def take_rows(self, queue, rows):
+        # 原host控制/资源协调可返回新的完整私有queue；局部读取随它刷新。
+        # 捕获内以begin已经刷新过的固定描述为输入，不构造CPU地址数据。
+        if not Numbers.device_batch_active():self._bind(queue)
+        from queues import _take
+        enabled=torch.ones_like(rows,dtype=torch.bool)
+        def gather(path,value,count=1):
+            output=torch.empty((rows.numel()*count,*value.shape[1:]),dtype=value.dtype,device=value.device)
+            Numbers.public_extension().copy_bound_rows(output,self.addresses,self.binding_slots[path],rows,enabled,False)
+            return output
+        def exact(path,value,count):
+            return ExactInt(*(gather((*path,name),getattr(value,name),count) for name in ('words','sign','fault')))
+        rank=queue.conservative
+        entering=replace(queue,price=ExactRational(_take(queue.price.numerator,rows),_take(queue.price.denominator,rows)),
+            kind=gather(('kind',),queue.kind),order_ids=gather(('order_ids',),queue.order_ids),
+            **{name:exact((name,),getattr(queue,name),queue.capacity) for name in
+                ('total_base','total_quote','consumed_base','account_remaining')},
+            debt=exact(('debt',),queue.debt,1),fault=queue.fault.index_select(0,rows),
+            conservative=None if rank is None else replace(rank,
+                kind=gather(('conservative','kind'),rank.kind),order_ids=gather(('conservative','order_ids'),rank.order_ids),
+                remaining=exact(('conservative','remaining'),rank.remaining,queue.capacity)))
+        # 私有scratch未准备行的字节不可作为业务值；只选择dirty行。
+        if self.scratch is None:return entering
+        saved=self.scratch.take_rows(rows,staged=False)
+        selected=self.dirty.index_select(0,rows)
+        return self._select(saved,entering,selected)
+
+    @staticmethod
+    def _select(candidate, original, enabled):
+        flat=enabled.repeat_interleave(candidate.capacity)
+        updates={name:torch.where(enabled[:,None],getattr(candidate,name),getattr(original,name)) for name in ('kind','order_ids')}
+        updates.update({name:getattr(candidate,name).select(flat,getattr(original,name)) for name in
+            ('total_base','total_quote','consumed_base','account_remaining')})
+        return replace(original,**updates,debt=candidate.debt.select(enabled,original.debt),
+            conservative=None if original.conservative is None else candidate.conservative.coordinate(original.conservative,enabled))
+
+    def propose(self, queue, rows, incoming, enabled=None):
+        if self.scratch is None:
+            self.scratch=replace(queue,**{f.name:self._allocate(getattr(queue,f.name)) for f in fields(queue)
+                if f.name not in ('price','fault')})
+        enabled=torch.ones_like(rows,dtype=torch.bool) if enabled is None else enabled
+        from account_state import grouped_fault
+        candidate=replace(queue,fault=queue.fault|grouped_fault(incoming.fault*enabled.to(torch.int32),rows,queue.rows))
+        self.pending[id(candidate)]=(candidate,rows,incoming,enabled)
+        return candidate
+
+    def coordinate(self, candidate, original, row_roots, fault):
+        pending=self.pending.get(id(candidate))
+        if pending is None:return None
+        _,rows,incoming,enabled=pending
+        entering=original.take_rows(rows)
+        local=self._select(incoming,entering,fault.index_select(0,row_roots.index_select(0,rows))==0)
+        local=replace(local,fault=incoming.fault|fault[row_roots[rows]])
+        return self.propose(replace(original,fault=candidate.fault|fault[row_roots]),rows,local,enabled)
+
+    def accept(self, queue, committed=None):
+        pending=self.pending.get(id(queue))
+        if pending is None:return queue
+        _,rows,incoming,enabled=pending
+        if committed is not None:enabled=enabled & committed
+        widths=[getattr(incoming,name).words.size(1) for name in
+            ('total_base','total_quote','consumed_base','account_remaining','debt')]
+        if incoming.conservative is not None:widths.append(incoming.conservative.remaining.words.size(1))
+        width=max(widths)
+        self.scratch=replace(self.scratch,
+            **{name:getattr(self.scratch,name).with_capacity(width) for name in
+                ('total_base','total_quote','consumed_base','account_remaining','debt')},
+            conservative=None if self.scratch.conservative is None else replace(self.scratch.conservative,
+                remaining=self.scratch.conservative.remaining.with_capacity(width)))
+        self._write(self.scratch,rows,incoming,enabled)
+        self._copy_rows(self.dirty.reshape(-1,1),torch.ones_like(enabled).reshape(-1,1),rows,enabled)
+        if self.counts is not None:self._copy_rows(self.counts.reshape(-1,1),(incoming.kind!=0).sum(1).reshape(-1,1),rows,enabled)
+        self.pending.clear()
+        return queue
+
+    def segment_counts(self, queue):
+        if self.counts is None:
+            self.installed_counts=(self.original.kind!=0).sum(1)
+            self.counts=self.installed_counts.clone()
+        pending=self.pending.get(id(queue))
+        if pending is None:return self.counts
+        _,rows,incoming,enabled=pending
+        result=self.counts.clone()
+        self._copy_rows(result.reshape(-1,1),(incoming.kind!=0).sum(1).reshape(-1,1),rows,enabled)
+        return result
+
+    @staticmethod
+    def _copy_rows(target,incoming,rows,enabled):
+        Numbers.public_extension().copy_selected_rows(target,incoming,rows,enabled)
+
+    @staticmethod
+    def _write(target, rows, incoming,enabled=None):
+        enabled=torch.ones_like(rows,dtype=torch.bool) if enabled is None else enabled
+        copy=StageQueueStorage._copy_rows
+        for name in ('kind','order_ids'):copy(getattr(target,name),getattr(incoming,name),rows,enabled)
+        for name in ('total_base','total_quote','consumed_base','account_remaining','debt'):
+            left,right=getattr(target,name),getattr(incoming,name)
+            right=right.with_capacity(left.words.size(1))
+            count=1 if name=='debt' else target.capacity
+            for column in ('words','sign','fault'):
+                a,b=getattr(left,column),getattr(right,column)
+                tail=count*(a.size(1) if a.ndim==2 else 1)
+                copy(a.reshape(target.rows,tail),b.reshape(rows.numel(),tail),rows,enabled)
+        if target.conservative is not None:
+            for name in ('kind','order_ids'):copy(getattr(target.conservative,name),getattr(incoming.conservative,name),rows,enabled)
+            right=incoming.conservative.remaining.with_capacity(target.conservative.remaining.words.size(1))
+            for name in ('words','sign','fault'):
+                a,b=getattr(target.conservative.remaining,name),getattr(right,name)
+                tail=target.capacity*(a.size(1) if a.ndim==2 else 1)
+                copy(a.reshape(target.rows,tail),b.reshape(rows.numel(),tail),rows,enabled)
+
+    def install(self, queue, committed=None, *, bound=False):
+        # 仅原共同提交点调用；此时公开append及输入frontier已成功。
+        if self.scratch is None:return queue
+        # 原host资源重算/完整控制协调后的queue可能是新的同布局对象。
+        # 设备物理批的当前权威对象已在begin绑定，图只读取固定描述向量。
+        if not bound:self._bind(queue)
+        if any(getattr(self.scratch,name).words.size(1)>getattr(queue,name).words.size(1) for name in
+                ('total_base','total_quote','consumed_base','account_remaining','debt')):
+            return self.materialize(queue,committed)
+        rows=torch.arange(queue.rows,device=queue.kind.device)
+        dirty=self.dirty if committed is None else self.dirty&committed
+        # 图不能把安装地址绑定捕获时旧queue；原当前对象来自固定描述向量。
+        for path,incoming in self._binding_fields(self.scratch):
+            Numbers.public_extension().copy_bound_rows(incoming,self.addresses,self.binding_slots[path],rows,dirty,True)
+        if self.counts is not None:
+            if self.installed_counts is None:self.installed_counts=self.counts.clone()
+            else:self.installed_counts.copy_(self.counts if committed is None else
+                torch.where(committed,self.counts,self.installed_counts))
+        return queue
+
+    def materialize(self, queue, committed=None):
+        """实际全盘控制入口需要完整私有候选；不安装到进入态。"""
+        if self.scratch is None:return queue
+        dirty=self.dirty if committed is None else self.dirty&committed
+        rows=torch.arange(queue.rows,device=queue.kind.device)[dirty]
+        token=_queue_stage.set(None)
+        try:return queue.put_rows(rows,self.scratch.take_rows(rows,staged=False))
+        finally:_queue_stage.reset(token)
+
+    def rebind(self, queue):
+        self.original=queue;self.layout=queue;self.scratch=None
+        self.dirty=torch.zeros(queue.rows,dtype=torch.bool,device=queue.kind.device)
+        self.pending.clear()
+        self.counts=None;self.installed_counts=None;self.count_binding=queue.kind.data_ptr()
+        self.addresses=None;self.address_values=None;self.binding_owners=()
+        self._bind(queue)
 
 
 @dataclass(frozen=True)
@@ -33,7 +261,7 @@ class TerminalFeedback:
 
 
 def _shared(value, name):
-    return name in ('columns','resolution_columns') or isinstance(value, FillRecord) and name in (
+    return name in ('columns','resolution_columns','asset_roots') or isinstance(value, FillRecord) and name in (
         'offsets', 'states', 'lengths', 'economic_ordinals')
 
 
@@ -64,6 +292,18 @@ def _owned(value, layout, *, word_capacity=0, word_widths=None):
             raise ValueError('活动SIM物理布局元数据不一致')
         return value
     raise TypeError('活动SIM存储只接受原状态类型与已安装共享列')
+
+
+def _capacity_like(value, layout):
+    """固定输入只补Exact高位零；不先克隆一份再复制进私有地址。"""
+    if isinstance(value, ExactInt):
+        return value.with_capacity(layout.words.size(1))
+    if is_dataclass(value):
+        return replace(value, **{f.name:_capacity_like(getattr(value,f.name),getattr(layout,f.name))
+            for f in fields(value) if not _shared(value,f.name)})
+    if isinstance(value,tuple):
+        return tuple(_capacity_like(a,b) for a,b in zip(value,layout,strict=True))
+    return value
 
 
 def _tensor_pairs(target, candidate):
@@ -106,6 +346,10 @@ class BaseRuntimeStorage:
     """单一固定布局的活动运行状态；图与冻结副本的生命周期由宿主持有。"""
     def __init__(self, original, layout):
         self.runtime = _owned(original, layout)
+
+    @staticmethod
+    def stage_queue(queue):
+        return StageQueueStorage(queue)
 
     def snapshot(self):
         return _owned(self.runtime, self.runtime)

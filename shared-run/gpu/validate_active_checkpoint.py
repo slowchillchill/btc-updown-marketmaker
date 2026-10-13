@@ -133,8 +133,8 @@ def advance_reference_tail(joint,stage):
         tags=source.reference_rows[start:index,0].cpu().tolist()
         if tags:
             assert all(tag!=9 for tag in tags)
-            assert backend.reference_loop.captured.world.source_resolutions is world.source_resolutions
-            assert backend.reference_loop.captured.world.resolution_obligations.reference_indices is world.resolution_obligations.reference_indices
+            assert torch.equal(backend.reference_loop.captured.inputs.resolutions.present,world.source_resolutions.present)
+            assert torch.equal(backend.reference_loop.captured.inputs.obligations.reference_indices,world.resolution_obligations.reference_indices)
             calls.append(dict(start=start,end=index,tags=tags,before=before.cpu().tolist(),
                 after=result.hidden_frontier.next_reference.cpu().tolist(),
                 source_present=world.source_resolutions.present.cpu().tolist(),
@@ -211,8 +211,8 @@ def advance_maker_tail(joint,stage,artifact):
         assert sum(row['physical_frames'] for row in micro)>0
         assert sum(row['emitting_frames'] for row in micro)==0 and sum(row['batches'] for row in micro)==0
         assert sum(row['emitting_frames'] for row in positive)>=2 and sum(row['batches'] for row in positive)>=2
-        before_micro=next(row for row in reversed(observations) if row['at']==[1741])
-        before_positive=next(row for row in reversed(observations) if row['at']==[1790])
+        before_micro=micro[-1]['before_public_trade']
+        before_positive=positive[-1]['before_public_trade']
         # CPU价格优先：.4可见外部2份仅占本条预算，不从盘口消失。
         # 1742的2.000001份留下1微份pending；1791的12份再扣2份，己方耗损10份。
         delta=lambda before,after,key:sum(after[key])-sum(before[key])

@@ -329,7 +329,9 @@ def main():
             assert transition.event.emitted.cpu().tolist()==[True]
             projection,batch=Numbers.run_exact_batch(lambda:projection.fill_from_origin(sampler,runtime.orders,
                 runtime.fills,transition,tensor([0,1]),runtime.calendars,rebate,choice.at,maker_results=(market,)))
-            assert batch.emitted.sum().cpu().item()==len(original['records'])
+            assert batch.emitted.sum().cpu().item()==len(original['records']),dict(
+                at=original['at'],emitted=batch.emitted.cpu().tolist(),fault=batch.fault.cpu().tolist(),
+                expected_records=original['records'])
             public=Numbers.run_exact_batch(lambda:public.append_batch(projection.normalizer.bank,batch))
             gates=gates.set_receive(tensor([50000]),enabled).set_public(tensor([50000]),enabled)
             progress('actual_post_resolution_finality_receive_begin',at=original['at'],physical_columns=public.waiting.received.size(1))

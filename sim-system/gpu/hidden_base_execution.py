@@ -4,6 +4,8 @@
 fill；整消息/桶顺序与关闭前沿由外层原hidden宿主保持。本层不推进公开可见性。
 """
 from dataclasses import dataclass, replace
+from contextvars import ContextVar
+from contextlib import contextmanager
 import torch
 from queues import Numbers, _take
 from asset_buy import take_ratio
@@ -13,6 +15,16 @@ from pending_base_execution import _coordinate_orders
 from taker_days import coordinate_calendar
 from maker_execution import maker_column
 from hidden_market import rational_select, rational_take
+
+_empty_maker_dispatch=ContextVar('empty_level_maker_dispatch',default=False)
+
+
+@contextmanager
+def empty_level_maker_dispatch():
+    """仅设备分派已确认原正base人口为空时省去原零次Maker循环。"""
+    token=_empty_maker_dispatch.set(True)
+    try:yield
+    finally:_empty_maker_dispatch.reset(token)
 
 
 @dataclass(frozen=True)
@@ -146,7 +158,9 @@ def apply_base_level_transition(queue, orders, account, fills, calendars, rows, 
     frames = []
     maker = calendars.maker
     columns = queue.capacity
-    if maker_loop is not None and not Numbers.device_batch_active():
+    if _empty_maker_dispatch.get():
+        columns=0
+    elif maker_loop is not None and not Numbers.device_batch_active():
         orders, account, fills, maker, fault, frames, demand_records, demand_maker_fills, demand_maker_days = maker_loop.take(
             orders, account, fills, maker, fault, demand_records, demand_maker_fills, demand_maker_days,
             effects.order_ids, effects.maker_base_units, safe, row_assets[safe], condition,
@@ -239,10 +253,26 @@ def apply_hidden_base_transition(state, orders, account, fills, calendars, rows,
         new=_take(new_units,safe)
     else:
         old=new=account.cash.constant(0)
-    queue,orders,account,fills,calendars,effects=apply_base_level_transition(state.queues,
-        candidate_orders,candidate_account,candidate_fills,calendars,rows,old,new,source_price,
-        condition,at,use,selected_paths,row_roots,state.level_assets,fee_rate,fee_exponent,taker_rate,
-        fifo_loop=fifo_loop,maker_loop=maker_loop)
+    if state.queues.rows:
+        # 每根至多一个原价位；无关非空行和fault仍由进入态承担。
+        entering=state.queues.take_rows(safe)
+        all_fault=grouped_fault(state.queues.fault,level_roots,roots)
+        entering=replace(entering,fault=all_fault)
+        axis=torch.arange(roots,device=owner.device)
+        local,orders,account,fills,calendars,effects=apply_base_level_transition(entering,
+            candidate_orders,candidate_account,candidate_fills,calendars,axis,old,new,source_price,
+            condition,at,use,selected_paths,axis,state.level_assets[safe],fee_rate,fee_exponent,taker_rate,
+            fifo_loop=fifo_loop,maker_loop=maker_loop)
+        queue=state.queues.put_rows(safe,local,enabled=use)
+        required=state.queues.segment_counts().clone()
+        from base_runtime_storage import StageQueueStorage
+        StageQueueStorage._copy_rows(required.reshape(-1,1),effects.required_segments.reshape(-1,1),safe,use)
+        effects=replace(effects,required_segments=required)
+    else:
+        queue,orders,account,fills,calendars,effects=apply_base_level_transition(state.queues,
+            candidate_orders,candidate_account,candidate_fills,calendars,rows,old,new,source_price,
+            condition,at,use,selected_paths,row_roots,state.level_assets,fee_rate,fee_exponent,taker_rate,
+            fifo_loop=fifo_loop,maker_loop=maker_loop)
     fault=effects.fault | fault
     committed=(fault==0)[owner]
     prepared=replace(prepared,

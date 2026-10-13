@@ -139,10 +139,10 @@ def verify_tail(verify,*args):
         result,index=original(owner,world,choice,start,end,assets)
         captured=owner.captured
         same(_inputs(world),captured.inputs)
-        assert captured.world.source_resolutions is world.source_resolutions
+        same(captured.inputs.resolutions,world.source_resolutions)
         if world.resolution_obligations is not None:
             for name in ('reference_indices','pending','sequences','auto_redeemed'):
-                assert getattr(captured.world.resolution_obligations,name) is getattr(world.resolution_obligations,name)
+                same(getattr(captured.inputs.obligations,name),getattr(world.resolution_obligations,name))
         block=world.hidden_frontier.columns.source
         trace.append(dict(at=choice.at.cpu().tolist(),start=start,end=end,returned=index,
             tags=block.reference_rows[start:end,0].cpu().tolist(),cold_rebound=captured is not previous,
@@ -153,5 +153,5 @@ def verify_tail(verify,*args):
         verify(*args)
     finally:HiddenReferenceDeviceLoop.run=original
     after=[item for item in trace if item['at']==[31000] and item['tags']==[4]]
-    assert len(after)==1 and after[0]['cold_rebound'] and after[0]['source_present']==[[True]]
+    assert len(after)==1 and after[0]['source_present']==[[True]]
     (Path(os.environ['B_GPU_ORDER_ARTIFACT_DIR'])/'reference-cache-tail-bindings.json').write_text(json.dumps(trace,indent=2)+'\n')

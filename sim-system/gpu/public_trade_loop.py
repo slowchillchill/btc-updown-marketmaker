@@ -4,7 +4,7 @@ import torch
 from queues import Numbers, ExactInt, _take, _put, _repeat
 from fifo_loop import _column as fifo_column, _empty
 from maker_loop import _column as maker_column, _State as MakerState, _Inputs as MakerInputs, _copy, _signature
-from base_runtime_storage import _owned, _shared, SimFeedbackPage
+from base_runtime_storage import _owned, _shared, _capacity_like, SimFeedbackPage
 from hidden_base_execution import prepare_base_level_transition, finish_base_level_transition
 
 
@@ -63,13 +63,15 @@ class _CapturedTrade:
         from public_trade_execution import prepare_public_price, finish_public_price
         self.prepare_price_math, self.finish_price_math = prepare_public_price, finish_public_price
         self.width=width;self.inputs=_owned(inputs, inputs, word_capacity=width)
-        self.assets=assets;self.owners=self.inputs.owners
+        self.assets=assets.clone();self.owners=self.inputs.owners
         self.initial=_owned(initial, initial, word_capacity=width)
         self.state=_owned(self.initial, self.initial)
         self.price_original=_owned(self.initial, self.initial)
         # 仅保图内实际只读的queue/taker字段，不持有Runtime或旧可变rank。
-        self.readonly_queue=replace(queue, conservative=None, fault=None)
-        self.readonly_calendars=replace(calendars, maker=None, taker=replace(calendars.taker, fault=None))
+        readonly=replace(queue, conservative=None, fault=None)
+        self.readonly_queue=_owned(readonly,readonly,word_capacity=width)
+        readonly=replace(calendars, maker=None, taker=replace(calendars.taker, fault=None))
+        self.readonly_calendars=_owned(readonly,readonly,word_capacity=width)
         device=inputs.at.device;self.device=device;self.capacity=queue.capacity;self.rows=queue.rows
         self.prices=inputs.order.size(1)
         scalar=lambda dtype:torch.zeros((), dtype=dtype, device=device)
@@ -216,8 +218,13 @@ class _CapturedTrade:
         self.effect_page.append(effect,self.yes,self.yes)
         self.price.add_(1);self.select_phase(0)
 
-    def replay(self,state,inputs):
-        _copy(self.initial,_owned(state,self.initial));_copy(self.inputs,_owned(inputs,self.inputs))
+    def replay(self,state,inputs,queue,calendars,assets):
+        readonly=replace(queue,conservative=None,fault=None)
+        _copy(self.readonly_queue,_capacity_like(readonly,self.readonly_queue))
+        readonly=replace(calendars,maker=None,taker=replace(calendars.taker,fault=None))
+        _copy(self.readonly_calendars,_capacity_like(readonly,self.readonly_calendars))
+        self.assets.copy_(assets)
+        _copy(self.initial,_capacity_like(state,self.initial));_copy(self.inputs,_capacity_like(inputs,self.inputs))
         self.loop.replay();Numbers.record_resource_request(self.required.clone())
         output=_owned(self.state,self.state)
         return output,self.effect_page.snapshot()
@@ -235,14 +242,16 @@ class PublicTradeDeviceLoop:
                 self.current=_CapturedTrade(need.state,need.inputs,need.queue,need.calendars,need.assets,need.width)
                 self.key=need.key
 
-    def take(self,world,order,budget,lowest,enabled,conditions,at,paths,fee,exponent,rebate):
-        state=_state(world);assets=world.hidden.level_assets
-        inputs=_Inputs(order,budget,lowest,enabled,conditions,at,paths,fee,exponent,rebate,world.account.asset_roots[assets])
-        queue=world.hidden.queues
+    def take(self,world,order,budget,lowest,enabled,conditions,at,paths,fee,exponent,rebate,*,queue=None,assets=None,owners=None):
+        queue=world.hidden.queues if queue is None else queue
+        assets=world.hidden.level_assets if assets is None else assets
+        owners=world.account.asset_roots[assets] if owners is None else owners
+        state=replace(_state(world),rank=queue.conservative,queue_fault=queue.fault)
+        inputs=_Inputs(order,budget,lowest,enabled,conditions,at,paths,fee,exponent,rebate,owners)
         readonly_queue=replace(queue,conservative=None,fault=None)
         readonly_taker=replace(world.calendars.taker,fault=None)
         width=max([self.width,Numbers.device_word_capacity(),*_widths(state),*_widths(inputs)])
-        key=(_signature(state),_signature(inputs),_borrow_signature(readonly_queue),_borrow_signature(readonly_taker),_borrow_signature(assets),
+        key=(_signature(state),_signature(inputs),_signature(readonly_queue),_signature(readonly_taker),_signature(assets),
             width,at.device,torch.cuda.current_stream(at.device).cuda_stream)
         if key!=self.key:raise _LayoutNeeded(key,state,inputs,queue,world.calendars,assets,width)
-        return self.current.replay(state,inputs)
+        return self.current.replay(state,inputs,queue,world.calendars,assets)

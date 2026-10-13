@@ -6,6 +6,29 @@
 #include "../../contracts/gpu/exact.cuh"
 extern "C" cudaError_t public_graph_condition_node(cudaGraphNode_t*, cudaGraph_t,
     cudaGraphNode_t, cudaGraphConditionalHandle, const bool*);
+extern "C" void public_gpu_selected_rows(void*,const void*,const int64_t*,const bool*,
+    int64_t,int64_t,cudaStream_t);
+extern "C" void public_gpu_bound_rows(void*,const int64_t*,int64_t,const int64_t*,const bool*,
+    int64_t,int64_t,bool,cudaStream_t);
+
+void copy_bound_rows(torch::Tensor value,torch::Tensor addresses,int64_t field,
+    torch::Tensor rows,torch::Tensor enabled,bool scatter) {
+  // Stage构造同布局连续行和固定地址描述；不增加业务接纳门。
+  const c10::cuda::CUDAGuard guard(value.device());
+  if(rows.numel())public_gpu_bound_rows(value.data_ptr(),addresses.data_ptr<int64_t>(),field,
+      rows.data_ptr<int64_t>(),enabled.data_ptr<bool>(),value.numel()*value.element_size()/rows.numel(),
+      rows.numel(),scatter,c10::cuda::getCurrentCUDAStream().stream());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void copy_selected_rows(torch::Tensor target,torch::Tensor incoming,torch::Tensor rows,torch::Tensor enabled) {
+  // 仅由SIM阶段缓冲的reshape和原int64行/启用掩码调用；布局由该构造入口保证。
+  const c10::cuda::CUDAGuard guard(target.device());
+  if(rows.numel())public_gpu_selected_rows(target.data_ptr(),incoming.data_ptr(),rows.data_ptr<int64_t>(),
+      enabled.data_ptr<bool>(),target.size(1)*target.element_size(),rows.numel(),
+      c10::cuda::getCurrentCUDAStream().stream());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 
 class DeviceConditionalLoop {
   torch::Tensor ready_;
@@ -476,6 +499,8 @@ std::vector<torch::Tensor> ordered_attribution(torch::Tensor tn,torch::Tensor td
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("copy_selected_rows",&copy_selected_rows);
+  m.def("copy_bound_rows",&copy_bound_rows);
   m.def("hidden_snapshot_gather", &hidden_snapshot_gather);
   pybind11::class_<DeviceConditionalLoop>(m, "DeviceConditionalLoop")
       .def(pybind11::init<uint64_t, uint64_t, torch::Tensor>())

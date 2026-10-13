@@ -198,7 +198,9 @@ class HiddenAssetState:
         fault = self.fault | (enabled & (self.quality != previous)).to(torch.int32)
         valid = enabled & (fault == 0)
         clear = valid & resync_required
-        queues = self.queues.clear_external(clear[self.level_assets])
+        queues = self.queues
+        if Numbers.device_batch_active() or bool(clear.any().cpu()):
+            queues = queues.clear_external(clear[self.level_assets])
         return replace(self, quality=torch.where(valid, current, self.quality), queues=queues,
                        external_shares=rational_select(zeros(self.external_shares), clear[self.level_assets], self.external_shares),
                        fault=fault | self._asset_fault(queues.fault))

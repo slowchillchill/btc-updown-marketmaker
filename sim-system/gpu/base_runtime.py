@@ -381,7 +381,7 @@ class BaseSimRuntime:
         return replace(self,hidden_frontier=self.hidden_frontier.step_applied(index,committed,fault))
 
     def apply_hidden_selected(self, choice, indices, condition_by_asset, selected_paths,
-                              fee_rate, fee_exponent, taker_rate, source_assets, level_sides, *, fifo_loop=None, maker_loop=None):
+                              fee_rate, fee_exponent, taker_rate, source_assets, level_sides, *, fifo_loop=None, maker_loop=None, level_only=False):
         """每根本轮只读取一个原源步；固定类型候选都使用同一进入游标。"""
         from account_state import grouped_fault
         from hidden_market import rational_take
@@ -419,13 +419,13 @@ class BaseSimRuntime:
         hidden = candidate.hidden
         # eager纯Level已经沿原FIFO做完整append/compact及报价fault归并。
         # 其它类型、空启用人口、故障及固定设备候选仍走原完整类型布局。
-        eager_level = not Numbers.device_batch_active() and bool((enabled.any() &
+        eager_level = level_only or (not Numbers.device_batch_active() and bool((enabled.any() &
             ((~enabled) | (present & (tags == 2))).all() &
-            ((source_fault | effect.fault) == 0).all()).cpu())
+            ((source_fault | effect.fault) == 0).all()).cpu()))
         if eager_level:
             # 禁用Snapshot仍有原close职责；段需求按同一已压紧候选人口保留。
             hidden = hidden._close_active_book()
-            snapshot_required = (hidden.queues.kind != 0).sum(1)
+            snapshot_required = hidden.queues.segment_counts()
         else:
             snapshot_enabled = assets & (permitted & (tags == 1))[owner]
             active_snapshot = snapshot_enabled & ~hidden.book_closed
@@ -453,7 +453,7 @@ class BaseSimRuntime:
     def hidden_reference_applied(self, index, committed, fault):
         return replace(self,hidden_frontier=self.hidden_frontier.reference_applied(index,committed,fault))
 
-    def apply_hidden_reference(self, choice, indices, source_assets=None):
+    def apply_hidden_reference(self, choice, indices, source_assets=None, *, ordinary=False):
         """原ReferenceEvent/control MarketFact候选；Terminal等待真实经济共同处理器。"""
         from account_state import grouped_fault
         from hidden_market import rational_take
@@ -470,6 +470,8 @@ class BaseSimRuntime:
         if source_assets.dtype != torch.int64 or source_assets.device != owner.device or source_assets.shape != owner.shape:
             raise TypeError('hidden参考源资产须为同设备完整int64绑定')
         supported = enabled & (tags >= 1) & (tags <= 8)
+        if not Numbers.device_batch_active() and not ordinary:
+            ordinary = not bool((supported & ((tags == 3) | (tags == 8))).any().cpu())
         control = self.market_controls.apply(rows, supported)
         if self.source_resolutions is not None:
             # 非Fresh Terminal后首次转Fresh会产生Resolution效果。该效果尚未
@@ -486,16 +488,19 @@ class BaseSimRuntime:
         selected = asset_event[owner] & (source_assets == rows[owner,2])
         counts = torch.zeros_like(indices).scatter_add(0, owner, selected.to(torch.int64))
         fault = control.fault | (asset_event & (counts != 1)).to(torch.int32)
-        hidden = self.hidden.initial_tick(selected & (tags == 3)[owner],
-            rational_take(block._values(rows[:,3]), owner))
-        hidden = hidden.quality_boundary(selected & (tags == 8)[owner],
-            rows[owner,9], rows[owner,10], rows[owner,11] != 0)
+        hidden = self.hidden
+        if not ordinary:
+            hidden = hidden.initial_tick(selected & (tags == 3)[owner],
+                rational_take(block._values(rows[:,3]), owner))
+            hidden = hidden.quality_boundary(selected & (tags == 8)[owner],
+                rows[owner,9], rows[owner,10], rows[owner,11] != 0)
         fault = fault | grouped_fault(hidden.fault, owner, self.orders.roots)
         obligations=self.resolution_obligations
         if obligations is not None:
             obligations=obligations.invalidate_market(rows,supported & (fault==0)).coordinate_result(
                 self.resolution_obligations,fault)
-        candidate = replace(self, hidden=hidden.coordinate_result(self.hidden, owner, fault),
+        coordinated = replace(hidden,fault=hidden.fault | fault[owner]) if hidden is self.hidden else hidden.coordinate_result(self.hidden,owner,fault)
+        candidate = replace(self, hidden=coordinated,
                             market_controls=control.coordinate_result(self.market_controls, fault),
                             resolution_obligations=obligations)
         return candidate.hidden_reference_applied(indices, supported & (fault == 0), fault)

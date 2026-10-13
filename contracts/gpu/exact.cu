@@ -2,6 +2,39 @@
 #include <cmath>
 using namespace public_gpu;
 
+// SIM阶段行安装：禁用行只检查掩码，不读取或复制未准备的scratch字节。
+__global__ void selected_rows_kernel(uint8_t* target, const uint8_t* incoming,
+    const int64_t* rows, const bool* enabled, int64_t bytes) {
+  const int64_t source = blockIdx.x;
+  if (!enabled[source]) return;
+  const int64_t destination = rows[source];
+  for (int64_t byte = threadIdx.x; byte < bytes; byte += blockDim.x)
+    target[destination * bytes + byte] = incoming[source * bytes + byte];
+}
+extern "C" void public_gpu_selected_rows(void* target, const void* incoming,
+    const int64_t* rows, const bool* enabled, int64_t bytes, int64_t count, cudaStream_t stream) {
+  selected_rows_kernel<<<count,256,0,stream>>>(static_cast<uint8_t*>(target),
+      static_cast<const uint8_t*>(incoming),rows,enabled,bytes);
+}
+
+// 固定图只绑定描述向量；实际进入态地址在原阶段开始时刷新。
+__global__ void bound_rows_kernel(uint8_t* value, const int64_t* addresses,
+    int64_t field, const int64_t* rows, const bool* enabled, int64_t bytes, bool scatter) {
+  const int64_t selected = blockIdx.x;
+  if (!enabled[selected]) return;
+  auto* bound = reinterpret_cast<uint8_t*>(addresses[field]);
+  auto* destination = scatter ? bound + rows[selected] * bytes : value + selected * bytes;
+  const auto* source = scatter ? value + selected * bytes : bound + rows[selected] * bytes;
+  for (int64_t byte = threadIdx.x; byte < bytes; byte += blockDim.x)
+    destination[byte] = source[byte];
+}
+extern "C" void public_gpu_bound_rows(void* value, const int64_t* addresses,
+    int64_t field, const int64_t* rows, const bool* enabled, int64_t bytes,
+    int64_t count, bool scatter, cudaStream_t stream) {
+  bound_rows_kernel<<<count,256,0,stream>>>(static_cast<uint8_t*>(value),addresses,
+      field,rows,enabled,bytes,scatter);
+}
+
 __global__ void integer_kernel(int op, const uint32_t* aw, int64_t wa,
     const int8_t* as, const uint32_t* bw, int64_t wb, const int8_t* bs,
     uint32_t* ow, int64_t wo, int8_t* os, uint32_t* rw, int64_t wr,

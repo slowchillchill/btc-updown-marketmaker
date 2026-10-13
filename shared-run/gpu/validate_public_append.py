@@ -70,6 +70,7 @@ def observe(clock,artifact,*,resources=False):
             entered['view']=(runtime_view(runtime),own(projection),own(clock.public),own(clock.source.position))
             entered['at']=choice.at.cpu().tolist()
             return handler(runtime,projection,choice)
+        tracked.__dict__.update(getattr(handler,'__dict__',{}))
         clock.handlers[phase]=tracked
     _clocks.append((clock,artifact,resources,observations,entered,held,probe))
     if _base is not None:return observations

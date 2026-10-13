@@ -2,7 +2,7 @@
 from dataclasses import dataclass, replace
 import torch
 from queues import Numbers
-from base_runtime_storage import _owned, _tensor_pairs
+from base_runtime_storage import _owned, _tensor_pairs, _capacity_like
 from maker_loop import _signature
 
 
@@ -51,23 +51,27 @@ class _Inputs:
     initialized: object
     matching_closed: object
     book_closed: object
+    resolutions: object
+    obligations: object
 
 
 def _inputs(world):
     return _Inputs(world.hidden_frontier.next_bucket,world.hidden_frontier.applying,
-        world.hidden.initialized,world.hidden.matching_closed,world.hidden.book_closed)
+        world.hidden.initialized,world.hidden.matching_closed,world.hidden.book_closed,
+        world.source_resolutions,world.resolution_obligations)
 
 
 def _bind_inputs(world,inputs):
     return replace(world,hidden_frontier=replace(world.hidden_frontier,
         next_bucket=inputs.next_bucket,applying=inputs.applying),hidden=replace(world.hidden,
-        initialized=inputs.initialized,matching_closed=inputs.matching_closed,book_closed=inputs.book_closed))
+        initialized=inputs.initialized,matching_closed=inputs.matching_closed,book_closed=inputs.book_closed),
+        source_resolutions=inputs.resolutions,resolution_obligations=inputs.obligations)
 
 
 def _state(world):
     hidden=world.hidden;queue=hidden.queues;obligations=world.resolution_obligations
     return _State(_Asset(hidden.tick,hidden.tick_present,hidden.quality,hidden.external_shares,
-        _Queue(*(getattr(queue,name) for name in _Queue.__dataclass_fields__)),hidden.fault),
+        None,hidden.fault),
         world.market_controls,None if obligations is None else
             _Obligations(obligations.invalidated_by_quality,obligations.fault),
         world.hidden_frontier.next_reference,world.hidden_frontier.fault)
@@ -75,7 +79,7 @@ def _state(world):
 
 def _install(world,state):
     asset=state.hidden
-    queue=replace(world.hidden.queues,**vars(asset.queues))
+    queue=world.hidden.queues if asset.queues is None else replace(world.hidden.queues,**vars(asset.queues))
     hidden=replace(world.hidden,**{name:value for name,value in vars(asset).items() if name!='queues'},queues=queue)
     obligations=world.resolution_obligations
     if obligations is not None:obligations=replace(obligations,**vars(state.obligations))
@@ -111,7 +115,7 @@ class _CapturedReferences:
 
         def ready():
             tag=block.reference_rows.index_select(0,self.index.clamp(0,block.reference_rows.size(0)-1).reshape(1))[0,0]
-            return (self.index<self.end)&(tag!=9)&self.fits
+            return (self.index<self.end)&(tag!=9)&(tag!=3)&(tag!=8)&self.fits
 
         def body():
             def compute():
@@ -121,7 +125,7 @@ class _CapturedReferences:
                     settlement_registrations=candidate.settlement_registrations,
                     order_query_history=candidate.order_query_history)
                 return _state(candidate.apply_hidden_reference(current,
-                    torch.ones_like(choice.at)*self.index,source_assets))
+                    torch.ones_like(choice.at)*self.index,source_assets,ordinary=True))
             candidate=Numbers.device_exact_batch(compute,word_capacity=width,device=device)
             self.required.copy_(torch.maximum(self.required,candidate.required_words))
             self.fits.logical_and_(candidate.fits)
@@ -148,8 +152,8 @@ class _CapturedReferences:
             self.entry.raw_cuda_graph(),self.body.raw_cuda_graph(),self.ready)
 
     def replay(self,world,choice,start,end):
-        _copy(self.inputs,_inputs(world))
-        _copy(self.initial,_owned(_state(world),self.initial))
+        _copy(self.inputs,_capacity_like(_inputs(world),self.inputs))
+        _copy(self.initial,_capacity_like(_state(world),self.initial))
         for name in ('at','phase','present','fault'):getattr(self.choice,name).copy_(getattr(choice,name))
         self.start.fill_(start);self.end.fill_(end);self.loop.replay()
         return (_install(world,_owned(self.state,self.state)),self.index.clone(),
@@ -168,9 +172,7 @@ class HiddenReferenceDeviceLoop:
             borrowed=(frontier.columns,
                 hidden.level_assets,hidden.asset_markets,hidden.market_populations,
                 hidden.level_sides,hidden.queues.price,
-                world.account.asset_roots,world.source_resolutions,source_assets)
-            if obligations is not None:
-                borrowed+=(obligations.reference_indices,obligations.pending,obligations.sequences,obligations.auto_redeemed)
+                world.account.asset_roots,source_assets)
             key=(_signature(_state(world)),_signature(_inputs(world)),tuple(id(value) for value in borrowed),world.orders.roots,
                 self.width,choice.at.device,torch.cuda.current_stream(choice.at.device).cuda_stream)
             if key!=self.key:

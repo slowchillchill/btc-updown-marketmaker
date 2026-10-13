@@ -52,9 +52,21 @@ class PublicTradeExecution:
         order=self.rows(world.hidden)[safe]
         original=world
         if order.size(1):
-            output,effects=self.loop.take(world,order,quantity,lowest,enabled,conditions,choice.at,paths,fee,exponent,rebate)
-            world=replace(world,hidden=replace(world.hidden,queues=replace(world.hidden.queues,
-                conservative=output.rank,fault=output.queue_fault)),orders=output.orders,account=output.account,
+            # 仅本条成交可能访问的原价格行；原价格优先次序保持，空padding不安装。
+            physical=order.flatten();valid=physical>=0;safe_rows=physical.clamp_min(0)
+            queue=world.hidden.queues.take_rows(safe_rows)
+            local_assets=world.hidden.level_assets.index_select(0,safe_rows)
+            local_owners=torch.arange(roots,device=owner.device).repeat_interleave(order.size(1))
+            global_fault=grouped_fault(world.hidden.queues.fault,owner[world.hidden.level_assets],roots)
+            queue=replace(queue,fault=global_fault[local_owners])
+            local_order=torch.arange(physical.numel(),device=owner.device).reshape_as(order)
+            local_order=torch.where(order>=0,local_order,-1)
+            output,effects=self.loop.take(world,local_order,quantity,lowest,enabled,conditions,choice.at,paths,fee,exponent,rebate,
+                queue=queue,assets=local_assets,owners=local_owners)
+            queue=replace(queue,conservative=output.rank,fault=output.queue_fault)
+            selected=torch.arange(physical.numel(),device=owner.device)[valid]
+            updated=world.hidden.queues.put_rows(physical[valid],queue.take_rows(selected))
+            world=replace(world,hidden=replace(world.hidden,queues=updated),orders=output.orders,account=output.account,
                 fills=output.fills,calendars=replace(world.calendars,maker=output.maker,
                     taker=replace(world.calendars.taker,fault=output.taker_fault)),
                 resolution_obligations=None if world.resolution_obligations is None else world.resolution_obligations.resized(output.fills.capacity))

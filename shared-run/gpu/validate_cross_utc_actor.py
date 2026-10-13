@@ -264,6 +264,7 @@ def run_actor(config):
             public_source_position=runtime.clock.source.position.cpu().tolist(),
             fifo_rows=fifo.rows,fifo_capacity=fifo.capacity,
             fifo_last_nonempty_column_end=last_segment,fifo_nonempty_segments=int(occupied.sum().cpu()))
+    progress.ready=lambda stage:stage=='drive_fault' or time.perf_counter()-last_print>=10
     def advance(at):
         while True:
             result=model.run.advance_before(T([at]),yes,progress=progress)
