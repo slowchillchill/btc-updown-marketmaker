@@ -8,7 +8,7 @@
 
 An engineering project built around Polymarket’s five-minute BTC Up/Down markets, spanning market data, human-designed strategies, historical backtesting, GPU reinforcement learning and local model inference. It explores how models interpret markets and make trading decisions—and how real data and account outcomes can test those decisions.
 
-[![Watch the project introduction on YouTube](https://i.ytimg.com/vi/a9qzkJ_NjKA/maxresdefault.jpg)](https://youtu.be/a9qzkJ_NjKA)
+[![Watch the project introduction on YouTube](assets/readme/video-thumbnail.png)](https://youtu.be/a9qzkJ_NjKA)
 
 [▶ Watch the project introduction on YouTube](https://youtu.be/a9qzkJ_NjKA)
 

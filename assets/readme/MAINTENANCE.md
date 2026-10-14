@@ -20,3 +20,7 @@ The README GIF/PNG assets use the user-confirmed PMM VI 0.4 implementation in `v
 Use white `#FFFFFF`, cobalt `#0D41A2`, text `#171B20`, secondary text `#53606C`, borders `#DCE1E5`, active-node pale green `#DCEBE7`, secondary-line blue-grey `#39758A`, and notices `#A34F45`. Noto Sans serves English, Noto Sans CJK SC serves Chinese, and Noto Sans Mono serves module names. The `Prediction Market Maker` name accompanies the original logo.
 
 The renderer reads `visualization/ui/public/pmm-cobalt.png` without changing it. It reproduces the CSS visible window (160×52.07 within a 232.66px-wide proportional image, offset −36.33/−32.13), then preserves aspect ratio and at least 0.5H clear space around the visible mark. Do not derive a crop from the noisy alpha bounding box. The expanded header moves the diagram as a whole; JSON geometry, compiled routes and the six phase descriptions remain unchanged.
+
+## Video thumbnail
+
+`video-thumbnail.png` is an imagegen edit of the user-provided video screenshot, adding a centered semitransparent play-button overlay. Both README versions use this local asset and retain the original YouTube destination. `video-thumbnail-prompt.txt` records the editing prompt. The screenshot framing, portrait, labels and bottom controls were visually compared; this generative edit does not imply pixel-for-pixel preservation.
