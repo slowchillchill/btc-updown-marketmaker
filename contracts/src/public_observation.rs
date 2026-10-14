@@ -421,7 +421,7 @@ pub struct MarketBusinessObservationV1 {
     pub group_events: std::sync::Arc<[PublicBusinessFactV1]>,
     /// 显式选用的来源进展投影；空集合表示没有此证据，不能从字段锚点补造。
     #[serde(default, skip_serializing_if = "source_progress_is_empty")]
-    pub source_progress: std::sync::Arc<[SourceStreamProgressV1]>,
+    pub source_progress: SharedSourceProgressV1,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClosedBusinessGroupV1 {
@@ -430,7 +430,7 @@ pub struct ClosedBusinessGroupV1 {
     pub member_input_positions: Vec<u64>,
     pub closed_at_input_position: u64,
     pub records: std::sync::Arc<[PublicBusinessFactV1]>,
-    pub observations: Vec<MarketBusinessObservationV1>,
+    pub observations: MarketObservationSetV1,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppliedIngressV1 {
@@ -584,7 +584,7 @@ pub struct PublicRuleSourceV1 {
     pub reference: String,
 }
 
-fn source_progress_is_empty(v: &std::sync::Arc<[SourceStreamProgressV1]>) -> bool {
+fn source_progress_is_empty(v: &SharedSourceProgressV1) -> bool {
     v.is_empty()
 }
 
@@ -660,5 +660,337 @@ mod depth_observation_encoding {
 impl Default for PublicObservationRequirementsV1 {
     fn default() -> Self {
         Self::FULL
+    }
+}
+
+/// 市场状态按变化共享；本组公共参考与可见前缀仅保存一次。
+pub type MarketObservationSnapshotsV1 =
+    imbl::OrdMap<String, std::sync::Arc<MarketObservationSnapshotV1>>;
+/// 仅包含市场事实；完整正式观察由读取时结合本组事实产生。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketObservationSnapshotV1 {
+    pub market: MarketIdentityV2,
+    pub assets: Vec<AssetBusinessObservationV1>,
+    pub lifecycle: ObservedFactV1<crate::MappedMarketLifecycleStateV1>,
+    pub active: ObservedFactV1<bool>,
+    pub closed: ObservedFactV1<bool>,
+    pub accepting_orders: ObservedFactV1<bool>,
+    pub terminal: ObservedFactV1<crate::MarketResolutionTerminalV3>,
+    pub official_anchor: ObservedFactV1<MarketPriceAnchorV1>,
+    pub settlement_reference: ObservedFactV1<BtcSettlementReferenceV1>,
+    pub temporary_reference: Option<TemporaryTwapReferenceV1>,
+    pub effective_reference: EffectiveMarketReferenceV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketObservationGroupV1 {
+    pub schema_version: String,
+    pub group_id: Sha256Hex,
+    pub group_position: u64,
+    pub visible_prefix: AppliedIngressPrefixV1,
+    pub chainlink_spot: ObservedFactV1<ChainlinkBtcUsdReferenceV1>,
+    pub chainlink_twap_thirty: ObservedFactV1<ChainlinkBtcUsdTwapReferenceV1>,
+    pub chainlink_twap_sixty: ObservedFactV1<ChainlinkBtcUsdTwapReferenceV1>,
+    pub binance_depth: std::sync::Arc<ObservedFactV1<BinanceDepthObservationV1>>,
+    pub binance_trade: ObservedFactV1<BinanceAggregateTradeReferenceV1>,
+    pub group_events: std::sync::Arc<[PublicBusinessFactV1]>,
+    pub source_progress: SharedSourceProgressV1,
+}
+#[derive(Clone)]
+enum ObservationSource {
+    Complete(Vec<MarketBusinessObservationV1>),
+    Shared {
+        markets: MarketObservationSnapshotsV1,
+        group: std::sync::Arc<MarketObservationGroupV1>,
+    },
+}
+/// 保留完整观察读取；必要市场读取不展开其他市场。缓存只归本组。
+pub struct MarketObservationSetV1 {
+    source: ObservationSource,
+    selected: elsa::sync::FrozenBTreeMap<String, Box<MarketBusinessObservationV1>>,
+    complete: std::sync::OnceLock<Vec<MarketBusinessObservationV1>>,
+}
+impl MarketObservationSetV1 {
+    pub fn shared(markets: MarketObservationSnapshotsV1, group: MarketObservationGroupV1) -> Self {
+        Self {
+            source: ObservationSource::Shared {
+                markets,
+                group: std::sync::Arc::new(group),
+            },
+            selected: elsa::sync::FrozenBTreeMap::new(),
+            complete: std::sync::OnceLock::new(),
+        }
+    }
+    pub fn shared_parts(
+        &self,
+    ) -> Option<(
+        &MarketObservationSnapshotsV1,
+        &std::sync::Arc<MarketObservationGroupV1>,
+    )> {
+        match &self.source {
+            ObservationSource::Shared { markets, group } => Some((markets, group)),
+            _ => None,
+        }
+    }
+    pub fn get_market(&self, id: &str) -> Option<&MarketBusinessObservationV1> {
+        match &self.source {
+            ObservationSource::Complete(v) => v.iter().find(|o| o.market.condition_id.0 == id),
+            ObservationSource::Shared { markets, group } => {
+                if let Some(o) = self.selected.get(id) {
+                    return Some(o);
+                }
+                let market = markets.get(id)?;
+                let o = MarketBusinessObservationV1 {
+                    schema_version: group.schema_version.clone(),
+                    group_id: group.group_id.clone(),
+                    group_position: group.group_position,
+                    visible_prefix: group.visible_prefix.clone(),
+                    market: market.market.clone(),
+                    assets: market.assets.clone(),
+                    lifecycle: market.lifecycle.clone(),
+                    active: market.active.clone(),
+                    closed: market.closed.clone(),
+                    accepting_orders: market.accepting_orders.clone(),
+                    terminal: market.terminal.clone(),
+                    official_anchor: market.official_anchor.clone(),
+                    settlement_reference: market.settlement_reference.clone(),
+                    temporary_reference: market.temporary_reference.clone(),
+                    effective_reference: market.effective_reference.clone(),
+                    chainlink_spot: group.chainlink_spot.clone(),
+                    chainlink_twap_thirty: group.chainlink_twap_thirty.clone(),
+                    chainlink_twap_sixty: group.chainlink_twap_sixty.clone(),
+                    binance_depth: group.binance_depth.clone(),
+                    binance_trade: group.binance_trade.clone(),
+                    group_events: group.group_events.clone(),
+                    source_progress: group.source_progress.clone(),
+                };
+                Some(self.selected.insert(id.into(), Box::new(o)))
+            }
+        }
+    }
+    pub fn len(&self) -> usize {
+        match &self.source {
+            ObservationSource::Complete(v) => v.len(),
+            ObservationSource::Shared { markets, .. } => markets.len(),
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn iter(&self) -> Box<dyn Iterator<Item = &MarketBusinessObservationV1> + '_> {
+        match &self.source {
+            ObservationSource::Complete(v) => Box::new(v.iter()),
+            ObservationSource::Shared { markets, .. } => Box::new(
+                markets
+                    .keys()
+                    .map(|id| self.get_market(id).expect("原市场快照")),
+            ),
+        }
+    }
+    fn as_vec(&self) -> &Vec<MarketBusinessObservationV1> {
+        match &self.source {
+            ObservationSource::Complete(v) => v,
+            _ => self.complete.get_or_init(|| self.iter().cloned().collect()),
+        }
+    }
+    pub fn as_slice(&self) -> &[MarketBusinessObservationV1] {
+        self.as_vec()
+    }
+    pub fn replace_group_events(&mut self, records: std::sync::Arc<[PublicBusinessFactV1]>) {
+        match &mut self.source {
+            ObservationSource::Complete(v) => {
+                for o in v {
+                    o.group_events = records.clone();
+                }
+            }
+            ObservationSource::Shared { group, .. } => {
+                std::sync::Arc::make_mut(group).group_events = records
+            }
+        }
+        self.selected = elsa::sync::FrozenBTreeMap::new();
+        self.complete.take();
+    }
+}
+impl From<Vec<MarketBusinessObservationV1>> for MarketObservationSetV1 {
+    fn from(v: Vec<MarketBusinessObservationV1>) -> Self {
+        Self {
+            source: ObservationSource::Complete(v),
+            selected: elsa::sync::FrozenBTreeMap::new(),
+            complete: std::sync::OnceLock::new(),
+        }
+    }
+}
+impl Clone for MarketObservationSetV1 {
+    fn clone(&self) -> Self {
+        Self {
+            source: self.source.clone(),
+            selected: elsa::sync::FrozenBTreeMap::new(),
+            complete: std::sync::OnceLock::new(),
+        }
+    }
+}
+impl std::ops::Index<usize> for MarketObservationSetV1 {
+    type Output = MarketBusinessObservationV1;
+    fn index(&self, index: usize) -> &Self::Output {
+        self.iter().nth(index).expect("原观察位置越界")
+    }
+}
+impl std::ops::IndexMut<usize> for MarketObservationSetV1 {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut std::ops::DerefMut::deref_mut(self)[index]
+    }
+}
+impl std::ops::Deref for MarketObservationSetV1 {
+    type Target = Vec<MarketBusinessObservationV1>;
+    fn deref(&self) -> &Self::Target {
+        self.as_vec()
+    }
+}
+impl std::ops::DerefMut for MarketObservationSetV1 {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        if !matches!(self.source, ObservationSource::Complete(_)) {
+            self.source = ObservationSource::Complete(self.iter().cloned().collect());
+        }
+        match &mut self.source {
+            ObservationSource::Complete(v) => v,
+            _ => unreachable!(),
+        }
+    }
+}
+impl<'a> IntoIterator for &'a MarketObservationSetV1 {
+    type Item = &'a MarketBusinessObservationV1;
+    type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+impl<'a> IntoIterator for &'a mut MarketObservationSetV1 {
+    type Item = &'a mut MarketBusinessObservationV1;
+    type IntoIter = std::slice::IterMut<'a, MarketBusinessObservationV1>;
+    fn into_iter(self) -> Self::IntoIter {
+        std::ops::DerefMut::deref_mut(self).iter_mut()
+    }
+}
+impl std::fmt::Debug for MarketObservationSetV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+impl PartialEq for MarketObservationSetV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+impl Eq for MarketObservationSetV1 {}
+impl Serialize for MarketObservationSetV1 {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(self.len()))?;
+        for o in self.iter() {
+            seq.serialize_element(o)?;
+        }
+        seq.end()
+    }
+}
+impl<'de> Deserialize<'de> for MarketObservationSetV1 {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Vec::<MarketBusinessObservationV1>::deserialize(d).map(Into::into)
+    }
+}
+
+/// 已归约来源进展的共享快照；同组健康查询只读所需 scope。
+pub type SourceProgressSnapshotsV1 =
+    imbl::OrdMap<SourceStreamScopeV1, std::sync::Arc<SourceStreamProgressV1>>;
+#[derive(Clone, Default)]
+pub struct SharedSourceProgressV1 {
+    values: SourceProgressSnapshotsV1,
+    original: Option<std::sync::Arc<[SourceStreamProgressV1]>>,
+    complete: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<[SourceStreamProgressV1]>>>,
+}
+impl SharedSourceProgressV1 {
+    pub fn new(values: SourceProgressSnapshotsV1) -> Self {
+        Self {
+            values,
+            original: None,
+            complete: Default::default(),
+        }
+    }
+    pub fn shared_values(&self) -> Option<&SourceProgressSnapshotsV1> {
+        self.original.is_none().then_some(&self.values)
+    }
+    pub fn get_scope(&self, scope: &SourceStreamScopeV1) -> Option<&SourceStreamProgressV1> {
+        if let Some(v) = &self.original {
+            v.iter().find(|p| p.scope == *scope)
+        } else {
+            self.values.get(scope).map(AsRef::as_ref)
+        }
+    }
+    pub fn iter(&self) -> Box<dyn Iterator<Item = &SourceStreamProgressV1> + '_> {
+        if let Some(v) = &self.original {
+            Box::new(v.iter())
+        } else {
+            Box::new(self.values.values().map(AsRef::as_ref))
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.original
+            .as_ref()
+            .map_or(self.values.len(), |v| v.len())
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn as_arc(&self) -> &std::sync::Arc<[SourceStreamProgressV1]> {
+        if let Some(v) = &self.original {
+            v
+        } else {
+            self.complete.get_or_init(|| self.iter().cloned().collect())
+        }
+    }
+}
+impl From<std::sync::Arc<[SourceStreamProgressV1]>> for SharedSourceProgressV1 {
+    fn from(v: std::sync::Arc<[SourceStreamProgressV1]>) -> Self {
+        Self {
+            values: Default::default(),
+            original: Some(v),
+            complete: Default::default(),
+        }
+    }
+}
+impl From<Vec<SourceStreamProgressV1>> for SharedSourceProgressV1 {
+    fn from(v: Vec<SourceStreamProgressV1>) -> Self {
+        Self::from(std::sync::Arc::<[SourceStreamProgressV1]>::from(v))
+    }
+}
+impl std::ops::Deref for SharedSourceProgressV1 {
+    type Target = [SourceStreamProgressV1];
+    fn deref(&self) -> &Self::Target {
+        self.as_arc()
+    }
+}
+impl std::fmt::Debug for SharedSourceProgressV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+impl PartialEq for SharedSourceProgressV1 {
+    fn eq(&self, o: &Self) -> bool {
+        self.iter().eq(o.iter())
+    }
+}
+impl Eq for SharedSourceProgressV1 {}
+impl Serialize for SharedSourceProgressV1 {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(self.len()))?;
+        for p in self.iter() {
+            seq.serialize_element(p)?;
+        }
+        seq.end()
+    }
+}
+impl<'de> Deserialize<'de> for SharedSourceProgressV1 {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Vec::<SourceStreamProgressV1>::deserialize(d).map(Into::into)
     }
 }

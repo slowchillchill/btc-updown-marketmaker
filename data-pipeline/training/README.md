@@ -112,6 +112,10 @@ TypedRaw Parquet 仍先以原打开的 `File` 完成长度与 SHA 校验，然�
 
 `MarketBusinessObservationV1::source_progress` 使用公共 `SourceStreamProgressV1`，按 `SourceStreamScopeV1` 区分 Binance 深度/成交、Chainlink 现货/30秒/60秒流与 Polymarket 市场资产。字段记录最后有效业务来源证据、最后观察证据、实际已知连接代次与快照同步关联。它与字段值的 `direct_anchors` 分离：同值的新有效确认可以推进流时间，字段旧值锚点继续保留；重复、无效、PONG 或异资产消息不能续期其他流。来源事件时间和接收时间直接复用 `SourceEvidenceRefV3`，不把其他锚点最大值给所有源续期。
 
+关闭组的 `MarketObservationSetV1` 共享不可变市场快照树。Core 仅更新有变化的市场；生命周期、终局、固定／临时参考及 PM 资产事实都归原市场状态。`MarketObservationGroupV1` 单独保存本组前缀、全局参考、事件和来源进展。后续全局变化不重建历史市场，滞后消费者仍读取其组内的事实。`get_market` 只组装所需市场；`iter`、完整切片与冻结读取保留全部市场。普通序列化仍输出原完整观察数组，已有数组导入保留原顺序；没有删除历史义务或在读取时引用生产者未来状态。
+
+`SharedSourceProgressV1` 在 Core 路径共享按 scope 更新的原进展；健康复核用 `get_scope` 读取所需流。完整序列化和旧数组读取保留原证据，空集合仍表示没有该证据。共享树复用锁定的 imbl 有序容器，组内稳定借用缓存使用 elsa 的 `FrozenBTreeMap`；这些是派生只读表示，不是第二份归约状态，不计算内容哈希。
+
 选用回放从已记录的原 `RecordedIngressV1` 重建该投影，不要求重制历史材料、不回写旧文件或迁移历史记录。同值 Binance 快照原先只生成 `Confirm`；开启后额外产生一个只含进展的关闭观察组，其业务 `records` 为空，字段值/锚点不改。该组按真实输入接纳/可见时间交付，空业务事实不占规范事实序号。新组序号属于本次选用消费序列；没有选用的回放保持原序号。新/旧路径都由原输入和同一归约器生成，没有第二份来源或健康账本。
 
 Binance 原输入带真实 `connection_generation`，代次变化或已知连续性丢失使健康同步投影要求快照；同一代次后续有效快照建立 `SnapshotObserved`，仅网络或一条无关消息不恢复同步。Polymarket 来源 epoch 变化按原归约器范围要求重新同步本市场资产。未记录连接代次的流保持 `None`，没有快照同步证据保持 `Unknown`；它们不证明当前连接存活、断开或完整采集覆盖。固定市场锚点与已判定结果不作为持续行情流维护，公共原质量和 NAV 定义不受此投影改变。

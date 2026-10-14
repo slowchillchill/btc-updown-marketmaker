@@ -149,13 +149,8 @@ impl ComplementaryPairV1 {
         scope: &SourceStreamScopeV1,
         at: i64,
     ) -> SourceHealthStateV1 {
-        // Core 有序产出；合法旧夹具可无序，未命中仍走原查找。
-        let progress = o
-            .source_progress
-            .binary_search_by(|p| p.scope.cmp(scope))
-            .ok()
-            .map(|i| &o.source_progress[i])
-            .or_else(|| o.source_progress.iter().find(|p| &p.scope == scope));
+        // 共享进展只借用所需来源；旧完整数组由 get_scope 保留原查找。
+        let progress = o.source_progress.get_scope(scope);
         let facts = progress.map(SourceHealthFactsV1::from);
         source_health_state_v1(facts.as_ref(), self.config.health.limits(scope.source), at)
     }
@@ -223,8 +218,7 @@ impl ComplementaryPairV1 {
                     let h = self.config.health.limits(scope.source);
                     f.observation
                         .source_progress
-                        .iter()
-                        .find(|p| p.scope == scope)
+                        .get_scope(&scope)
                         .and_then(|p| p.last_valid_business_message.as_ref())
                         .map(|e| {
                             [
@@ -337,17 +331,7 @@ impl ComplementaryPairV1 {
                 scopes: vec![],
             });
         };
-        let observation = group
-            .observations
-            .binary_search_by(|o| o.market.condition_id.0.cmp(&dependency.condition_id.0))
-            .ok()
-            .map(|i| &group.observations[i])
-            .or_else(|| {
-                group
-                    .observations
-                    .iter()
-                    .find(|o| o.market.condition_id == dependency.condition_id)
-            });
+        let observation = group.observations.get_market(&dependency.condition_id.0);
         let Some(o) = observation else {
             return IntentQualificationV1::Invalidated(IntentInvalidationReasonV1 {
                 reason_code: "market_unavailable".into(),
@@ -523,10 +507,7 @@ impl ComplementaryPairV1 {
             // 已到达的真实反馈可能消除原缺口；不能凭冻结的修复标签重复买入。
             let Some(m) = input
                 .action_before
-                .economics()
-                .markets
-                .iter()
-                .find(|m| m.condition_id == dependency.condition_id)
+                .market_economics(&dependency.condition_id)
             else {
                 return reject("repair_position_unavailable", vec![]);
             };
@@ -537,10 +518,7 @@ impl ComplementaryPairV1 {
                 return reject("repair_asset_unavailable", vec![]);
             };
             let held = 1 - side;
-            if m.settlement_state != EconomicSettlementStateV1::Unresolved
-                || decimal(&m.orphan_shares[held]).is_err()
-                || decimal(&m.orphan_shares[held]).is_ok_and(|q| q <= Decimal::ZERO)
-            {
+            if !m.unresolved || m.orphan_shares[held] <= Decimal::ZERO {
                 return reject("repair_gap_unavailable", vec![]);
             }
             if matches!(

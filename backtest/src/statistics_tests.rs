@@ -378,3 +378,77 @@ fn progress_off_on_and_output_fault_preserve_full_business_and_failed_prepare_re
         error
     );
 }
+
+#[test]
+fn initialization_dependency_uses_exact_shared_group_and_keeps_legacy_arrays() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, _) = common::setup(temp.path());
+    common::initialize_at(&mut config, common::BASE + 1000, &[common::FIRST]);
+    let prepared = prepare_historical_run_v1(&config.preparation).unwrap();
+    let mut replay = PublicReplayV1::open(&prepared.public_root, 1, 1 << 20).unwrap();
+    let mut groups = Vec::new();
+    while let Some((_, applied)) = replay.next_applied().unwrap() {
+        groups.extend(applied.applied.closed_groups);
+    }
+    assert!(groups.len() > 2);
+    let first = &groups[0];
+    let last = groups.last().unwrap();
+    assert!(first.observations.shared_parts().is_some());
+    assert!(first.observations.get_market(common::SECOND).is_none());
+    assert!(last.observations.get_market(common::SECOND).is_some());
+    let later_source = last
+        .observations
+        .get_market(common::SECOND)
+        .unwrap()
+        .lifecycle
+        .direct_anchors[0]
+        .source_message_id
+        .0
+        .clone();
+    let later = HistoricalInitializationProvenanceV1 {
+        source_message_ids: [later_source].into_iter().collect(),
+        ..Default::default()
+    };
+    assert!(!later.observations_have_initialization_dependency(&first.observations));
+    assert!(later.observations_have_initialization_dependency(&last.observations));
+    // 已保存的早前缀不因后续市场出现而改变。
+    assert!(!later.observations_have_initialization_dependency(&first.observations));
+    let missing = HistoricalInitializationProvenanceV1 {
+        source_message_ids: ["f".repeat(64)].into_iter().collect(),
+        ..Default::default()
+    };
+    for provenance in [&prepared.initialization, &later, &missing] {
+        for group in &groups {
+            let legacy_values: Vec<_> = group.observations.clone().iter().cloned().collect();
+            let original = legacy_values
+                .iter()
+                .any(|o| provenance.observation_has_initialization_dependency(o));
+            // 只比较本次读取前后的持有者变化；不限定合法共享结构的精确数量。
+            let books: Vec<_> = group
+                .observations
+                .shared_parts()
+                .unwrap()
+                .0
+                .values()
+                .flat_map(|market| market.assets.iter().map(|asset| &asset.bids))
+                .collect();
+            let holders: Vec<_> = books.iter().map(|book| Arc::strong_count(book)).collect();
+            assert_eq!(
+                provenance.observations_have_initialization_dependency(&group.observations),
+                original
+            );
+            assert_eq!(
+                holders,
+                books
+                    .iter()
+                    .map(|book| Arc::strong_count(book))
+                    .collect::<Vec<_>>()
+            );
+
+            assert_eq!(
+                provenance.observations_have_initialization_dependency(&legacy_values.into()),
+                original
+            );
+        }
+    }
+}

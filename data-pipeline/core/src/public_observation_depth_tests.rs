@@ -72,12 +72,19 @@ fn one_depth_owner_per_group_keeps_complete_values_quality_and_old_snapshots() {
         MarketDataQuality::ConfirmedGap,
         MarketDataQuality::Fresh,
     ];
+    for pair in groups.windows(2) {
+        let (a, _) = pair[0].observations.shared_parts().unwrap();
+        let (b, _) = pair[1].observations.shared_parts().unwrap();
+        for id in a.keys() {
+            assert!(Arc::ptr_eq(&a[id], &b[id]), "全局深度不重建市场事实");
+        }
+    }
     for (i, group) in groups.iter().enumerate() {
         assert_eq!(group.observations.len(), 2);
         let a = &group.observations[0].binance_depth;
         let b = &group.observations[1].binance_depth;
         assert!(Arc::ptr_eq(a, b));
-        assert_eq!(Arc::strong_count(a), if i == 4 { 3 } else { 2 });
+        // 本组事实及显式完整读取可增加 Arc 持有者；ptr_eq 证明数量正文没有复制。
         assert_eq!(a.quality, expected_quality[i]);
         if i == 0 {
             assert!(a.value.is_none());
@@ -179,7 +186,7 @@ fn complete_pre_arc_observation_json_remains_readable_and_identical() {
     assert_eq!(serde_json::to_value(&observations).unwrap(), old_value);
     assert_eq!(serde_json::to_value(&old_observations).unwrap(), old_value);
     for (old, new) in old_observations.iter().zip(&groups) {
-        assert_eq!(old, &new.observations);
+        assert_eq!(old.as_slice(), new.observations.as_slice());
         // Reading old JSON need not reconstruct in-memory ownership sharing.
         assert!(!Arc::ptr_eq(&old[0].binance_depth, &old[1].binance_depth));
     }

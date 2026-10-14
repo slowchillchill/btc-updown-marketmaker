@@ -20663,6 +20663,21 @@ impl PublicConsumptionStateV1 {
             .iter()
             .map(|o| &self.rules[&o.market.condition_id.0])
     }
+    pub fn observation_at_current_prefix(
+        &self,
+        id: &str,
+    ) -> Option<&contracts::MarketBusinessObservationV1> {
+        self.last_prepared
+            .as_ref()?
+            .group
+            .observations
+            .get_market(id)
+    }
+    pub fn public_observation_count(&self) -> usize {
+        self.last_prepared
+            .as_ref()
+            .map_or(0, |p| p.group.observations.len())
+    }
     /// 当前已成功消费的公开观察；此有序切片由公共核心按 condition 生成，检查点保持原序。
     pub fn observations_at_current_prefix(&self) -> &[contracts::MarketBusinessObservationV1] {
         self.last_prepared
@@ -20680,13 +20695,13 @@ impl PublicConsumptionStateV1 {
         let mut ids: std::collections::BTreeSet<String> =
             self.unfinished_public_markets.keys().cloned().collect();
         ids.extend(historical.into_iter().map(str::to_owned));
-        let observations = self.observations_at_current_prefix();
+        let Some(prepared) = self.last_prepared.as_ref() else {
+            return Vec::new();
+        };
+        let observations = &prepared.group.observations;
         ids.into_iter()
             .filter_map(|id| {
-                let i = observations
-                    .binary_search_by(|o| o.market.condition_id.0.as_str().cmp(&id))
-                    .ok()?;
-                let observation = &observations[i];
+                let observation = observations.get_market(&id)?;
                 Some(PublicObservationFrameV1 {
                     observation,
                     rule_context: self.rules[&observation.market.condition_id.0].clone(),

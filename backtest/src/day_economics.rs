@@ -1,8 +1,6 @@
 //! 日内统计仅采样原 Ledger 与公开估值，不形成新的经济分录。
 use contracts::{ExactRationalV1, ExecutionReadValueV1, economics::EconomicRational as R};
-use ledger::LedgerEconomicReadV2;
 use serde::{Deserialize, Serialize};
-use shared_run::AccountEconomicsReadV3;
 
 #[derive(Debug, Serialize)]
 pub struct HistoricalDayEconomicsSummaryV1 {
@@ -53,15 +51,8 @@ impl Default for DayEconomicsStateV1 {
 fn rational(value: &ExactRationalV1) -> R {
     R::try_from(value).expect("原经济读取的规范有理数")
 }
-fn amount(value: &contracts::ExactDecimal) -> R {
-    R::from_decimal(value.0.parse().expect("原经济读取的精确金额"))
-}
 impl DayEconomicsStateV1 {
-    pub fn sample(
-        &mut self,
-        at: i64,
-        read: Option<(&LedgerEconomicReadV2<'_>, &AccountEconomicsReadV3)>,
-    ) {
+    pub fn sample(&mut self, at: i64, read: Option<(&ExecutionReadValueV1<R>, R)>) {
         if let Some(previous) = self.last_at {
             let duration = at.saturating_sub(previous).max(0) as u64;
             self.duration_ms += duration;
@@ -75,14 +66,14 @@ impl DayEconomicsStateV1 {
         }
         self.last_at = Some(at);
         self.samples += 1;
-        let Some((ledger, economics)) = read else {
+        let Some((nav, capital)) = read else {
             self.unknown_nav += 1;
             self.last_capital = None;
             return;
         };
-        match &economics.conservative_nav_pusd {
+        match nav {
             ExecutionReadValueV1::Known(nav) => {
-                let nav = rational(nav);
+                let nav = nav.clone();
                 let peak = self
                     .peak_nav
                     .as_ref()
@@ -100,8 +91,6 @@ impl DayEconomicsStateV1 {
             }
             _ => self.unknown_nav += 1,
         }
-        let mut capital = amount(&economics.cash.actual_reserved_pusd);
-        capital = capital.add(&rational(&ledger.committed_principal_pusd()));
         self.peak_capital = rational(&self.peak_capital).max(capital.clone()).public();
         self.last_capital = Some(capital.public());
     }

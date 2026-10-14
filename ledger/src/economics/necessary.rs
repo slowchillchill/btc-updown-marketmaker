@@ -42,6 +42,7 @@ pub struct AccountEconomicNumbersV1 {
     pub confirmed_net_pnl: R,
     pub confirmed_unpaid_rebate: R,
     pub conservative_positions: R,
+    pub committed_principal: R,
 }
 impl AccountEconomicNumbersV1 {
     fn adjust(&mut self, value: &Self, remove: bool) {
@@ -51,6 +52,7 @@ impl AccountEconomicNumbersV1 {
             &self.confirmed_unpaid_rebate,
             &value.confirmed_unpaid_rebate,
         );
+        self.committed_principal = add(&self.committed_principal, &value.committed_principal);
         self.conservative_positions =
             add(&self.conservative_positions, &value.conservative_positions);
     }
@@ -65,11 +67,16 @@ impl AccountIndex {
     pub fn from_state(state: &EconomicsState) -> Self {
         let mut index = Self::default();
         for id in state.markets.keys() {
-            index.replace(id, state);
+            let pending = state
+                .read_index
+                .as_ref()
+                .and_then(|i| i.markets.get(id))
+                .map_or_else(R::zero, |t| t.pending_principal.clone());
+            index.replace(id, state, pending);
         }
         index
     }
-    pub fn replace(&mut self, id: &str, state: &EconomicsState) {
+    pub fn replace(&mut self, id: &str, state: &EconomicsState, pending: R) {
         if let Some(old) = self.contributions.remove(id) {
             self.totals.adjust(&old, true);
         }
@@ -92,6 +99,14 @@ impl AccountIndex {
         let fee = R::from_decimal(m.settlement_recognized - m.settlement_paid);
         let taker = R::from_decimal(m.unpaid_taker);
         let value = AccountEconomicNumbersV1 {
+            committed_principal: if m.resolution.as_ref().is_some_and(|r| {
+                r.redeemed_pair > Decimal::ZERO
+                    || r.redeemed_orphan.iter().any(|q| *q > Decimal::ZERO)
+            }) {
+                pending
+            } else {
+                pending.add(&m.success_cost[0]).add(&m.success_cost[1])
+            },
             confirmed_net_pnl: m.pi.clone(),
             confirmed_unpaid_rebate: unpaid,
             conservative_positions: common.add(&R::from_decimal(orphan)).sub(&fee).sub(&taker),
@@ -183,6 +198,17 @@ impl LedgerNecessaryReadV2<'_> {
     }
     pub fn market_funds(&self, condition: &ConditionId) -> MarketFundsNumbersV1 {
         self.writer.necessary_market_funds(condition)
+    }
+    /// 读取原资产与池份额；调用方沿 marked_markets 选择未判定估值市场，不读取费用明细。
+    pub fn marked_position(
+        &self,
+        id: &str,
+    ) -> Option<(Option<&[AssetIdentityV1; 2]>, [Decimal; 2])> {
+        let m = self.writer.economics.markets.get(id)?;
+        Some((
+            m.assets.as_ref(),
+            std::array::from_fn(|i| m.pools[i].quantity),
+        ))
     }
     pub fn market(&self, condition: &ConditionId) -> Option<MarketEconomicNumbersV1> {
         let m = self.writer.economics.markets.get(&condition.0)?;

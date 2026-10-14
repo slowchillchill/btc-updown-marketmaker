@@ -2732,3 +2732,107 @@ async fn gamma_policy_is_explicit_in_the_actual_historical_entry_and_old_config(
         }
     }
 }
+
+#[test]
+fn actual_day_initialization_statistics_keep_late_candidate_prefixes() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = setup(temp.path());
+    config.preparation.scope.received_end_utc_ms = BASE + 15000;
+    initialize_at(&mut config, BASE + 2000, &[FIRST]);
+    let mut reference_config = config.preparation.clone();
+    reference_config.work_root = temp.path().join("reference-prepared");
+    let prepared = prepare_historical_run_v1(&reference_config).unwrap();
+    let mut replay = data_pipeline_training::public_replay::PublicReplayV1::open(
+        &prepared.public_root,
+        1,
+        1 << 20,
+    )
+    .unwrap();
+    let (mut expected_groups, mut expected_initial, mut expected_dependencies) = (0, 0, 0);
+    while let Some((_, applied)) = replay.next_applied().unwrap() {
+        for group in applied.applied.closed_groups {
+            expected_groups += 1;
+            let initial = prepared
+                .initialization
+                .group_is_initialization(&group.member_input_positions);
+            expected_initial += u64::from(initial);
+            let dependency = prepared.initialization.group_has_initialization_dependency(
+                &group.member_input_positions,
+                group.closed_at_input_position,
+            ) || group.observations.iter().any(|o| {
+                prepared
+                    .initialization
+                    .observation_has_initialization_dependency(o)
+            });
+            expected_dependencies += u64::from(!initial && dependency);
+        }
+    }
+    let mut fast = HistoricalPreparedRunConfigV1::from(&config);
+    fast.session.run_id = "initial-fast".into();
+    let mut late = fast.clone();
+    late.session.run_id = "initial-late".into();
+    late.session.account_id = "initial-late-account".into();
+    late.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(2100);
+    late.sim_log = temp.path().join("late-sim.jsonl");
+    late.noe_root = temp.path().join("late-noe");
+    late.ledger_root = temp.path().join("late-ledger");
+    late.metadata_path = temp.path().join("late-metadata.json");
+    late.result_path = temp.path().join("late-result.json");
+    let day = HistoricalDayConfigV1 {
+        preparation: config.preparation.clone(),
+        candidates: vec![fast, late],
+        checkpoint_root: temp.path().join("day-state"),
+        checkpoint_interval_seconds: 60,
+        progress_interval_seconds: 0,
+        checkpoint_every_applied_inputs: None,
+        checkpoint_every_candidate_events: None,
+        producer_lead_groups: Some(1),
+    };
+    let result = run_historical_days_v1(&[day], rules, &|_| {
+        Ok(Probe {
+            no_trade_only: true,
+            ..Default::default()
+        })
+    })
+    .unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].candidates.len(), 2);
+    for candidate in &result[0].candidates {
+        let summary = &candidate.report["delivery_summary"];
+        let before = &summary["before_operating_start"];
+        let within = &summary["within_operating_range"];
+        assert_eq!(
+            before["groups"].as_u64().unwrap() + within["groups"].as_u64().unwrap(),
+            expected_groups
+        );
+        assert_eq!(
+            before["initialization_source_groups"].as_u64().unwrap()
+                + within["initialization_source_groups"].as_u64().unwrap(),
+            expected_initial
+        );
+        assert_eq!(
+            before["research_groups_with_initialization_dependencies"]
+                .as_u64()
+                .unwrap()
+                + within["research_groups_with_initialization_dependencies"]
+                    .as_u64()
+                    .unwrap(),
+            expected_dependencies
+        );
+        assert!(
+            within["research_groups_with_initialization_dependencies"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(candidate.report["end_reason"], "RangeEnd");
+    }
+    assert_eq!(
+        result[0].candidates[0].report["delivery_summary"]["before_operating_start"]["groups"],
+        1
+    );
+    assert_eq!(
+        result[0].candidates[1].report["delivery_summary"]["before_operating_start"]["groups"],
+        0
+    );
+}

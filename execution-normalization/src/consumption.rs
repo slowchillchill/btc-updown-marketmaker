@@ -271,6 +271,55 @@ impl<R: Clone + std::fmt::Debug + PartialEq> NoeConsumptionSource<R> {
     }
 }
 
+/// 恢复原批只编码一次，记录可见性归每个引用。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NoeCheckpointRecordRefV1 {
+    batch: usize,
+    ordinal: usize,
+    visibility: NoeConsumptionVisibilityV1,
+}
+#[derive(Serialize, Deserialize)]
+pub struct NoeCheckpointBatchPoolV1<R> {
+    batches: Vec<Arc<Batch<R>>>,
+    #[serde(skip)]
+    ids: BTreeMap<usize, usize>,
+}
+impl<R> Default for NoeCheckpointBatchPoolV1<R> {
+    fn default() -> Self {
+        Self {
+            batches: Vec::new(),
+            ids: BTreeMap::new(),
+        }
+    }
+}
+impl<R> NoeCheckpointBatchPoolV1<R> {
+    pub fn capture(&mut self, r: &NoeConsumedRecordRef<R>) -> NoeCheckpointRecordRefV1 {
+        let pointer = Arc::as_ptr(&r.batch) as usize;
+        let batch = *self.ids.entry(pointer).or_insert_with(|| {
+            let index = self.batches.len();
+            self.batches.push(r.batch.clone());
+            index
+        });
+        NoeCheckpointRecordRefV1 {
+            batch,
+            ordinal: r.ordinal,
+            visibility: r.visibility.clone(),
+        }
+    }
+    pub fn restore(&self, r: NoeCheckpointRecordRefV1) -> Result<NoeConsumedRecordRef<R>, String> {
+        let batch = self
+            .batches
+            .get(r.batch)
+            .filter(|b| r.ordinal < b.batch.records.len())
+            .ok_or("恢复 NOE 原批引用越界")?;
+        Ok(NoeConsumedRecordRef {
+            batch: batch.clone(),
+            ordinal: r.ordinal,
+            visibility: r.visibility,
+        })
+    }
+}
+
 // 私有恢复队列只编码一次原批；有序坐标引用批内 ordinal，不复制经济事实。
 mod ordered_feedback {
     use super::*;
@@ -285,32 +334,34 @@ mod ordered_feedback {
         queue: &BTreeMap<Coordinate, Vec<NoeConsumedRecordRef<R>>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        let mut ids = BTreeMap::new();
-        let mut batches = Vec::new();
+        let mut pool = NoeCheckpointBatchPoolV1::default();
         let entries = queue
             .iter()
             .map(|(coordinate, records)| {
                 let refs = records
                     .iter()
                     .map(|r| {
-                        let pointer = Arc::as_ptr(&r.batch) as usize;
-                        let index = *ids.entry(pointer).or_insert_with(|| {
-                            let i = batches.len();
-                            batches.push(r.batch.clone());
-                            i
-                        });
-                        (index, r.ordinal, r.visibility.clone())
+                        let saved = pool.capture(r);
+                        (saved.batch, saved.ordinal, saved.visibility)
                     })
                     .collect();
                 (*coordinate, refs)
             })
             .collect();
-        Stored { batches, entries }.serialize(serializer)
+        Stored {
+            batches: pool.batches,
+            entries,
+        }
+        .serialize(serializer)
     }
     pub fn deserialize<'de, D: serde::Deserializer<'de>, R: Deserialize<'de>>(
         deserializer: D,
     ) -> Result<BTreeMap<Coordinate, Vec<NoeConsumedRecordRef<R>>>, D::Error> {
         let stored = Stored::<R>::deserialize(deserializer)?;
+        let pool = NoeCheckpointBatchPoolV1 {
+            batches: stored.batches,
+            ids: BTreeMap::new(),
+        };
         stored
             .entries
             .into_iter()
@@ -318,16 +369,12 @@ mod ordered_feedback {
                 let refs = entries
                     .into_iter()
                     .map(|(index, ordinal, visibility)| {
-                        let batch = stored
-                            .batches
-                            .get(index)
-                            .filter(|b| ordinal < b.batch.records.len())
-                            .ok_or_else(|| serde::de::Error::custom("反馈队列原批引用越界"))?;
-                        Ok(NoeConsumedRecordRef {
-                            batch: batch.clone(),
+                        pool.restore(NoeCheckpointRecordRefV1 {
+                            batch: index,
                             ordinal,
                             visibility,
                         })
+                        .map_err(serde::de::Error::custom)
                     })
                     .collect::<Result<Vec<_>, D::Error>>()?;
                 Ok((coordinate, refs))
@@ -396,5 +443,100 @@ impl<'de> Deserialize<'de> for NoeBatchDurabilityV1 {
             value.publish(&container);
         }
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_pool_tests {
+    use super::*;
+    use contracts::*;
+    #[test]
+    fn original_batch_keeps_record_ordinals_and_each_visibility() {
+        let reference = DurableSourceReferenceV1 {
+            source: ImmutableSourceReferenceV1::Identity("pool-test".into()),
+        };
+        let context = Arc::new(
+            sim_v2_context(
+                SimV2ContextSeedV1 {
+                    run_id: "pool-test".into(),
+                    account_instance_key: AccountInstanceKeyV1 {
+                        run_id: "pool-test".into(),
+                        caller_role: SimCallerRoleV1::Paper,
+                        caller_instance_id: "caller".into(),
+                        account_id: "account".into(),
+                        platform_source: PlatformSourceV1::Simulated,
+                    },
+                    run_opened: reference.clone(),
+                    account_opening: reference,
+                    account_opening_evidence_identity: "opening".into(),
+                    implementation_identity: "test".into(),
+                },
+                "execution_normalization_v3",
+            )
+            .unwrap(),
+        );
+        let mut core = NormalizationCore::<
+            SourceNeutralTradeLifecycleResultV2<MemoryLogicalIdentityV1>,
+            SourceNeutralControlResult<
+                SourceNeutralSubmissionOutcomeV2<MemoryLogicalIdentityV1>,
+                SourceNeutralOrderSnapshotV2<MemoryLogicalIdentityV1>,
+                MemoryLogicalIdentityV1,
+            >,
+            MemoryLogicalIdentityV1,
+            MemoryEconomicFactReferenceV1,
+        >::new((*context).clone());
+        let batch = Arc::new(
+            core.normalize_and_accept(NormalizationBatchInput {
+                source_watermark: SimV2SourceWatermarkV1 {
+                    run_id: "pool-test".into(),
+                    projection_batch_sequence: 1,
+                },
+                evidence: (0..2)
+                    .map(|i| SourceNeutralEvidence {
+                        source_record: SimV2SourceRecordReferenceV1::DirectResponse {
+                            private_feedback_sequence: 1,
+                            platform_responded_at_utc_ms: 10,
+                            response_received_at_utc_ms: 20,
+                            association: SimV2DirectResponseAssociationV1::SubmissionItem {
+                                global_request_id: "submit".into(),
+                                batch_item_ordinal: i,
+                            },
+                        },
+                        source_ordinal: i as u32,
+                        logical_key: SourceNeutralLogicalKeyV1::SubmissionItem {
+                            global_request_id: "submit".into(),
+                            batch_item_ordinal: i,
+                        },
+                        kind: SourceNeutralEvidenceKind::Control {
+                            result: SourceNeutralControlResult::Submission {
+                                outcome: SourceNeutralSubmissionOutcomeV2::RejectedNoEffect,
+                            },
+                        },
+                    })
+                    .collect(),
+            })
+            .unwrap(),
+        );
+        let mut source = NoeConsumptionSourceV1::default();
+        source.accept(context, batch);
+        let before = source.pending.values().flatten().next().unwrap().clone();
+        let after = source.take_closed(21, 40);
+        assert_eq!(after.len(), 2);
+        let mut pool = NoeCheckpointBatchPoolV1::default();
+        let refs = [&before, &after[0], &after[1]].map(|r| pool.capture(r));
+        assert_eq!(pool.batches.len(), 1);
+        let encoded = serde_json::to_vec(&pool).unwrap();
+        let restored: NoeCheckpointBatchPoolV1<NoCancellationRequestCompletionV0> =
+            serde_json::from_slice(&encoded).unwrap();
+        for (r, original) in refs.iter().zip([&before, &after[0], &after[1]]) {
+            let actual = restored.restore(r.clone()).unwrap();
+            assert_eq!(actual.position(), original.position());
+            assert_eq!(actual.visibility(), original.visibility());
+            assert_eq!(actual.record(), original.record());
+        }
+        assert_ne!(before.visibility(), after[0].visibility());
+        let mut damaged = refs[0].clone();
+        damaged.ordinal = usize::MAX;
+        assert!(restored.restore(damaged).is_err(), "损坏的批内引用不能恢复");
     }
 }

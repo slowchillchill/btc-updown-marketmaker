@@ -15,4 +15,6 @@ mod strategy;
 pub use strategy::*;
 
 mod necessary;
-pub use necessary::{ActionAccountReadV2, BorrowedActionAccountV2, OwnedActionAccountV2};
+pub use necessary::{
+    ActionAccountReadV2, BorrowedActionAccountV2, OwnedActionAccountV2, conservative_nav,
+};

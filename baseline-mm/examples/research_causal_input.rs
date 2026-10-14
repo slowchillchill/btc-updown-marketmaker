@@ -849,7 +849,7 @@ mod tests {
         o.effective_reference = EffectiveMarketReferenceV1::Missing;
         o.terminal = ObservedFactV1::default();
         o.chainlink_spot = spot(1, 1000, "100");
-        g.observations = vec![o];
+        g.observations = vec![o].into();
         let target = g.observations[0].market.condition_id.clone();
         let mut a = Analysis::default();
         let mut s = Sampler::default();
@@ -909,7 +909,7 @@ mod tests {
         target_o.terminal = ObservedFactV1::default();
         target_o.chainlink_spot = spot(1, -1000, "100");
         let target = target_o.market.condition_id.clone();
-        g.observations = vec![other, target_o];
+        g.observations = vec![other, target_o].into();
         let mut a = Analysis::default();
         a.consume(&g, -500, true, &target, 0, 300_000);
         assert_eq!(a.target_research_observations, 0);
@@ -972,7 +972,7 @@ mod tests {
             condition_id: second.market.condition_id.clone(),
             window: second.market.window.clone(),
         });
-        g.observations = vec![first, second];
+        g.observations = vec![first, second].into();
         a.consume(&g, 1100, false).unwrap();
         b.consume(&g, 1100, false).unwrap();
         // 同一个组在第一市场右端，在第二市场左端；前者不能倒灌，后者可读已见前序。

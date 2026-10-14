@@ -362,13 +362,12 @@ fn sample_day_economics<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunA
     at: i64,
     state: &mut crate::day_economics::DayEconomicsStateV1,
 ) {
-    if let Some(read) = shared.ledger().economic_read() {
-        let frames = driver.frames_at_observation();
-        let economics = AccountEconomicsReadV3::from_ledger_and_observations(
-            &read,
-            frames.iter().map(|f| f.observation),
-        );
-        state.sample(at, Some((&read, &economics)));
+    if let Some(read) = shared.ledger().necessary_read_v2() {
+        let nav =
+            shared_run::conservative_nav(&read, |id| driver.observation_at_current_prefix(id));
+        let capital = contracts::economics::EconomicRational::from_decimal(read.cash().1)
+            .add(&read.account().committed_principal);
+        state.sample(at, Some((&nav, capital)));
     } else {
         state.sample(at, None);
     }
@@ -817,7 +816,11 @@ where
                     )
                 })
             {
-                sample_day_economics(&driver, &shared, at, &mut day_economics);
+                measure_stage!(
+                    stages,
+                    "day_economic_sampling",
+                    sample_day_economics(&driver, &shared, at, &mut day_economics)
+                );
                 return Ok((HistoricalEndReasonV1::StrategyExit, at));
             }
             let health_due = health_at == Some(at);
@@ -875,11 +878,11 @@ where
                             catalog.initialization.group_has_initialization_dependency(
                                 &group.group.member_input_positions,
                                 group.group.closed_at_input_position,
-                            ) || group.group.observations.iter().any(|o| {
-                                catalog
-                                    .initialization
-                                    .observation_has_initialization_dependency(o)
-                            });
+                            ) || catalog
+                                .initialization
+                                .observations_have_initialization_dependency(
+                                    &group.group.observations,
+                                );
                         delivered_group = Some((group.group.group_position, initial, dependency));
                     }
                     for pm_context in &group.pm_contexts {
@@ -1323,7 +1326,20 @@ where
                             stages,
                             "next_health_evaluation_including_dependency_lookup",
                             strategy.next_health_evaluation_at(
-                                &driver.frames_at_observation(),
+                                &if strategy.selects_relevant_markets() {
+                                    let mut historical = strategy.historical_market_requirements();
+                                    historical.extend(
+                                        strategy.calculation_market_requirements(&calculation),
+                                    );
+                                    shared
+                                        .strategy_selected_current_observations(
+                                            &driver,
+                                            &historical,
+                                        )
+                                        .map_err(HistoricalFailureCauseV1::Ledger)?
+                                } else {
+                                    driver.frames_at_observation()
+                                },
                                 Some(&calculation),
                                 at,
                             )
@@ -1373,7 +1389,11 @@ where
             }
             // 初始化及隐藏来源可早于经营范围；保留其业务时刻，不让统计前沿倒退。
             if at >= economics_start {
-                sample_day_economics(&driver, &shared, at, &mut day_economics);
+                measure_stage!(
+                    stages,
+                    "day_economic_sampling",
+                    sample_day_economics(&driver, &shared, at, &mut day_economics)
+                );
             }
             checkpoint
                 .save(
@@ -1406,7 +1426,11 @@ where
                             StrategyOutputV1::Exit { .. }
                         )
                 }) {
-                    sample_day_economics(&driver, &shared, at, &mut day_economics);
+                    measure_stage!(
+                        stages,
+                        "day_economic_sampling",
+                        sample_day_economics(&driver, &shared, at, &mut day_economics)
+                    );
                     return Ok((HistoricalEndReasonV1::StrategyExit, at));
                 }
                 return Ok((HistoricalEndReasonV1::BudgetStop, at));

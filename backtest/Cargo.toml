@@ -7,7 +7,7 @@ publish = false
 [features]
 default = []
 # 有限本地测量；默认构建没有计时或汇总输出。
-stage-timing = []
+stage-timing = ["data-pipeline-training/stage-timing"]
 
 [dependencies]
 contracts = { path = "../contracts" }

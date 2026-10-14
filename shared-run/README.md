@@ -167,3 +167,9 @@ SIM的`prepare_business_request_v1`只选择请求身份模式。新模式的订
 LIVE Bridge的`prepare`返回原签名正文和基础Order hash；配对两腿都准备成功后才允许`execute_prepared`消费原正文。哈希不加入平台POST JSON，salt、时间和签名正文不在发送阶段重造。普通V1/V2直接复用既有签名摘要。Poly1271依据[D-0351](https://github.com/slowchillchill/btc-updown-marketmaker/issues/301#issuecomment-6161579473)，只在需要提前基础订单身份时复用原结构／域中间值并增加一次66字节Keccak；原`sign`不增加哈希计算，不逐帧计算或做运行时哈希校验，不承诺具体耗时。该能力不是已交付LIVE宿主，也不证明真实平台已经受理。
 
 当前完整日运行使用backtest的v3检查点边界，拒绝旧完整运行续接；底层旧事件和旧身份仍可按原含义解释，没有通用旧研究迁移。B已按[D-0349](https://github.com/slowchillchill/btc-updown-marketmaker/issues/301#issuecomment-6160221232)停止，后续重新基于A的公共接口设计；公共Rust验证不能替代B或真实LIVE验收。
+
+## 必要经济读取与共享保存
+
+`conservative_nav` 复用 `LedgerNecessaryReadV2` 的原账户贡献及未决市场份额，并读取消费者当前公开组的估值买价。它保持完整 `AccountEconomicsReadV3` 的 NAV 与未知语义；策略 equity 仍减去已确认未付返佣，两者不能混用。日统计调用此数值读取；完整报告和显式冻结继续走原完整接口。修复订单健康复核只取目标市场，不为该条件生成所有市场的账户报告。
+
+`shared_execution_v2` 检查点用 execution-normalization 的 `NoeCheckpointBatchPoolV1` 一次保存 registry 与 pending 引用的原批，另存批内 ordinal 和每个引用自身的可见性。它复用 NOE 有序反馈队列的原批捕获与恢复逻辑，保留发布容器引用；不按内容合并不同原批，不生成内容哈希。旧无格式字段的 SharedRun 保存仍可在读取边界导入一次；这一底层兼容不允许旧完整研究跨资金政策或源码身份续跑。

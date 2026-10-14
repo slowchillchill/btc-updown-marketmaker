@@ -11,3 +11,5 @@ num-bigint = "=0.4.8"
 num-integer = "=0.1.46"
 num-traits = "=0.2.19"
 alloy-primitives = { version = "=1.6.0", default-features = false, features = ["serde"] }
+imbl = { version = "=7.0.2", features = ["serde"] }
+elsa = "=1.11.2"

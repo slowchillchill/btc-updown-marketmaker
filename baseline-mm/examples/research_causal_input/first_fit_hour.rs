@@ -300,7 +300,7 @@ mod tests {
         o.chainlink_spot = spot(1, 1000, "100");
         let mut other = o.clone();
         other.market.condition_id = ConditionId(format!("0x{}", "2".repeat(64)));
-        g.observations = vec![o.clone(), other, o.clone()];
+        g.observations = vec![o.clone(), other, o.clone()].into();
         let mut a = History::default();
         assert!(observe_group(&mut a, &g, 1100, false, true));
         assert!(!observe_group(&mut a, &g, 1200, false, true));

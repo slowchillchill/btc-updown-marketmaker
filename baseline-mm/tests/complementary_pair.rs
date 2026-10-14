@@ -1930,3 +1930,142 @@ async fn qualified_chainlink_history_survives_binance_failure_at_original_decide
         serde_json::json!([[22000, 100002.0], [23000, 100001.0]])
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn actual_health_calculation_borrows_required_scope_among_unrelated_history() {
+    use data_pipeline_core::{public_input::*, typed_raw::*};
+    // 通过原 metadata/PM typed_raw 准备和公共归约建立来源，而非改写既有进展。
+    let historical_progress = |count: u64| {
+        let mut source = common::core();
+        source.enable_source_progress();
+        let mut progress = Vec::new();
+        for i in 0..count {
+            let condition = format!("0x{:064x}", i + 256);
+            let token = (1000 + 2 * i).to_string();
+            let DptIngressV1::Message {
+                row: TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(mut metadata)),
+                ..
+            } = common::meta(0).ingress
+            else {
+                panic!("原 metadata 夹具应提供正式行")
+            };
+            metadata.condition_id = condition.clone();
+            metadata.clob_market_id = (4_000_000 + i).to_string();
+            metadata.asset_ids = format!("[\"{token}\",\"{}\"]", 1001 + 2 * i);
+            metadata.collector_admission_sequence = i + 1;
+            let input = common::record(
+                2 * i,
+                TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(metadata)),
+            );
+            let prepared =
+                prepare_public_ingress_v1(&source, &input, &Default::default(), &[]).unwrap();
+            source.push(&prepared).unwrap();
+            let event = PolymarketOrderbookEvent::Book {
+                asset_id: token.clone(),
+                bids: vec![PolymarketPriceLevel {
+                    price: "0.5".into(),
+                    size: "100".into(),
+                }],
+                asks: vec![PolymarketPriceLevel {
+                    price: "0.6".into(),
+                    size: "80".into(),
+                }],
+                last_trade_price: Some("0.55".into()),
+            };
+            let DptIngressV1::Message {
+                row: TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(mut book)),
+                ..
+            } = common::pm(0, i + 1, 21_000, event).ingress
+            else {
+                panic!("原 PM 夹具应提供正式行")
+            };
+            book.market = condition.clone();
+            let input = common::record(
+                2 * i + 1,
+                TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(book)),
+            );
+            let prepared =
+                prepare_public_ingress_v1(&source, &input, &Default::default(), &[]).unwrap();
+            source.push(&prepared).unwrap();
+            let scope = SourceStreamScopeV1 {
+                source: SourceStreamKindV1::PolymarketBook,
+                condition_id: Some(ConditionId(condition.clone())),
+                asset_or_symbol: token.clone(),
+            };
+            let context = source.prepared_pm_context(&condition).unwrap();
+            assert_eq!(context.market.condition_id.0, condition);
+            assert!(
+                context
+                    .assets
+                    .iter()
+                    .any(|asset| asset.asset.token_id.0 == token)
+            );
+            let observed = source.current_source_progress(&scope).unwrap();
+            assert_eq!(
+                observed.last_observed_message.source_kind,
+                CanonicalSourceKindV2::PolymarketOrderbook
+            );
+            assert_eq!(
+                observed
+                    .last_valid_business_message
+                    .as_ref()
+                    .unwrap()
+                    .source_kind,
+                CanonicalSourceKindV2::PolymarketOrderbook
+            );
+            progress.push(observed.clone());
+        }
+        assert_eq!(progress.len(), count as usize);
+        progress
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver, rules) = setup(temp.path(), "2000");
+    let original = estimated(
+        shared.strategy_input(&mut driver).unwrap().unwrap(),
+        "100000",
+    );
+    let reference = original
+        .calculate(&mut strategy(config(), rules.clone()), 22_000)
+        .unwrap();
+    assert!(!diagnostic(&reference.output).markets.is_empty());
+    for historical_sources in [8, 80] {
+        let history = historical_progress(historical_sources);
+        let mut input = estimated(
+            shared.strategy_input(&mut driver).unwrap().unwrap(),
+            "100000",
+        );
+        for market in &mut input.markets {
+            let original_progress: Vec<_> =
+                market.observation.source_progress.iter().cloned().collect();
+            let mut values = SourceProgressSnapshotsV1::new();
+            for p in &original_progress {
+                values.insert(p.scope.clone(), Arc::new(p.clone()));
+            }
+            for p in &history {
+                values.insert(p.scope.clone(), Arc::new(p.clone()));
+            }
+            market.observation.source_progress = SharedSourceProgressV1::new(values);
+        }
+        let calculation = input
+            .calculate(&mut strategy(config(), rules.clone()), 22_000)
+            .unwrap();
+        assert_eq!(
+            diagnostic(&calculation.output).markets,
+            diagnostic(&reference.output).markets
+        );
+        // 合法旧数组可以无序；同一健康调用仍读取原来源。
+        let mut legacy = input;
+        for market in &mut legacy.markets {
+            let mut progress: Vec<_> = market.observation.source_progress.iter().cloned().collect();
+            progress.reverse();
+            market.observation.source_progress = progress.into();
+        }
+        let old = legacy
+            .calculate(&mut strategy(config(), rules.clone()), 22_000)
+            .unwrap();
+        assert_eq!(
+            diagnostic(&old.output).markets,
+            diagnostic(&reference.output).markets
+        );
+    }
+}

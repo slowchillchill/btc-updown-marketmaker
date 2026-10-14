@@ -231,10 +231,7 @@ impl HistoricalStatisticsCollectorV1 {
             if initialization.group_has_initialization_dependency(
                 &group.member_input_positions,
                 group.closed_at_input_position,
-            ) || group
-                .observations
-                .iter()
-                .any(|o| initialization.observation_has_initialization_dependency(o))
+            ) || initialization.observations_have_initialization_dependency(&group.observations)
             {
                 self.statistics
                     .research_groups_with_initialization_dependencies += 1;
