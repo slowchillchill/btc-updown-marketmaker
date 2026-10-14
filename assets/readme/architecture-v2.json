@@ -1,0 +1,497 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "市场数据、策略决策与账户反馈",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "animation": "trace",
+    "viewBox": [
+      1240,
+      730
+    ],
+    "views": [
+      {
+        "id": "observe",
+        "label": "数据与观察",
+        "focus": [
+          "collect",
+          "pipeline",
+          "shared",
+          "strategy"
+        ],
+        "note": "公开观察经 SIM 公共组驱动；隐藏撮合材料不会进入策略观察。"
+      },
+      {
+        "id": "trade",
+        "label": "决策与执行",
+        "focus": [
+          "strategy",
+          "shared",
+          "intent",
+          "sim"
+        ],
+        "note": "策略返回交易意图，由 shared-run 协调提交。"
+      },
+      {
+        "id": "account",
+        "label": "反馈与入账",
+        "focus": [
+          "sim",
+          "noe",
+          "ledger",
+          "shared"
+        ],
+        "note": "执行与经济反馈先规范化，再由 shared-run 领取并应用到账本。"
+      }
+    ],
+    "output": "assets/readme/architecture.html",
+    "repository": {
+      "url": "https://github.com/slowchillchill/btc-updown-marketmaker.git",
+      "revision": "9a7346a6857d8ccd57a462d8574c73deac2a1733"
+    }
+  },
+  "components": [
+    {
+      "id": "collect",
+      "type": "backend",
+      "label": "data-collect",
+      "sublabel": "多源行情采集",
+      "pos": [
+        49.128,
+        245
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "data-collect/src/lib.rs",
+          "line": 1,
+          "end_line": 30
+        },
+        {
+          "path": "data-pipeline/training/README.md",
+          "line": 1,
+          "end_line": 7
+        }
+      ]
+    },
+    {
+      "id": "pipeline",
+      "type": "backend",
+      "label": "data-pipeline",
+      "sublabel": "数据准备与历史回放",
+      "pos": [
+        49.128,
+        415
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "backtest/README.md",
+          "line": 13,
+          "end_line": 19
+        },
+        {
+          "path": "backtest/src/run.rs",
+          "line": 515,
+          "end_line": 551
+        }
+      ]
+    },
+    {
+      "id": "train",
+      "type": "backend",
+      "label": "model-train",
+      "sublabel": "GPU 训练 · 已暂停",
+      "pos": [
+        49.128,
+        585
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "model-train/README.md",
+          "line": 1,
+          "end_line": 22
+        },
+        {
+          "path": "model-train/README.md",
+          "line": 137,
+          "end_line": 137
+        }
+      ]
+    },
+    {
+      "id": "strategy",
+      "type": "backend",
+      "label": "baseline-mm",
+      "sublabel": "人工策略决策",
+      "pos": [
+        409.40000000000003,
+        75
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "baseline-mm/src/strategies/complementary_pair/mod.rs",
+          "line": 289,
+          "end_line": 310
+        }
+      ]
+    },
+    {
+      "id": "shared",
+      "type": "backend",
+      "label": "shared-run",
+      "sublabel": "观察、提交与入账协调",
+      "pos": [
+        409.40000000000003,
+        305
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "shared-run/src/strategy.rs",
+          "line": 359,
+          "end_line": 384
+        },
+        {
+          "path": "shared-run/src/strategy.rs",
+          "line": 807,
+          "end_line": 819
+        },
+        {
+          "path": "shared-run/src/group.rs",
+          "line": 179,
+          "end_line": 218
+        }
+      ]
+    },
+    {
+      "id": "intent",
+      "type": "backend",
+      "label": "intent-bridge",
+      "sublabel": "交易意图提交",
+      "pos": [
+        933.432,
+        305
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "intent-bridge/src/sim_adapter.rs",
+          "line": 189,
+          "end_line": 230
+        },
+        {
+          "path": "shared-run/src/group.rs",
+          "line": 455,
+          "end_line": 470
+        }
+      ]
+    },
+    {
+      "id": "sim",
+      "type": "backend",
+      "label": "sim-system",
+      "sublabel": "公开驱动、撮合与经济事件",
+      "pos": [
+        933.432,
+        555
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "backtest/README.md",
+          "line": 13,
+          "end_line": 19
+        },
+        {
+          "path": "sim-system/src/lib.rs",
+          "line": 1,
+          "end_line": 30
+        },
+        {
+          "path": "shared-run/README.md",
+          "line": 3,
+          "end_line": 13
+        }
+      ]
+    },
+    {
+      "id": "noe",
+      "type": "backend",
+      "label": "execution-normalization",
+      "sublabel": "执行反馈规范化",
+      "pos": [
+        659.134,
+        555
+      ],
+      "size": [
+        221.07600000000002,
+        82
+      ],
+      "sources": [
+        {
+          "path": "execution-normalization/src/core.rs",
+          "line": 1230,
+          "end_line": 1240
+        },
+        {
+          "path": "shared-run/src/group.rs",
+          "line": 487,
+          "end_line": 507
+        }
+      ]
+    },
+    {
+      "id": "ledger",
+      "type": "backend",
+      "label": "ledger",
+      "sublabel": "资金、持仓与预留",
+      "pos": [
+        409.40000000000003,
+        555
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "ledger/src/lib.rs",
+          "line": 10,
+          "end_line": 31
+        },
+        {
+          "path": "shared-run/src/group.rs",
+          "line": 179,
+          "end_line": 218
+        }
+      ]
+    },
+    {
+      "id": "visual",
+      "type": "backend",
+      "label": "visualization",
+      "sublabel": "只读回测报告与研究展示",
+      "pos": [
+        49.128,
+        75
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "visualization/README.md",
+          "line": 1,
+          "end_line": 5
+        }
+      ]
+    },
+    {
+      "id": "reports",
+      "type": "database",
+      "label": "回测报告",
+      "sublabel": "backtest 汇总运行结果",
+      "pos": [
+        659.134,
+        75
+      ],
+      "size": [
+        221.07600000000002,
+        82
+      ],
+      "sources": [
+        {
+          "path": "backtest/src/run.rs",
+          "line": 405,
+          "end_line": 448
+        },
+        {
+          "path": "visualization/README.md",
+          "line": 3,
+          "end_line": 5
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "backtest · 历史回测宿主与报告",
+      "wraps": [
+        "strategy",
+        "shared",
+        "intent",
+        "sim",
+        "noe",
+        "ledger",
+        "reports"
+      ],
+      "pad": 35
+    }
+  ],
+  "connections": [
+    {
+      "id": "market-data",
+      "from": "collect",
+      "to": "pipeline",
+      "label": "原始行情",
+      "labelAt": [
+        147.384,
+        371
+      ]
+    },
+    {
+      "id": "prepared-data",
+      "from": "pipeline",
+      "to": "shared",
+      "label": "公开观察（经 SIM）"
+    },
+    {
+      "id": "observation",
+      "from": "shared",
+      "to": "strategy",
+      "label": "行情＋账户",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelDx": 64.08,
+      "labelDy": -62
+    },
+    {
+      "id": "decision",
+      "from": "strategy",
+      "to": "shared",
+      "label": "交易意图",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDx": -64.08,
+      "labelDy": 62
+    },
+    {
+      "id": "submit",
+      "from": "shared",
+      "to": "intent",
+      "label": "预留后提交"
+    },
+    {
+      "id": "orders",
+      "from": "intent",
+      "to": "sim",
+      "label": "模拟订单",
+      "labelDy": 65
+    },
+    {
+      "id": "execution",
+      "from": "sim",
+      "to": "noe",
+      "label": "执行反馈"
+    },
+    {
+      "id": "normalized",
+      "from": "noe",
+      "to": "ledger",
+      "label": "协调入账"
+    },
+    {
+      "id": "feedback",
+      "from": "ledger",
+      "to": "shared",
+      "label": "账户反馈",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelDy": -66
+    },
+    {
+      "id": "training-input",
+      "from": "pipeline",
+      "to": "train",
+      "label": "训练输入",
+      "labelAt": [
+        147.384,
+        541
+      ]
+    },
+    {
+      "id": "hidden-input",
+      "from": "pipeline",
+      "to": "sim",
+      "label": "隐藏撮合材料",
+      "fromSide": "left",
+      "toSide": "bottom",
+      "via": [
+        [
+          16.375999999999998,
+          456
+        ],
+        [
+          16.375999999999998,
+          715
+        ],
+        [
+          1031.688,
+          715
+        ]
+      ],
+      "labelAt": [
+        525.1,
+        695
+      ]
+    },
+    {
+      "id": "report-output",
+      "from": "reports",
+      "to": "visual",
+      "label": "运行报告",
+      "fromSide": "top",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "contracts · 公共合同",
+      "items": [
+        "跨模块类型与语义；规范化事件由 shared-run 领取并应用到账本。"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "模型研究状态",
+      "items": [
+        "历史有限训练验证已完成；训练暂停，待基于 A/公共实现重设计。旧版 ONNX 本地推理已有验证。"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "流程示意",
+      "items": [
+        "高亮代表业务顺序，不表示实际耗时；完整 PAPER / LIVE 宿主仍在规划。"
+      ]
+    }
+  ]
+}

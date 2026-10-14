@@ -1,0 +1,955 @@
+{
+  "description": "七组人工策略候选在共同完成的前七小时中的原始数值摘录，供根 README 展示；不是原十二小时作业的完整终态。",
+  "source_commit": "9a7346a6857d8ccd57a462d8574c73deac2a1733",
+  "binary_sha256": "85a3c19213e5d027f68e7b5a364bc10b1491cc07374485f2e79861eeed6795e0",
+  "source_summary": {
+    "file": "partial-seven-hour-summary.json",
+    "sha256": "ad42cf5d0e35dfe7d4e0c08e5a0b0a05763c3ec58bc9e4f5c8bf99589267e0d0"
+  },
+  "checkpoint_reference": {
+    "format": "original-parquet-day-checkpoint-v2",
+    "identity": "168de052f1e3fef12a6bcff9354c754dbfcf1a23ae4f82042868723211701626",
+    "generation": 73,
+    "files": [
+      {
+        "path": "day.cbor",
+        "sha256": "7848783711220ee258e6cb691986ce190f39350c1617b1a4b43648794a2adab2"
+      },
+      {
+        "path": "candidate-000000.cbor",
+        "sha256": "8870203d6c26a0c49a954a0ca6af5f114fb8dd3f48a72cecab3f3a2cbcb89b93"
+      },
+      {
+        "path": "candidate-000001.cbor",
+        "sha256": "080e363479bc6fe382defdd8c6b5106f1006002f8d1b9e766839ca7e66d35ad0"
+      },
+      {
+        "path": "candidate-000002.cbor",
+        "sha256": "12abe54b26e8c09d9a9617bf5618ff80239e961cb2f34bded9a5616f918d5040"
+      },
+      {
+        "path": "candidate-000003.cbor",
+        "sha256": "5863c85961e73407fad1ee62e01cb5ce9d95d3608dc48173bc91228372571d37"
+      },
+      {
+        "path": "candidate-000004.cbor",
+        "sha256": "73a32340873f3b657d547bcd1674424ece3fc9840d3e27a9e7befd96948e6dd0"
+      },
+      {
+        "path": "candidate-000005.cbor",
+        "sha256": "01f0b6ec1bd11976837dd400b0993631dc433ff2b38d0c82e78675e3f6d569f4"
+      },
+      {
+        "path": "candidate-000006.cbor",
+        "sha256": "63a59752851cfe4f2b91ec2b4be528fc76dd14a7ab01f63ab79421a3ea5c4eeb"
+      }
+    ]
+  },
+  "extracted_at_utc": "2026-10-14T01:40:27.504615+00:00",
+  "compared_scope": {
+    "start_utc_ms": 1789171200000,
+    "end_utc_ms": 1789196400000
+  },
+  "compared_start_utc": "2026-09-12T00:00:00Z",
+  "compared_end_utc_exclusive": "2026-09-12T07:00:00Z",
+  "requested_twelve_hour_run_completed": false,
+  "basis": "只读提取第73代检查点已记录的七个整小时统计；原始有理数保留。不恢复运行，不重演行情或经济事实。",
+  "limits": [
+    "内部整点按该毫秒事件之前的原研究快照比较；不加窗口外结算。",
+    "已确认净损益不等于所有未决持仓最终结算收益；NAV使用当时的原估值。",
+    "未成熟返佣单列，不加到已确认净损益或NAV变化中。",
+    "小时快照缺独立孤腿估值分项；未决孤腿本金不是最终亏损。",
+    "最大回撤是起点至该截点累计值；不从累计最大值相减推算小时最大回撤。",
+    "七组本次研究在第八个行情小时异常退出；这些数据仅覆盖共同完成的前七小时。",
+    "请求编号变化可能改变模拟延迟路径；尚未逐事件归因，不能确认全部收益差异由此造成，也不能把这次七组收益差异全部归因于参数。未修复或重跑。"
+  ],
+  "display_formulas": {
+    "nav_change_percent": "(conservative_nav_pusd / initial_pusd - 1) * 100",
+    "maximum_drawdown_percent": "maximum_nav_drawdown_fraction * 100",
+    "rounding": "由原有理数计算，再按 ROUND_HALF_UP 显示两位小数。"
+  },
+  "candidates": [
+    {
+      "candidate": "center",
+      "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-center",
+      "initial_pusd": "2000",
+      "completed_hours": 7,
+      "boundary_utc_ms": 1789196400000,
+      "observation_cutoff": {
+        "decision_time": {
+          "drive_position": 35009789,
+          "logical_time_utc_ms": 1789196399999,
+          "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-center"
+        },
+        "private_feedback_sequence": 23184,
+        "receipt": {
+          "actor_input_sequence": 46107957,
+          "execution_time": {
+            "drive_position": 35009779,
+            "logical_time_utc_ms": 1789196399980,
+            "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-center"
+          },
+          "group": {
+            "applied_prefix": {
+              "input_stream_id": "issue185-twelve-hour-conservative-public-2026-09-12",
+              "next_input_position": 6744013
+            },
+            "closed_at_input_position": 6744012,
+            "group_id": "3f710f1e3a01c4f1b448127469f5e05d311b93d47b687995ff39db3e39c07381",
+            "group_position": 6742610,
+            "input_stream_id": "issue185-twelve-hour-conservative-public-2026-09-12"
+          },
+          "session_id": "issue185-twelve-hour-conservative-f0-2026-09-12-center-session"
+        }
+      },
+      "metrics": {
+        "conservative_nav_pusd": {
+          "Known": {
+            "numerator": "1950541847",
+            "denominator": "1000000"
+          }
+        },
+        "confirmed_net_pnl_pusd": {
+          "Known": {
+            "numerator": "-1440313",
+            "denominator": "40000"
+          }
+        },
+        "actual_available_pusd": {
+          "Known": {
+            "numerator": "1938617947",
+            "denominator": "1000000"
+          }
+        },
+        "actual_reserved_pusd": {
+          "Known": {
+            "numerator": "119239",
+            "denominator": "10000"
+          }
+        },
+        "unresolved_orphan_principal_cost_pusd": {
+          "Known": {
+            "numerator": "1681291",
+            "denominator": "125000"
+          }
+        },
+        "paired_shares": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "orphan_shares": {
+          "Known": {
+            "numerator": "25377979",
+            "denominator": "1000000"
+          }
+        },
+        "accrued_unmatured_rebates_pusd": {
+          "Known": {
+            "numerator": "1408699",
+            "denominator": "50000"
+          }
+        },
+        "paid_rebates_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "maker_fee_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "taker_fee_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        }
+      },
+      "day_economics": {
+        "economics_version": "account_economics_v2",
+        "maximum_nav_drawdown_fraction": {
+          "Known": {
+            "denominator": "1169959213",
+            "numerator": "177210998"
+          }
+        },
+        "maximum_nav_drawdown_pusd": {
+          "Known": {
+            "denominator": "2500000",
+            "numerator": "797449491"
+          }
+        },
+        "unknown_nav_samples": 0
+      },
+      "counters": {
+        "open_order_count": 1,
+        "unclosed_commitments": 1,
+        "pending_noe_records": 0,
+        "maker_success_trade_count": 666,
+        "taker_success_trade_count": 0
+      },
+      "pending_calculation": null
+    },
+    {
+      "candidate": "no-innovation",
+      "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-no-innovation",
+      "initial_pusd": "2000",
+      "completed_hours": 7,
+      "boundary_utc_ms": 1789196400000,
+      "observation_cutoff": {
+        "decision_time": {
+          "drive_position": 34976021,
+          "logical_time_utc_ms": 1789196399999,
+          "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-no-innovation"
+        },
+        "private_feedback_sequence": 24217,
+        "receipt": {
+          "actor_input_sequence": 46065249,
+          "execution_time": {
+            "drive_position": 34976011,
+            "logical_time_utc_ms": 1789196399980,
+            "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-no-innovation"
+          },
+          "group": {
+            "applied_prefix": {
+              "input_stream_id": "issue185-twelve-hour-conservative-public-2026-09-12",
+              "next_input_position": 6744013
+            },
+            "closed_at_input_position": 6744012,
+            "group_id": "3f710f1e3a01c4f1b448127469f5e05d311b93d47b687995ff39db3e39c07381",
+            "group_position": 6742610,
+            "input_stream_id": "issue185-twelve-hour-conservative-public-2026-09-12"
+          },
+          "session_id": "issue185-twelve-hour-conservative-f0-2026-09-12-no-innovation-session"
+        }
+      },
+      "metrics": {
+        "conservative_nav_pusd": {
+          "Known": {
+            "numerator": "1160561899",
+            "denominator": "500000"
+          }
+        },
+        "confirmed_net_pnl_pusd": {
+          "Known": {
+            "numerator": "161561899",
+            "denominator": "500000"
+          }
+        },
+        "actual_available_pusd": {
+          "Known": {
+            "numerator": "1126561899",
+            "denominator": "500000"
+          }
+        },
+        "actual_reserved_pusd": {
+          "Known": {
+            "numerator": "37",
+            "denominator": "1"
+          }
+        },
+        "unresolved_orphan_principal_cost_pusd": {
+          "Known": {
+            "numerator": "2",
+            "denominator": "1"
+          }
+        },
+        "paired_shares": {
+          "Known": {
+            "numerator": "31",
+            "denominator": "1"
+          }
+        },
+        "orphan_shares": {
+          "Known": {
+            "numerator": "50",
+            "denominator": "1"
+          }
+        },
+        "accrued_unmatured_rebates_pusd": {
+          "Known": {
+            "numerator": "220363",
+            "denominator": "6250"
+          }
+        },
+        "paid_rebates_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "maker_fee_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "taker_fee_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        }
+      },
+      "day_economics": {
+        "economics_version": "account_economics_v2",
+        "maximum_nav_drawdown_fraction": {
+          "Known": {
+            "denominator": "3980359100",
+            "numerator": "225313469"
+          }
+        },
+        "maximum_nav_drawdown_pusd": {
+          "Known": {
+            "denominator": "50000000",
+            "numerator": "6083463663"
+          }
+        },
+        "unknown_nav_samples": 0
+      },
+      "counters": {
+        "open_order_count": 1,
+        "unclosed_commitments": 1,
+        "pending_noe_records": 0,
+        "maker_success_trade_count": 834,
+        "taker_success_trade_count": 0
+      },
+      "pending_calculation": null
+    },
+    {
+      "candidate": "small-size",
+      "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-small-size",
+      "initial_pusd": "2000",
+      "completed_hours": 7,
+      "boundary_utc_ms": 1789196400000,
+      "observation_cutoff": {
+        "decision_time": {
+          "drive_position": 35009811,
+          "logical_time_utc_ms": 1789196399999,
+          "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-small-size"
+        },
+        "private_feedback_sequence": 23126,
+        "receipt": {
+          "actor_input_sequence": 46108075,
+          "execution_time": {
+            "drive_position": 35009801,
+            "logical_time_utc_ms": 1789196399980,
+            "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-small-size"
+          },
+          "group": {
+            "applied_prefix": {
+              "input_stream_id": "issue185-twelve-hour-conservative-public-2026-09-12",
+              "next_input_position": 6744013
+            },
+            "closed_at_input_position": 6744012,
+            "group_id": "3f710f1e3a01c4f1b448127469f5e05d311b93d47b687995ff39db3e39c07381",
+            "group_position": 6742610,
+            "input_stream_id": "issue185-twelve-hour-conservative-public-2026-09-12"
+          },
+          "session_id": "issue185-twelve-hour-conservative-f0-2026-09-12-small-size-session"
+        }
+      },
+      "metrics": {
+        "conservative_nav_pusd": {
+          "Known": {
+            "numerator": "412177403",
+            "denominator": "200000"
+          }
+        },
+        "confirmed_net_pnl_pusd": {
+          "Known": {
+            "numerator": "336298390102",
+            "denominator": "5458734375"
+          }
+        },
+        "actual_available_pusd": {
+          "Known": {
+            "numerator": "407417403",
+            "denominator": "200000"
+          }
+        },
+        "actual_reserved_pusd": {
+          "Known": {
+            "numerator": "333",
+            "denominator": "25"
+          }
+        },
+        "unresolved_orphan_principal_cost_pusd": {
+          "Known": {
+            "numerator": "251670293143",
+            "denominator": "349359000000"
+          }
+        },
+        "paired_shares": {
+          "Known": {
+            "numerator": "262",
+            "denominator": "25"
+          }
+        },
+        "orphan_shares": {
+          "Known": {
+            "numerator": "1800077",
+            "denominator": "100000"
+          }
+        },
+        "accrued_unmatured_rebates_pusd": {
+          "Known": {
+            "numerator": "8012297",
+            "denominator": "500000"
+          }
+        },
+        "paid_rebates_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "maker_fee_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "taker_fee_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        }
+      },
+      "day_economics": {
+        "economics_version": "account_economics_v2",
+        "maximum_nav_drawdown_fraction": {
+          "Known": {
+            "denominator": "211103791409",
+            "numerator": "6282083609"
+          }
+        },
+        "maximum_nav_drawdown_pusd": {
+          "Known": {
+            "denominator": "100000000",
+            "numerator": "6282083609"
+          }
+        },
+        "unknown_nav_samples": 0
+      },
+      "counters": {
+        "open_order_count": 1,
+        "unclosed_commitments": 1,
+        "pending_noe_records": 0,
+        "maker_success_trade_count": 619,
+        "taker_success_trade_count": 0
+      },
+      "pending_calculation": null
+    },
+    {
+      "candidate": "no-inventory",
+      "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-no-inventory",
+      "initial_pusd": "2000",
+      "completed_hours": 7,
+      "boundary_utc_ms": 1789196400000,
+      "observation_cutoff": {
+        "decision_time": {
+          "drive_position": 35008771,
+          "logical_time_utc_ms": 1789196399999,
+          "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-no-inventory"
+        },
+        "private_feedback_sequence": 21624,
+        "receipt": {
+          "actor_input_sequence": 46106016,
+          "execution_time": {
+            "drive_position": 35008761,
+            "logical_time_utc_ms": 1789196399980,
+            "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-no-inventory"
+          },
+          "group": {
+            "applied_prefix": {
+              "input_stream_id": "issue185-twelve-hour-conservative-public-2026-09-12",
+              "next_input_position": 6744013
+            },
+            "closed_at_input_position": 6744012,
+            "group_id": "3f710f1e3a01c4f1b448127469f5e05d311b93d47b687995ff39db3e39c07381",
+            "group_position": 6742610,
+            "input_stream_id": "issue185-twelve-hour-conservative-public-2026-09-12"
+          },
+          "session_id": "issue185-twelve-hour-conservative-f0-2026-09-12-no-inventory-session"
+        }
+      },
+      "metrics": {
+        "conservative_nav_pusd": {
+          "Known": {
+            "numerator": "84427241",
+            "denominator": "50000"
+          }
+        },
+        "confirmed_net_pnl_pusd": {
+          "Known": {
+            "numerator": "-292216453",
+            "denominator": "1000000"
+          }
+        },
+        "actual_available_pusd": {
+          "Known": {
+            "numerator": "83385161",
+            "denominator": "50000"
+          }
+        },
+        "actual_reserved_pusd": {
+          "Known": {
+            "numerator": "13026",
+            "denominator": "625"
+          }
+        },
+        "unresolved_orphan_principal_cost_pusd": {
+          "Known": {
+            "numerator": "19238727",
+            "denominator": "1000000"
+          }
+        },
+        "paired_shares": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "orphan_shares": {
+          "Known": {
+            "numerator": "40080683",
+            "denominator": "1000000"
+          }
+        },
+        "accrued_unmatured_rebates_pusd": {
+          "Known": {
+            "numerator": "7756691",
+            "denominator": "250000"
+          }
+        },
+        "paid_rebates_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "maker_fee_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "taker_fee_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        }
+      },
+      "day_economics": {
+        "economics_version": "account_economics_v2",
+        "maximum_nav_drawdown_fraction": {
+          "Known": {
+            "denominator": "5076277550",
+            "numerator": "1210260771"
+          }
+        },
+        "maximum_nav_drawdown_pusd": {
+          "Known": {
+            "denominator": "2500000",
+            "numerator": "1210260771"
+          }
+        },
+        "unknown_nav_samples": 0
+      },
+      "counters": {
+        "open_order_count": 1,
+        "unclosed_commitments": 1,
+        "pending_noe_records": 0,
+        "maker_success_trade_count": 655,
+        "taker_success_trade_count": 0
+      },
+      "pending_calculation": null
+    },
+    {
+      "candidate": "passive-repair",
+      "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-passive-repair",
+      "initial_pusd": "2000",
+      "completed_hours": 7,
+      "boundary_utc_ms": 1789196400000,
+      "observation_cutoff": {
+        "decision_time": {
+          "drive_position": 35008866,
+          "logical_time_utc_ms": 1789196399999,
+          "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-passive-repair"
+        },
+        "private_feedback_sequence": 21833,
+        "receipt": {
+          "actor_input_sequence": 46106104,
+          "execution_time": {
+            "drive_position": 35008856,
+            "logical_time_utc_ms": 1789196399980,
+            "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-passive-repair"
+          },
+          "group": {
+            "applied_prefix": {
+              "input_stream_id": "issue185-twelve-hour-conservative-public-2026-09-12",
+              "next_input_position": 6744013
+            },
+            "closed_at_input_position": 6744012,
+            "group_id": "3f710f1e3a01c4f1b448127469f5e05d311b93d47b687995ff39db3e39c07381",
+            "group_position": 6742610,
+            "input_stream_id": "issue185-twelve-hour-conservative-public-2026-09-12"
+          },
+          "session_id": "issue185-twelve-hour-conservative-f0-2026-09-12-passive-repair-session"
+        }
+      },
+      "metrics": {
+        "conservative_nav_pusd": {
+          "Known": {
+            "numerator": "1848862907",
+            "denominator": "1000000"
+          }
+        },
+        "confirmed_net_pnl_pusd": {
+          "Known": {
+            "numerator": "-16363077",
+            "denominator": "125000"
+          }
+        },
+        "actual_available_pusd": {
+          "Known": {
+            "numerator": "1827048907",
+            "denominator": "1000000"
+          }
+        },
+        "actual_reserved_pusd": {
+          "Known": {
+            "numerator": "10907",
+            "denominator": "500"
+          }
+        },
+        "unresolved_orphan_principal_cost_pusd": {
+          "Known": {
+            "numerator": "20232477",
+            "denominator": "1000000"
+          }
+        },
+        "paired_shares": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "orphan_shares": {
+          "Known": {
+            "numerator": "41955683",
+            "denominator": "1000000"
+          }
+        },
+        "accrued_unmatured_rebates_pusd": {
+          "Known": {
+            "numerator": "3295653",
+            "denominator": "100000"
+          }
+        },
+        "paid_rebates_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "maker_fee_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "taker_fee_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        }
+      },
+      "day_economics": {
+        "economics_version": "account_economics_v2",
+        "maximum_nav_drawdown_fraction": {
+          "Known": {
+            "denominator": "103400293427",
+            "numerator": "16278698777"
+          }
+        },
+        "maximum_nav_drawdown_pusd": {
+          "Known": {
+            "denominator": "50000000",
+            "numerator": "16278698777"
+          }
+        },
+        "unknown_nav_samples": 0
+      },
+      "counters": {
+        "open_order_count": 1,
+        "unclosed_commitments": 1,
+        "pending_noe_records": 0,
+        "maker_success_trade_count": 718,
+        "taker_success_trade_count": 0
+      },
+      "pending_calculation": null
+    },
+    {
+      "candidate": "health2",
+      "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-health2",
+      "initial_pusd": "2000",
+      "completed_hours": 7,
+      "boundary_utc_ms": 1789196400000,
+      "observation_cutoff": {
+        "decision_time": {
+          "drive_position": 35065244,
+          "logical_time_utc_ms": 1789196399999,
+          "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-health2"
+        },
+        "private_feedback_sequence": 29721,
+        "receipt": {
+          "actor_input_sequence": 46182555,
+          "execution_time": {
+            "drive_position": 35065234,
+            "logical_time_utc_ms": 1789196399980,
+            "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-health2"
+          },
+          "group": {
+            "applied_prefix": {
+              "input_stream_id": "issue185-twelve-hour-conservative-public-2026-09-12",
+              "next_input_position": 6744013
+            },
+            "closed_at_input_position": 6744012,
+            "group_id": "3f710f1e3a01c4f1b448127469f5e05d311b93d47b687995ff39db3e39c07381",
+            "group_position": 6742610,
+            "input_stream_id": "issue185-twelve-hour-conservative-public-2026-09-12"
+          },
+          "session_id": "issue185-twelve-hour-conservative-f0-2026-09-12-health2-session"
+        }
+      },
+      "metrics": {
+        "conservative_nav_pusd": {
+          "Known": {
+            "numerator": "123272337",
+            "denominator": "62500"
+          }
+        },
+        "confirmed_net_pnl_pusd": {
+          "Known": {
+            "numerator": "-204269",
+            "denominator": "62500"
+          }
+        },
+        "actual_available_pusd": {
+          "Known": {
+            "numerator": "121647337",
+            "denominator": "62500"
+          }
+        },
+        "actual_reserved_pusd": {
+          "Known": {
+            "numerator": "26",
+            "denominator": "1"
+          }
+        },
+        "unresolved_orphan_principal_cost_pusd": {
+          "Known": {
+            "numerator": "761697",
+            "denominator": "31250"
+          }
+        },
+        "paired_shares": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "orphan_shares": {
+          "Known": {
+            "numerator": "50561453",
+            "denominator": "1000000"
+          }
+        },
+        "accrued_unmatured_rebates_pusd": {
+          "Known": {
+            "numerator": "4032263",
+            "denominator": "125000"
+          }
+        },
+        "paid_rebates_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "maker_fee_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "taker_fee_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        }
+      },
+      "day_economics": {
+        "economics_version": "account_economics_v2",
+        "maximum_nav_drawdown_fraction": {
+          "Known": {
+            "denominator": "10084514002",
+            "numerator": "1204937777"
+          }
+        },
+        "maximum_nav_drawdown_pusd": {
+          "Known": {
+            "denominator": "5000000",
+            "numerator": "1204937777"
+          }
+        },
+        "unknown_nav_samples": 0
+      },
+      "counters": {
+        "open_order_count": 1,
+        "unclosed_commitments": 1,
+        "pending_noe_records": 0,
+        "maker_success_trade_count": 754,
+        "taker_success_trade_count": 0
+      },
+      "pending_calculation": null
+    },
+    {
+      "candidate": "health8",
+      "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-health8",
+      "initial_pusd": "2000",
+      "completed_hours": 7,
+      "boundary_utc_ms": 1789196400000,
+      "observation_cutoff": {
+        "decision_time": {
+          "drive_position": 34965491,
+          "logical_time_utc_ms": 1789196399999,
+          "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-health8"
+        },
+        "private_feedback_sequence": 18047,
+        "receipt": {
+          "actor_input_sequence": 46048507,
+          "execution_time": {
+            "drive_position": 34965481,
+            "logical_time_utc_ms": 1789196399980,
+            "run_id": "issue185-twelve-hour-conservative-f0-2026-09-12-health8"
+          },
+          "group": {
+            "applied_prefix": {
+              "input_stream_id": "issue185-twelve-hour-conservative-public-2026-09-12",
+              "next_input_position": 6744013
+            },
+            "closed_at_input_position": 6744012,
+            "group_id": "3f710f1e3a01c4f1b448127469f5e05d311b93d47b687995ff39db3e39c07381",
+            "group_position": 6742610,
+            "input_stream_id": "issue185-twelve-hour-conservative-public-2026-09-12"
+          },
+          "session_id": "issue185-twelve-hour-conservative-f0-2026-09-12-health8-session"
+        }
+      },
+      "metrics": {
+        "conservative_nav_pusd": {
+          "Known": {
+            "numerator": "1100867907",
+            "denominator": "500000"
+          }
+        },
+        "confirmed_net_pnl_pusd": {
+          "Known": {
+            "numerator": "113055059",
+            "denominator": "500000"
+          }
+        },
+        "actual_available_pusd": {
+          "Known": {
+            "numerator": "1098981507",
+            "denominator": "500000"
+          }
+        },
+        "actual_reserved_pusd": {
+          "Known": {
+            "numerator": "2358",
+            "denominator": "625"
+          }
+        },
+        "unresolved_orphan_principal_cost_pusd": {
+          "Known": {
+            "numerator": "761697",
+            "denominator": "31250"
+          }
+        },
+        "paired_shares": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "orphan_shares": {
+          "Known": {
+            "numerator": "50561453",
+            "denominator": "1000000"
+          }
+        },
+        "accrued_unmatured_rebates_pusd": {
+          "Known": {
+            "numerator": "7372251",
+            "denominator": "250000"
+          }
+        },
+        "paid_rebates_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "maker_fee_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        },
+        "taker_fee_pusd": {
+          "Known": {
+            "numerator": "0",
+            "denominator": "1"
+          }
+        }
+      },
+      "day_economics": {
+        "economics_version": "account_economics_v2",
+        "maximum_nav_drawdown_fraction": {
+          "Known": {
+            "denominator": "2116830641",
+            "numerator": "289135433"
+          }
+        },
+        "maximum_nav_drawdown_pusd": {
+          "Known": {
+            "denominator": "1000000",
+            "numerator": "289135433"
+          }
+        },
+        "unknown_nav_samples": 0
+      },
+      "counters": {
+        "open_order_count": 1,
+        "unclosed_commitments": 1,
+        "pending_noe_records": 0,
+        "maker_success_trade_count": 649,
+        "taker_success_trade_count": 0
+      },
+      "pending_calculation": null
+    }
+  ]
+}
