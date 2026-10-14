@@ -1264,6 +1264,8 @@ mod enabled {
             let log_path = candidate.join("sim-event-log-v2.working.jsonl");
             let opened = RunOpenedV2 {
                 projection_version: Default::default(),
+                latency_sampler_version: "xoshiro256plusplus_jump_multiply_high_empirical_rank_v2"
+                    .into(),
                 run_id: GATE_A_RUNNER_IDENTITY.to_owned(),
                 durability_role: RunDurabilityRoleV2::CleanRun,
                 platform_rule_snapshot_file_sha256: rule_snapshot.file_sha256().clone(),
@@ -1403,11 +1405,13 @@ mod enabled {
                     if request_count != 0 {
                         return Err("Gate A 代表订单触发事件重复".to_owned());
                     }
-                    let outbound_delay = i64::try_from(latency.sample_delay_ms(
-                        "8".repeat(64).as_bytes(),
-                        GATE_A_REQUEST_ID,
-                        DelaySampleDomainV1::RequestOutbound,
-                    ))
+                    let outbound_delay = i64::try_from(
+                        sim_system::latency_profile::SessionDelaySamplerV2::from_hex(
+                            &"8".repeat(64),
+                        )
+                        .unwrap()
+                        .sample(&latency, DelaySampleDomainV1::RequestOutbound),
+                    )
                     .map_err(|_| "Gate A 代表订单出站时延不可表示".to_owned())?;
                     execution
                         .post_order(
@@ -1997,6 +2001,8 @@ mod enabled {
             &log_path,
             RunOpenedV2 {
                 projection_version: Default::default(),
+                latency_sampler_version: "xoshiro256plusplus_jump_multiply_high_empirical_rank_v2"
+                    .into(),
                 run_id: COMPONENT_RUNNER_IDENTITY.to_owned(),
                 durability_role: RunDurabilityRoleV2::CleanRun,
                 platform_rule_snapshot_file_sha256: snapshot.file_sha256().clone(),
@@ -2805,6 +2811,8 @@ mod enabled {
             &log_path,
             RunOpenedV2 {
                 projection_version: Default::default(),
+                latency_sampler_version: "xoshiro256plusplus_jump_multiply_high_empirical_rank_v2"
+                    .into(),
                 run_id: run_id.clone(),
                 durability_role: RunDurabilityRoleV2::RecoverablePaper,
                 platform_rule_snapshot_file_sha256: snapshot.file_sha256().clone(),
@@ -3295,6 +3303,8 @@ mod enabled {
         let caller_role = SimCallerRoleV1::Paper;
         let opened = RunOpenedV2 {
             projection_version: Default::default(),
+            latency_sampler_version: "xoshiro256plusplus_jump_multiply_high_empirical_rank_v2"
+                .into(),
             run_id: run_id.clone(),
             durability_role: role,
             platform_rule_snapshot_file_sha256: snapshot.file_sha256().clone(),

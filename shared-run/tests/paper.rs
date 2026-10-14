@@ -43,31 +43,25 @@ fn setup(root: &Path) -> (PaperConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
     std::fs::write(&finality, SUCCESS_POLICY).unwrap();
     // 原采样器选定可短时覆盖的测试 seed；不替换生产时钟/延迟 profile。
     let latency = load_embedded_proxy_latency_profile().unwrap();
-    let seed = (0..10000u64)
-        .map(|i| format!("{i:064x}"))
-        .find(|s| {
-            ["paper-buy", "paper-cancel"].into_iter().all(|id| {
-                [
-                    DelaySampleDomainV1::RequestOutbound,
-                    DelaySampleDomainV1::DirectResponseInbound,
-                ]
-                .into_iter()
-                .all(|d| {
-                    if id == "paper-buy" && matches!(d, DelaySampleDomainV1::RequestOutbound) {
-                        (200..300).contains(&latency.sample_delay_ms(s.as_bytes(), id, d))
-                    } else {
-                        latency.sample_delay_ms(s.as_bytes(), id, d) < 50
-                    }
-                })
-            }) && (0..20).all(|i| {
-                latency.sample_delay_ms(
-                    s.as_bytes(),
-                    &i.to_string(),
-                    DelaySampleDomainV1::LifecycleFeedbackInbound,
-                ) < 100
-            })
-        })
-        .unwrap();
+    // 固定新版完整32字节种子；保留原出站200..300ms及短响应的真实窗口。
+    let seed = "28158a348a1d6c7c487c652331cc7457d85a359488a13aaf18e487127a33e45f".to_owned();
+    let mut sampler = sim_system::latency_profile::SessionDelaySamplerV2::from_hex(&seed).unwrap();
+    assert_eq!(
+        sampler.sample(&latency, DelaySampleDomainV1::RequestOutbound),
+        250
+    );
+    assert_eq!(
+        sampler.sample(&latency, DelaySampleDomainV1::DirectResponseInbound),
+        10
+    );
+    assert_eq!(
+        sampler.sample(&latency, DelaySampleDomainV1::RequestOutbound),
+        10
+    );
+    assert_eq!(
+        sampler.sample(&latency, DelaySampleDomainV1::DirectResponseInbound),
+        11
+    );
     let config = PaperConfigV1 {
         socket_path: root.join("hot.sock"),
         dpt_root: root.join("dpt"),

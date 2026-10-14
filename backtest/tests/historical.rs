@@ -395,8 +395,7 @@ async fn physical_entry_freezes_delayed_decisions_uses_hidden_fills_and_keeps_on
             .last_dispatched_calculation_timing
             .as_ref()
             .unwrap()
-            .actual_sent_at_utc_ms
-            .unwrap()
+            .scheduled_send_at_utc_ms
             > report
                 .last_dispatched_calculation_timing
                 .as_ref()
@@ -539,7 +538,7 @@ fn assert_range_tail_capital_observation_times(config: &HistoricalRunConfigV1) {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    for offset in [1622, 1632, 1899] {
+    for offset in [1632, 1642, 1899] {
         assert!(observations.contains(&(BASE + offset)));
     }
 }
@@ -551,14 +550,16 @@ fn assert_range_tail_day_economics(report: &HistoricalRunReportV1, duration_ms: 
     assert_eq!(statistics.measured_duration_ms, duration_ms);
     assert_eq!(statistics.unknown_capital_duration_ms, 0);
     assert_eq!(statistics.unknown_nav_samples, 0);
-    // 原公开买价0.4，10份本金6和费用0.168；未成熟返佣不计入公共NAV。
+    // 新固定序列：MINED经济事实先到，CONFIRMED份额后到。
+    // 1642读取已扣本金6与费用0.168，但成功份额尚未入池；保守NAV临时少6.168。
+    // 1899尾观察成功份额才按公开买价0.4估值4，期末损失2.168。未成熟返佣不计NAV。
     assert_eq!(
         statistics.maximum_nav_drawdown_pusd,
-        ExecutionReadValueV1::Known(amount("2.168").public())
+        ExecutionReadValueV1::Known(amount("6.168").public())
     );
     assert_eq!(
         statistics.maximum_nav_drawdown_fraction,
-        ExecutionReadValueV1::Known(amount("2.168").divided_by(&amount("2000")).public())
+        ExecutionReadValueV1::Known(amount("6.168").divided_by(&amount("2000")).public())
     );
     // 固定规则rate=.07、exponent=1：非post-only买单按最坏价.5预留费，
     // 10*.07*.5*(1-.5)=.175；实际.6成交费为10*.07*.6*(1-.6)=.168。
@@ -568,23 +569,13 @@ fn assert_range_tail_day_economics(report: &HistoricalRunReportV1, duration_ms: 
         .mul(&amount("0.07"))
         .mul(&amount("0.5"))
         .mul(&amount("0.5"));
-    let actual_fee = amount("10")
-        .mul(&amount("0.07"))
-        .mul(&amount("0.6"))
-        .mul(&amount("0.4"));
     let submitted = principal.add(&reserved_fee).add(&down);
-    let accepted = principal.add(&actual_fee);
-    // 1601提交；1622收到Up经济事实时准确关联替代本地预留，1632迟到响应不重复占用。
-    // 初始LIMIT费预留略大于实际费，因此最大占用是原提交10.675。
-    let converted = down.add(&accepted);
-    // 1899原尾观察才领取成功成交/费用；占用为剩余Down预留+成功剩余本金。
-    // 只按这些原公共观察时点积分，不回填隐藏成交时刻或追加驱动事件。
+    // seed=e×64：Up/Down出站21/10ms；Up MINED平台时刻1632，入站9ms。
+    // 原逻辑在下一义务1642读取经济事实；此前的1632直接响应不改变10.675占用。
+    // 1642以后本金6+Down预留4.5=10.5；已付费0.168不再属于占用资本。
+    // NOE真实来源和SIM观察时刻独立支持这两个积分段，不从统计值生成期望。
     let tail = down.add(&principal);
-    let integral = submitted
-        .mul(&amount("21"))
-        .add(&converted.mul(&amount("10")))
-        .add(&converted.mul(&amount("267")))
-        .add(&tail);
+    let integral = submitted.mul(&amount("41")).add(&tail.mul(&amount("258")));
     assert_eq!(
         statistics.maximum_committed_capital_pusd,
         ExecutionReadValueV1::Known(submitted.public())
@@ -667,6 +658,21 @@ async fn strategy_and_batch_failures_preserve_original_errors_and_stop_without_r
             .await
             .unwrap_err();
         if bad_batch {
+            let report = failure.report.as_ref().unwrap();
+            let batch = report.failed_batch.as_ref().unwrap();
+            assert_eq!(batch.intents.len(), 2);
+            assert_eq!(batch.intents[0].context.global_request_id, "duplicate");
+            assert_eq!(batch.dispatch_effects.as_ref().unwrap().sent.len(), 1);
+            assert!(batch.calculation_cash.is_some());
+            assert!(batch.admission_cash.is_some());
+            assert!(
+                report
+                    .pending_calculation_timing
+                    .as_ref()
+                    .unwrap()
+                    .actual_sent_at_utc_ms
+                    .is_some()
+            );
             match failure.cause {
                 HistoricalFailureCauseV1::Dispatch(error) => {
                     assert_eq!(error.sent.len(), 1);
@@ -721,8 +727,9 @@ async fn explicit_zero_compute_and_dispatch_delays_consume_original_obligations(
         );
         assert_eq!(
             timing.calculation_completed_at_utc_ms,
-            timing.actual_sent_at_utc_ms.unwrap()
+            timing.scheduled_send_at_utc_ms
         );
+        assert_eq!(timing.actual_sent_at_utc_ms, None);
         assert!(
             probe
                 .observed
@@ -1638,7 +1645,7 @@ async fn source_health_finite_overhead_measurement() {
         serde_json::json!({ "selected": enabled, "input_manifest_sha256": input_identity, "elapsed_ms": elapsed_ms,
         "decision_count": probe.decisions, "dispatch_count": probe.dispatches, "qualification_calls": report.source_health.as_ref().map_or(0, |s| s.qualification_calls),
         "health_deadline_wakeups": report.source_health.as_ref().map_or(0, |s| s.deadline_wakeups),
-        "last_decision_to_dispatch_ms": timing.actual_sent_at_utc_ms.unwrap() - timing.calculation_started_at_utc_ms,
+        "last_decision_to_scheduled_dispatch_ms": timing.scheduled_send_at_utc_ms - timing.calculation_started_at_utc_ms,
         "purpose": "合成工程开销；不是盈利、历史静默事故或实际在线性能证据" })
     );
 }
@@ -2715,6 +2722,16 @@ async fn gamma_policy_is_explicit_in_the_actual_historical_entry_and_old_config(
             .await
             .unwrap();
         assert!(report.recording_drained);
+        assert_eq!(report.end_reason, HistoricalEndReasonV1::RangeEnd);
+        assert_eq!(
+            report
+                .last_dispatched_calculation_timing
+                .as_ref()
+                .unwrap()
+                .actual_sent_at_utc_ms,
+            None
+        );
+        assert!(report.failed_batch.is_none());
         let inputs = sim_log_values(&restored.sim_log);
         let policies = inputs
             .iter()
@@ -2835,4 +2852,155 @@ fn actual_day_initialization_statistics_keep_late_candidate_prefixes() {
         result[0].candidates[1].report["delivery_summary"]["before_operating_start"]["groups"],
         0
     );
+}
+
+#[test]
+fn later_candidate_original_failure_survives_earlier_candidate_collateral_stop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (config, rules) = setup(tmp.path());
+    let first = HistoricalPreparedRunConfigV1::from(&config);
+    let mut second = first.clone();
+    second.session.run_id = "later-root".into();
+    second.session.account_id = "later-account".into();
+    second.sim_log = tmp.path().join("root-sim.jsonl");
+    second.noe_root = tmp.path().join("root-noe");
+    second.ledger_root = tmp.path().join("root-ledger");
+    second.metadata_path = tmp.path().join("root-metadata.json");
+    second.result_path = tmp.path().join("root-result.json");
+    let day = HistoricalDayConfigV1 {
+        preparation: config.preparation.clone(),
+        candidates: vec![first, second],
+        checkpoint_root: tmp.path().join("state"),
+        checkpoint_interval_seconds: 60,
+        progress_interval_seconds: 0,
+        checkpoint_every_applied_inputs: None,
+        checkpoint_every_candidate_events: None,
+        producer_lead_groups: Some(1),
+    };
+    let error = run_historical_days_v1(&[day], rules.clone(), &|c| {
+        Ok(Probe {
+            rules: Some(rules.clone()),
+            fail: c.session.run_id == "later-root",
+            no_trade_only: c.session.run_id != "later-root",
+            ..Default::default()
+        })
+    })
+    .unwrap_err();
+    let failure = error.downcast::<HistoricalDaysFailureV1>().unwrap();
+    assert!(
+        matches!(&failure.source,DayFailureSourceV1::Candidate {index:1,run_id} if run_id=="later-root")
+    );
+    assert!(
+        failure
+            .cause
+            .downcast_ref::<HistoricalRunFailureV1<&str>>()
+            .is_some()
+    );
+    let candidates = &failure.days[0].candidates;
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[1].outcome, CandidateOutcomeV1::OriginalFailure);
+    assert_eq!(candidates[1].report["end_reason"], "Failure");
+    assert!(!candidates[1].reused);
+    assert!(matches!(
+        candidates[0].outcome,
+        CandidateOutcomeV1::CollateralStop | CandidateOutcomeV1::Complete
+    ));
+    assert!(candidates[0].report.get("observation_cutoff").is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn zero_send_cash_refusal_keeps_original_batch_and_unsent_timing() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = setup(temp.path());
+    config.session.initial_account_state.available_pusd = ExactDecimal("0".into());
+    let mut probe = Probe {
+        rules: Some(rules.clone()),
+        ..Default::default()
+    };
+    let failure = run_historical_v1(&config, rules, &mut probe)
+        .await
+        .unwrap_err();
+    let HistoricalFailureCauseV1::Dispatch(error) = &failure.cause else {
+        panic!("{:?}", failure.cause)
+    };
+    assert!(error.sent.is_empty());
+    assert_eq!(error.attempted_intent_index, None);
+    assert_eq!(error.failed_request_effect, None);
+    let report = failure.report.unwrap();
+    let batch = report.failed_batch.unwrap();
+    assert_eq!(batch.intents.len(), 2);
+    assert_eq!(batch.intents[0].context.global_request_id, "first-buy");
+    assert_eq!(
+        batch.calculation_cash.unwrap().actual_available_pusd,
+        ExactDecimal("0".into())
+    );
+    assert_eq!(
+        batch.admission_cash.unwrap().actual_available_pusd,
+        ExactDecimal("0".into())
+    );
+    assert!(batch.dispatch_effects.unwrap().sent.is_empty());
+    assert_eq!(
+        report
+            .pending_calculation_timing
+            .unwrap()
+            .actual_sent_at_utc_ms,
+        None
+    );
+    assert!(!report.recording_drained);
+    assert!(!config.result_path.exists());
+}
+
+#[test]
+fn completed_business_report_survives_result_file_failure_without_completion_reuse() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = setup(temp.path());
+    config.preparation.scope.received_end_utc_ms = BASE + 3_600_000;
+    std::fs::create_dir(&config.result_path).unwrap();
+    let state = temp.path().join("failed-output-state");
+    let day = HistoricalDayConfigV1 {
+        preparation: config.preparation.clone(),
+        candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
+        checkpoint_root: state.clone(),
+        checkpoint_interval_seconds: 60,
+        progress_interval_seconds: 0,
+        checkpoint_every_applied_inputs: None,
+        checkpoint_every_candidate_events: None,
+        producer_lead_groups: Some(1),
+    };
+    let error = run_historical_days_with_options_v1(
+        &[day],
+        rules,
+        &|_| {
+            Ok(Probe {
+                no_trade_only: true,
+                ..Default::default()
+            })
+        },
+        1,
+        &HistoricalDayRunOptionsV1 {
+            research_summary: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    let failure = error.downcast_ref::<HistoricalDaysFailureV1>().unwrap();
+    let original = failure
+        .cause
+        .downcast_ref::<HistoricalRunFailureV1<&'static str>>()
+        .unwrap();
+    assert!(
+        matches!(&original.cause, HistoricalFailureCauseV1::Material(error) if error.downcast_ref::<std::io::Error>().is_some_and(|error| error.kind() == std::io::ErrorKind::IsADirectory))
+    );
+    let candidate = &failure.days[0].candidates[0];
+    assert_eq!(candidate.outcome, CandidateOutcomeV1::OriginalFailure);
+    assert!(!candidate.reused);
+    let report = &candidate.report;
+    assert_eq!(report["end_reason"], "RangeEnd");
+    assert_eq!(report["recording_drained"], true);
+    assert_eq!(report["last_observed_at_utc_ms"], BASE + 3_600_000 - 1);
+    assert!(report["account_economics_memory"].is_object());
+    assert!(report["research"]["final_snapshot"].is_object());
+    assert_eq!(report["research"]["hours"].as_array().unwrap().len(), 1);
+    assert!(config.result_path.is_dir());
+    assert!(!state.join("checkpoint.json").exists());
 }

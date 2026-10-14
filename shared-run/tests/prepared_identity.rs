@@ -63,7 +63,7 @@ async fn historical_prepared_identity_converts_early_economics_once_and_survives
     let root = temp.path().join("dpt");
     let (core, times) = recorded_trading_window(&root, "100", None, 60_000, true);
     let (mut execution, observation, _) =
-        execution_historical_v4(&temp.path().join("sim.jsonl"), &core);
+        execution_historical_v4(&temp.path().join("sim.jsonl"), &core, format!("{:064x}", 1));
     let reader = data_pipeline_training::public_recording::PublicRecordingReaderV1::recover(
         &root,
         1,
@@ -198,10 +198,10 @@ async fn historical_prepared_identity_converts_early_economics_once_and_survives
     }
     shared = restore_client(shared, observation.clone(), &mut driver, &ledger_root);
     balance(&shared);
-    // 固定原经验采样的真实间隔：平台22009、生命周期22018、响应22021。
+    // 固定新版seed1：平台22006、生命周期22016、响应22022。
     // next_required_logical_drive不枚举反馈交付，必须在现有公开observe_at取截点。
-    assert_eq!(receipt.platform_arrived_at_utc_ms(), 22_009);
-    driver.observe_at(22_019).unwrap().unwrap();
+    assert_eq!(receipt.platform_arrived_at_utc_ms(), 22_006);
+    driver.observe_at(22_017).unwrap().unwrap();
     shared.apply_closed().unwrap();
     let early_status = shared
         .ledger()
@@ -215,7 +215,7 @@ async fn historical_prepared_identity_converts_early_economics_once_and_survives
         .orders()
         .any(|o| o.latest_direct_feedback.is_some());
     eprintln!(
-        "实际观察 at=22019 arrival={} reservation={early_status:?} direct_response={early_response}",
+        "实际观察 at=22017 arrival={} reservation={early_status:?} direct_response={early_response}",
         receipt.platform_arrived_at_utc_ms()
     );
     assert_eq!(early_status, ReservationStatusV1::Converted);
@@ -223,7 +223,7 @@ async fn historical_prepared_identity_converts_early_economics_once_and_survives
     balance(&shared);
     shared = restore_client(shared, observation.clone(), &mut driver, &ledger_root);
     balance(&shared);
-    driver.observe_at(22_022).unwrap().unwrap();
+    driver.observe_at(22_023).unwrap().unwrap();
     shared.apply_closed().unwrap();
     assert!(
         shared
@@ -239,7 +239,7 @@ async fn historical_prepared_identity_converts_early_economics_once_and_survives
         .next()
         .unwrap()
         .reservation_state;
-    eprintln!("实际观察 at=22022 reservation={late_status:?} direct_response=true");
+    eprintln!("实际观察 at=22023 reservation={late_status:?} direct_response=true");
     assert_eq!(late_status, ReservationStatusV1::Converted);
     // 重复领取闭合前缀不再变更占用。
     shared.apply_closed().unwrap();
@@ -248,4 +248,89 @@ async fn historical_prepared_identity_converts_early_economics_once_and_survives
     driver.stop_and_drain().unwrap();
     let recovered = LedgerWriterV1::open_durable(&ledger_root).unwrap();
     assert_eq!(recovered.projection_v2(), before);
+}
+
+/// 有界检查点成本观察：8/80个真实订单历史；不作为回测吞吐或收益门。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "#185 bounded registry checkpoint history cost observation"]
+async fn registry_checkpoint_cost_keeps_real_eight_and_eighty_order_histories() {
+    use rust_decimal::Decimal;
+    for orders in [8, 80] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dpt");
+        let core = recorded_memory_complete(&root);
+        let (mut execution, observation, _) = execution_with_rules_v4(
+            &temp.path().join("sim.jsonl"),
+            &core,
+            SUCCESS_POLICY,
+            None,
+            "e".repeat(64),
+            "1000",
+        );
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(
+            AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
+        );
+        execution
+            .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
+            .unwrap();
+        let mut shared = SharedExecutionV2::from_opening(ledger, observation.clone())
+            .unwrap()
+            .unwrap();
+        let source =
+            RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes).unwrap();
+        let mut driver = FinitePublicConsumptionV1::new(execution, source, "registry-cost".into());
+        for _ in 0..2 {
+            driver.next_group().unwrap().unwrap();
+        }
+        for index in 0..orders {
+            shared
+                .execute(
+                    &mut driver.decision().unwrap(),
+                    request(&format!("registry-cost-{index}")),
+                    Some(Arc::new(ModelIntentV1::SubmitSingleBuy {
+                        condition_id: ConditionId(CONDITION_ID.into()),
+                        order: BuyLegIntentV1 {
+                            token_id: TokenId(UP_TOKEN_ID.into()),
+                            order: BuyOrderIntentV1::GtcLimit {
+                                limit_price_pusd_per_share: Decimal::new(1, 2),
+                                size_shares: Decimal::from(5),
+                                post_only: true,
+                            },
+                        },
+                    })),
+                )
+                .await
+                .unwrap();
+        }
+        while driver.next_group().unwrap().is_some() {
+            shared.apply_closed().unwrap();
+        }
+        driver.stop_and_drain().unwrap();
+        shared.apply_closed().unwrap();
+        assert_eq!(shared.registry().orders().count(), orders);
+        let started = std::time::Instant::now();
+        let mut bytes = Vec::new();
+        for _ in 0..32 {
+            bytes.clear();
+            shared.write_checkpoint(&mut bytes).unwrap();
+        }
+        let elapsed = started.elapsed();
+        let mut ledger_bytes = Vec::new();
+        shared.ledger().write_checkpoint(&mut ledger_bytes).unwrap();
+        let restored = SharedExecutionV2::restore_checkpoint(
+            LedgerWriterV1::restore_checkpoint(ledger_bytes.as_slice()).unwrap(),
+            observation,
+            bytes.as_slice(),
+        )
+        .unwrap();
+        assert_eq!(restored.registry().orders().count(), orders);
+        assert_eq!(
+            restored.ledger().economic_read().unwrap().cash(),
+            shared.ledger().economic_read().unwrap().cash()
+        );
+        println!(
+            "registry_checkpoint_cost={}",
+            serde_json::json!({"orders":orders,"captures":32,"encode_in_memory_ns":elapsed.as_nanos(),"bytes":bytes.len(),"restored_orders":restored.registry().orders().count()})
+        );
+    }
 }

@@ -281,3 +281,131 @@ fn day_command_uses_full_candidate_configuration_and_reuses_completed_outputs() 
     assert_eq!(first["summaries"], second["summaries"]);
     assert_eq!(std::fs::read(&config.sim_log).unwrap(), sim);
 }
+
+#[test]
+fn day_session_failure_outputs_one_partial_json_and_nonzero_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, _) = common::setup(temp.path());
+    let strategy = ComplementaryPairConfigV1::parse_toml(include_str!(
+        "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering.toml"
+    ))
+    .unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let rule_path = root.join("sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
+    let mut run =
+        serde_json::to_value(backtest::HistoricalPreparedRunConfigV1::from(&config)).unwrap();
+    run["session"]["session_seed"] = json!("old arbitrary seed");
+    let command = json!({"rules":{"snapshot_path":rule_path,"expected_file_sha256":format!("{:x}",Sha256::digest(std::fs::read(&rule_path).unwrap())),"replay_causal_start_utc_ms":common::BASE},"days":[{"preparation":config.preparation,"candidates":[{"run":run,"strategy":strategy,"request_namespace":"failure-json"}],"checkpoint_root":temp.path().join("state"),"checkpoint_interval_seconds":60}]});
+    let path = temp.path().join("day.json");
+    std::fs::write(&path, serde_json::to_vec(&command).unwrap()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_backtest-cli"))
+        .args([
+            "--mode",
+            "day",
+            "--config",
+            path.to_str().unwrap(),
+            "--research-summary",
+            "--progress-interval-seconds",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["days"][0]["candidates"][0]["outcome"], "NoReport");
+    assert!(report["days"][0]["candidates"][0]["report"].is_null());
+    assert!(report["error"].as_str().unwrap().contains("session_seed"));
+}
+
+#[test]
+fn research_script_summarizes_missing_reports_and_preserves_original_exit_code() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let config = temp.path().join("config.json");
+    std::fs::write(&config,serde_json::to_vec(&json!({"days":[{"preparation":{"scope":{"received_start_utc_ms":0,"received_end_utc_ms":43200000}},"candidates":[{"run":{"session":{"run_id":"missing-report"},"metadata_path":temp.path().join("new-candidate/run.json")}}]}]})).unwrap()).unwrap();
+    let fixture = temp.path().join("fixture-cli.sh");
+    std::fs::write(&fixture,"#!/bin/sh\nprintf '%s\\n' '{\"status\":\"failed\",\"error\":\"original\",\"days\":[{\"public_applied_inputs\":0,\"candidates\":[{\"run_id\":\"missing-report\",\"initial_available_pusd\":\"2000\",\"outcome\":\"NoReport\",\"report\":null}]}]}'\nexit 37\n").unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output_dir = temp.path().join("out");
+    let status = Command::new("bash")
+        .arg(root.join("scripts/run_research.sh"))
+        .args([
+            fixture.as_os_str(),
+            config.as_os_str(),
+            output_dir.as_os_str(),
+        ])
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(37));
+    assert!(temp.path().join("new-candidate").is_dir());
+    let summary: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(output_dir.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary["error"], "original");
+    assert_eq!(summary["all_candidates_complete_window"], false);
+    assert_eq!(summary["candidates"][0]["outcome"], "NoReport");
+    // 原业务错误优先于汇总错误；空日期也不会伪造完整结果。
+    std::fs::write(
+        &fixture,
+        "#!/bin/sh\nprintf '%s\\n' '{\"status\":\"failed\",\"days\":[]}'\nexit 37\n",
+    )
+    .unwrap();
+    let status = Command::new("bash")
+        .arg(root.join("scripts/run_research.sh"))
+        .args([
+            fixture.as_os_str(),
+            config.as_os_str(),
+            output_dir.as_os_str(),
+        ])
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(37));
+}
+
+#[test]
+fn day_result_output_failure_preserves_completed_business_json_and_nonzero_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, _) = common::setup(temp.path());
+    std::fs::create_dir(&config.result_path).unwrap();
+    let strategy = ComplementaryPairConfigV1::parse_toml(include_str!(
+        "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering.toml"
+    ))
+    .unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let rules = root.join("sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
+    let command = json!({"rules":{"snapshot_path":rules,"expected_file_sha256":format!("{:x}",Sha256::digest(std::fs::read(&rules).unwrap())),"replay_causal_start_utc_ms":common::BASE},"days":[{"preparation":config.preparation,"candidates":[{"run":backtest::HistoricalPreparedRunConfigV1::from(&config),"strategy":strategy,"request_namespace":"tail-output-failure"}],"checkpoint_root":temp.path().join("state"),"checkpoint_interval_seconds":60}]});
+    let path = temp.path().join("day-result-output-error.json");
+    std::fs::write(&path, serde_json::to_vec(&command).unwrap()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_backtest-cli"))
+        .args([
+            "--mode",
+            "day",
+            "--config",
+            path.to_str().unwrap(),
+            "--research-summary",
+            "--progress-interval-seconds",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["status"], "failed");
+    let candidate = &result["days"][0]["candidates"][0];
+    assert_eq!(candidate["outcome"], "OriginalFailure");
+    assert_eq!(candidate["reused"], false);
+    assert_eq!(candidate["report"]["end_reason"], "RangeEnd");
+    assert_eq!(candidate["report"]["recording_drained"], true);
+    assert!(candidate["report"]["account_economics_memory"].is_object());
+    assert!(candidate["report"]["research"]["final_snapshot"].is_object());
+    assert!(result["error"].as_str().unwrap().contains("IsADirectory"));
+}

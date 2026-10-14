@@ -66,7 +66,12 @@ async fn original_auto_redeem_allocates_pair_and_orphan_once_and_preserves_pendi
             SUCCESS_POLICY
         };
         let log = path.join("sim.jsonl");
-        let (mut execution, observation) = execution(&log, &core, policy);
+        let (mut execution, observation) = if case == 3 {
+            // 固定新版有效种子：后一个CONFIRMED入站95ms，自动结算入站9ms。
+            execution_with_seed(&log, &core, policy, None, format!("{:064x}", 1))
+        } else {
+            execution(&log, &core, policy)
+        };
         let feedback = observation.clone();
         let mut ledger = LedgerWriterV1::new_with_admission_v3(
             AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
@@ -440,7 +445,7 @@ async fn v4_auto_waits_for_real_resolution_and_restores_original_pending_without
         &core,
         SUCCESS_POLICY,
         None,
-        "e".repeat(64),
+        "00000000000000000000000000000000000000000000000000000000000103e6".into(),
         "100",
     );
     let ledger_root = temp.as_path().join("ledger");

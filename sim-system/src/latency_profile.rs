@@ -2,12 +2,16 @@ use std::fmt;
 use std::sync::{Arc, OnceLock};
 
 use contracts::Sha256Hex;
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use rand_xoshiro::{
+    Xoshiro256PlusPlus,
+    rand_core::{RngCore, SeedableRng},
+};
+use serde::{Deserialize, Serialize};
 
 pub const PROXY_LATENCY_PROFILE_SHA256_V1: &str =
     "98fd40f843275db8994a29cec1de6a72f95bbaa4309df9779c7ed1285cdff596";
-pub const PROXY_LATENCY_SAMPLER_VERSION_V1: &str = "sha256_multiply_high_empirical_rank_v1";
+pub const PROXY_LATENCY_SAMPLER_VERSION_V2: &str =
+    "xoshiro256plusplus_jump_multiply_high_empirical_rank_v2";
 
 const EMBEDDED_PROFILE_BYTES: &[u8] = include_bytes!(
     "../config/latency-profiles/98fd40f843275db8994a29cec1de6a72f95bbaa4309df9779c7ed1285cdff596/profile.json"
@@ -20,13 +24,48 @@ pub enum DelaySampleDomainV1 {
     LifecycleFeedbackInbound,
 }
 
-impl DelaySampleDomainV1 {
-    fn identifier(self) -> &'static [u8] {
-        match self {
-            Self::RequestOutbound => b"REQUEST_OUTBOUND_V1",
-            Self::DirectResponseInbound => b"DIRECT_RESPONSE_INBOUND_V1",
-            Self::LifecycleFeedbackInbound => b"LIFECYCLE_FEEDBACK_INBOUND_V1",
+/// 每个会话的三个非密码学随机序列；状态随原会话保存。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDelaySamplerV2 {
+    outbound: Xoshiro256PlusPlus,
+    response: Xoshiro256PlusPlus,
+    lifecycle: Xoshiro256PlusPlus,
+}
+impl SessionDelaySamplerV2 {
+    /// 新版种子合同：64位十六进制表示32字节，仅开户时解析。
+    pub fn from_hex(seed: &str) -> Result<Self, &'static str> {
+        if seed.len() != 64 {
+            return Err("session_seed 必须为64位十六进制");
         }
+        let mut bytes = [0; 32];
+        for (out, pair) in bytes.iter_mut().zip(seed.as_bytes().chunks_exact(2)) {
+            let digit = |c: u8| match c {
+                b'0'..=b'9' => Some(c - b'0'),
+                b'a'..=b'f' => Some(c - b'a' + 10),
+                b'A'..=b'F' => Some(c - b'A' + 10),
+                _ => None,
+            };
+            *out = (digit(pair[0]).ok_or("session_seed 含非十六进制字符")? << 4)
+                | digit(pair[1]).ok_or("session_seed 含非十六进制字符")?;
+        }
+        let outbound = Xoshiro256PlusPlus::from_seed(bytes);
+        let mut response = outbound.clone();
+        response.jump();
+        let mut lifecycle = response.clone();
+        lifecycle.jump();
+        Ok(Self {
+            outbound,
+            response,
+            lifecycle,
+        })
+    }
+    pub fn sample(&mut self, profile: &EmpiricalDelayProfile, domain: DelaySampleDomainV1) -> u64 {
+        let rng = match domain {
+            DelaySampleDomainV1::RequestOutbound => &mut self.outbound,
+            DelaySampleDomainV1::DirectResponseInbound => &mut self.response,
+            DelaySampleDomainV1::LifecycleFeedbackInbound => &mut self.lifecycle,
+        };
+        profile.delay_for_word(rng.next_u64())
     }
 }
 
@@ -43,24 +82,9 @@ impl EmpiricalDelayProfile {
         &self.file_sha256
     }
 
-    pub fn sample_delay_ms(
-        &self,
-        session_seed: &[u8],
-        stable_identity: &str,
-        domain: DelaySampleDomainV1,
-    ) -> u64 {
-        let mut hasher = Sha256::new();
-        update_len_prefixed(&mut hasher, PROXY_LATENCY_SAMPLER_VERSION_V1.as_bytes());
-        update_len_prefixed(&mut hasher, self.file_sha256.0.as_bytes());
-        update_len_prefixed(&mut hasher, session_seed);
-        update_len_prefixed(&mut hasher, stable_identity.as_bytes());
-        update_len_prefixed(&mut hasher, domain.identifier());
-        let digest = hasher.finalize();
-        let mut word = [0_u8; 8];
-        word.copy_from_slice(&digest[..8]);
-        let rank = ((u64::from_be_bytes(word) as u128 * self.sample_count as u128) >> 64) as u64;
-        let index = histogram_index_for_rank(&self.cumulative_counts, rank);
-        self.histogram[index]
+    fn delay_for_word(&self, word: u64) -> u64 {
+        let rank = ((word as u128 * self.sample_count as u128) >> 64) as u64;
+        self.histogram[histogram_index_for_rank(&self.cumulative_counts, rank)]
     }
 }
 
@@ -125,14 +149,32 @@ fn histogram_index_for_rank(cumulative_counts: &[u64], rank: u64) -> usize {
     cumulative_counts.partition_point(|cumulative| *cumulative <= rank)
 }
 
-fn update_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
-    hasher.update((bytes.len() as u64).to_be_bytes());
-    hasher.update(bytes);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 锁定 rand_xoshiro 0.7.0 上游 reference() 的同一字节种子和参考输出。
+    #[test]
+    fn parsed_seed_matches_upstream_xoshiro_reference_words() {
+        let mut sampler = SessionDelaySamplerV2::from_hex(
+            "0100000000000000020000000000000003000000000000000400000000000000",
+        )
+        .unwrap();
+        for word in [
+            41943041,
+            58720359,
+            3588806011781223,
+            3591011842654386,
+            9228616714210784205,
+            9973669472204895162,
+            14011001112246962877,
+            12406186145184390807,
+            15849039046786891736,
+            10450023813501588000,
+        ] {
+            assert_eq!(sampler.outbound.next_u64(), word);
+        }
+    }
 
     #[test]
     fn malformed_profile_json_reports_parse_error() {

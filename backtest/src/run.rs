@@ -139,6 +139,34 @@ pub struct CalculationTimingRecordV1 {
     pub scheduled_send_at_utc_ms: i64,
     pub actual_sent_at_utc_ms: Option<i64>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ActionCashContextV1 {
+    pub actual_available_pusd: ExactDecimal,
+    pub ledger_entry_sequence: u64,
+}
+#[derive(Debug, Serialize)]
+pub struct FailedBatchContextV1 {
+    pub intents: Vec<ReservedIntentV1>,
+    pub calculation_cash: Option<ActionCashContextV1>,
+    pub admission_cash: Option<ActionCashContextV1>,
+    pub dispatch_effects: Option<FailedDispatchEffectsV1>,
+}
+#[derive(Debug, Serialize)]
+pub struct FailedDispatchEffectsV1 {
+    pub sent: Vec<SentIntentReceiptV1>,
+    pub attempted_intent_index: Option<usize>,
+    pub failed_request_effect: Option<RequestEffectV1>,
+    pub release_errors: Vec<String>,
+}
+fn action_cash(shared: &SharedExecutionV2) -> Option<ActionCashContextV1> {
+    shared.ledger().necessary_read_v2().map(|r| {
+        let (actual_available, _) = r.cash();
+        ActionCashContextV1 {
+            actual_available_pusd: ExactDecimal(actual_available.normalize().to_string()),
+            ledger_entry_sequence: shared.ledger().applied_entry_sequence(),
+        }
+    })
+}
 /// 只汇总实际公开交付，不复制逐决策账本；来源与经营阶段分别记录。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HistoricalDeliveryPhaseSummaryV1 {
@@ -197,6 +225,8 @@ pub struct HistoricalRunReportV1 {
     pub economics_version: String,
     pub last_dispatched_calculation_timing: Option<CalculationTimingRecordV1>,
     pub pending_calculation_timing: Option<CalculationTimingRecordV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_batch: Option<FailedBatchContextV1>,
     pub calculation_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_health: Option<SourceHealthRunSummaryV1>,
@@ -222,6 +252,12 @@ pub struct HistoricalRunFailureV1<E> {
     pub cause: HistoricalFailureCauseV1<E>,
     pub report: Option<HistoricalRunReportV1>,
 }
+impl<E: std::fmt::Debug> std::fmt::Display for HistoricalRunFailureV1<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.cause)
+    }
+}
+impl<E: std::fmt::Debug> std::error::Error for HistoricalRunFailureV1<E> {}
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Pending<D> {
     calculation: CompletedStrategyCalculationV1<D>,
@@ -229,6 +265,24 @@ pub(crate) struct Pending<D> {
     send_at: i64,
     record: CalculationTimingRecordV1,
     health_invalidated: bool,
+    #[serde(default)]
+    calculation_cash: Option<ActionCashContextV1>,
+}
+// 调用者已确认非空释放错误；保留原根错误及完整已知发送/释放效果。
+fn invalidation_release_failure(
+    sent: Vec<SentIntentReceiptV1>,
+    mut release_errors: Vec<ledger::LedgerErrorV1>,
+) -> (ledger::LedgerErrorV1, FailedDispatchEffectsV1) {
+    let effects = FailedDispatchEffectsV1 {
+        sent,
+        attempted_intent_index: None,
+        failed_request_effect: None,
+        release_errors: release_errors
+            .iter()
+            .map(|error| format!("{error:?}"))
+            .collect(),
+    };
+    (release_errors.remove(0), effects)
 }
 fn assemble(
     config: &HistoricalPreparedRunConfigV1,
@@ -256,6 +310,7 @@ fn assemble(
     let latency = load_embedded_proxy_latency_profile()?;
     let opened = RunOpenedV2 {
         projection_version: BusinessProjectionVersionV1::V4,
+        latency_sampler_version: "xoshiro256plusplus_jump_multiply_high_empirical_rank_v2".into(),
         run_id: config.session.run_id.clone(),
         durability_role: RunDurabilityRoleV2::FiniteHistorical,
         platform_rule_snapshot_file_sha256: rules.file_sha256().clone(),
@@ -440,6 +495,7 @@ fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         economics_version: ACCOUNT_ECONOMICS_VERSION.into(),
         last_dispatched_calculation_timing: timing,
         pending_calculation_timing: pending_timing,
+        failed_batch: None,
         calculation_count: count,
         source_health: None,
         delivery_summary: None,
@@ -728,6 +784,11 @@ where
             baseline, fresh,
         ));
     }
+    let mut failed_timing = None;
+    let mut failed_calculation = None;
+    let mut failed_dispatch_effects = None;
+    let mut failed_calculation_cash = None;
+    let mut admission_cash = None;
     let running = async {
         let mut next_hidden = checkpoint
             .restored_hidden()
@@ -1050,7 +1111,7 @@ where
             });
             // 已冻结发送先于本毫秒完整隐藏桶闭合，允许原 SIM 请求/行情竞速。
             if pending_due {
-                let p = pending.take().expect("待完成计算");
+                let p = pending.as_ref().expect("待完成计算");
                 if matches!(
                     p.calculation.calculation.output,
                     StrategyOutputV1::Exit { .. }
@@ -1058,6 +1119,7 @@ where
                     return Ok((HistoricalEndReasonV1::StrategyExit, at));
                 }
                 if p.health_invalidated {
+                    pending.take();
                     dirty = true;
                 } else {
                     measure_stage!(
@@ -1069,6 +1131,10 @@ where
                     let mut decision = driver
                         .send_decision_at(p.calculation.calculation.input_cutoff.clone(), at)
                         .map_err(HistoricalFailureCauseV1::Sim)?;
+                    let p = pending.take().expect("发送入口前计算保持存在");
+                    failed_timing = Some(p.record.clone());
+                    failed_calculation_cash = p.calculation_cash;
+                    admission_cash = if matches!(&p.calculation.calculation.output, StrategyOutputV1::Continue {intents,..} if !intents.is_empty()) {action_cash(&shared)} else {None};
                     let dispatched = if health_enabled {
                         let result = measure_stage!(
                             stages,
@@ -1086,6 +1152,7 @@ where
                                 Some(dispatch)
                             }
                             Ok(QualifiedStrategyDispatchV1::Invalidated {
+                                calculation,
                                 result,
                                 qualification_calls,
                                 ..
@@ -1096,20 +1163,26 @@ where
                                     Some(p.record.clone());
                                 dirty = true;
                                 if !result.release_errors.is_empty() {
-                                    return Err(HistoricalFailureCauseV1::Ledger(
-                                        result.release_errors.into_iter().next().unwrap(),
-                                    ));
+                                    failed_calculation=Some(calculation);
+                                    if !result.sent.is_empty(){failed_timing.as_mut().unwrap().actual_sent_at_utc_ms=Some(at);}
+                                    let (cause, effects) = invalidation_release_failure(result.sent, result.release_errors);
+                                    failed_dispatch_effects = Some(effects);
+                                    return Err(HistoricalFailureCauseV1::Ledger(cause));
                                 }
                                 None
                             }
-                            Err(QualifiedBatchErrorV1::Execution(error)) => {
+                            Err(StrategyDispatchFailureV1 {calculation,error:QualifiedBatchErrorV1::Execution(error)}) => {
+                                failed_calculation = Some(calculation);
+                                if !error.sent.is_empty() {failed_timing.as_mut().unwrap().actual_sent_at_utc_ms=Some(at);}
                                 return Err(HistoricalFailureCauseV1::Dispatch(error));
                             }
-                            Err(QualifiedBatchErrorV1::Qualification {
+                            Err(StrategyDispatchFailureV1 {calculation, error:QualifiedBatchErrorV1::Qualification {
                                 error,
                                 sent,
                                 release_errors,
-                            }) => {
+                            }}) => {
+                                failed_calculation = Some(calculation);
+                                if !sent.is_empty() {failed_timing.as_mut().unwrap().actual_sent_at_utc_ms=Some(at);}
                                 return Err(HistoricalFailureCauseV1::Qualification {
                                     error,
                                     sent,
@@ -1126,17 +1199,20 @@ where
                                     .dispatch_strategy(&mut decision, strategy, p.calculation)
                                     .await
                             )
-                            .map_err(HistoricalFailureCauseV1::Dispatch)?,
+                            .map_err(|failure| {failed_calculation=Some(failure.calculation); if !failure.error.sent.is_empty() {failed_timing.as_mut().unwrap().actual_sent_at_utc_ms=Some(at);} HistoricalFailureCauseV1::Dispatch(failure.error)})?,
                         )
                     };
+                    failed_timing = None;
+                    failed_calculation_cash = None;
+                    admission_cash = None;
                     if let Some(StrategyDispatchV1::Continue {
                         calculation,
                         sent_at_utc_ms,
-                        ..
+                        receipts,
                     }) = dispatched
                     {
                         let mut record = p.record;
-                        record.actual_sent_at_utc_ms = Some(sent_at_utc_ms);
+                        record.actual_sent_at_utc_ms = (!receipts.is_empty()).then_some(sent_at_utc_ms);
                         timing = Some(record);
                         if let StrategyOutputV1::Continue {
                             next_evaluation_at_utc_ms,
@@ -1347,6 +1423,7 @@ where
                         .filter(|next| *next > at);
                     }
                     pending = Some(Pending {
+                        calculation_cash: if matches!(&calculation.output, StrategyOutputV1::Continue {intents,..} if !intents.is_empty()) {action_cash(&shared)} else {None},
                         calculation: calculation.complete(completed_at),
                         health_invalidated: false,
                         completed_at,
@@ -1501,26 +1578,32 @@ where
             });
             result.source_health = health_enabled.then_some(health_summary);
             if normal {
-                measure_stage!(stages, "recording_stop_and_drain", driver.stop_and_drain())
-                    .map_err(|cause| HistoricalRunFailureV1 {
+                if let Err(cause) =
+                    measure_stage!(stages, "recording_stop_and_drain", driver.stop_and_drain())
+                {
+                    result.durable_noe_prefix = observation.durable_through();
+                    return Err(HistoricalRunFailureV1 {
                         cause: HistoricalFailureCauseV1::Sim(cause),
-                        report: None,
-                    })?;
+                        report: Some(result),
+                    });
+                }
                 result.recording_drained = true;
                 result.durable_noe_prefix = observation.durable_through();
-                serde_json::to_writer(
-                    std::fs::File::create(&config.result_path).map_err(|cause| {
-                        HistoricalRunFailureV1 {
+                let file = match std::fs::File::create(&config.result_path) {
+                    Ok(file) => file,
+                    Err(cause) => {
+                        return Err(HistoricalRunFailureV1 {
                             cause: HistoricalFailureCauseV1::Material(Box::new(cause)),
-                            report: None,
-                        }
-                    })?,
-                    &result,
-                )
-                .map_err(|cause| HistoricalRunFailureV1 {
-                    cause: HistoricalFailureCauseV1::Material(Box::new(cause)),
-                    report: None,
-                })?;
+                            report: Some(result),
+                        });
+                    }
+                };
+                if let Err(cause) = serde_json::to_writer(file, &result) {
+                    return Err(HistoricalRunFailureV1 {
+                        cause: HistoricalFailureCauseV1::Material(Box::new(cause)),
+                        report: Some(result),
+                    });
+                }
             }
             Ok(result)
         }
@@ -1531,9 +1614,46 @@ where
                 observation.durable_through(),
                 HistoricalEndReasonV1::Failure,
                 timing,
-                pending.as_ref().map(|p| p.record.clone()),
+                failed_timing.or_else(|| pending.as_ref().map(|p| p.record.clone())),
                 calculation_index,
             );
+            let dispatch_effects = failed_dispatch_effects.or_else(|| match &cause {
+                HistoricalFailureCauseV1::Dispatch(e) => Some(FailedDispatchEffectsV1 {
+                    sent: e.sent.clone(),
+                    attempted_intent_index: e.attempted_intent_index,
+                    failed_request_effect: e.failed_request_effect,
+                    release_errors: e.release_errors.iter().map(|e| format!("{e:?}")).collect(),
+                }),
+                HistoricalFailureCauseV1::Qualification {
+                    sent,
+                    release_errors,
+                    ..
+                } => Some(FailedDispatchEffectsV1 {
+                    sent: sent.clone(),
+                    attempted_intent_index: None,
+                    failed_request_effect: None,
+                    release_errors: release_errors.iter().map(|e| format!("{e:?}")).collect(),
+                }),
+                _ => None,
+            });
+            let failure_calculation = failed_calculation.or_else(|| {
+                pending.take().map(|p| {
+                    failed_calculation_cash = p.calculation_cash;
+                    p.calculation
+                })
+            });
+            failure_report.failed_batch =
+                failure_calculation.and_then(|c| match c.calculation.output {
+                    StrategyOutputV1::Continue { intents, .. } if !intents.is_empty() => {
+                        Some(FailedBatchContextV1 {
+                            intents,
+                            calculation_cash: failed_calculation_cash,
+                            admission_cash,
+                            dispatch_effects,
+                        })
+                    }
+                    _ => None,
+                });
             failure_report.delivery_summary = operating_start.map(|_| delivery_summary.clone());
             failure_report.day_economics = day_economics.summary();
             failure_report.research = research.as_ref().map(|summary| {
@@ -1664,5 +1784,90 @@ impl<S: StrategyV1, I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActor
         _next_hidden: Option<&AcceptedHiddenStepBucketV1>,
     ) -> Result<(), MaterialError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod failure_preservation_tests {
+    use super::*;
+    #[derive(Default)]
+    struct SentProbe {
+        decided: bool,
+        sent: Vec<SentIntentReceiptV1>,
+    }
+    impl StrategyV1 for SentProbe {
+        type Error = &'static str;
+        type Diagnostics = ();
+        fn decide(
+            &mut self,
+            input: &StrategyInputV1,
+            _: i64,
+        ) -> Result<StrategyOutputV1, Self::Error> {
+            let mut intents = vec![];
+            if !self.decided && !input.markets.is_empty() {
+                self.decided = true;
+                intents.push(ReservedIntentV1 {
+                    context: RequestContextV2 {
+                        global_request_id: "release-prefix".into(),
+                        caller_correlation_id: None,
+                    },
+                    intent: Arc::new(ModelIntentV1::CancelMarketOrders {
+                        condition_id: input.markets[0].observation.market.condition_id.clone(),
+                    }),
+                    reserves: vec![],
+                });
+            }
+            Ok(StrategyOutputV1::Continue {
+                intents,
+                next_evaluation_at_utc_ms: None,
+                diagnostics: (),
+            })
+        }
+        fn dispatched(
+            &mut self,
+            _: &StrategyCalculationV1,
+            result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        ) {
+            self.sent.extend(result.as_ref().unwrap().iter().cloned());
+        }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalidation_release_conversion_preserves_real_receipt_and_all_original_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, rules) = crate::test_common::setup(temp.path());
+        let mut probe = SentProbe::default();
+        run_historical_v1(&config, rules, &mut probe).await.unwrap();
+        assert_eq!(probe.sent.len(), 1);
+        let request_sequence = probe.sent[0].receipt.input_sequence();
+        let mut ledger = LedgerWriterV1::open_durable(&config.ledger_root).unwrap();
+        let errors = ["missing-release-a", "missing-release-b"]
+            .into_iter()
+            .map(|id| {
+                ledger
+                    .release_known_unsent(
+                        &ledger::LedgerLocalEventIdentityV1(format!("event-{id}")),
+                        &ledger::LedgerRequestIdentityV1(id.into()),
+                    )
+                    .unwrap_err()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(&errors[0], ledger::LedgerErrorV1::ReservationRequestNotFound { request_identity } if request_identity.0 == "missing-release-a")
+        );
+        let expected = errors
+            .iter()
+            .map(|error| format!("{error:?}"))
+            .collect::<Vec<_>>();
+        // 只核对错误出口转换；没有向生产路径注入同步释放故障。
+        let (cause, effects) = invalidation_release_failure(probe.sent, errors);
+        assert!(
+            matches!(cause, ledger::LedgerErrorV1::ReservationRequestNotFound { request_identity } if request_identity.0 == "missing-release-a")
+        );
+        assert_eq!(effects.sent.len(), 1);
+        assert_eq!(effects.sent[0].context.global_request_id, "release-prefix");
+        assert_eq!(effects.sent[0].receipt.input_sequence(), request_sequence);
+        assert_eq!(effects.release_errors, expected);
+        assert_eq!(effects.attempted_intent_index, None);
+        assert_eq!(effects.failed_request_effect, None);
     }
 }

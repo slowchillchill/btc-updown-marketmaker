@@ -2007,11 +2007,7 @@ async fn request_due_with_three_groups_waits_for_the_independent_time_close() {
         .session
         .as_ref()
         .unwrap();
-    let delay = execution.actor._latency_profile.sample_delay_ms(
-        session.session_seed.0.as_bytes(),
-        request_id,
-        DelaySampleDomainV1::RequestOutbound,
-    );
+    let delay = session.latency_sampler.clone().sample(&execution.actor._latency_profile, DelaySampleDomainV1::RequestOutbound);
     let decision_at = 22_000 - i64::try_from(delay).unwrap();
     assert!((20_000..22_000).contains(&decision_at));
     let source =
@@ -3458,6 +3454,7 @@ async fn trusted_observation_keeps_source_prefix_and_sends_at_independent_time_l
         materialize_logged_input_v2(legacy_logged, &mut |_| unreachable!("请求不读取行情桶"))
             .unwrap();
     assert_eq!(serde_json::to_value(old_replayed).unwrap(), legacy_json);
+    let delay = driver.execution.actor.state.as_ref().unwrap().session.as_ref().unwrap().latency_sampler.clone().sample(&driver.execution.actor._latency_profile, DelaySampleDomainV1::RequestOutbound);
     let receipt = driver
         .send_decision_at(frozen.clone(), 22_050)
         .unwrap()
@@ -3477,11 +3474,6 @@ async fn trusted_observation_keeps_source_prefix_and_sends_at_independent_time_l
     assert_eq!(
         registered.platform_arrived_at_utc_ms,
         receipt.platform_arrived_at_utc_ms
-    );
-    let delay = driver.execution.actor._latency_profile.sample_delay_ms(
-        state.session_seed.0.as_bytes(),
-        "delayed-send",
-        DelaySampleDomainV1::RequestOutbound,
     );
     assert_eq!(receipt.platform_arrived_at_utc_ms, 22_050 + delay as i64);
     assert_eq!(

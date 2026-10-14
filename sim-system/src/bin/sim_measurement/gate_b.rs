@@ -62,6 +62,7 @@ fn prepare_gate_b_flow(input: GateBFlowPreparation<'_>) -> Result<PreparedGateBF
     let creation_request_id = format!("{}-create", input.gate.run_id);
     let opened = RunOpenedV2 {
         projection_version: Default::default(),
+        latency_sampler_version: "xoshiro256plusplus_jump_multiply_high_empirical_rank_v2".into(),
         run_id: input.gate.run_id.clone(),
         durability_role: RunDurabilityRoleV2::CleanRun,
         platform_rule_snapshot_file_sha256: input.rule_snapshot.file_sha256().clone(),

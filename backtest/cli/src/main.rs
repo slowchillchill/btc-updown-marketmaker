@@ -331,6 +331,14 @@ fn research_args(
     }
     Ok((result, remaining))
 }
+fn write_day_failure_json(value: &serde_json::Value) -> std::io::Result<()> {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut writer = stdout.lock();
+    serde_json::to_writer(&mut writer, value)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
+}
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     if std::env::args().any(|arg| arg == "--help") {
@@ -344,6 +352,11 @@ async fn main() {
         );
         return;
     }
+    let day_requested = std::env::args()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|args| args == ["--mode", "day"]);
+    let mut day_failure_json_attempted = false;
     let outcome = async {
         let started = std::time::Instant::now();
         let (research, args) = research_args(std::env::args().skip(1))?;
@@ -387,10 +400,21 @@ async fn main() {
             };
             let options=HistoricalDayRunOptionsV1 { research_summary:research.summary, started,
                 budget_save_after:research.budget_seconds.map(|budget| std::time::Duration::from_secs(budget-research.reserve_seconds.unwrap_or(900))) };
-            let results=if research.summary || research.budget_seconds.is_some() {
-                run_historical_days_with_options_v1(&days,rules.clone(),&factory,command.parallel_dates.unwrap_or(1),&options)?
-            } else if let Some(parallel)=command.parallel_dates {run_historical_days_with_parallelism_v1(&days,rules.clone(),&factory,parallel)?}
-                else {run_historical_days_v1(&days,rules.clone(),&factory)?};
+            let result=if research.summary || research.budget_seconds.is_some() {
+                run_historical_days_with_options_v1(&days,rules.clone(),&factory,command.parallel_dates.unwrap_or(1),&options)
+            } else if let Some(parallel)=command.parallel_dates {run_historical_days_with_parallelism_v1(&days,rules.clone(),&factory,parallel)}
+                else {run_historical_days_v1(&days,rules.clone(),&factory)};
+            let results = match result {
+                Ok(results)=>results,
+                Err(error)=>{
+                    let value=if let Some(failure)=error.downcast_ref::<HistoricalDaysFailureV1>() {
+                        serde_json::json!({"status":"failed","error":failure.cause.to_string(),"failure_source":failure.source,"days":failure.days})
+                    } else {serde_json::json!({"status":"failed","error":error.to_string(),"days":[]})};
+                    day_failure_json_attempted=true;
+                    if let Err(output)=write_day_failure_json(&value) {eprintln!("失败部分报告输出错误: {output}");}
+                    return Err(error);
+                }
+            };
             // 连续六小时研究不日化；保留整段和小时原结果，旧默认日汇总仍保持。
             if research.summary {
                 println!("{}",serde_json::json!({"days":results,"window_summary":"各候选research.final_snapshot及hours；非完整账户日，不日化"})); return Ok(());
@@ -423,6 +447,13 @@ async fn main() {
         print_result(run_historical_v1(&config.run, rules, &mut strategy).await)
     }.await;
     if let Err(error) = outcome as Result<(), CommandError> {
+        if day_requested && !day_failure_json_attempted {
+            if let Err(output) = write_day_failure_json(
+                &serde_json::json!({"status":"failed","error":error.to_string(),"days":[]}),
+            ) {
+                eprintln!("失败结果输出错误: {output}");
+            }
+        }
         eprintln!("{error}");
         std::process::exit(1);
     }

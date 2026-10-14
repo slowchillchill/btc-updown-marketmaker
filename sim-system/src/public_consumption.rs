@@ -517,6 +517,8 @@ impl PublicRunOpenedV1 {
     pub(crate) fn into_record(self) -> crate::runtime_v2::RunOpenedV2 {
         crate::runtime_v2::RunOpenedV2 {
             projection_version: self.projection_version,
+            latency_sampler_version: crate::latency_profile::PROXY_LATENCY_SAMPLER_VERSION_V2
+                .into(),
             run_id: self.run_id,
             durability_role: crate::runtime_v2::RunDurabilityRoleV2::CleanRun,
             platform_rule_snapshot_file_sha256: self.platform_rule_snapshot_file_sha256,

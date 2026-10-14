@@ -753,6 +753,7 @@ struct UniqueSessionStateV2 {
     opening_fact: Arc<AccountOpeningFactV2>,
     response_bridge_binding_id: String,
     session_seed: Sha256Hex,
+    latency_sampler: crate::latency_profile::SessionDelaySamplerV2,
     initialization: SessionInitializationV2,
     market_directory: SessionMarketDirectoryV1,
     public_markets: MarketStateStoreV2,
@@ -915,6 +916,7 @@ impl UniqueSessionStateV2 {
             opening_fact,
             response_bridge_binding_id,
             session_seed,
+            latency_sampler,
             initialization,
             market_directory,
             public_markets,
@@ -936,6 +938,7 @@ impl UniqueSessionStateV2 {
                 opening_fact,
                 response_bridge_binding_id,
                 session_seed,
+                latency_sampler,
                 initialization,
                 market_directory,
                 public_markets,
@@ -1158,7 +1161,7 @@ fn finalize_direct_response_v2(
 fn finalize_lifecycle_feedback_v2(
     effect: LifecycleFeedbackEffectV2,
     account_instance_key: &AccountInstanceKeyV1,
-    session_seed: &Sha256Hex,
+    sampler: &mut crate::latency_profile::SessionDelaySamplerV2,
     latency_profile: &EmpiricalDelayProfile,
     private_feedback_sequence: u64,
     processed_at_utc_ms: Option<i64>,
@@ -1174,10 +1177,8 @@ fn finalize_lifecycle_feedback_v2(
             .unwrap_or(platform_event_at_utc_ms),
         _ => platform_event_at_utc_ms,
     };
-    let stable_sequence = private_feedback_sequence.to_string();
-    let delay_ms = latency_profile.sample_delay_ms(
-        session_seed.0.as_bytes(),
-        &stable_sequence,
+    let delay_ms = sampler.sample(
+        latency_profile,
         DelaySampleDomainV1::LifecycleFeedbackInbound,
     );
     let metadata = contracts::LifecycleFeedbackMetadataV2 {
@@ -1358,7 +1359,7 @@ fn finalize_projection_batch_v2(
                 let finalized = finalize_lifecycle_feedback_v2(
                     effect,
                     &session.opening_fact.account_instance_key,
-                    &session.session_seed,
+                    &mut session.latency_sampler,
                     latency_profile,
                     next_private_feedback_sequence,
                     processed_at,
@@ -1523,23 +1524,35 @@ fn reduce_actor_input_v2(
                 } => Some((&identity.resolution_identity, requested_at_utc_ms)),
                 Op::Configure(_) | Op::ExternalCash { .. } => None,
             };
-            if let Some((identity, at)) = arrival {
+            let mut next_sampler = session.latency_sampler.clone();
+            if let Some((_identity, at)) = arrival {
                 *at = checked_add_delay_v2(
                     *at,
-                    latency_profile.sample_delay_ms(
-                        session.session_seed.0.as_bytes(),
-                        identity,
-                        DelaySampleDomainV1::RequestOutbound,
-                    ),
+                    next_sampler.sample(latency_profile, DelaySampleDomainV1::RequestOutbound),
                 )
                 .map_err(BusinessReductionErrorV2::Fatal)?;
             }
+            let condition = match &operation {
+                Op::Request { request, .. } => Some(&request.identity.condition_id),
+                Op::Query { identity, .. } => Some(&identity.condition_id),
+                _ => None,
+            };
+            let before = condition
+                .and_then(|id| session.execution_state.settlement_simulation_read(id))
+                .map(|r| (r.sends, r.queries));
             let lifecycle = session
                 .execution_state
                 .settlement_operation(&operation)
                 .map_err(|error| {
                     BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
                 })?;
+
+            let after = condition
+                .and_then(|id| session.execution_state.settlement_simulation_read(id))
+                .map(|r| (r.sends, r.queries));
+            if before != after {
+                session.latency_sampler = next_sampler;
+            }
 
             Ok((
                 state,
@@ -2317,7 +2330,7 @@ pub(crate) fn settlement_event_owned_bytes_v2(
 }
 
 /// 当前请求在原事务路径的效果；不描述此前请求或公开时间推进的效果。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum RequestEffectV1 {
     /// 请求构造／注册未成功；此调用没有登记或调度当前请求。
     NoRequestEffect,
@@ -2528,6 +2541,11 @@ fn validate_run_dependencies_v2(
     scenario: &SealedPlatformScenarioV1,
     latency_profile: &EmpiricalDelayProfile,
 ) -> Result<(), SimRunActorErrorV2> {
+    if opened.latency_sampler_version != crate::latency_profile::PROXY_LATENCY_SAMPLER_VERSION_V2 {
+        return Err(SimRunActorErrorV2::CompletionNotReady(
+            "旧采样运行须由旧程序解释",
+        ));
+    }
     if !is_stable_text(&opened.run_id) {
         return Err(SimRunActorErrorV2::InvalidRunId);
     }
@@ -4212,16 +4230,12 @@ fn register_new_request_v2(
         }
     };
 
-    let outbound_delay_ms = latency_profile.sample_delay_ms(
-        session.session_seed.0.as_bytes(),
-        &context.global_request_id,
-        DelaySampleDomainV1::RequestOutbound,
-    );
-    let inbound_delay_ms = latency_profile.sample_delay_ms(
-        session.session_seed.0.as_bytes(),
-        &context.global_request_id,
-        DelaySampleDomainV1::DirectResponseInbound,
-    );
+    // 仅复制三个小随机状态；登记失败不消费会话序列。
+    let mut next_sampler = session.latency_sampler.clone();
+    let outbound_delay_ms =
+        next_sampler.sample(latency_profile, DelaySampleDomainV1::RequestOutbound);
+    let inbound_delay_ms =
+        next_sampler.sample(latency_profile, DelaySampleDomainV1::DirectResponseInbound);
     let platform_arrived_at_utc_ms =
         match checked_add_delay_v2(cutoff.logical_time_utc_ms, outbound_delay_ms) {
             Ok(at) => at,
@@ -4444,6 +4458,7 @@ fn register_new_request_v2(
         .session
         .as_mut()
         .expect("刚确认存在的唯一会话必须仍存在");
+    session.latency_sampler = next_sampler;
     for condition_id in condition_fences {
         session
             .market_enrollment
@@ -6401,6 +6416,17 @@ fn reduce_business_input_v2(
             if let Err(error) = validate_session_spec(spec, &opened.run_id) {
                 return Err(unaccepted_business_input_v2(state, error));
             }
+            let latency_sampler =
+                match crate::latency_profile::SessionDelaySamplerV2::from_hex(&spec.session_seed.0)
+                {
+                    Ok(value) => value,
+                    Err(reason) => {
+                        return Err(unaccepted_business_input_v2(
+                            state,
+                            SimRunActorErrorV2::InvalidSessionSpec(reason),
+                        ));
+                    }
+                };
             let account_instance_key = AccountInstanceKeyV1 {
                 run_id: opened.run_id.clone(),
                 caller_role: spec.caller_role,
@@ -6441,6 +6467,7 @@ fn reduce_business_input_v2(
                 opening_fact: Arc::clone(&opening_fact),
                 response_bridge_binding_id: spec.response_bridge_binding_id.clone(),
                 session_seed: spec.session_seed.clone(),
+                latency_sampler,
                 initialization: SessionInitializationV2::PreparedLedgerInit,
                 market_directory,
                 public_markets,
@@ -7505,6 +7532,8 @@ mod tests {
     ) -> RunOpenedV2 {
         RunOpenedV2 {
             projection_version: Default::default(),
+            latency_sampler_version: "xoshiro256plusplus_jump_multiply_high_empirical_rank_v2"
+                .into(),
             run_id: run_id.to_owned(),
             durability_role: RunDurabilityRoleV2::CleanRun,
             platform_rule_snapshot_file_sha256: rule_snapshot.file_sha256().clone(),
@@ -7636,6 +7665,143 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_names_do_not_sample_and_rejected_or_replayed_requests_do_not_advance_streams()
+    {
+        let (_left_dir, mut left) =
+            active_market_actor(SimCallerRoleV1::Paper, "rng-short-center").await;
+        let (right_dir, mut right) =
+            active_market_actor(SimCallerRoleV1::Paper, "rng-long-renamed").await;
+        let request = |id: &str| {
+            BusinessRequestV2::Orders(OrdersRequestV2 {
+                context: RequestContextV2 {
+                    global_request_id: id.into(),
+                    caller_correlation_id: None,
+                },
+                filter: OrdersFilterV1::default(),
+                cursor: None,
+            })
+        };
+        let before = right
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap()
+            .latency_sampler
+            .clone();
+        assert!(
+            right
+                .register_request(request_cutoff(1100), request(""))
+                .is_err()
+        );
+        assert_eq!(
+            right
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .latency_sampler,
+            before
+        );
+        let a = left
+            .register_request(request_cutoff(1100), request("short:center:0"))
+            .unwrap();
+        let b = right
+            .register_request(request_cutoff(1100), request("long:renamed:0"))
+            .unwrap();
+        assert_eq!(a.platform_arrived_at_utc_ms, b.platform_arrived_at_utc_ms);
+        let expected = left
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap()
+            .latency_sampler
+            .clone();
+        assert_eq!(
+            right
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .latency_sampler,
+            expected
+        );
+        let duplicate = right
+            .register_request(request_cutoff(1200), request("long:renamed:0"))
+            .unwrap();
+        assert_eq!(duplicate, b);
+        assert_eq!(
+            right
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .latency_sampler,
+            expected
+        );
+        let rules = right._rule_snapshot.clone();
+        let finality = right._finality_policy.clone();
+        let scenario = right.scenario.clone();
+        let latency = right._latency_profile.clone();
+        drop(right);
+        let mut restored = SimRunActorV2::recover_paper(
+            &right_dir.path().join(SIM_EVENT_LOG_FILE_NAME_V2),
+            rules,
+            finality,
+            scenario,
+            latency,
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+            |_| panic!("本夹具无行情正文桶"),
+        )
+        .unwrap();
+        assert_eq!(
+            restored
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .latency_sampler,
+            expected
+        );
+        let a = left
+            .register_request(request_cutoff(1300), request("short:center:1"))
+            .unwrap();
+        let b = restored
+            .register_request(request_cutoff(1300), request("long:renamed:1"))
+            .unwrap();
+        assert_eq!(a.platform_arrived_at_utc_ms, b.platform_arrived_at_utc_ms);
+        assert_eq!(
+            left.state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .latency_sampler,
+            restored
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .latency_sampler
+        );
     }
 
     async fn active_market_actor(
@@ -8193,6 +8359,7 @@ mod tests {
             opening_fact,
             response_bridge_binding_id,
             session_seed,
+            latency_sampler,
             initialization,
             market_directory,
             public_markets,
@@ -8220,6 +8387,7 @@ mod tests {
             opening_fact,
             response_bridge_binding_id,
             session_seed,
+            latency_sampler,
             initialization,
             market_directory,
             public_markets,
@@ -8249,6 +8417,7 @@ mod tests {
             opening_fact,
             response_bridge_binding_id,
             session_seed,
+            latency_sampler,
             initialization,
             market_directory,
             public_markets,
@@ -8272,6 +8441,7 @@ mod tests {
             opening_fact,
             response_bridge_binding_id,
             session_seed,
+            latency_sampler,
             initialization,
             market_directory,
             public_markets,
@@ -8303,6 +8473,7 @@ mod tests {
             opening_fact,
             response_bridge_binding_id,
             session_seed,
+            latency_sampler,
             initialization,
             market_directory,
             public_markets,
@@ -8329,6 +8500,7 @@ mod tests {
             opening_fact,
             response_bridge_binding_id,
             session_seed,
+            latency_sampler,
             initialization,
             market_directory,
             public_markets,
@@ -8363,11 +8535,10 @@ mod tests {
         lead_seconds: i64,
     ) -> i64 {
         let session = state.session.as_ref().expect("GTD 测试必须已有唯一会话");
-        let outbound_delay_ms = latency_profile.sample_delay_ms(
-            session.session_seed.0.as_bytes(),
-            global_request_id,
-            DelaySampleDomainV1::RequestOutbound,
-        );
+        let outbound_delay_ms = session
+            .latency_sampler
+            .clone()
+            .sample(&latency_profile, DelaySampleDomainV1::RequestOutbound);
         let processing_at_utc_ms = decision_at_utc_ms
             .checked_add(i64::try_from(outbound_delay_ms).expect("测试时延可表示"))
             .expect("GTD 测试处理时点可表示");
@@ -8685,11 +8856,11 @@ mod tests {
         let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
         let session_seed = sha('8');
         let outbound_delay = |request_id: &str| {
-            i64::try_from(latency_profile.sample_delay_ms(
-                session_seed.0.as_bytes(),
-                request_id,
-                DelaySampleDomainV1::RequestOutbound,
-            ))
+            i64::try_from(
+                crate::latency_profile::SessionDelaySamplerV2::from_hex(&session_seed.0)
+                    .unwrap()
+                    .sample(&latency_profile, DelaySampleDomainV1::RequestOutbound),
+            )
             .expect("路径隔离测试出站时延可表示")
         };
         let decision_at = 10_000;
@@ -8794,7 +8965,15 @@ mod tests {
                 },
             ),
         });
-        let mutation_decision_at = target_at - outbound_delay(mutation_request_id);
+        let mutation_decision_at = target_at
+            - state
+                .session
+                .as_ref()
+                .unwrap()
+                .latency_sampler
+                .clone()
+                .sample(&latency_profile, DelaySampleDomainV1::RequestOutbound)
+                as i64;
         let (state, mutation_receipt) = register_request_candidate(
             &actor.opened,
             actor.scenario.initial_market_directory(),
@@ -9236,11 +9415,11 @@ mod tests {
         let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
         let session_seed = sha('8');
         let outbound_delay = |request_id: &str| {
-            i64::try_from(latency_profile.sample_delay_ms(
-                session_seed.0.as_bytes(),
-                request_id,
-                DelaySampleDomainV1::RequestOutbound,
-            ))
+            i64::try_from(
+                crate::latency_profile::SessionDelaySamplerV2::from_hex(&session_seed.0)
+                    .unwrap()
+                    .sample(&latency_profile, DelaySampleDomainV1::RequestOutbound),
+            )
             .expect("同刻测试出站时延可表示")
         };
         let gtd_decision_at = 10_000;
@@ -9305,7 +9484,7 @@ mod tests {
         )
         .expect("同刻碰撞初始正文桶必须成功");
 
-        let register_post_at = |state,
+        let register_post_at = |state: BusinessReducerStateV2,
                                 request_id: &str,
                                 item_id: &str,
                                 kind: SimBuyOrderKindV1,
@@ -9323,7 +9502,15 @@ mod tests {
                     kind,
                 ),
             });
-            let decision_at = desired_arrival_at - outbound_delay(request_id);
+            let decision_at = desired_arrival_at
+                - state
+                    .session
+                    .as_ref()
+                    .unwrap()
+                    .latency_sampler
+                    .clone()
+                    .sample(&latency_profile, DelaySampleDomainV1::RequestOutbound)
+                    as i64;
             let (state, receipt) = register_request_candidate(
                 &actor.opened,
                 actor.scenario.initial_market_directory(),
@@ -10418,17 +10605,16 @@ mod tests {
         });
         for (batch_index, chunk) in post_items.chunks(15).enumerate() {
             let global_request_id = format!("query-root-post-batch-{batch_index}");
-            let outbound_delay_ms = actor._latency_profile.sample_delay_ms(
-                state
-                    .session
-                    .as_ref()
-                    .expect("查询根提交批次前会话存在")
-                    .session_seed
-                    .0
-                    .as_bytes(),
-                &global_request_id,
-                DelaySampleDomainV1::RequestOutbound,
-            );
+            let outbound_delay_ms = state
+                .session
+                .as_ref()
+                .expect("查询根提交批次前会话存在")
+                .latency_sampler
+                .clone()
+                .sample(
+                    &actor._latency_profile,
+                    DelaySampleDomainV1::RequestOutbound,
+                );
             let target_arrival_at = 1_300 + batch_index as i64;
             let decision_at =
                 target_arrival_at - i64::try_from(outbound_delay_ms).expect("查询根出站时延可表示");
@@ -11069,17 +11255,16 @@ mod tests {
         .unwrap_or_else(|_| panic!("maker 查询初始盘口必须成功"));
 
         let post_request_id = "query-maker-post";
-        let outbound_delay_ms = actor._latency_profile.sample_delay_ms(
-            state
-                .session
-                .as_ref()
-                .expect("maker 查询提交前会话存在")
-                .session_seed
-                .0
-                .as_bytes(),
-            post_request_id,
-            DelaySampleDomainV1::RequestOutbound,
-        );
+        let outbound_delay_ms = state
+            .session
+            .as_ref()
+            .expect("maker 查询提交前会话存在")
+            .latency_sampler
+            .clone()
+            .sample(
+                &actor._latency_profile,
+                DelaySampleDomainV1::RequestOutbound,
+            );
         let post_decision_at =
             1_200 - i64::try_from(outbound_delay_ms).expect("maker 查询出站时延可表示");
         let post_request = BusinessRequestV2::PostOrder(PostOrderRequestV2 {
@@ -13146,17 +13331,16 @@ mod tests {
         });
         let state = actor.state.take().expect("Paper 围栏测试初始状态");
 
-        let outbound_delay_ms = actor._latency_profile.sample_delay_ms(
-            state
-                .session
-                .as_ref()
-                .expect("Paper 围栏测试唯一会话")
-                .session_seed
-                .0
-                .as_bytes(),
-            unknown_condition_request_id,
-            DelaySampleDomainV1::RequestOutbound,
-        );
+        let outbound_delay_ms = state
+            .session
+            .as_ref()
+            .expect("Paper 围栏测试唯一会话")
+            .latency_sampler
+            .clone()
+            .sample(
+                &actor._latency_profile,
+                DelaySampleDomainV1::RequestOutbound,
+            );
         let unknown_condition_cutoff =
             1_500 - i64::try_from(outbound_delay_ms).expect("Paper 测试出站时延可表示");
         let (next, unknown_condition_receipt) = register_request_candidate(
@@ -13255,17 +13439,16 @@ mod tests {
                 },
             ),
         });
-        let outbound_delay_ms = actor._latency_profile.sample_delay_ms(
-            state
-                .session
-                .as_ref()
-                .expect("未知 token 请求前唯一会话")
-                .session_seed
-                .0
-                .as_bytes(),
-            unknown_token_request_id,
-            DelaySampleDomainV1::RequestOutbound,
-        );
+        let outbound_delay_ms = state
+            .session
+            .as_ref()
+            .expect("未知 token 请求前唯一会话")
+            .latency_sampler
+            .clone()
+            .sample(
+                &actor._latency_profile,
+                DelaySampleDomainV1::RequestOutbound,
+            );
         let unknown_token_cutoff =
             1_500 - i64::try_from(outbound_delay_ms).expect("Paper 测试出站时延可表示");
         let (next, unknown_token_receipt) = register_request_candidate(
@@ -13353,17 +13536,16 @@ mod tests {
         });
         let state = actor.state.take().expect("Paper 查询围栏初始状态");
 
-        let outbound_delay_ms = actor._latency_profile.sample_delay_ms(
-            state
-                .session
-                .as_ref()
-                .expect("Paper condition 查询前会话存在")
-                .session_seed
-                .0
-                .as_bytes(),
-            condition_query_id,
-            DelaySampleDomainV1::RequestOutbound,
-        );
+        let outbound_delay_ms = state
+            .session
+            .as_ref()
+            .expect("Paper condition 查询前会话存在")
+            .latency_sampler
+            .clone()
+            .sample(
+                &actor._latency_profile,
+                DelaySampleDomainV1::RequestOutbound,
+            );
         let decision_at =
             1_500 - i64::try_from(outbound_delay_ms).expect("Paper 查询出站时延可表示");
         let (state, condition_receipt, condition_effect) = register_and_advance_query_candidate(
@@ -13502,17 +13684,16 @@ mod tests {
             cursor: None,
         });
 
-        let outbound_delay_ms = actor._latency_profile.sample_delay_ms(
-            state
-                .session
-                .as_ref()
-                .expect("Paper token 查询前会话存在")
-                .session_seed
-                .0
-                .as_bytes(),
-            token_only_id,
-            DelaySampleDomainV1::RequestOutbound,
-        );
+        let outbound_delay_ms = state
+            .session
+            .as_ref()
+            .expect("Paper token 查询前会话存在")
+            .latency_sampler
+            .clone()
+            .sample(
+                &actor._latency_profile,
+                DelaySampleDomainV1::RequestOutbound,
+            );
         let decision_at =
             1_600 - i64::try_from(outbound_delay_ms).expect("Paper token 查询时延可表示");
         let (state, token_receipt, token_effect) = register_and_advance_query_candidate(
@@ -14049,11 +14230,14 @@ mod tests {
                 .expect("私有响应测试会话存在")
                 .session_seed
                 .clone();
-            let outbound_delay = i64::try_from(actor._latency_profile.sample_delay_ms(
-                session_seed.0.as_bytes(),
-                request_id,
-                DelaySampleDomainV1::RequestOutbound,
-            ))
+            let outbound_delay = i64::try_from(
+                crate::latency_profile::SessionDelaySamplerV2::from_hex(&session_seed.0)
+                    .unwrap()
+                    .sample(
+                        &actor._latency_profile,
+                        DelaySampleDomainV1::RequestOutbound,
+                    ),
+            )
             .expect("私有响应测试时延可表示");
             actor
                 .register_request(
@@ -16171,11 +16355,10 @@ mod tests {
             .expect("请求投影会话存在")
             .session_seed
             .clone();
-        let outbound_delay_ms = latency_profile.sample_delay_ms(
-            session_seed.0.as_bytes(),
-            request_id,
-            DelaySampleDomainV1::RequestOutbound,
-        );
+        let outbound_delay_ms =
+            crate::latency_profile::SessionDelaySamplerV2::from_hex(&session_seed.0)
+                .unwrap()
+                .sample(&latency_profile, DelaySampleDomainV1::RequestOutbound);
         let cutoff_at_utc_ms = target_arrival_at_utc_ms
             - i64::try_from(outbound_delay_ms).expect("测试出站时延可表示");
         let initial_events = decoded_initial_market_events("10");
@@ -16335,11 +16518,10 @@ mod tests {
             .expect("请求投影会话存在")
             .session_seed
             .clone();
-        let outbound_delay_ms = latency_profile.sample_delay_ms(
-            session_seed.0.as_bytes(),
-            request_id,
-            DelaySampleDomainV1::RequestOutbound,
-        );
+        let outbound_delay_ms =
+            crate::latency_profile::SessionDelaySamplerV2::from_hex(&session_seed.0)
+                .unwrap()
+                .sample(&latency_profile, DelaySampleDomainV1::RequestOutbound);
         let cutoff_at_utc_ms = target_arrival_at_utc_ms
             - i64::try_from(outbound_delay_ms).expect("测试出站时延可表示");
         let initial_events = decoded_initial_market_events("10");
@@ -16689,11 +16871,13 @@ mod tests {
             .expect("空前缀测试会话存在")
             .session_seed
             .clone();
-        let outbound_delay_ms = execution.actor._latency_profile.sample_delay_ms(
-            session_seed.0.as_bytes(),
-            request_id,
-            DelaySampleDomainV1::RequestOutbound,
-        );
+        let outbound_delay_ms =
+            crate::latency_profile::SessionDelaySamplerV2::from_hex(&session_seed.0)
+                .unwrap()
+                .sample(
+                    &execution.actor._latency_profile,
+                    DelaySampleDomainV1::RequestOutbound,
+                );
         let cutoff_at_utc_ms = platform_arrived_at_utc_ms
             - i64::try_from(outbound_delay_ms).expect("测试出站时延可表示");
         execution
@@ -16846,19 +17030,18 @@ mod tests {
 
         let request_id = "sparse-orders-request";
         let platform_arrived_at_utc_ms = 1_200;
-        let outbound_delay_ms = execution.actor._latency_profile.sample_delay_ms(
-            execution
-                .actor
-                .state
-                .as_ref()
-                .and_then(|state| state.session.as_ref())
-                .expect("稀疏请求测试会话存在")
-                .session_seed
-                .0
-                .as_bytes(),
-            request_id,
-            DelaySampleDomainV1::RequestOutbound,
-        );
+        let outbound_delay_ms = execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .expect("稀疏请求测试会话存在")
+            .latency_sampler
+            .clone()
+            .sample(
+                &execution.actor._latency_profile,
+                DelaySampleDomainV1::RequestOutbound,
+            );
         execution
             .orders(
                 request_cutoff(
@@ -16924,19 +17107,18 @@ mod tests {
             })
             .expect("Paper 初始公开桶必须受理");
         let request_id = "request-bucket-tie";
-        let outbound_delay_ms = execution.actor._latency_profile.sample_delay_ms(
-            execution
-                .actor
-                .state
-                .as_ref()
-                .and_then(|state| state.session.as_ref())
-                .expect("同刻测试会话存在")
-                .session_seed
-                .0
-                .as_bytes(),
-            request_id,
-            DelaySampleDomainV1::RequestOutbound,
-        );
+        let outbound_delay_ms = execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .expect("同刻测试会话存在")
+            .latency_sampler
+            .clone()
+            .sample(
+                &execution.actor._latency_profile,
+                DelaySampleDomainV1::RequestOutbound,
+            );
         execution
             .orders(
                 request_cutoff(
@@ -17015,19 +17197,18 @@ mod tests {
             })
             .expect("Paper 恢复代表初始桶必须受理");
         let request_id = "sparse-prefix-recovery-request";
-        let outbound_delay_ms = execution.actor._latency_profile.sample_delay_ms(
-            execution
-                .actor
-                .state
-                .as_ref()
-                .and_then(|state| state.session.as_ref())
-                .expect("恢复代表会话存在")
-                .session_seed
-                .0
-                .as_bytes(),
-            request_id,
-            DelaySampleDomainV1::RequestOutbound,
-        );
+        let outbound_delay_ms = execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .expect("恢复代表会话存在")
+            .latency_sampler
+            .clone()
+            .sample(
+                &execution.actor._latency_profile,
+                DelaySampleDomainV1::RequestOutbound,
+            );
         execution
             .orders(
                 request_cutoff(
@@ -17569,18 +17750,17 @@ mod tests {
 
         let query_id = "retention-empty-orders";
         let query_arrival_at_utc_ms = 1_100;
-        let query_delay_ms = actor._latency_profile.sample_delay_ms(
-            actor
-                .state
-                .as_ref()
-                .and_then(|state| state.session.as_ref())
-                .expect("保留测试会话存在")
-                .session_seed
-                .0
-                .as_bytes(),
-            query_id,
-            DelaySampleDomainV1::RequestOutbound,
-        );
+        let query_delay_ms = actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .expect("保留测试会话存在")
+            .latency_sampler
+            .clone()
+            .sample(
+                &actor._latency_profile,
+                DelaySampleDomainV1::RequestOutbound,
+            );
         actor
             .register_request(
                 request_cutoff(
@@ -17615,18 +17795,17 @@ mod tests {
 
         let post_id = "retention-revision-post";
         let post_arrival_at_utc_ms = 1_200;
-        let post_delay_ms = actor._latency_profile.sample_delay_ms(
-            actor
-                .state
-                .as_ref()
-                .and_then(|state| state.session.as_ref())
-                .expect("保留测试会话存在")
-                .session_seed
-                .0
-                .as_bytes(),
-            post_id,
-            DelaySampleDomainV1::RequestOutbound,
-        );
+        let post_delay_ms = actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .expect("保留测试会话存在")
+            .latency_sampler
+            .clone()
+            .sample(
+                &actor._latency_profile,
+                DelaySampleDomainV1::RequestOutbound,
+            );
         actor
             .register_request(
                 request_cutoff(
@@ -18923,11 +19102,11 @@ mod tests {
                     == "c114c118d06b40f1bbca4a383fca55cf5b08ae8fffa8d083dd57e65e7389a355"
             });
             if is_order_bucket {
-                let outbound_delay = i64::try_from(latency_profile.sample_delay_ms(
-                    sha('8').0.as_bytes(),
-                    REQUEST_ID,
-                    DelaySampleDomainV1::RequestOutbound,
-                ))
+                let outbound_delay = i64::try_from(
+                    crate::latency_profile::SessionDelaySamplerV2::from_hex(&sha('8').0)
+                        .unwrap()
+                        .sample(&latency_profile, DelaySampleDomainV1::RequestOutbound),
+                )
                 .expect("请求时延可表示");
                 assert_eq!(outbound_delay, 11);
                 let receipt = real

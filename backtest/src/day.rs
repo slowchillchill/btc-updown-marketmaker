@@ -35,6 +35,50 @@ pub struct HistoricalDayConfigV1 {
     #[serde(default)]
     pub producer_lead_groups: Option<usize>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DayFailureSourceV1 {
+    Candidate { index: usize, run_id: String },
+    Producer,
+    DaySetup,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CandidateOutcomeV1 {
+    Complete,
+    OriginalFailure,
+    CollateralStop,
+    NoReport,
+}
+#[derive(Debug)]
+pub struct HistoricalDaysFailureV1 {
+    pub cause: MaterialError,
+    pub source: DayFailureSourceV1,
+    pub days: Vec<HistoricalDayResultV1>,
+}
+impl std::fmt::Display for HistoricalDaysFailureV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "日研究失败 {:?}: {}", self.source, self.cause)
+    }
+}
+impl std::error::Error for HistoricalDaysFailureV1 {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
+#[derive(Debug)]
+struct CandidateFailureV1 {
+    cause: MaterialError,
+    report: Option<serde_json::Value>,
+}
+impl std::fmt::Display for CandidateFailureV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.cause.fmt(f)
+    }
+}
+impl std::error::Error for CandidateFailureV1 {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
 #[derive(Debug, Serialize)]
 pub struct HistoricalDayCandidateResultV1 {
     pub run_id: String,
@@ -42,6 +86,9 @@ pub struct HistoricalDayCandidateResultV1 {
     pub initial_available_pusd: ExactDecimal,
     pub report: serde_json::Value,
     pub reused: bool,
+    pub outcome: CandidateOutcomeV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct HistoricalDayResultV1 {
@@ -79,7 +126,7 @@ pub fn run_historical_days_v1<S, F>(
 where
     S: CheckpointStrategyV1,
     S::Diagnostics: Serialize + serde::de::DeserializeOwned,
-    S::Error: std::fmt::Debug,
+    S::Error: std::fmt::Debug + Send + Sync + 'static,
     F: Fn(&HistoricalPreparedRunConfigV1) -> Result<S, MaterialError> + Sync,
 {
     let cpus = std::thread::available_parallelism()?.get();
@@ -100,7 +147,7 @@ pub fn run_historical_days_with_parallelism_v1<S, F>(
 where
     S: CheckpointStrategyV1,
     S::Diagnostics: Serialize + serde::de::DeserializeOwned,
-    S::Error: std::fmt::Debug,
+    S::Error: std::fmt::Debug + Send + Sync + 'static,
     F: Fn(&HistoricalPreparedRunConfigV1) -> Result<S, MaterialError> + Sync,
 {
     run_historical_days_with_options_v1(
@@ -122,7 +169,7 @@ pub fn run_historical_days_with_options_v1<S, F>(
 where
     S: CheckpointStrategyV1,
     S::Diagnostics: Serialize + serde::de::DeserializeOwned,
-    S::Error: std::fmt::Debug,
+    S::Error: std::fmt::Debug + Send + Sync + 'static,
     F: Fn(&HistoricalPreparedRunConfigV1) -> Result<S, MaterialError> + Sync,
 {
     let mut results = Vec::new();
@@ -137,13 +184,35 @@ where
                 .collect::<Vec<_>>();
             handles
                 .into_iter()
-                .map(|h| {
-                    h.join()
-                        .map_err(|_| -> MaterialError { "日线程异常退出".into() })?
-                })
-                .collect::<Result<Vec<_>, _>>()
-        })?;
-        results.extend(values);
+                .map(|h| h.join().unwrap_or_else(|_| Err("日线程异常退出".into())))
+                .collect::<Vec<_>>()
+        });
+        let mut root = None;
+        for value in values {
+            match value {
+                Ok(day) => results.push(day),
+                Err(error) => match error.downcast::<HistoricalDaysFailureV1>() {
+                    Ok(mut failure) => {
+                        results.append(&mut failure.days);
+                        if root.is_none() {
+                            root = Some((failure.source, failure.cause));
+                        }
+                    }
+                    Err(error) => {
+                        if root.is_none() {
+                            root = Some((DayFailureSourceV1::DaySetup, error));
+                        }
+                    }
+                },
+            }
+        }
+        if let Some((source, cause)) = root {
+            return Err(Box::new(HistoricalDaysFailureV1 {
+                source,
+                cause,
+                days: results,
+            }));
+        }
     }
     Ok(results)
 }
@@ -157,7 +226,7 @@ fn run_day<S, F>(
 where
     S: CheckpointStrategyV1,
     S::Diagnostics: Serialize + serde::de::DeserializeOwned,
-    S::Error: std::fmt::Debug,
+    S::Error: std::fmt::Debug + Send + Sync + 'static,
     F: Fn(&HistoricalPreparedRunConfigV1) -> Result<S, MaterialError> + Sync,
 {
     let config = &day.preparation;
@@ -250,6 +319,8 @@ where
                             .clone(),
                         report: r.clone().unwrap(),
                         reused: true,
+                        outcome: CandidateOutcomeV1::Complete,
+                        error: None,
                     })
                     .collect(),
             });
@@ -392,72 +463,90 @@ where
             let hub = hub.clone();
             let metadata = serde_json::json!({"config":candidate,"day":day,"input_set_identity_sha256":input_identity,"source_identity_sha256":source_identity,
                 "source_manifests":admitted.iter().map(|d|(d.utc_day(),d.manifest_sha256())).collect::<Vec<_>>(),"rules_file_sha256":rules.file_sha256(),"maker_model_version":rules.maker_model_version_for(contracts::SimCallerRoleV1::HistoricalBacktest),"entry":"original-parquet-day-v1"});
-            workers.push(scope.spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || -> Result<_, MaterialError> {
-                        let mut strategy = factory(candidate)?;
-                        {
-                            let mut buffer = hub.0.0.lock().unwrap();
-                            buffer.candidates[index].source_health =
-                                Some(strategy.uses_source_health());
-                            buffer.candidates[index].requirements =
-                                Some(strategy.observation_requirements());
-                            hub.0.1.notify_all();
-                        }
-                        let mut saved: Option<CandidateCheckpointV1<S::Diagnostics>> = saved
-                            .map(|bytes| ciborium::de::from_reader(bytes.as_slice()))
-                            .transpose()?;
-                        let prefetched = saved
-                            .as_mut()
-                            .and_then(|s| s.prefetched.take())
-                            .map(|g| g.restore())
-                            .transpose()?
-                            .into_iter()
-                            .collect();
-                        let public = DayPublicSourceV1::new(hub.clone(), index, prefetched);
-                        let hidden = DayHiddenSourceV1::new(hub.clone(), index);
-                        let checkpoint = DayCandidateCheckpointV1::new(
-                            hub.clone(),
-                            index,
-                            day.checkpoint_root.clone(),
-                            saved,
-                            day.checkpoint_every_candidate_events,
-                        );
-                        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
-                        let report = runtime
-                            .block_on(run_context_with_hook(
-                                candidate,
-                                context,
-                                metadata,
-                                rules.clone(),
-                                &mut strategy,
-                                public,
-                                hidden,
-                                checkpoint,
-                            ))
-                            .map_err(|e| -> MaterialError {
-                                format!("候选 {} 失败: {e:?}", candidate.session.run_id).into()
-                            })?;
-                        Ok(HistoricalDayCandidateResultV1 {
-                            run_id: candidate.session.run_id.clone(),
-                            comparison_identity_sha256: comparison_identity(
-                                candidate,
-                                rules.file_sha256(),
-                            ),
-                            initial_available_pusd: candidate
-                                .session
-                                .initial_account_state
-                                .available_pusd
-                                .clone(),
-                            report: serde_json::to_value(report)?,
-                            reused: false,
-                        })
-                    },
-                ))
-                .unwrap_or_else(|_| Err("候选线程异常退出".into()));
-                hub.finish(index, &result);
-                result.map(|value| (index, value))
-            }));
+            workers.push((
+                index,
+                scope.spawn(move || {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || -> Result<_, MaterialError> {
+                            let mut strategy = factory(candidate)?;
+                            {
+                                let mut buffer = hub.0.0.lock().unwrap();
+                                buffer.candidates[index].source_health =
+                                    Some(strategy.uses_source_health());
+                                buffer.candidates[index].requirements =
+                                    Some(strategy.observation_requirements());
+                                hub.0.1.notify_all();
+                            }
+                            let mut saved: Option<CandidateCheckpointV1<S::Diagnostics>> = saved
+                                .map(|bytes| ciborium::de::from_reader(bytes.as_slice()))
+                                .transpose()?;
+                            let prefetched = saved
+                                .as_mut()
+                                .and_then(|s| s.prefetched.take())
+                                .map(|g| g.restore())
+                                .transpose()?
+                                .into_iter()
+                                .collect();
+                            let public = DayPublicSourceV1::new(hub.clone(), index, prefetched);
+                            let hidden = DayHiddenSourceV1::new(hub.clone(), index);
+                            let checkpoint = DayCandidateCheckpointV1::new(
+                                hub.clone(),
+                                index,
+                                day.checkpoint_root.clone(),
+                                saved,
+                                day.checkpoint_every_candidate_events,
+                            );
+                            let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+                            let report = runtime
+                                .block_on(run_context_with_hook(
+                                    candidate,
+                                    context,
+                                    metadata,
+                                    rules.clone(),
+                                    &mut strategy,
+                                    public,
+                                    hidden,
+                                    checkpoint,
+                                ))
+                                .map_err(|mut failure| -> MaterialError {
+                                    let report =
+                                        failure.report.take().map(serde_json::to_value).transpose();
+                                    // 报告编码错误不能替换原运行原因。
+                                    let report = match report {
+                                        Ok(value) => value,
+                                        Err(error) => {
+                                            eprintln!("失败部分报告编码错误: {error}");
+                                            None
+                                        }
+                                    };
+                                    Box::new(CandidateFailureV1 {
+                                        cause: Box::new(failure),
+                                        report,
+                                    })
+                                })?;
+                            Ok(HistoricalDayCandidateResultV1 {
+                                run_id: candidate.session.run_id.clone(),
+                                comparison_identity_sha256: comparison_identity(
+                                    candidate,
+                                    rules.file_sha256(),
+                                ),
+                                initial_available_pusd: candidate
+                                    .session
+                                    .initial_account_state
+                                    .available_pusd
+                                    .clone(),
+                                report: serde_json::to_value(report)?,
+                                reused: false,
+                                outcome: CandidateOutcomeV1::Complete,
+                                error: None,
+                            })
+                        },
+                    ))
+                    .unwrap_or_else(|_| Err("候选线程异常退出".into()));
+                    hub.finish(index, &result, &candidate.session.run_id);
+                    result.map(|value| (index, value))
+                }),
+            ));
         }
         #[cfg(feature = "stage-timing")]
         let mut stages = crate::stage_timing::StageTimings::new("day_producer".into());
@@ -473,7 +562,7 @@ where
             loop {
                 {
                     let mut buffer=hub.0.0.lock().unwrap();
-                    if let Some(error)=&buffer.failure {return Err(error.clone().into());}
+                    if let Some(error)=&buffer.failure {return Err(error.message.clone().into());}
                     if day.progress_interval_seconds>0 && progress.elapsed()>=Duration::from_secs(day.progress_interval_seconds) {
                         eprintln!("日作业: phase={}, inputs={count}, active_candidates={}, retained_public_groups={}, retained_hidden_buckets={}, elapsed_seconds={}, total_inputs=unknown",if ended {"consuming"} else if buffer.requested.is_some() {"checkpoint"} else {"producing"},buffer.candidates.iter().filter(|c|c.active).count(),buffer.public.len(),buffer.hidden.len(),started.elapsed().as_secs());progress=Instant::now();
                     }
@@ -562,19 +651,56 @@ where
         if let Err(error) = &production {
             let mut buffer = hub.0.0.lock().unwrap();
             buffer.production = ProductionV1::Failed(error.to_string());
-            buffer.failure = Some(error.to_string());
+            if buffer.failure.is_none() {
+                buffer.failure = Some(DayFailureSignalV1 {
+                    source: DayFailureSourceV1::Producer,
+                    message: error.to_string(),
+                });
+            }
             buffer.requested = None;
             hub.0.1.notify_all();
         }
         let mut candidates = Vec::new();
-        for worker in workers {
-            candidates.push(
-                worker
-                    .join()
-                    .map_err(|_| -> MaterialError { "候选线程异常退出".into() })??,
-            );
+        let mut failures = Vec::new();
+        for (index, worker) in workers {
+            match worker
+                .join()
+                .unwrap_or_else(|_| Err("候选线程异常退出".into()))
+            {
+                Ok(value) => candidates.push(value),
+                Err(error) => {
+                    let (cause, report) = match error.downcast::<CandidateFailureV1>() {
+                        Ok(failure) => (failure.cause, failure.report),
+                        Err(error) => (error, None),
+                    };
+                    let candidate = &day.candidates[index];
+                    candidates.push((
+                        index,
+                        HistoricalDayCandidateResultV1 {
+                            run_id: candidate.session.run_id.clone(),
+                            comparison_identity_sha256: comparison_identity(
+                                candidate,
+                                rules.file_sha256(),
+                            ),
+                            initial_available_pusd: candidate
+                                .session
+                                .initial_account_state
+                                .available_pusd
+                                .clone(),
+                            outcome: if report.is_some() {
+                                CandidateOutcomeV1::CollateralStop
+                            } else {
+                                CandidateOutcomeV1::NoReport
+                            },
+                            report: report.unwrap_or(serde_json::Value::Null),
+                            reused: false,
+                            error: Some(cause.to_string()),
+                        },
+                    ));
+                    failures.push((index, cause));
+                }
+            }
         }
-        production?;
         let buffer = hub.0.0.lock().unwrap();
         for (index, candidate) in day.candidates.iter().enumerate() {
             if !candidates.iter().any(|(i, _)| *i == index) {
@@ -596,24 +722,69 @@ where
                             .clone()
                             .ok_or("恢复的完成记录缺失")?,
                         reused: true,
+                        outcome: CandidateOutcomeV1::Complete,
+                        error: None,
                     },
                 ));
             }
         }
         candidates.sort_by_key(|(index, _)| *index);
         let candidates = candidates.into_iter().map(|(_, value)| value).collect();
-        Ok(HistoricalDayResultV1 {
-            published_checkpoint: if options.research_summary {
-                Some(serde_json::from_reader(std::fs::File::open(
-                    day.checkpoint_root.join("checkpoint.json"),
-                )?)?)
+        let failure_signal = buffer.failure.clone();
+        drop(buffer);
+        let published_checkpoint = if options.research_summary {
+            let path = day.checkpoint_root.join("checkpoint.json");
+            if path.exists() {
+                match std::fs::File::open(path)
+                    .map_err(|e| -> MaterialError { Box::new(e) })
+                    .and_then(|f| serde_json::from_reader(f).map_err(|e| e.into()))
+                {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        eprintln!("最后发布点读取失败: {error}");
+                        None
+                    }
+                }
             } else {
                 None
-            },
+            }
+        } else {
+            None
+        };
+        let mut day_result = HistoricalDayResultV1 {
+            published_checkpoint,
             input_set_identity_sha256: input_identity,
             public_applied_inputs: count,
             candidates,
-        })
+        };
+        if let Some(signal) = failure_signal {
+            let cause = match &signal.source {
+                DayFailureSourceV1::Candidate { index, .. } => {
+                    for candidate in &mut day_result.candidates {
+                        if candidate.run_id == day.candidates[*index].session.run_id
+                            && candidate.report != serde_json::Value::Null
+                        {
+                            candidate.outcome = CandidateOutcomeV1::OriginalFailure;
+                        }
+                    }
+                    failures
+                        .into_iter()
+                        .find(|(i, _)| i == index)
+                        .map(|(_, e)| e)
+                        .unwrap_or_else(|| signal.message.clone().into())
+                }
+                _ => production
+                    .err()
+                    .unwrap_or_else(|| signal.message.clone().into()),
+            };
+            return Err(Box::new(HistoricalDaysFailureV1 {
+                source: signal.source,
+                cause,
+                days: vec![day_result],
+            }) as MaterialError);
+        }
+        production?;
+        Ok(day_result)
     })
 }
 fn comparison_identity(candidate: &HistoricalPreparedRunConfigV1, rules: &Sha256Hex) -> Sha256Hex {

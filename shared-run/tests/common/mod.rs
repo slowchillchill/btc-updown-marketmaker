@@ -603,6 +603,7 @@ pub fn execution_with_fee_v4(
 pub fn execution_historical_v4(
     path: &Path,
     core: &PublicObservationCoreV1,
+    seed: String,
 ) -> (
     PublicSimExecutionV1,
     MemoryNoeObservationV4,
@@ -613,7 +614,7 @@ pub fn execution_historical_v4(
         core,
         SUCCESS_POLICY,
         None,
-        "e".repeat(64),
+        seed,
         "100",
         "shared-combination",
         BusinessProjectionVersionV1::V4,
@@ -729,6 +730,7 @@ fn execution_with_evidence<P: MemoryOrderEvidence + 'static>(
     let latency = load_embedded_proxy_latency_profile().unwrap();
     let opened = RunOpenedV2 {
         projection_version,
+        latency_sampler_version: "xoshiro256plusplus_jump_multiply_high_empirical_rank_v2".into(),
         run_id: run_id.into(),
         durability_role: RunDurabilityRoleV2::CleanRun,
         platform_rule_snapshot_file_sha256: rules.file_sha256().clone(),
