@@ -1,0 +1,497 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Market data, strategy decisions and account feedback",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "animation": "trace",
+    "viewBox": [
+      1240,
+      730
+    ],
+    "views": [
+      {
+        "id": "observe",
+        "label": "Data and observations",
+        "focus": [
+          "collect",
+          "pipeline",
+          "shared",
+          "strategy"
+        ],
+        "note": "Public observations reach the run through SIM; hidden matching data never enters strategy observations."
+      },
+      {
+        "id": "trade",
+        "label": "Decisions and execution",
+        "focus": [
+          "strategy",
+          "shared",
+          "intent",
+          "sim"
+        ],
+        "note": "The strategy returns trading intents; shared-run coordinates submission."
+      },
+      {
+        "id": "account",
+        "label": "Feedback and accounting",
+        "focus": [
+          "sim",
+          "noe",
+          "ledger",
+          "shared"
+        ],
+        "note": "Execution feedback is normalized, then consumed and applied to ledger by shared-run."
+      }
+    ],
+    "output": "assets/readme/architecture-en.html",
+    "repository": {
+      "url": "https://github.com/slowchillchill/btc-updown-marketmaker.git",
+      "revision": "9a7346a6857d8ccd57a462d8574c73deac2a1733"
+    }
+  },
+  "components": [
+    {
+      "id": "collect",
+      "type": "backend",
+      "label": "data-collect",
+      "sublabel": "Multi-source market data",
+      "pos": [
+        49.128,
+        245
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "data-collect/src/lib.rs",
+          "line": 1,
+          "end_line": 30
+        },
+        {
+          "path": "data-pipeline/training/README.md",
+          "line": 1,
+          "end_line": 7
+        }
+      ]
+    },
+    {
+      "id": "pipeline",
+      "type": "backend",
+      "label": "data-pipeline",
+      "sublabel": "Data prep and historical replay",
+      "pos": [
+        49.128,
+        415
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "backtest/README.md",
+          "line": 13,
+          "end_line": 19
+        },
+        {
+          "path": "backtest/src/run.rs",
+          "line": 515,
+          "end_line": 551
+        }
+      ]
+    },
+    {
+      "id": "train",
+      "type": "backend",
+      "label": "model-train",
+      "sublabel": "GPU training: paused",
+      "pos": [
+        49.128,
+        585
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "model-train/README.md",
+          "line": 1,
+          "end_line": 22
+        },
+        {
+          "path": "model-train/README.md",
+          "line": 137,
+          "end_line": 137
+        }
+      ]
+    },
+    {
+      "id": "strategy",
+      "type": "backend",
+      "label": "baseline-mm",
+      "sublabel": "Rule-based strategy decisions",
+      "pos": [
+        409.40000000000003,
+        75
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "baseline-mm/src/strategies/complementary_pair/mod.rs",
+          "line": 289,
+          "end_line": 310
+        }
+      ]
+    },
+    {
+      "id": "shared",
+      "type": "backend",
+      "label": "shared-run",
+      "sublabel": "Observe, submit, account updates",
+      "pos": [
+        409.40000000000003,
+        305
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "shared-run/src/strategy.rs",
+          "line": 359,
+          "end_line": 384
+        },
+        {
+          "path": "shared-run/src/strategy.rs",
+          "line": 807,
+          "end_line": 819
+        },
+        {
+          "path": "shared-run/src/group.rs",
+          "line": 179,
+          "end_line": 218
+        }
+      ]
+    },
+    {
+      "id": "intent",
+      "type": "backend",
+      "label": "intent-bridge",
+      "sublabel": "Trading intent submission",
+      "pos": [
+        933.432,
+        305
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "intent-bridge/src/sim_adapter.rs",
+          "line": 189,
+          "end_line": 230
+        },
+        {
+          "path": "shared-run/src/group.rs",
+          "line": 455,
+          "end_line": 470
+        }
+      ]
+    },
+    {
+      "id": "sim",
+      "type": "backend",
+      "label": "sim-system",
+      "sublabel": "Public feed, matching and events",
+      "pos": [
+        933.432,
+        555
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "backtest/README.md",
+          "line": 13,
+          "end_line": 19
+        },
+        {
+          "path": "sim-system/src/lib.rs",
+          "line": 1,
+          "end_line": 30
+        },
+        {
+          "path": "shared-run/README.md",
+          "line": 3,
+          "end_line": 13
+        }
+      ]
+    },
+    {
+      "id": "noe",
+      "type": "backend",
+      "label": "execution-normalization",
+      "sublabel": "Execution feedback normalization",
+      "pos": [
+        659.134,
+        555
+      ],
+      "size": [
+        221.07600000000002,
+        82
+      ],
+      "sources": [
+        {
+          "path": "execution-normalization/src/core.rs",
+          "line": 1230,
+          "end_line": 1240
+        },
+        {
+          "path": "shared-run/src/group.rs",
+          "line": 487,
+          "end_line": 507
+        }
+      ]
+    },
+    {
+      "id": "ledger",
+      "type": "backend",
+      "label": "ledger",
+      "sublabel": "Cash, positions and reservations",
+      "pos": [
+        409.40000000000003,
+        555
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "ledger/src/lib.rs",
+          "line": 10,
+          "end_line": 31
+        },
+        {
+          "path": "shared-run/src/group.rs",
+          "line": 179,
+          "end_line": 218
+        }
+      ]
+    },
+    {
+      "id": "visual",
+      "type": "backend",
+      "label": "visualization",
+      "sublabel": "Read-only reports and research",
+      "pos": [
+        49.128,
+        75
+      ],
+      "size": [
+        196.512,
+        82
+      ],
+      "sources": [
+        {
+          "path": "visualization/README.md",
+          "line": 1,
+          "end_line": 5
+        }
+      ]
+    },
+    {
+      "id": "reports",
+      "type": "database",
+      "label": "Backtest report",
+      "sublabel": "Run results produced by backtest",
+      "pos": [
+        659.134,
+        75
+      ],
+      "size": [
+        221.07600000000002,
+        82
+      ],
+      "sources": [
+        {
+          "path": "backtest/src/run.rs",
+          "line": 405,
+          "end_line": 448
+        },
+        {
+          "path": "visualization/README.md",
+          "line": 3,
+          "end_line": 5
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "backtest · historical run host and reports",
+      "wraps": [
+        "strategy",
+        "shared",
+        "intent",
+        "sim",
+        "noe",
+        "ledger",
+        "reports"
+      ],
+      "pad": 35
+    }
+  ],
+  "connections": [
+    {
+      "id": "market-data",
+      "from": "collect",
+      "to": "pipeline",
+      "label": "Raw market data",
+      "labelAt": [
+        147.384,
+        371
+      ]
+    },
+    {
+      "id": "prepared-data",
+      "from": "pipeline",
+      "to": "shared",
+      "label": "Public observations (via SIM)"
+    },
+    {
+      "id": "observation",
+      "from": "shared",
+      "to": "strategy",
+      "label": "Market + account",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelDx": 64.08,
+      "labelDy": -62
+    },
+    {
+      "id": "decision",
+      "from": "strategy",
+      "to": "shared",
+      "label": "Trading intents",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDx": -64.08,
+      "labelDy": 62
+    },
+    {
+      "id": "submit",
+      "from": "shared",
+      "to": "intent",
+      "label": "Reserve, then submit"
+    },
+    {
+      "id": "orders",
+      "from": "intent",
+      "to": "sim",
+      "label": "SIM orders",
+      "labelDy": 65
+    },
+    {
+      "id": "execution",
+      "from": "sim",
+      "to": "noe",
+      "label": "Feedback"
+    },
+    {
+      "id": "normalized",
+      "from": "noe",
+      "to": "ledger",
+      "label": "Posting"
+    },
+    {
+      "id": "feedback",
+      "from": "ledger",
+      "to": "shared",
+      "label": "Account feedback",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelDy": -66
+    },
+    {
+      "id": "training-input",
+      "from": "pipeline",
+      "to": "train",
+      "label": "Training inputs",
+      "labelAt": [
+        147.384,
+        541
+      ]
+    },
+    {
+      "id": "hidden-input",
+      "from": "pipeline",
+      "to": "sim",
+      "label": "Hidden matching data: SIM only",
+      "fromSide": "left",
+      "toSide": "bottom",
+      "via": [
+        [
+          16.375999999999998,
+          456
+        ],
+        [
+          16.375999999999998,
+          715
+        ],
+        [
+          1031.688,
+          715
+        ]
+      ],
+      "labelAt": [
+        525.1,
+        695
+      ]
+    },
+    {
+      "id": "report-output",
+      "from": "reports",
+      "to": "visual",
+      "label": "Run report",
+      "fromSide": "top",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "contracts · shared interfaces",
+      "items": [
+        "Shared types and semantics; shared-run consumes normalized events and applies them to ledger."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Model research status",
+      "items": [
+        "Historical limited training validation completed. Training is paused pending redesign on A/shared components; earlier ONNX inference was validated."
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "Illustrative flow",
+      "items": [
+        "Highlights show business order, not elapsed time. Complete PAPER / LIVE hosts are planned."
+      ]
+    }
+  ]
+}
