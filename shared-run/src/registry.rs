@@ -28,6 +28,9 @@ impl FrozenIntentRefV1 {
     pub fn intent(&self) -> &ModelIntentV1 {
         &self.intent
     }
+    pub(crate) fn intent_arc(&self) -> Arc<ModelIntentV1> {
+        Arc::clone(&self.intent)
+    }
 }
 #[derive(Clone)]
 pub struct SubmittedLegReadV1<'a> {
@@ -119,6 +122,9 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             cancel_locations: BTreeMap::new(),
             action_population: Some(ActionPopulation::default()),
         }
+    }
+    pub(crate) fn context(&self) -> &ExecutionNormalizationContextV1 {
+        &self.context
     }
     pub(crate) fn observed_market_count(&self) -> usize {
         self.markets.len()

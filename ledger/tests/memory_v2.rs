@@ -1019,7 +1019,8 @@ fn new_policy_checkpoint_preserves_identity_and_rejects_old_dual_cash_identity()
         Some(AccountAdmissionPolicyV3::ActualCashNoMarketLimit)
     );
     // 旧持久边界使用 DualCash 枚举及 maker_cash。它不能静默改用新政策。
-    let mut old = serde_json::to_value(&writer).unwrap();
+    // 保持原CBOR整数；workspace启用JSON arbitrary_precision时，JSON数字的私有map不是CBOR整数。
+    let mut old: ciborium::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
     let mut same_identity_bytes = Vec::new();
     ciborium::ser::into_writer(&old, &mut same_identity_bytes).unwrap();
     assert_eq!(
@@ -1028,8 +1029,26 @@ fn new_policy_checkpoint_preserves_identity_and_rejects_old_dual_cash_identity()
             .admission_policy_v3(),
         writer.admission_policy_v3()
     );
-    old["policy"] = serde_json::json!({"DualCash":"DualCashNoMarketLimit"});
-    old["economics"]["cash"]["maker_cash"] = serde_json::json!("0");
+    fn field_mut<'a>(value: &'a mut ciborium::Value, name: &str) -> &'a mut ciborium::Value {
+        &mut value
+            .as_map_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|(key, _)| key.as_text() == Some(name))
+            .unwrap()
+            .1
+    }
+    *field_mut(&mut old, "policy") = ciborium::Value::Map(vec![(
+        ciborium::Value::Text("DualCash".into()),
+        ciborium::Value::Text("DualCashNoMarketLimit".into()),
+    )]);
+    field_mut(field_mut(&mut old, "economics"), "cash")
+        .as_map_mut()
+        .unwrap()
+        .push((
+            ciborium::Value::Text("maker_cash".into()),
+            ciborium::Value::Text("0".into()),
+        ));
     let mut old_bytes = Vec::new();
     ciborium::ser::into_writer(&old, &mut old_bytes).unwrap();
     assert!(LedgerWriterV1::restore_checkpoint(old_bytes.as_slice()).is_err());

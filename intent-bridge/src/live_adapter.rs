@@ -9,7 +9,7 @@ use polymarket_client_sdk_v2::auth::state::Authenticated;
 use polymarket_client_sdk_v2::clob::Client;
 use polymarket_client_sdk_v2::clob::types::request::CancelMarketOrderRequest;
 use polymarket_client_sdk_v2::clob::types::response::{CancelOrdersResponse, PostOrderResponse};
-use polymarket_client_sdk_v2::clob::types::{Amount, OrderType, Side, SignedOrder};
+use polymarket_client_sdk_v2::clob::types::{Amount, OrderType, Side, SignableOrder, SignedOrder};
 use polymarket_client_sdk_v2::error::Error;
 use polymarket_client_sdk_v2::types::{B256, DateTime, U256, Utc};
 
@@ -25,6 +25,22 @@ pub enum LiveIntentImmediateSuccessV1 {
     Cancellation(CancelOrdersResponse),
 }
 
+/// 同一次签名的订单正文和基础订单hash；字段私有，发送消费原正文。
+pub struct PreparedLiveIntentV1 {
+    payload: PreparedLivePayload,
+    order_hashes: Vec<B256>,
+}
+enum PreparedLivePayload {
+    Single(SignedOrder),
+    Paired(Vec<SignedOrder>),
+    Cancellation(ModelIntentV1),
+}
+impl PreparedLiveIntentV1 {
+    pub fn order_hashes(&self) -> &[B256] {
+        &self.order_hashes
+    }
+}
+
 pub struct LiveAdapterV1<'live, S: Signer, K: Kind> {
     client: &'live Client<Authenticated<K>>,
     signer: &'live S,
@@ -35,7 +51,7 @@ impl<'live, S: Signer, K: Kind> LiveAdapterV1<'live, S, K> {
         Self { client, signer }
     }
 
-    async fn signed_buy(&self, leg: &BuyLegIntentV1) -> Result<SignedOrder, Error> {
+    async fn signable_buy(&self, leg: &BuyLegIntentV1) -> Result<SignableOrder, Error> {
         let token_id = U256::from_str(&leg.token_id.0)?;
         let signable = match &leg.order {
             BuyOrderIntentV1::GtcLimit {
@@ -103,29 +119,90 @@ impl<'live, S: Signer, K: Kind> LiveAdapterV1<'live, S, K> {
                     .await?
             }
         };
-        self.client.sign(self.signer, signable).await
+        Ok(signable)
     }
 
+    async fn signed_buy(&self, leg: &BuyLegIntentV1) -> Result<(SignedOrder, B256), Error> {
+        self.client
+            .sign_and_hash(self.signer, self.signable_buy(leg).await?)
+            .await
+    }
+
+    async fn prepare_intent(&self, intent: &ModelIntentV1) -> Result<PreparedLiveIntentV1, Error> {
+        let (payload, order_hashes) = match intent {
+            ModelIntentV1::SubmitSingleBuy { order, .. } => {
+                let (signed, hash) = self.signed_buy(order).await?;
+                (PreparedLivePayload::Single(signed), vec![hash])
+            }
+            ModelIntentV1::SubmitPairedBuy { orders, .. } => {
+                let (first, first_hash) = self.signed_buy(&orders[0]).await?;
+                let (second, second_hash) = self.signed_buy(&orders[1]).await?;
+                (
+                    PreparedLivePayload::Paired(vec![first, second]),
+                    vec![first_hash, second_hash],
+                )
+            }
+            _ => (PreparedLivePayload::Cancellation(intent.clone()), vec![]),
+        };
+        Ok(PreparedLiveIntentV1 {
+            payload,
+            order_hashes,
+        })
+    }
     async fn dispatch_intent(
         &mut self,
         intent: &ModelIntentV1,
     ) -> Result<LiveIntentImmediateSuccessV1, Error> {
-        match intent {
-            ModelIntentV1::SubmitSingleBuy { order, .. } => {
-                let signed = self.signed_buy(order).await?;
+        let payload = match intent {
+            ModelIntentV1::SubmitSingleBuy { order, .. } => PreparedLivePayload::Single(
                 self.client
-                    .post_order(signed)
-                    .await
-                    .map(LiveIntentImmediateSuccessV1::PostOrder)
-            }
+                    .sign(self.signer, self.signable_buy(order).await?)
+                    .await?,
+            ),
             ModelIntentV1::SubmitPairedBuy { orders, .. } => {
-                let first = self.signed_buy(&orders[0]).await?;
-                let second = self.signed_buy(&orders[1]).await?;
-                self.client
-                    .post_orders(vec![first, second])
-                    .await
-                    .map(LiveIntentImmediateSuccessV1::PostOrders)
+                let first = self
+                    .client
+                    .sign(self.signer, self.signable_buy(&orders[0]).await?)
+                    .await?;
+                let second = self
+                    .client
+                    .sign(self.signer, self.signable_buy(&orders[1]).await?)
+                    .await?;
+                PreparedLivePayload::Paired(vec![first, second])
             }
+            _ => return self.dispatch_cancellation(intent).await,
+        };
+        self.send_payload(payload).await
+    }
+    async fn send_prepared(
+        &mut self,
+        prepared: PreparedLiveIntentV1,
+    ) -> Result<LiveIntentImmediateSuccessV1, Error> {
+        self.send_payload(prepared.payload).await
+    }
+    async fn send_payload(
+        &mut self,
+        payload: PreparedLivePayload,
+    ) -> Result<LiveIntentImmediateSuccessV1, Error> {
+        match payload {
+            PreparedLivePayload::Single(order) => self
+                .client
+                .post_order(order)
+                .await
+                .map(LiveIntentImmediateSuccessV1::PostOrder),
+            PreparedLivePayload::Paired(orders) => self
+                .client
+                .post_orders(orders)
+                .await
+                .map(LiveIntentImmediateSuccessV1::PostOrders),
+            PreparedLivePayload::Cancellation(intent) => self.dispatch_cancellation(&intent).await,
+        }
+    }
+    async fn dispatch_cancellation(
+        &mut self,
+        intent: &ModelIntentV1,
+    ) -> Result<LiveIntentImmediateSuccessV1, Error> {
+        match intent {
             ModelIntentV1::CancelOrder { platform_order_id } => self
                 .client
                 .cancel_order(platform_order_id)
@@ -152,7 +229,24 @@ impl<'live, S: Signer, K: Kind> LiveAdapterV1<'live, S, K> {
                     .await
                     .map(LiveIntentImmediateSuccessV1::Cancellation)
             }
+            _ => unreachable!("准备阶段只在此保存撤单意图"),
         }
+    }
+}
+
+impl<'live, S: Signer, K: Kind> crate::IntentBridge<LiveAdapterV1<'live, S, K>> {
+    pub async fn prepare(
+        &self,
+        _: (),
+        intent: &ModelIntentV1,
+    ) -> Result<PreparedLiveIntentV1, Error> {
+        self.backend.prepare_intent(intent).await
+    }
+    pub async fn execute_prepared(
+        &mut self,
+        prepared: PreparedLiveIntentV1,
+    ) -> Result<LiveIntentImmediateSuccessV1, Error> {
+        self.backend.send_prepared(prepared).await
     }
 }
 
@@ -183,6 +277,7 @@ impl<'live, S: Signer, K: Kind> BridgeBackendV1 for LiveAdapterV1<'live, S, K> {
 
 #[cfg(test)]
 mod tests {
+    use super::PreparedLivePayload;
     use std::str::FromStr as _;
     use std::time::Duration;
 
@@ -190,10 +285,10 @@ mod tests {
     use polymarket_client_sdk_v2::POLYGON;
     use polymarket_client_sdk_v2::auth::state::Authenticated;
     use polymarket_client_sdk_v2::auth::{Credentials, LocalSigner, Normal, Signer as _, Uuid};
-    use polymarket_client_sdk_v2::clob::types::TickSize;
+    use polymarket_client_sdk_v2::clob::types::{SignatureType, TickSize};
     use polymarket_client_sdk_v2::clob::{Client, Config};
     use polymarket_client_sdk_v2::error::{Kind as ErrorKind, Method, Status, StatusCode};
-    use polymarket_client_sdk_v2::types::{B256, Decimal, U256};
+    use polymarket_client_sdk_v2::types::{Address, B256, Decimal, U256};
     use serde_json::{Value, json};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
@@ -447,7 +542,19 @@ mod tests {
         };
         let mut bridge = IntentBridge::bind_live(&client, &signer);
 
-        let result = bridge.execute((), &intent).await.expect("双腿提交应成功");
+        let prepared = bridge.prepare((), &intent).await.expect("双腿均先准备");
+        assert_eq!(prepared.order_hashes().len(), 2);
+        assert_ne!(prepared.order_hashes()[0], prepared.order_hashes()[1]);
+        let PreparedLivePayload::Paired(ref signed) = prepared.payload else {
+            unreachable!()
+        };
+        let expected_wire = serde_json::to_value(signed).unwrap();
+        // 跨过不同毫秒，若发送错误重建时间或payload，完整正文对照会失败。
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let result = bridge
+            .execute_prepared(prepared)
+            .await
+            .expect("发送同一份准备正文");
 
         let LiveIntentImmediateSuccessV1::PostOrders(responses) = result else {
             panic!("应返回批订单即时响应");
@@ -464,6 +571,10 @@ mod tests {
         assert_eq!(
             (captured[1].method.as_str(), captured[1].path.as_str()),
             ("POST", "/orders")
+        );
+        assert_eq!(
+            captured[1].body, expected_wire,
+            "身份交付后原签名payload一次POST"
         );
         let orders = captured[1].body.as_array().expect("批请求体应为数组");
         assert_eq!(orders.len(), 2);
@@ -501,7 +612,22 @@ mod tests {
         ])
         .await;
         let signer = test_signer!(POLYGON);
-        let client = authenticated_client(&host, &signer, None).await;
+        let funder = Address::from_str("0xaDEFf2158d668f64308C62ef227C5CcaCAAf976D")
+            .expect("测试存款钱包地址应合法");
+        let client = Client::new(&host, Config::default())
+            .expect("回环地址应创建 Client")
+            .authentication_builder(&signer)
+            .credentials(Credentials::new(
+                Uuid::nil(),
+                TEST_SECRET.to_owned(),
+                TEST_PASSPHRASE.to_owned(),
+            ))
+            .funder(funder)
+            .signature_type(SignatureType::Poly1271)
+            .salt_generator(|| 88)
+            .authenticate()
+            .await
+            .expect("固定存款钱包测试凭据应离线认证");
         cache_order_rules(&client, &["33"]);
         let intent = ModelIntentV1::SubmitSingleBuy {
             condition_id: condition(),
@@ -535,6 +661,9 @@ mod tests {
         assert_eq!(body["order"]["makerAmount"], "7200000");
         assert_eq!(body["order"]["takerAmount"], "18000000");
         assert_eq!(body["order"]["side"], "BUY");
+        assert_eq!(body["order"]["signatureType"], 3);
+        assert_eq!(body["order"]["maker"], funder.to_string().to_lowercase());
+        assert_eq!(body["order"]["signer"], funder.to_string().to_lowercase());
     }
 
     #[tokio::test]

@@ -574,21 +574,20 @@ fn assert_range_tail_day_economics(report: &HistoricalRunReportV1, duration_ms: 
         .mul(&amount("0.4"));
     let submitted = principal.add(&reserved_fee).add(&down);
     let accepted = principal.add(&actual_fee);
-    // 1601提交；1622账户先接到Up接受事实，原SubmittedUnknown仍占可用现金；
-    // 1632响应转换旧预留。原cash_balances同时包含两项真实现金约束，峰值尚无trade。
-    let transitional = submitted.add(&accepted);
+    // 1601提交；1622收到Up经济事实时准确关联替代本地预留，1632迟到响应不重复占用。
+    // 初始LIMIT费预留略大于实际费，因此最大占用是原提交10.675。
     let converted = down.add(&accepted);
     // 1899原尾观察才领取成功成交/费用；占用为剩余Down预留+成功剩余本金。
     // 只按这些原公共观察时点积分，不回填隐藏成交时刻或追加驱动事件。
     let tail = down.add(&principal);
     let integral = submitted
         .mul(&amount("21"))
-        .add(&transitional.mul(&amount("10")))
+        .add(&converted.mul(&amount("10")))
         .add(&converted.mul(&amount("267")))
         .add(&tail);
     assert_eq!(
         statistics.maximum_committed_capital_pusd,
-        ExecutionReadValueV1::Known(transitional.public())
+        ExecutionReadValueV1::Known(submitted.public())
     );
     assert_eq!(
         statistics.committed_capital_pusd_milliseconds,
@@ -1738,6 +1737,24 @@ fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
     let latest_generation = latest["generation"].as_u64().unwrap();
     assert!(latest_generation > 1);
     let mut target = None;
+    let mut prepared_target = None;
+    fn field<'a>(value: &'a ciborium::Value, name: &str) -> Option<&'a ciborium::Value> {
+        value
+            .as_map()?
+            .iter()
+            .find_map(|(key, value)| (key.as_text() == Some(name)).then_some(value))
+    }
+    fn has_prepared_mode(value: &ciborium::Value) -> bool {
+        match value {
+            ciborium::Value::Map(values) => values.iter().any(|(k, v)| {
+                (k.as_text() == Some("order_identity_mode")
+                    && v.as_text() == Some("PublicRequestV1"))
+                    || has_prepared_mode(v)
+            }),
+            ciborium::Value::Array(values) => values.iter().any(has_prepared_mode),
+            _ => false,
+        }
+    }
     for generation in 0..latest_generation {
         let directory = archive.join(format!("checkpoint-{generation:020}"));
         #[derive(serde::Deserialize)]
@@ -1747,58 +1764,90 @@ fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
         #[derive(serde::Deserialize)]
         struct Saved {
             state: State,
+            driver: Vec<u8>,
         }
         if let Ok(file) = std::fs::File::open(directory.join("candidate-000000.cbor")) {
             let saved: Saved = ciborium::de::from_reader(file).unwrap();
-            if saved.state.pending.is_some() {
+            if saved.state.pending.is_some() && target.is_none() {
                 target = Some(generation);
+            }
+            let driver: ciborium::Value =
+                ciborium::de::from_reader(saved.driver.as_slice()).unwrap();
+            let pending = field(&driver, "state")
+                .and_then(|v| field(v, "session"))
+                .and_then(|v| field(v, "mutation_requests"))
+                .and_then(|v| field(v, "pending_actions"));
+            if prepared_target.is_none() && pending.is_some_and(has_prepared_mode) {
+                prepared_target = Some(generation);
+            }
+            if target.is_some() && prepared_target.is_some() {
                 break;
             }
         }
     }
-    let generation = target.expect("必须在待发送计算处保存完整检查点");
-    let directory = day
-        .checkpoint_root
-        .join(format!("checkpoint-{generation:020}"));
-    std::fs::create_dir_all(&directory).unwrap();
-    let mut files = vec![];
-    for name in ["day.cbor", "candidate-000000.cbor", "candidate-000001.cbor"] {
-        std::fs::copy(
-            archive
-                .join(format!("checkpoint-{generation:020}"))
-                .join(name),
-            directory.join(name),
+    for generation in [
+        target.expect("必须在待发送计算处保存完整检查点"),
+        prepared_target.expect("必须在新身份BUY尚未处理时保存完整SIM检查点"),
+    ] {
+        eprintln!("完整原运行恢复 generation={generation}，覆盖待发送计算或prepared BUY待处理请求");
+        let directory = day
+            .checkpoint_root
+            .join(format!("checkpoint-{generation:020}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut files = vec![];
+        for name in ["day.cbor", "candidate-000000.cbor", "candidate-000001.cbor"] {
+            std::fs::copy(
+                archive
+                    .join(format!("checkpoint-{generation:020}"))
+                    .join(name),
+                directory.join(name),
+            )
+            .unwrap();
+            files.push(serde_json::json!({"path":name,"sha256":format!("{:x}",sha2::Sha256::digest(std::fs::read(directory.join(name)).unwrap()))}));
+        }
+        let previous = serde_json::json!({"format":latest["format"],"identity":latest["identity"],"generation":generation,"files":files});
+        std::fs::write(
+            day.checkpoint_root.join("checkpoint.json"),
+            serde_json::to_vec(&previous).unwrap(),
         )
         .unwrap();
-        files.push(serde_json::json!({"path":name,"sha256":format!("{:x}",sha2::Sha256::digest(std::fs::read(directory.join(name)).unwrap()))}));
-    }
-    let previous = serde_json::json!({"format":latest["format"],"identity":latest["identity"],"generation":generation,"files":files});
-    std::fs::write(
-        day.checkpoint_root.join("checkpoint.json"),
-        serde_json::to_vec(&previous).unwrap(),
-    )
-    .unwrap();
-    let resumed = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| {
-        Ok(Probe {
-            rules: Some(rules.clone()),
-            ..Default::default()
+        let resumed = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| {
+            Ok(Probe {
+                rules: Some(rules.clone()),
+                ..Default::default()
+            })
         })
-    })
-    .unwrap();
-    assert_eq!(
-        resumed[0].public_applied_inputs, results[0].public_applied_inputs,
-        "恢复不重新归约已提交公共前缀"
-    );
-    for (before, after) in results[0].candidates.iter().zip(&resumed[0].candidates) {
-        assert_eq!(before.report, after.report);
-    }
-    for (candidate, before) in day.candidates.iter().zip(uninterrupted_logs) {
+        .unwrap();
         assert_eq!(
-            std::fs::read(&candidate.sim_log).unwrap(),
-            before,
-            "请求/成交/反馈执行日志与不中断运行逐字一致"
+            resumed[0].public_applied_inputs, results[0].public_applied_inputs,
+            "恢复不重新归约已提交公共前缀"
         );
+        for (before, after) in results[0].candidates.iter().zip(&resumed[0].candidates) {
+            assert_eq!(before.report, after.report);
+        }
+        for (candidate, before) in day.candidates.iter().zip(&uninterrupted_logs) {
+            assert_eq!(
+                std::fs::read(&candidate.sim_log).unwrap(),
+                *before,
+                "请求/成交/反馈执行日志与不中断运行逐字一致"
+            );
+        }
     }
+    // 旧完整运行格式不能被当前prepared身份运行静默接续。
+    let pointer_path = day.checkpoint_root.join("checkpoint.json");
+    let pointer_bytes = std::fs::read(&pointer_path).unwrap();
+    let mut old: serde_json::Value = serde_json::from_slice(&pointer_bytes).unwrap();
+    old["format"] = serde_json::json!("original-parquet-day-checkpoint-v2");
+    std::fs::write(&pointer_path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let error = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| -> Result<
+        Probe,
+        MaterialError,
+    > {
+        panic!("旧运行版本不得创建新策略或账户")
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("日检查点与输入、配置或版本不符"));
+    std::fs::write(&pointer_path, pointer_bytes).unwrap();
     // 尚未发布的局部文件不覆盖完整引用，也不阻止完成复用。
     let latest: serde_json::Value = serde_json::from_reader(
         std::fs::File::open(day.checkpoint_root.join("checkpoint.json")).unwrap(),

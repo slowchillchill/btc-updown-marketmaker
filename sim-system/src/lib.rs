@@ -16,6 +16,7 @@ pub(crate) mod market_directory;
 pub(crate) mod matching;
 #[cfg(feature = "measurement")]
 mod measurement_probe;
+mod prepared_order;
 
 pub mod platform_rules;
 pub mod public_consumption;

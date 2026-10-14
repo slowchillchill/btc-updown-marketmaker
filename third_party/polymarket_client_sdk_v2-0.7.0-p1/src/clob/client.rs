@@ -87,6 +87,15 @@ const TERMINAL_CURSOR: &str = "LTE="; // base64("-1")
 
 pub(crate) const ORDER_VERSION_MISMATCH_ERROR: &str = "order_version_mismatch";
 
+// 原签名产生的临时摘要或组成部分；不保存第二份订单状态。
+enum OrderHashSource {
+    Existing(B256),
+    Poly1271 {
+        domain_separator: B256,
+        contents_hash: B256,
+    },
+}
+
 fn push_hex(out: &mut String, bytes: &[u8]) {
     const LUT: &[u8; 16] = b"0123456789abcdef";
     out.reserve(bytes.len() * 2);
@@ -1711,7 +1720,39 @@ impl<K: Kind> Client<Authenticated<K>> {
         reason = "No need to publicly document as we are guarded by the typestate pattern. \
         We cannot call `sign` without first calling `authenticate`"
     )]
-    pub async fn sign<S: Signer>(
+    pub async fn sign<S: Signer>(&self, signer: &S, order: SignableOrder) -> Result<SignedOrder> {
+        self.sign_order(signer, order)
+            .await
+            .map(|(signed, _)| signed)
+    }
+
+    /// 单次签名并返回平台基础Order hash；不向POST正文增加字段。
+    /// 普通V1/V2直接返回原签名摘要。Poly1271复用原签名中间值，
+    /// 仅此提前身份入口增加一次66字节Keccak；原sign不生成该基础摘要。
+    pub async fn sign_and_hash<S: Signer>(
+        &self,
+        signer: &S,
+        order: SignableOrder,
+    ) -> Result<(SignedOrder, B256)> {
+        let (signed, source) = self.sign_order(signer, order).await?;
+        let order_hash = match source {
+            OrderHashSource::Existing(hash) => hash,
+            OrderHashSource::Poly1271 {
+                domain_separator,
+                contents_hash,
+            } => {
+                let mut input = [0_u8; 66];
+                input[0] = 0x19;
+                input[1] = 0x01;
+                input[2..34].copy_from_slice(domain_separator.as_slice());
+                input[34..66].copy_from_slice(contents_hash.as_slice());
+                keccak256(input)
+            }
+        };
+        Ok((signed, order_hash))
+    }
+
+    async fn sign_order<S: Signer>(
         &self,
         signer: &S,
         SignableOrder {
@@ -1720,7 +1761,7 @@ impl<K: Kind> Client<Authenticated<K>> {
             post_only,
             defer_exec,
         }: SignableOrder,
-    ) -> Result<SignedOrder> {
+    ) -> Result<(SignedOrder, OrderHashSource)> {
         let chain_id = signer
             .chain_id()
             .expect("Validated not none in `authenticate`");
@@ -1733,7 +1774,7 @@ impl<K: Kind> Client<Authenticated<K>> {
         let config = contract_config(chain_id, neg_risk)
             .ok_or(Error::missing_contract_config(chain_id, neg_risk))?;
 
-        let signature = match &payload {
+        let (signature, order_hash) = match &payload {
             OrderPayload::V2(p) => {
                 let exchange = config.exchange_v2.ok_or_else(|| {
                     Error::validation(format!(
@@ -1748,13 +1789,22 @@ impl<K: Kind> Client<Authenticated<K>> {
                     ..Eip712Domain::default()
                 };
                 if p.order.signatureType == SignatureType::Poly1271 as u8 {
-                    self.sign_poly1271_order(signer, &p.order, &domain, chain_id)
-                        .await?
+                    let (signature, domain_separator, contents_hash) = self
+                        .sign_poly1271_order(signer, &p.order, &domain, chain_id)
+                        .await?;
+                    (
+                        signature,
+                        OrderHashSource::Poly1271 {
+                            domain_separator,
+                            contents_hash,
+                        },
+                    )
                 } else {
-                    signer
-                        .sign_hash(&p.order.eip712_signing_hash(&domain))
-                        .await?
-                        .into()
+                    let order_hash = p.order.eip712_signing_hash(&domain);
+                    (
+                        signer.sign_hash(&order_hash).await?.into(),
+                        OrderHashSource::Existing(order_hash),
+                    )
                 }
             }
             OrderPayload::V1(p) => {
@@ -1765,21 +1815,25 @@ impl<K: Kind> Client<Authenticated<K>> {
                     verifying_contract: Some(config.exchange),
                     ..Eip712Domain::default()
                 };
-                signer
-                    .sign_hash(&p.order.eip712_signing_hash(&domain))
-                    .await?
-                    .into()
+                let order_hash = p.order.eip712_signing_hash(&domain);
+                (
+                    signer.sign_hash(&order_hash).await?.into(),
+                    OrderHashSource::Existing(order_hash),
+                )
             }
         };
 
-        Ok(SignedOrder {
-            payload,
-            signature,
-            order_type,
-            owner: self.state().credentials.key,
-            post_only,
-            defer_exec,
-        })
+        Ok((
+            SignedOrder {
+                payload,
+                signature,
+                order_type,
+                owner: self.state().credentials.key,
+                post_only,
+                defer_exec,
+            },
+            order_hash,
+        ))
     }
 
     async fn sign_poly1271_order<S: Signer>(
@@ -1788,7 +1842,7 @@ impl<K: Kind> Client<Authenticated<K>> {
         order: &crate::clob::types::OrderV2,
         app_domain: &Eip712Domain,
         chain_id: u64,
-    ) -> Result<OrderSignature> {
+    ) -> Result<(OrderSignature, B256, B256)> {
         let contents_hash = order.eip712_hash_struct();
         let app_domain_separator = app_domain.hash_struct();
 
@@ -1824,7 +1878,11 @@ impl<K: Kind> Client<Authenticated<K>> {
             u16::try_from(ORDER_TYPE_STRING.len()).expect("order type string length fits in u16");
         push_hex(&mut wrapped, &contents_type_len.to_be_bytes());
 
-        Ok(OrderSignature::Wrapped(wrapped))
+        Ok((
+            OrderSignature::Wrapped(wrapped),
+            app_domain_separator,
+            contents_hash,
+        ))
     }
 
     /// Posts a signed order to the orderbook.

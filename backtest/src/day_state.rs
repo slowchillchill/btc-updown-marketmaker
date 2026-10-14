@@ -498,7 +498,7 @@ pub(crate) struct CheckpointPublicationV1 {
     pub generation: u64,
     pub files: Vec<CheckpointFileV1>,
 }
-pub(crate) const DAY_CHECKPOINT_FORMAT: &str = "original-parquet-day-checkpoint-v2";
+pub(crate) const DAY_CHECKPOINT_FORMAT: &str = "original-parquet-day-checkpoint-v3";
 struct DigestWriter<W> {
     inner: W,
     digest: Sha256,

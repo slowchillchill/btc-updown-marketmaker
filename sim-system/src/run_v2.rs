@@ -960,9 +960,15 @@ impl UniqueSessionStateV2 {
         input: BuyOrderActionV2,
         rules: &PlatformRuleSnapshotV3,
         finality_policy: &TradeFinalityPolicyV2,
+        prepared_order_id: Option<&str>,
     ) -> Result<(Self, BuyOrderDispositionV2), MatchingStateErrorV1> {
         self.map_execution_state(|execution_state| {
-            execution_state.apply_buy_order(input, rules, finality_policy)
+            execution_state.apply_buy_order_with_identity(
+                input,
+                rules,
+                finality_policy,
+                prepared_order_id,
+            )
         })
     }
 
@@ -3832,6 +3838,9 @@ fn validate_post_item_v2(item: &PostOrderItemV1) -> Result<(), SimRunActorErrorV
 }
 
 fn validate_platform_order_id_v2(platform_order_id: &str) -> bool {
+    if crate::prepared_order::is_prepared_order_id(platform_order_id) {
+        return true;
+    }
     let Some(sequence) = platform_order_id.strip_prefix("sim-") else {
         return false;
     };
@@ -4720,6 +4729,8 @@ fn apply_post_action_v2(
                 )? {
                     Err(reason) => PostOrderItemOutcomeV2::RejectedNoEffect(reason),
                     Ok(terms) => {
+                        let prepared_order_id =
+                            item.prepared_order_id(&global_request_id, key.batch_item_ordinal);
                         let input = BuyOrderActionV2 {
                             global_request_id,
                             batch_item_ordinal: key.batch_item_ordinal,
@@ -4730,7 +4741,12 @@ fn apply_post_action_v2(
                             terms,
                         };
                         let (session, disposition) = session
-                            .apply_buy_order(input, rules, finality_policy)
+                            .apply_buy_order(
+                                input,
+                                rules,
+                                finality_policy,
+                                prepared_order_id.as_deref(),
+                            )
                             .map_err(SimRunActorErrorV2::Matching)?;
 
                         let (outcome, lifecycle) = match disposition {
@@ -8370,6 +8386,7 @@ mod tests {
         kind: SimBuyOrderKindV1,
     ) -> PostOrderItemV1 {
         PostOrderItemV1 {
+            order_identity_mode: Default::default(),
             item_id: item_id.to_owned(),
             order: crate::execution::SimBuyOrderV1 {
                 condition_id: condition_id.clone(),
@@ -9719,6 +9736,38 @@ mod tests {
             lifecycle.extend(transition.lifecycle);
         }
         (state, receipt, effects, lifecycle)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn legal_missing_prepared_order_query_keeps_not_found_semantics() {
+        let (_directory, mut actor) = active_market_actor(
+            SimCallerRoleV1::HistoricalBacktest,
+            "run-missing-prepared-query",
+        )
+        .await;
+        let request = BusinessRequestV2::Order(OrderRequestV2 {
+            context: RequestContextV2 {
+                global_request_id: "query-missing-prepared".into(),
+                caller_correlation_id: None,
+            },
+            platform_order_id: crate::prepared_order::prepared_order_id_v1("never-submitted", 0),
+        });
+        let state = actor.state.take().unwrap();
+        let (_, _, effect) = register_and_advance_query_candidate(
+            &actor.opened,
+            actor.scenario.initial_market_directory(),
+            state,
+            &request,
+            1,
+            1_200,
+            actor._latency_profile.as_ref(),
+            actor._rule_snapshot.snapshot(),
+            actor._finality_policy.as_ref(),
+        );
+        assert_eq!(
+            effect.result,
+            QueryActionResultV2::Order(OrderQueryResultV2::NotFound)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
