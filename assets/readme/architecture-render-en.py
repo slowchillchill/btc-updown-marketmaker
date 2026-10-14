@@ -10,15 +10,22 @@ import hashlib, json, math, re, xml.etree.ElementTree as ET
 OUT = Path(__file__).resolve().parent
 SPEC = json.loads((OUT/'architecture-en.json').read_text())
 SVG = ET.fromstring(re.search(r'<svg[\s\S]*?</svg>', (OUT/'architecture-en.html').read_text()).group())
-W,H,S = 1320,1080,2
-OX,OY = 40,132
-FONT='/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
-BOLD='/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc'
-MONO='/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
-BG=(7,17,33); PANEL=(12,28,49); BOX=(15,35,60); BORDER=(39,67,101)
-INK=(230,242,255); MUTED=(154,181,210); LINE=(69,102,139)
-CYAN=(69,221,238); BLUE=(93,154,255); PURPLE=(178,151,243)
-COLORS=[CYAN,CYAN,BLUE,BLUE,CYAN,PURPLE]
+W,H,S = 1320,1220,2
+OX,OY = 40,272
+FONT='/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf'
+BOLD='/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf'
+MONO='/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf'
+# PMM VI 0.4 implementation values, confirmed for this README visual.
+BG=(255,255,255); PANEL=BG; BOX=BG; BORDER=(220,225,229)
+INK=(23,27,32); MUTED=(83,96,108); LINE=(57,117,138)
+BLUE=(13,65,162); ACTIVE=(220,235,231); NOTICE=(163,79,69)
+COLORS=[BLUE]*6
+# Reproduce style.css's visible window, not the noisy alpha bounding box.
+LOGO_SOURCE=OUT.parents[1]/'visualization/ui/public/pmm-cobalt.png'
+with Image.open(LOGO_SOURCE) as original:
+ scale=original.width/232.66
+ LOGO=original.crop((36.33*scale,32.13*scale,(36.33+160)*scale,(32.13+52.07)*scale))
+LOGO=LOGO.resize((160*S,round(52.07*S)),Image.Resampling.LANCZOS)
 EDGES={}
 for e in SVG.iter('path'):
  if 'data-edge-id' in e.attrib:
@@ -42,7 +49,16 @@ def font(size,bold=False,mono=False):return ImageFont.truetype(MONO if mono else
 def point(p):return (round((p[0]+OX)*S),round((p[1]+OY)*S))
 def rect(x,y,w,h):return (round(x*S),round(y*S),round((x+w)*S),round((y+h)*S))
 def tx(d,x,y,text,size=16,fill=INK,bold=False,mono=False,anchor='mm'):
- d.text((round(x*S),round(y*S)),text,font=font(size,bold,mono),fill=fill,anchor=anchor)
+ # Noto Sans lacks the directional glyphs used by these existing captions.
+ if any(c in text for c in '→↑'):
+  parts=re.split(r'([→↑])',text)
+  fonts=[ImageFont.truetype('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',round(size*S),index=2) if p in ('→','↑') else font(size,bold,mono) for p in parts]
+  widths=[d.textlength(p,font=f) for p,f in zip(parts,fonts)]
+  cursor=x*S-sum(widths)*({'l':0,'m':.5,'r':1}[anchor[0]])
+  for part,f,width in zip(parts,fonts,widths):
+   d.text((round(cursor),round(y*S)),part,font=f,fill=fill,anchor='l'+anchor[1]);cursor+=width
+ else:
+  d.text((round(x*S),round(y*S)),text,font=font(size,bold,mono),fill=fill,anchor=anchor)
 def line(d,ps,fill,width=2):d.line([point(p) for p in ps],fill=fill,width=round(width*S),joint='curve')
 def arrow(d,ps,fill,width=2):
  line(d,ps,fill,width)
@@ -51,21 +67,23 @@ def arrow(d,ps,fill,width=2):
  d.polygon([end,a1,a2],fill=fill)
 def base(stage=None):
  im=Image.new('RGB',(W*S,H*S),BG);d=ImageDraw.Draw(im)
- for x in range(40,W,40):d.line([(x*S,142*S),(x*S,883*S)],fill=(10,24,43),width=1)
- for y in range(142,884,40):d.line([(40*S,y*S),((W-40)*S,y*S)],fill=(10,24,43),width=1)
- tx(d,48,31,'btc-updown-marketmaker',15,BLUE,mono=True,anchor='lm')
- tx(d,48,74,'From market data to strategy decisions',33,bold=True,anchor='lm')
- tx(d,48,112,'Market data  →  Decisions  →  Execution  →  Account feedback',17,MUTED,anchor='lm')
- tx(d,W-48,45,'Illustrative flow · not a live monitor',13,MUTED,anchor='rm')
- tx(d,W-48,77,'Phase highlights do not show elapsed time',12,MUTED,anchor='rm')
+ # The original logo window is 160×52.07; 26.04px clearance surrounds it.
+ im.paste(LOGO,(74*S,64*S),LOGO)
+ d.text((280*S,90*S),'Prediction Market Maker',font=ImageFont.truetype('/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf',30*S),fill=BLUE,anchor='lm')
+ d.line([(48*S,146*S),((W-48)*S,146*S)],fill=BORDER,width=S)
+ tx(d,48,171,'btc-updown-marketmaker',15,BLUE,mono=True,anchor='lm')
+ tx(d,48,214,'From market data to strategy decisions',33,bold=True,anchor='lm')
+ tx(d,48,252,'Market data  →  Decisions  →  Execution  →  Account feedback',17,MUTED,anchor='lm')
+ tx(d,W-48,185,'Illustrative flow · not a live monitor',13,NOTICE,anchor='rm')
+ tx(d,W-48,217,'Phase highlights do not show elapsed time',12,MUTED,anchor='rm')
  # The host boundary is the exact compiled backtest region.
- d.rounded_rectangle(rect(460*.89-35+OX,40+OY,(1269.6-460)*.89+70,617),radius=14*S,fill=(10,25,44),outline=(36,71,108),width=2*S)
+ d.rounded_rectangle(rect(460*.89-35+OX,40+OY,(1269.6-460)*.89+70,617),radius=14*S,fill=BG,outline=BORDER,width=2*S)
  tx(d,(460*.89-19)+OX,57+OY,'backtest · historical run host and reports',16,BLUE,bold=True,anchor='lm')
  active=set(PHASES[stage]['edges']) if stage is not None else set()
- color=COLORS[stage] if stage is not None else CYAN
- for k,e in EDGES.items():arrow(d,e['points'],color if k in active else LINE,2.5 if k in active else 1.7)
+ color=COLORS[stage] if stage is not None else BLUE
+ for k,e in EDGES.items():arrow(d,e['points'],color if k in active else LINE if k in ('hidden-input','training-input','report-output') else BLUE,2.5 if k in active else 1.7)
  for k,e in EDGES.items():
-  x,y=LABELS[k];label=e['label'];fs=14
+  x,y=LABELS[k];label=e['label'];fs=15
   if k in ('normalized','execution'):
    x=(e['points'][0][0]+e['points'][-1][0])/2;y=533
    tx(d,x+OX,y+OY,'Posting' if k=='normalized' else 'Feedback',13,color if k in active else MUTED)
@@ -75,14 +93,14 @@ def base(stage=None):
   if k=='observation':x,y=655*.89,239
   if k=='decision':x,y=485*.89,214
   bbox=d.textbbox((0,0),label,font=font(fs));tw=(bbox[2]-bbox[0])/S
-  d.rounded_rectangle(rect(x+OX-tw/2-7,y+OY-11,tw+14,22),radius=4*S,fill=(10,25,44) if x>425 and y<657 else BG)
+  d.rounded_rectangle(rect(x+OX-tw/2-7,y+OY-11,tw+14,22),radius=4*S,fill=BG)
   tx(d,x+OX,y+OY,label,fs,color if k in active else MUTED)
  active_nodes=set(PHASES[stage]['nodes']) if stage is not None else set()
  for k,n in NODES.items():
   x,y=n['pos'];w,h=n['size'];on=k in active_nodes
-  fill=(14,46,72) if on else BOX
+  fill=ACTIVE if on else BOX
   d.rounded_rectangle(rect(x+OX,y+OY,w,h),radius=10*S,fill=fill,outline=color if on else BORDER,width=(3 if on else 2)*S)
-  d.rounded_rectangle(rect(x+OX+12,y+OY+13,4,h-26),radius=2*S,fill=color if on else (45,86,132))
+  d.rounded_rectangle(rect(x+OX+12,y+OY+13,4,h-26),radius=2*S,fill=color if on else BORDER)
   fs=13 if k=='noe' else 18
   tx(d,x+OX+w/2,y+OY+30,n['label'],fs,INK,mono=(k!='reports'))
   sub=n['sublabel'];fs=14 if k in ('sim','train','shared','visual') else 15
@@ -99,22 +117,22 @@ def base(stage=None):
  tx(d,876*.89+OX,434+OY,'shared-run coordinates execution and posting',14,MUTED)
  tx(d,876*.89+OX,463+OY,'Account updates feed the next decision',14,MUTED)
  # Reports are a host output, so this is a caption rather than an invented trade edge.
- tx(d,865*.89+OX,181+OY,'↑ Results aggregated by the host',14,PURPLE if stage==5 else MUTED)
- d.rounded_rectangle(rect(48,882,W-96,55),radius=9*S,fill=PANEL,outline=BORDER,width=S)
- tx(d,68,909,'contracts',17,BLUE,mono=True,anchor='lm')
- tx(d,191,909,'Shared types and semantics',14,INK,anchor='lm')
- tx(d,W-68,909,'Separate training branch · Full PAPER / LIVE hosts planned',13,MUTED,anchor='rm')
+ tx(d,865*.89+OX,181+OY,'↑ Results aggregated by the host',14,BLUE if stage==5 else MUTED)
+ d.rounded_rectangle(rect(48,1022,W-96,55),radius=9*S,fill=PANEL,outline=BORDER,width=S)
+ tx(d,68,1049,'contracts',17,BLUE,mono=True,anchor='lm')
+ tx(d,191,1049,'Shared types and semantics',14,INK,anchor='lm')
+ tx(d,W-68,1049,'Separate training branch · Full PAPER / LIVE hosts planned',13,MUTED,anchor='rm')
  # A separate caption band remains legible even at README display widths.
- d.rounded_rectangle(rect(48,957,W-96,85),radius=10*S,fill=PANEL,outline=BORDER,width=S)
+ d.rounded_rectangle(rect(48,1097,W-96,85),radius=10*S,fill=PANEL,outline=BORDER,width=S)
  if stage is None:
-  tx(d,68,981,'Strategies use public observations; hidden data stays inside SIM.',20,INK,bold=True,anchor='lm')
-  tx(d,68,1016,'shared-run applies normalized execution events to ledger. Arrows show business relationships.',16,MUTED,anchor='lm')
+  tx(d,68,1121,'Strategies use public observations; hidden data stays inside SIM.',20,INK,bold=True,anchor='lm')
+  tx(d,68,1156,'shared-run applies normalized execution events to ledger. Arrows show business relationships.',16,MUTED,anchor='lm')
  else:
-  tx(d,68,981,PHASES[stage]['title'],21,color,bold=True,anchor='lm')
-  tx(d,68,1016,PHASES[stage]['desc'],16,INK,anchor='lm')
+  tx(d,68,1121,PHASES[stage]['title'],21,color,bold=True,anchor='lm')
+  tx(d,68,1156,PHASES[stage]['desc'],16,INK,anchor='lm')
  for j in range(6):
   x=W-242+j*28
-  d.rounded_rectangle(rect(x,978,17,5),radius=2*S,fill=COLORS[j] if stage==j else BORDER)
+  d.rounded_rectangle(rect(x,1118,17,5),radius=2*S,fill=COLORS[j] if stage==j else BORDER)
  return im.resize((W,H),Image.Resampling.LANCZOS)
 
 def at(ps,f):
@@ -139,7 +157,7 @@ for stage in range(6):
   progress=j/36
   # All motion remains on the checked directed relationship polylines.
   edge_index=min(len(es)-1,int(progress*len(es)));frac=progress*len(es)-edge_index
-  for offset,r,c in ((-.035,5,tuple(int(x*.45) for x in COLORS[stage])),(0,4,COLORS[stage])):
+  for offset,r,c in ((-.035,5,LINE),(0,4,COLORS[stage])):
    x,y=at(EDGES[es[edge_index]]['points'],max(0,frac+offset));d.ellipse((x-r,y-r,x+r,y+r),fill=c)
   frame=im.quantize(palette=palette,dither=Image.Dither.NONE)
   frames.append(frame);durations.append(80 if j%3 else 90)
