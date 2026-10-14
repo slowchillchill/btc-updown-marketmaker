@@ -6086,7 +6086,8 @@ pub(crate) fn drive_business_input_at_v2(
                     validate_membership_v1(directory, market, assets)
                 }
                 HiddenExecutionRecordV1::Reference(_)
-                | HiddenExecutionRecordV1::BinanceDepthReference { .. } => Ok(()),
+                | HiddenExecutionRecordV1::BinanceDepthReference { .. }
+                | HiddenExecutionRecordV1::BinanceDepthPositionReference { .. } => Ok(()),
             };
             if let Err(error) = result {
                 return Err(unaccepted_business_input_v2(
@@ -6950,7 +6951,9 @@ fn validate_public_group_membership_v1(
                     P::NewMarket { .. } => {}
                 }
             }
-            F::ReferenceFact(_) | F::BinanceDepthReference(_) => {}
+            F::ReferenceFact(_)
+            | F::BinanceDepthReference(_)
+            | F::BinanceDepthPositionReference { .. } => {}
         }
     }
     Ok(())
@@ -20130,7 +20133,8 @@ fn reduce_public_group_v1(
                 }
             }
             contracts::PublicBusinessPayloadV1::ReferenceFact(_)
-            | contracts::PublicBusinessPayloadV1::BinanceDepthReference(_) => {}
+            | contracts::PublicBusinessPayloadV1::BinanceDepthReference(_)
+            | contracts::PublicBusinessPayloadV1::BinanceDepthPositionReference { .. } => {}
         }
     }
     Ok((state, effects))
@@ -21416,7 +21420,8 @@ fn reduce_hidden_step_bucket_v1(
                 &fact.quality,
             ),
             HiddenExecutionRecordV1::Reference(_)
-            | HiddenExecutionRecordV1::BinanceDepthReference { .. } => continue,
+            | HiddenExecutionRecordV1::BinanceDepthReference { .. }
+            | HiddenExecutionRecordV1::BinanceDepthPositionReference { .. } => continue,
         };
         let Some(normalized) = normalized else {
             continue;

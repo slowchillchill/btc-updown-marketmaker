@@ -33,6 +33,7 @@ pub struct PublicReductionReportV1<I = PublicFactPositionV1> {
 pub struct PublicReductionBatchV1 {
     pub facts: std::sync::Arc<[PublicBusinessFactV1]>,
     pub reports: Vec<PublicReductionReportV1>,
+    confirmed_reference: bool,
     group_id: Sha256Hex,
     direct_source_message_ids: Vec<Sha256Hex>,
     prepared_reference_ids: Vec<PublicFactBindingV1>,
@@ -79,14 +80,14 @@ fn fact(
         direct_sources: context.direct_sources.clone(),
         payload,
         source_refs: context.source_refs.clone(),
-        lineage: EventLineageV3 {
+        lineage: PublicBusinessLineageV1::Canonical(EventLineageV3 {
             canonical_rule_version: lineage.canonical_rule_version,
             source_evidence: lineage
                 .source_evidence
                 .into_iter()
                 .map(|s| s.source().clone())
                 .collect(),
-        },
+        }),
         direct_time: source_time(&context.direct_sources),
         dependency_time,
         quality,
@@ -161,6 +162,7 @@ fn finish(
         .collect();
     PublicReductionBatchV1 {
         facts: facts.into(),
+        confirmed_reference: false,
         reports,
         group_id: context.group_id,
         direct_source_message_ids: context
@@ -202,6 +204,54 @@ pub fn bind_reference_reduction_v1(
         ));
     }
     finish(context, facts, vec![outcome.report], identities)
+}
+
+/// 日内真实处置只绑定位置，不生成报告的完整证据或内容身份。
+pub(crate) fn bind_day_depth_reduction_v1(
+    outcome: crate::reduction::DayDepthReductionV1,
+    context: PublicReductionContextV1,
+    canonical_rule_version: &str,
+) -> PublicReductionBatchV1 {
+    let facts = outcome
+        .event
+        .into_iter()
+        .map(|event| PublicBusinessFactV1 {
+            position: position(&context, 0),
+            payload: PublicBusinessPayloadV1::BinanceDepthPositionReference {
+                quantities: event.quantities,
+            },
+            source_refs: context.source_refs.clone(),
+            lineage: PublicBusinessLineageV1::StateReference {
+                canonical_rule_version: canonical_rule_version.into(),
+            },
+            direct_time: source_time(&context.direct_sources),
+            dependency_time: event.time,
+            quality: event.quality,
+            direct_sources: context.direct_sources.clone(),
+        })
+        .collect::<Vec<_>>();
+    PublicReductionBatchV1 {
+        facts: facts.into(),
+        reports: Vec::new(),
+        confirmed_reference: outcome.confirmed,
+        group_id: context.group_id,
+        direct_source_message_ids: context
+            .direct_sources
+            .into_iter()
+            .map(|s| s.source_message_id)
+            .collect(),
+        prepared_reference_ids: Vec::new(),
+    }
+}
+impl PublicReductionBatchV1 {
+    pub(crate) fn produced_or_confirmed(&self) -> bool {
+        !self.facts.is_empty()
+            || self.confirmed_reference
+            || self
+                .reports
+                .iter()
+                .any(|r| r.report.operation == crate::reduction::ReductionOperationKindV1::Confirm)
+    }
 }
 
 pub fn bind_market_reduction_v1(
@@ -282,8 +332,15 @@ pub fn materialize_public_reduction_v1(
     let mut records = Vec::with_capacity(batch.facts.len());
     let mut bindings = Vec::with_capacity(batch.facts.len());
     for fact in batch.facts.iter() {
+        let PublicBusinessLineageV1::Canonical(lineage) = &fact.lineage else {
+            return Err(ContractError::InvalidField {
+                field: "public_reduction".into(),
+                reason: "日内状态引用不是完整录制材料".into(),
+            });
+        };
         let (record, event_id) = match &fact.payload {
-            PublicBusinessPayloadV1::BinanceDepthReference(_) => {
+            PublicBusinessPayloadV1::BinanceDepthReference(_)
+            | PublicBusinessPayloadV1::BinanceDepthPositionReference { .. } => {
                 return Err(ContractError::InvalidField {
                     field: "public_reduction".into(),
                     reason: "深度正文须从原输入重建".into(),
@@ -306,13 +363,13 @@ pub fn materialize_public_reduction_v1(
                         schema_version: CANONICAL_REFERENCE_EVENT_SCHEMA_V2.to_owned(),
                         event_id: binding.event_id.clone(),
                         time: fact.dependency_time.clone(),
-                        lineage: fact.lineage.clone(),
+                        lineage: lineage.clone(),
                         quality: fact.quality.clone(),
                         payload: payload.clone(),
                     }
                 } else {
                     crate::public_reference::materialize_reference_v2(
-                        fact.lineage.clone(),
+                        lineage.clone(),
                         fact.dependency_time.clone(),
                         fact.quality.clone(),
                         payload.clone(),
@@ -342,7 +399,7 @@ pub fn materialize_public_reduction_v1(
                             market,
                             group_id: &batch.group_id,
                             direct_source_message_ids: &batch.direct_source_message_ids,
-                            lineage: &fact.lineage,
+                            lineage: lineage,
                             direct_time: &fact.direct_time,
                             dependency_time: &fact.dependency_time,
                             quality: &fact.quality,
@@ -358,7 +415,7 @@ pub fn materialize_public_reduction_v1(
                     group_id: batch.group_id.clone(),
                     source_refs: fact.source_refs.clone(),
                     direct_source_message_ids: batch.direct_source_message_ids.clone(),
-                    lineage: fact.lineage.clone(),
+                    lineage: lineage.clone(),
                     direct_time: fact.direct_time.clone(),
                     dependency_time: fact.dependency_time.clone(),
                     quality: fact.quality.clone(),
@@ -494,7 +551,7 @@ pub fn bind_prepared_reference_facts_v1(
                 direct_sources: context.direct_sources.clone(),
                 payload: PublicBusinessPayloadV1::ReferenceFact(event.payload),
                 source_refs: context.source_refs.clone(),
-                lineage: event.lineage,
+                lineage: PublicBusinessLineageV1::Canonical(event.lineage),
                 direct_time: direct_time.clone(),
                 dependency_time: event.time,
                 quality: event.quality,
@@ -504,6 +561,7 @@ pub fn bind_prepared_reference_facts_v1(
     PublicReductionBatchV1 {
         facts: facts.into(),
         reports: Vec::new(),
+        confirmed_reference: false,
         group_id: context.group_id,
         direct_source_message_ids: context
             .direct_sources
@@ -524,6 +582,10 @@ pub enum CompactCanonicalReferenceV1 {
         binding: PublicFactBindingV1,
         time: EventTimeV2,
     },
+    BinanceDepthPosition {
+        position: PublicFactPositionV1,
+        time: EventTimeV2,
+    },
 }
 pub fn materialize_compact_public_reduction_v1(
     mut batch: PublicReductionBatchV1,
@@ -531,6 +593,16 @@ pub fn materialize_compact_public_reduction_v1(
     let mut depths = Vec::new();
     let mut retained = Vec::new();
     for fact in batch.facts.iter() {
+        if matches!(
+            fact.payload,
+            PublicBusinessPayloadV1::BinanceDepthPositionReference { .. }
+        ) {
+            depths.push(CompactCanonicalReferenceV1::BinanceDepthPosition {
+                position: fact.position.clone(),
+                time: fact.dependency_time.clone(),
+            });
+            continue;
+        }
         if let PublicBusinessPayloadV1::ReferenceFact(
             payload @ CanonicalReferenceEventPayloadV2::BinanceDepthState(_),
         ) = &fact.payload
@@ -545,7 +617,10 @@ pub fn materialize_compact_public_reduction_v1(
                 PublicFactBindingV1 {
                     position: fact.position.clone(),
                     event_id: crate::public_reference::materialized_reference_identity_v2(
-                        &fact.lineage,
+                        match &fact.lineage {
+                            PublicBusinessLineageV1::Canonical(lineage) => lineage,
+                            _ => unreachable!("完整参考正文具有完整谱系"),
+                        },
                         &fact.dependency_time,
                         &fact.quality,
                         payload,

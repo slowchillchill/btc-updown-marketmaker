@@ -61,26 +61,71 @@ impl<'a> DayProducerV1<'a> {
         let Some(mut input) = self.ingress.next_input()? else {
             return Ok(None);
         };
+        #[cfg(feature = "stage-timing")]
+        let timing_source = match &input.ingress {
+            DptIngressV1::Message {
+                source_evidence, ..
+            } => match source_evidence.source_kind {
+                CanonicalSourceKindV2::BinanceDepthSnapshot => "binance_depth_snapshot",
+                CanonicalSourceKindV2::BinanceDepthUpdate => "binance_depth_update",
+                CanonicalSourceKindV2::BinanceAggtrade => "binance_aggtrade",
+                CanonicalSourceKindV2::PolymarketMarketMetadata => "polymarket_market_metadata",
+                CanonicalSourceKindV2::PolymarketOrderbook => "polymarket_orderbook",
+                CanonicalSourceKindV2::PolymarketRtdsChainlinkBtcUsd => "chainlink_spot",
+                CanonicalSourceKindV2::PolymarketRtdsChainlinkTwap => "chainlink_twap",
+            },
+            DptIngressV1::EndOfInput => "end_of_input",
+            DptIngressV1::Aborted { .. } => "aborted",
+        };
         let initialization_binding = self.ingress.initialization_binding().cloned();
         let first_canonical_position = self.core.next_canonical_position();
         #[cfg(feature = "stage-timing")]
         {
             self.timings.inputs += 1;
-            self.timings.decode_ns += input_started.elapsed().as_nanos();
+            self.timings
+                .by_source
+                .entry(timing_source)
+                .or_default()
+                .inputs += 1;
+            let elapsed = input_started.elapsed().as_nanos();
+            self.timings.decode_ns += elapsed;
+            self.timings
+                .by_source
+                .entry(timing_source)
+                .or_default()
+                .stage_ns[0] += elapsed;
         }
         #[cfg(feature = "stage-timing")]
         let prepared_started = std::time::Instant::now();
         let prepared = self.ingress.prepare_input(&self.core, &mut input)?;
         #[cfg(feature = "stage-timing")]
         {
-            self.timings.prepare_ns += prepared_started.elapsed().as_nanos();
+            let elapsed = prepared_started.elapsed().as_nanos();
+            self.timings.prepare_ns += elapsed;
+            self.timings
+                .by_source
+                .entry(timing_source)
+                .or_default()
+                .stage_ns[1] += elapsed;
         }
         #[cfg(feature = "stage-timing")]
         let core_started = std::time::Instant::now();
-        let mut applied = self.core.push(&prepared)?.into_owned();
+        let PublicAppliedIngressV1 {
+            applied,
+            reductions,
+            pm_reductions,
+        } = self.core.push_day(&prepared)?;
+        // 日链无人消费借用 PM reductions；直接释放，不复制快照档位。
+        drop(pm_reductions);
         #[cfg(feature = "stage-timing")]
         {
-            self.timings.core_ns += core_started.elapsed().as_nanos();
+            let elapsed = core_started.elapsed().as_nanos();
+            self.timings.core_ns += elapsed;
+            self.timings
+                .by_source
+                .entry(timing_source)
+                .or_default()
+                .stage_ns[2] += elapsed;
         }
         #[cfg(feature = "stage-timing")]
         let material_started = std::time::Instant::now();
@@ -93,69 +138,34 @@ impl<'a> DayProducerV1<'a> {
         self.ended = matches!(input.ingress, DptIngressV1::EndOfInput);
         let mut contexts = BTreeMap::new();
         let mut materials = BTreeMap::new();
-        for batch in applied.reductions {
+        for batch in reductions {
             for material in materialize_compact_public_reduction_v1(batch)? {
                 let position = match &material {
                     CompactCanonicalReferenceV1::Record { binding, .. }
                     | CompactCanonicalReferenceV1::BinanceDepth { binding, .. } => {
                         binding.position.clone()
                     }
+                    CompactCanonicalReferenceV1::BinanceDepthPosition { position, .. } => {
+                        position.clone()
+                    }
                 };
                 materials.insert(position, material);
             }
         }
-        if !self
-            .core
-            .observation_requirements()
-            .binance_depth_quantities
-        {
-            for group in &mut applied.applied.closed_groups {
-                if !group.records.iter().any(|fact| {
-                    matches!(
-                        materials.get(&fact.position),
-                        Some(CompactCanonicalReferenceV1::BinanceDepth { .. })
-                    )
-                }) {
-                    continue;
-                }
-                let group = std::sync::Arc::make_mut(group);
-                let records = group
-                    .records
-                    .iter()
-                    .map(|fact| {
-                        let payload = if let Some(CompactCanonicalReferenceV1::BinanceDepth {
-                            binding,
-                            ..
-                        }) = materials.get(&fact.position)
-                        {
-                            PublicBusinessPayloadV1::BinanceDepthReference(binding.clone())
-                        } else {
-                            fact.payload.clone()
-                        };
-                        PublicBusinessFactV1 {
-                            position: fact.position.clone(),
-                            payload,
-                            source_refs: fact.source_refs.clone(),
-                            lineage: fact.lineage.clone(),
-                            direct_time: fact.direct_time.clone(),
-                            dependency_time: fact.dependency_time.clone(),
-                            quality: fact.quality.clone(),
-                            direct_sources: fact.direct_sources.clone(),
-                        }
-                    })
-                    .collect::<std::sync::Arc<[_]>>();
-                group.observations.replace_group_events(records.clone());
-                group.records = records;
-            }
-        }
         #[cfg(feature = "stage-timing")]
         {
-            self.timings.material_ns += material_started.elapsed().as_nanos();
+            let elapsed = material_started.elapsed().as_nanos();
+            self.timings.material_ns += elapsed;
+            self.timings
+                .by_source
+                .entry(timing_source)
+                .or_default()
+                .stage_ns[3] += elapsed;
         }
         #[cfg(feature = "stage-timing")]
         let hidden_started = std::time::Instant::now();
         let mut canonical = first_canonical_position;
-        for group in &applied.applied.closed_groups {
+        for group in &applied.closed_groups {
             for fact in group.records.iter() {
                 let market = match &fact.payload {
                     PublicBusinessPayloadV1::PolymarketMessage(pm) => Some(&pm.market),
@@ -185,6 +195,9 @@ impl<'a> DayProducerV1<'a> {
                         CompactCanonicalReferenceV1::BinanceDepth { binding, time } => {
                             self.hidden.push_depth_reference(canonical, binding, time)
                         }
+                        CompactCanonicalReferenceV1::BinanceDepthPosition { position, time } => {
+                            self.hidden.push_depth_position(canonical, position, time)
+                        }
                     },
                 }
                 canonical += 1;
@@ -201,17 +214,23 @@ impl<'a> DayProducerV1<'a> {
         let mut hidden = Vec::new();
         while let Some(bucket) =
             self.hidden
-                .next_bucket(lower, applied.applied.applied_prefix.clone(), self.ended)
+                .next_bucket(lower, applied.applied_prefix.clone(), self.ended)
         {
             hidden.push(bucket);
         }
         #[cfg(feature = "stage-timing")]
         {
-            self.timings.hidden_ns += hidden_started.elapsed().as_nanos();
+            let elapsed = hidden_started.elapsed().as_nanos();
+            self.timings.hidden_ns += elapsed;
+            self.timings
+                .by_source
+                .entry(timing_source)
+                .or_default()
+                .stage_ns[4] += elapsed;
         }
         Ok(Some(DayAppliedV1 {
             input,
-            applied: applied.applied,
+            applied,
             first_canonical_position,
             prepared_pm,
             contexts,
@@ -265,6 +284,14 @@ pub struct DayProducerStageTimingsV1 {
     pub core_ns: u128,
     pub material_ns: u128,
     pub hidden_ns: u128,
+    pub by_source: BTreeMap<&'static str, DayProducerSourceTimingsV1>,
+}
+#[cfg(feature = "stage-timing")]
+#[derive(Default, serde::Serialize)]
+pub struct DayProducerSourceTimingsV1 {
+    pub inputs: u64,
+    /// 顺序与既有五阶段一致：decode、prepare、core、material、hidden。
+    pub stage_ns: [u128; 5],
 }
 #[cfg(feature = "stage-timing")]
 impl DayProducerV1<'_> {

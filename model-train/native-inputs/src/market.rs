@@ -837,6 +837,7 @@ pub(crate) fn trades(
 fn event_class(p: &PublicBusinessPayloadV1) -> (usize, usize) {
     match p {
         PublicBusinessPayloadV1::BinanceDepthReference(_) => (17, 6),
+        PublicBusinessPayloadV1::BinanceDepthPositionReference { .. } => (17, 6),
         PublicBusinessPayloadV1::PolymarketMessage(m) => (
             match &m.payload {
                 CanonicalPmPayloadV1::Book {

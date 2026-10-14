@@ -715,15 +715,19 @@ fn day_quantity_projection_keeps_original_binding_hidden_buckets_and_pm_asks() {
         for (old, new) in a.records.iter().zip(b.records.iter()) {
             if matches!(
                 old.payload,
-                PublicBusinessPayloadV1::ReferenceFact(
-                    CanonicalReferenceEventPayloadV2::BinanceDepthState(_)
-                )
+                PublicBusinessPayloadV1::BinanceDepthPositionReference { .. }
             ) {
                 depth_facts += 1;
-                let PublicBusinessPayloadV1::BinanceDepthReference(binding) = &new.payload else {
-                    panic!("完整事实改为同来源引用")
+                let PublicBusinessPayloadV1::BinanceDepthPositionReference { quantities } =
+                    &new.payload
+                else {
+                    panic!("日内深度使用正式位置引用")
                 };
-                assert_eq!(binding.position, new.position);
+                assert!(quantities.is_none());
+                assert!(matches!(
+                    new.lineage,
+                    PublicBusinessLineageV1::StateReference { .. }
+                ));
                 let mut expected = old.clone();
                 expected.payload = new.payload.clone();
                 assert_eq!(expected, *new);

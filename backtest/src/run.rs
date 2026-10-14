@@ -1231,7 +1231,8 @@ where
                         HiddenExecutionRecordV1::Step { market, .. } => Some(market),
                         HiddenExecutionRecordV1::MarketFact(fact) => Some(&fact.market),
                         HiddenExecutionRecordV1::Reference(_)
-                        | HiddenExecutionRecordV1::BinanceDepthReference { .. } => None,
+                        | HiddenExecutionRecordV1::BinanceDepthReference { .. }
+                        | HiddenExecutionRecordV1::BinanceDepthPositionReference { .. } => None,
                     };
                     if let Some(market) = market
                         && !driver.has_enrolled_market(&market.condition_id)
@@ -1472,7 +1473,7 @@ where
                     sample_day_economics(&driver, &shared, at, &mut day_economics)
                 );
             }
-            checkpoint
+            let checkpoint_control = checkpoint
                 .save(
                     &mut driver,
                     &shared,
@@ -1494,7 +1495,7 @@ where
                     next_hidden.as_ref(),
                 )
                 .map_err(HistoricalFailureCauseV1::Material)?;
-            if checkpoint.budget_stopped() {
+            if checkpoint_control == RuntimeCheckpointControlV1::SavedThenStop {
                 // 同毫秒已算完的Exit沿原下一轮立即终止；未到期的Exit仍随Running保存。
                 if pending.as_ref().is_some_and(|p| {
                     p.completed_at == at
@@ -1739,6 +1740,11 @@ pub(crate) type RestoredRuntimeV1<D> = (
     MemoryNoeObservationV4,
     RuntimeLoopCheckpointV1<D>,
 );
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeCheckpointControlV1 {
+    Continue,
+    SavedThenStop,
+}
 pub(crate) trait RuntimeCheckpointV1<
     S: StrategyV1,
     I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
@@ -1746,9 +1752,6 @@ pub(crate) trait RuntimeCheckpointV1<
 {
     fn started(&mut self) {}
     fn research_enabled(&self) -> bool {
-        false
-    }
-    fn budget_stopped(&self) -> bool {
         false
     }
     fn restore(
@@ -1769,7 +1772,7 @@ pub(crate) trait RuntimeCheckpointV1<
         strategy: &S,
         state: RuntimeLoopCheckpointRefV1<'_, S::Diagnostics>,
         next_hidden: Option<&AcceptedHiddenStepBucketV1>,
-    ) -> Result<(), MaterialError>;
+    ) -> Result<RuntimeCheckpointControlV1, MaterialError>;
 }
 struct NoRuntimeCheckpointV1;
 impl<S: StrategyV1, I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
@@ -1782,8 +1785,8 @@ impl<S: StrategyV1, I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActor
         _strategy: &S,
         _state: RuntimeLoopCheckpointRefV1<'_, S::Diagnostics>,
         _next_hidden: Option<&AcceptedHiddenStepBucketV1>,
-    ) -> Result<(), MaterialError> {
-        Ok(())
+    ) -> Result<RuntimeCheckpointControlV1, MaterialError> {
+        Ok(RuntimeCheckpointControlV1::Continue)
     }
 }
 

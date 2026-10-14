@@ -671,3 +671,188 @@ fn quantity_free_depth_keeps_original_unknown_quality_anchors_and_prefix() {
     let restored = PublicObservationCoreV1::read_checkpoint(bytes.as_slice()).unwrap();
     assert!(!restored.observation_requirements().binance_depth_quantities);
 }
+
+#[test]
+fn day_depth_positions_keep_canonical_times_quality_health_and_frozen_quantities() {
+    let mut full = core();
+    let mut day = core();
+    let mut no_quantities = core();
+    for core in [&mut full, &mut day, &mut no_quantities] {
+        core.enable_source_progress();
+        push(core, &meta(0));
+    }
+    no_quantities.set_observation_requirements(PublicObservationRequirementsV1 {
+        binance_depth_quantities: false,
+    });
+    let applied = |seq, id, before, source, bids| {
+        let mut row = update(
+            "a",
+            id,
+            id,
+            seq,
+            Some(100),
+            before,
+            BinanceDepthStitchVerdict::Applied,
+            bids,
+        );
+        row.event_time = source;
+        if seq == 7 {
+            row.timestamp_received = 1900;
+        }
+        TypedRawRow::BinanceDepthUpdate(row)
+    };
+    let mut reset = update(
+        "b",
+        201,
+        201,
+        3,
+        None,
+        None,
+        BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable,
+        vec![],
+    );
+    reset.timestamp_received += 86_400_000;
+    reset.collector_admission_time_utc_ms = reset.timestamp_received + 100;
+    let rows = vec![
+        TypedRawRow::BinanceDepthSnapshot(snapshot("a", 100, 1)),
+        TypedRawRow::BinanceDepthSnapshot(snapshot("a", 100, 2)),
+        TypedRawRow::BinanceDepthUpdate(update(
+            "a",
+            100,
+            100,
+            3,
+            Some(100),
+            None,
+            BinanceDepthStitchVerdict::NotAppliedStaleDuplicate,
+            vec![],
+        )),
+        applied(4, 101, None, 1800, vec![level("64100", "0.2")]),
+        applied(5, 102, Some(101), 1700, vec![level("64100", "0")]),
+        applied(6, 103, Some(102), 1500, vec![level("64100", "0")]),
+        // A high source time held only by the old anchor must disappear on the next empty update.
+        applied(7, 104, Some(103), 1900, vec![]),
+        applied(8, 105, Some(104), 1400, vec![]),
+        applied(9, 106, Some(105), 1600, vec![level("64100", "0.3")]),
+        applied(10, 107, Some(106), 1300, vec![]),
+        TypedRawRow::BinanceDepthUpdate(update(
+            "a",
+            110,
+            110,
+            11,
+            Some(100),
+            Some(107),
+            BinanceDepthStitchVerdict::NotAppliedConfirmedHole,
+            vec![],
+        )),
+        TypedRawRow::BinanceDepthUpdate(update(
+            "a",
+            111,
+            111,
+            12,
+            None,
+            None,
+            BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable,
+            vec![],
+        )),
+        TypedRawRow::BinanceDepthSnapshot(snapshot("b", 200, 2)),
+        TypedRawRow::BinanceDepthUpdate(reset),
+        TypedRawRow::BinanceDepthSnapshot(snapshot("b", 210, 4)),
+        TypedRawRow::BinanceDepthUpdate(update(
+            "c",
+            220,
+            220,
+            1,
+            None,
+            None,
+            BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable,
+            vec![],
+        )),
+    ];
+    let expected_sources = [
+        None,
+        None,
+        None,
+        Some(1800),
+        Some(1800),
+        Some(1700),
+        Some(1900),
+        Some(1500),
+        Some(1600),
+        Some(1600),
+    ];
+    let mut frozen = None;
+    for (i, row) in rows.into_iter().enumerate() {
+        let input = record(i as u64 + 1, TypedRawRowV2::Existing(row));
+        let expected = push(&mut full, &input);
+        let run_day = |core: &mut PublicObservationCoreV1| {
+            let ids = BTreeMap::new();
+            let prepared = prepare_public_ingress_v1(core, &input, &ids, &[]).unwrap();
+            // Fails if day production reaches the old full identity encoding path.
+            crate::without_identity_encoding(|| core.push_day(&prepared))
+                .unwrap()
+                .applied
+        };
+        let actual = run_day(&mut day);
+        let compact = run_day(&mut no_quantities);
+        for (quantities, result) in [(true, &actual), (false, &compact)] {
+            assert_eq!(result.applied_prefix, expected.applied_prefix);
+            assert_eq!(result.closed_groups.len(), expected.closed_groups.len());
+            for (old, new) in expected.closed_groups.iter().zip(&result.closed_groups) {
+                assert_eq!(old.group_id, new.group_id);
+                assert_eq!(old.group_position, new.group_position);
+                assert_eq!(old.member_input_positions, new.member_input_positions);
+                assert_eq!(old.records.len(), new.records.len());
+                for (old, new) in old.records.iter().zip(new.records.iter()) {
+                    assert_eq!(old.position, new.position);
+                    assert_eq!(old.source_refs, new.source_refs);
+                    assert_eq!(old.direct_sources, new.direct_sources);
+                    assert_eq!(old.direct_time, new.direct_time);
+                    assert_eq!(old.dependency_time, new.dependency_time);
+                    assert_eq!(old.quality, new.quality);
+                    assert!(matches!(
+                        new.lineage,
+                        PublicBusinessLineageV1::StateReference { .. }
+                    ));
+                    if i < expected_sources.len() {
+                        assert_eq!(
+                            new.dependency_time.source_event_at_utc_ms,
+                            expected_sources[i]
+                        );
+                    }
+                }
+                for (old, new) in old.observations.iter().zip(&new.observations) {
+                    let mut expected = old.clone();
+                    if !quantities && expected.binance_depth.value.is_some() {
+                        let mut value = (*expected.binance_depth).clone();
+                        value.value = Some(BinanceDepthObservationV1::NotMaterialized);
+                        expected.binance_depth = Arc::new(value);
+                    }
+                    expected.group_events = new.group_events.clone();
+                    assert_eq!(
+                        expected, *new,
+                        "including confirmation/stale/reset health and depth"
+                    );
+                }
+            }
+        }
+        if i == 3 {
+            frozen = actual
+                .closed_groups
+                .first()
+                .map(|g| Arc::clone(&g.observations[0].binance_depth));
+        }
+        if i == 4 {
+            // Restore after a deletion, including its index entry. The next source maximum may fall.
+            for core in [&mut day, &mut no_quantities] {
+                let mut bytes = Vec::new();
+                core.write_checkpoint(&mut bytes).unwrap();
+                *core = PublicObservationCoreV1::read_checkpoint(bytes.as_slice()).unwrap();
+            }
+        }
+    }
+    let old = frozen.unwrap();
+    assert_eq!(
+        old.value.as_ref().unwrap().full().unwrap().bids[0].quantity_btc,
+        ExactDecimal("0.2".into())
+    );
+}

@@ -28,6 +28,13 @@ impl StageTimings {
         sample.total_ns += ns;
         sample.max_ns = sample.max_ns.max(ns);
     }
+    pub(crate) fn emit_checkpoint(&self, generation: u64) {
+        eprintln!(
+            "stage_timing_checkpoint={}",
+            serde_json::json!({"scope":self.label,"generation":generation,
+                "scope_wall_ns":self.started.elapsed().as_nanos(),"stages":self.samples})
+        );
+    }
     pub(crate) fn emit_hour(&self, boundary_utc_ms: i64) {
         eprintln!(
             "stage_timing_hour={}",

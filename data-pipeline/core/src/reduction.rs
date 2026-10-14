@@ -521,8 +521,10 @@ struct ReferenceLevelState<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     direct_evidence: E,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 struct BinanceDepthBookState<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
+    #[serde(skip)]
+    source_times: BTreeMap<i64, usize>,
     snapshot_last_update_id: u64,
     local_u: Option<u64>,
     bids: BTreeMap<Decimal, ReferenceLevelState<E>>,
@@ -532,6 +534,163 @@ struct BinanceDepthBookState<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     snapshot_evidence: E,
     anchor_evidence: E,
     visibility_frontier_evidence: E,
+}
+
+// 索引派生自权威价格证据；仅恢复和快照初始化时全量建立。
+impl<'de, E: ReductionEvidenceV1 + serde::Deserialize<'de>> serde::Deserialize<'de>
+    for BinanceDepthBookState<E>
+{
+    fn deserialize<D: serde::Deserializer<'de>>(reader: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Saved<E: ReductionEvidenceV1> {
+            snapshot_last_update_id: u64,
+            local_u: Option<u64>,
+            bids: BTreeMap<Decimal, ReferenceLevelState<E>>,
+            asks: BTreeMap<Decimal, ReferenceLevelState<E>>,
+            deleted_bids: BTreeMap<Decimal, E>,
+            deleted_asks: BTreeMap<Decimal, E>,
+            snapshot_evidence: E,
+            anchor_evidence: E,
+            visibility_frontier_evidence: E,
+        }
+        let saved = Saved::<E>::deserialize(reader)?;
+        let mut book = Self {
+            source_times: BTreeMap::new(),
+            snapshot_last_update_id: saved.snapshot_last_update_id,
+            local_u: saved.local_u,
+            bids: saved.bids,
+            asks: saved.asks,
+            deleted_bids: saved.deleted_bids,
+            deleted_asks: saved.deleted_asks,
+            snapshot_evidence: saved.snapshot_evidence,
+            anchor_evidence: saved.anchor_evidence,
+            visibility_frontier_evidence: saved.visibility_frontier_evidence,
+        };
+        book.rebuild_source_times();
+        Ok(book)
+    }
+}
+impl<E: ReductionEvidenceV1> BinanceDepthBookState<E> {
+    fn rebuild_source_times(&mut self) {
+        self.source_times.clear();
+        for time in self
+            .bids
+            .values()
+            .chain(self.asks.values())
+            .map(|l| &l.direct_evidence)
+            .chain(self.deleted_bids.values())
+            .chain(self.deleted_asks.values())
+            .filter_map(|e| e.source_time())
+        {
+            *self.source_times.entry(time).or_default() += 1;
+        }
+    }
+    fn dependency_time(&self, extra: &DepthPriorEvidenceV1<E>) -> EventTimeV2 {
+        let constants = [
+            &self.snapshot_evidence,
+            &self.anchor_evidence,
+            &self.visibility_frontier_evidence,
+        ];
+        EventTimeV2 {
+            source_event_at_utc_ms: self
+                .source_times
+                .last_key_value()
+                .map(|(t, _)| *t)
+                .into_iter()
+                .chain(constants.iter().filter_map(|e| e.source_time()))
+                .chain(extra.time.iter().filter_map(|t| t.source_event_at_utc_ms))
+                .max(),
+            // 快照初始化前沿，每次 Applied 更新延续接收时间最大值。
+            // 缺口／日界／换代输入作为额外依赖，不冒充已安装的价格证据。
+            received_at_utc_ms: constants
+                .iter()
+                .map(|e| e.received_time())
+                .chain(extra.time.iter().map(|t| t.received_at_utc_ms))
+                .max()
+                .unwrap(),
+        }
+    }
+}
+/// 完整录制保留被触及价格的旧证据；日内路径只累计其时间。
+struct DepthPriorEvidenceV1<E> {
+    canonical: Vec<E>,
+    time: Option<EventTimeV2>,
+}
+impl<E: ReductionEvidenceV1> Default for DepthPriorEvidenceV1<E> {
+    fn default() -> Self {
+        Self {
+            canonical: Vec::new(),
+            time: None,
+        }
+    }
+}
+impl<E: ReductionEvidenceV1> DepthPriorEvidenceV1<E> {
+    fn record(&mut self, evidence: &E, canonical: bool) {
+        let old = self.time.as_ref();
+        self.time = Some(EventTimeV2 {
+            source_event_at_utc_ms: old
+                .and_then(|t| t.source_event_at_utc_ms)
+                .max(evidence.source_time()),
+            received_at_utc_ms: old.map_or(evidence.received_time(), |t| {
+                t.received_at_utc_ms.max(evidence.received_time())
+            }),
+        });
+        if canonical {
+            self.canonical.push(evidence.clone());
+        }
+    }
+    fn single(evidence: &E, mode: DepthOutputMode) -> Self {
+        let mut result = Self::default();
+        result.record(evidence, mode == DepthOutputMode::Canonical);
+        result
+    }
+    fn combine(&mut self, other: Self) {
+        self.canonical.extend(other.canonical);
+        if let Some(time) = other.time {
+            self.time = Some(match self.time.take() {
+                None => time,
+                Some(old) => EventTimeV2 {
+                    source_event_at_utc_ms: old
+                        .source_event_at_utc_ms
+                        .max(time.source_event_at_utc_ms),
+                    received_at_utc_ms: old.received_at_utc_ms.max(time.received_at_utc_ms),
+                },
+            });
+        }
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DepthOutputMode {
+    Canonical,
+    QuantityOnly,
+    Day { quantities: bool },
+}
+pub(crate) struct DayDepthEventV1 {
+    pub time: EventTimeV2,
+    pub quality: EventQualityV2,
+    pub quantities: Option<std::sync::Arc<BinanceDepthStateReferenceV1>>,
+}
+pub(crate) struct DayDepthReductionV1 {
+    pub event: Option<DayDepthEventV1>,
+    pub confirmed: bool,
+}
+enum DepthProjectionResult<E: ReductionEvidenceV1> {
+    Canonical(ReferenceReductionOutcomeV1<E, E::Identity>),
+    Day(DayDepthReductionV1),
+}
+impl<E: ReductionEvidenceV1> DepthProjectionResult<E> {
+    fn canonical(self) -> ReferenceReductionOutcomeV1<E, E::Identity> {
+        match self {
+            Self::Canonical(v) => v,
+            Self::Day(_) => unreachable!(),
+        }
+    }
+    fn day(self) -> DayDepthReductionV1 {
+        match self {
+            Self::Day(v) => v,
+            Self::Canonical(_) => unreachable!(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -582,6 +741,21 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
             .map(binance_depth_payload)
     }
 
+    /// 当前盘口容器长度；不遍历档位或来源证据。
+    pub(crate) fn current_book_sizes(&self) -> Option<[usize; 4]> {
+        self.current_epoch
+            .as_ref()
+            .and_then(|e| self.epochs.get(e))
+            .and_then(|s| s.book.as_ref())
+            .map(|b| {
+                [
+                    b.bids.len(),
+                    b.asks.len(),
+                    b.deleted_bids.len(),
+                    b.deleted_asks.len(),
+                ]
+            })
+    }
     pub(crate) fn has_current_depth_value(&self) -> bool {
         self.current_epoch
             .as_ref()
@@ -614,16 +788,16 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         row: &BinanceDepthSnapshotRow,
         evidence: E,
     ) -> Result<ReferenceReductionOutcomeV1<E, E::Identity>, ContractError> {
-        self.compute_snapshot_projection(row, evidence, false, None)
-            .map(|outcome| outcome.expect("完整路径提供公共归约结果"))
+        self.compute_snapshot_projection(row, evidence, DepthOutputMode::Canonical, None)
+            .map(|outcome| outcome.expect("完整路径提供公共归约结果").canonical())
     }
     pub fn compute_update(
         &mut self,
         row: &BinanceDepthUpdateRow,
         evidence: E,
     ) -> Result<ReferenceReductionOutcomeV1<E, E::Identity>, ContractError> {
-        self.compute_update_projection(row, evidence, false, None)
-            .map(|outcome| outcome.expect("完整路径提供公共归约结果"))
+        self.compute_update_projection(row, evidence, DepthOutputMode::Canonical, None)
+            .map(|outcome| outcome.expect("完整路径提供公共归约结果").canonical())
     }
     pub(crate) fn compute_prepared_snapshot(
         &mut self,
@@ -631,8 +805,8 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         evidence: E,
         depth: &PreparedBinanceDepthV1,
     ) -> Result<ReferenceReductionOutcomeV1<E, E::Identity>, ContractError> {
-        self.compute_snapshot_projection(row, evidence, false, Some(depth))
-            .map(|v| v.expect("完整路径提供公共归约结果"))
+        self.compute_snapshot_projection(row, evidence, DepthOutputMode::Canonical, Some(depth))
+            .map(|v| v.expect("完整路径提供公共归约结果").canonical())
     }
     pub(crate) fn compute_prepared_update(
         &mut self,
@@ -640,8 +814,38 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         evidence: E,
         depth: &PreparedBinanceDepthV1,
     ) -> Result<ReferenceReductionOutcomeV1<E, E::Identity>, ContractError> {
-        self.compute_update_projection(row, evidence, false, Some(depth))
-            .map(|v| v.expect("完整路径提供公共归约结果"))
+        self.compute_update_projection(row, evidence, DepthOutputMode::Canonical, Some(depth))
+            .map(|v| v.expect("完整路径提供公共归约结果").canonical())
+    }
+    pub(crate) fn compute_day_snapshot(
+        &mut self,
+        row: &BinanceDepthSnapshotRow,
+        evidence: E,
+        depth: &PreparedBinanceDepthV1,
+        quantities: bool,
+    ) -> Result<DayDepthReductionV1, ContractError> {
+        self.compute_snapshot_projection(
+            row,
+            evidence,
+            DepthOutputMode::Day { quantities },
+            Some(depth),
+        )
+        .map(|v| v.expect("日内归约返回状态处置").day())
+    }
+    pub(crate) fn compute_day_update(
+        &mut self,
+        row: &BinanceDepthUpdateRow,
+        evidence: E,
+        depth: &PreparedBinanceDepthV1,
+        quantities: bool,
+    ) -> Result<DayDepthReductionV1, ContractError> {
+        self.compute_update_projection(
+            row,
+            evidence,
+            DepthOutputMode::Day { quantities },
+            Some(depth),
+        )
+        .map(|v| v.expect("日内归约返回状态处置").day())
     }
     /// 研究薄入口复用已验证行和接纳边界，不投影完整事件或盘口谱系。
     pub fn apply_quantity_snapshot(
@@ -649,7 +853,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         row: &BinanceDepthSnapshotRow,
         evidence: E,
     ) -> Result<(), ContractError> {
-        self.compute_snapshot_projection(row, evidence, true, None)
+        self.compute_snapshot_projection(row, evidence, DepthOutputMode::QuantityOnly, None)
             .map(|_| ())
     }
     pub fn apply_quantity_update(
@@ -657,7 +861,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         row: &BinanceDepthUpdateRow,
         evidence: E,
     ) -> Result<(), ContractError> {
-        self.compute_update_projection(row, evidence, true, None)
+        self.compute_update_projection(row, evidence, DepthOutputMode::QuantityOnly, None)
             .map(|_| ())
     }
     /// 研究已定位的数量资格缺口：丢弃当前数量状态，delta不能重建。
@@ -709,9 +913,9 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         &mut self,
         row: &BinanceDepthSnapshotRow,
         evidence: E,
-        quantity_only: bool,
+        mode: DepthOutputMode,
         prepared: Option<&PreparedBinanceDepthV1>,
-    ) -> Result<Option<ReferenceReductionOutcomeV1<E, E::Identity>>, ContractError> {
+    ) -> Result<Option<DepthProjectionResult<E>>, ContractError> {
         self.begin_epoch(&row.source_sequence_epoch_id)?;
         let state = self
             .epochs
@@ -736,7 +940,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         let prior_evidence = state
             .book
             .as_ref()
-            .filter(|_| !quantity_only)
+            .filter(|_| mode == DepthOutputMode::Canonical)
             .map(binance_depth_evidence)
             .transpose()?
             .unwrap_or_default();
@@ -759,30 +963,39 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
             depth_ingress_sequence: row.depth_ingress_sequence,
             connection_generation: row.connection_generation,
         });
-        let scope = if quantity_only {
+        let scope = if mode != DepthOutputMode::Canonical {
             String::new()
         } else {
             format!("binance_depth:{}", row.source_sequence_epoch_id)
         };
         if same_state {
-            if quantity_only {
+            if mode == DepthOutputMode::QuantityOnly {
                 return Ok(None);
+            }
+            if matches!(mode, DepthOutputMode::Day { .. }) {
+                return Ok(Some(DepthProjectionResult::Day(DayDepthReductionV1 {
+                    event: None,
+                    confirmed: true,
+                })));
             }
             let mut confirmation_evidence = prior_evidence;
             confirmation_evidence.push(evidence);
-            return Ok(Some(ReferenceReductionOutcomeV1 {
-                event: None,
-                report: non_event_report(
-                    &self.canonical_rule_version,
-                    scope,
-                    ReductionOperationKindV1::Confirm,
-                    "BINANCE_DEPTH_IDENTICAL_SNAPSHOT",
-                    confirmation_evidence,
-                    true,
-                )?,
-            }));
+            return Ok(Some(DepthProjectionResult::Canonical(
+                ReferenceReductionOutcomeV1 {
+                    event: None,
+                    report: non_event_report(
+                        &self.canonical_rule_version,
+                        scope,
+                        ReductionOperationKindV1::Confirm,
+                        "BINANCE_DEPTH_IDENTICAL_SNAPSHOT",
+                        confirmation_evidence,
+                        true,
+                    )?,
+                },
+            )));
         }
-        let book = BinanceDepthBookState {
+        let mut book = BinanceDepthBookState {
+            source_times: BTreeMap::new(),
             snapshot_last_update_id: row.last_update_id,
             local_u: None,
             bids,
@@ -793,39 +1006,34 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
             anchor_evidence: evidence.clone(),
             visibility_frontier_evidence: evidence,
         };
-        if quantity_only {
+        book.rebuild_source_times();
+        if mode == DepthOutputMode::QuantityOnly {
             state.install_book(book);
             return Ok(None);
         }
-        let event = finalize_binance_depth_event(
+        let output = depth_produced(
+            mode,
             &self.canonical_rule_version,
             &book,
             MarketDataQuality::Fresh,
             resync,
-            Vec::new(),
-        )?;
-        let report = produced_report::<E>(
-            &self.canonical_rule_version,
+            DepthPriorEvidenceV1::default(),
             scope,
             ReductionOperationKindV1::Merge,
             "BINANCE_DEPTH_SNAPSHOT_BASELINE",
             None,
-            event.event_id.clone(),
         )?;
         state.install_book(book);
-        Ok(Some(ReferenceReductionOutcomeV1 {
-            event: Some(event),
-            report,
-        }))
+        Ok(Some(output))
     }
 
     fn compute_update_projection(
         &mut self,
         row: &BinanceDepthUpdateRow,
         evidence: E,
-        quantity_only: bool,
+        mode: DepthOutputMode,
         prepared: Option<&PreparedBinanceDepthV1>,
-    ) -> Result<Option<ReferenceReductionOutcomeV1<E, E::Identity>>, ContractError> {
+    ) -> Result<Option<DepthProjectionResult<E>>, ContractError> {
         self.begin_epoch(&row.source_sequence_epoch_id)?;
         let state = self
             .epochs
@@ -847,7 +1055,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
             ));
         }
         state.last_admission_sequence = Some(row.collector_admission_sequence);
-        let scope = if quantity_only {
+        let scope = if mode != DepthOutputMode::Canonical {
             String::new()
         } else {
             format!("binance_depth:{}", row.source_sequence_epoch_id)
@@ -855,111 +1063,109 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
 
         match row.stitch_verdict {
             BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable => {
-                if quantity_only {
+                if mode == DepthOutputMode::QuantityOnly {
                     return Ok(None);
                 }
                 if let Some(previous_book) = day_reset_book.as_ref() {
-                    let event = finalize_binance_depth_event(
+                    let output = depth_produced(
+                        mode,
                         &self.canonical_rule_version,
                         previous_book,
                         MarketDataQuality::Missing,
                         ResyncQuality::Required,
-                        vec![evidence.clone()],
-                    )?;
-                    let report = produced_report::<E>(
-                        &self.canonical_rule_version,
+                        DepthPriorEvidenceV1::single(&evidence, mode),
                         scope,
                         ReductionOperationKindV1::Reject,
                         "BINANCE_DEPTH_UTC_DAY_SNAPSHOT_REQUIRED",
                         None,
-                        event.event_id.clone(),
                     )?;
-                    return Ok(Some(ReferenceReductionOutcomeV1 {
-                        event: Some(event),
-                        report,
-                    }));
+                    return Ok(Some(output));
                 }
                 if !state.epoch_switch_missing_emitted
                     && let Some(previous_book) = state.epoch_switch_prior_book.as_ref()
                 {
-                    let event = finalize_binance_depth_event(
+                    let output = depth_produced(
+                        mode,
                         &self.canonical_rule_version,
                         previous_book,
                         MarketDataQuality::Missing,
                         ResyncQuality::Required,
-                        vec![evidence.clone()],
-                    )?;
-                    let report = produced_report::<E>(
-                        &self.canonical_rule_version,
+                        DepthPriorEvidenceV1::single(&evidence, mode),
                         scope,
                         ReductionOperationKindV1::Reject,
                         "BINANCE_DEPTH_EPOCH_SNAPSHOT_REQUIRED",
                         None,
-                        event.event_id.clone(),
                     )?;
                     state.epoch_switch_missing_emitted = true;
-                    return Ok(Some(ReferenceReductionOutcomeV1 {
-                        event: Some(event),
-                        report,
-                    }));
+                    return Ok(Some(output));
                 }
-                Ok(Some(ReferenceReductionOutcomeV1 {
-                    event: None,
-                    report: non_event_report(
-                        &self.canonical_rule_version,
-                        scope,
-                        ReductionOperationKindV1::Reject,
-                        "BINANCE_DEPTH_SNAPSHOT_UNAVAILABLE",
-                        vec![evidence],
-                        false,
-                    )?,
-                }))
+                if matches!(mode, DepthOutputMode::Day { .. }) {
+                    return Ok(Some(DepthProjectionResult::Day(DayDepthReductionV1 {
+                        event: None,
+                        confirmed: false,
+                    })));
+                }
+                Ok(Some(DepthProjectionResult::Canonical(
+                    ReferenceReductionOutcomeV1 {
+                        event: None,
+                        report: non_event_report(
+                            &self.canonical_rule_version,
+                            scope,
+                            ReductionOperationKindV1::Reject,
+                            "BINANCE_DEPTH_SNAPSHOT_UNAVAILABLE",
+                            vec![evidence],
+                            false,
+                        )?,
+                    },
+                )))
             }
             BinanceDepthStitchVerdict::NotAppliedStaleDuplicate => {
-                if quantity_only {
+                if mode == DepthOutputMode::QuantityOnly {
                     return Ok(None);
+                }
+                if matches!(mode, DepthOutputMode::Day { .. }) {
+                    return Ok(Some(DepthProjectionResult::Day(DayDepthReductionV1 {
+                        event: None,
+                        confirmed: false,
+                    })));
                 }
                 let matched_evidence = binance_depth_evidence(
                     state.book.as_ref().expect("stale verdict requires a book"),
                 )?;
-                Ok(Some(ReferenceReductionOutcomeV1 {
-                    event: None,
-                    report: duplicate_suppressed_report(
-                        &self.canonical_rule_version,
-                        scope,
-                        "BINANCE_DEPTH_STALE_DUPLICATE",
-                        Vec::new(),
-                        matched_evidence,
-                        vec![evidence],
-                    )?,
-                }))
+                Ok(Some(DepthProjectionResult::Canonical(
+                    ReferenceReductionOutcomeV1 {
+                        event: None,
+                        report: duplicate_suppressed_report(
+                            &self.canonical_rule_version,
+                            scope,
+                            "BINANCE_DEPTH_STALE_DUPLICATE",
+                            Vec::new(),
+                            matched_evidence,
+                            vec![evidence],
+                        )?,
+                    },
+                )))
             }
             BinanceDepthStitchVerdict::NotAppliedConfirmedHole => {
-                if quantity_only {
+                if mode == DepthOutputMode::QuantityOnly {
                     state.confirm_gap();
                     return Ok(None);
                 }
                 let book = state.book.as_ref().expect("hole verdict requires a book");
-                let event = finalize_binance_depth_event(
+                let output = depth_produced(
+                    mode,
                     &self.canonical_rule_version,
                     book,
                     MarketDataQuality::ConfirmedGap,
                     ResyncQuality::Required,
-                    vec![evidence.clone()],
-                )?;
-                let report = produced_report::<E>(
-                    &self.canonical_rule_version,
+                    DepthPriorEvidenceV1::single(&evidence, mode),
                     scope,
                     ReductionOperationKindV1::Reject,
                     "BINANCE_DEPTH_CONFIRMED_HOLE",
                     None,
-                    event.event_id.clone(),
                 )?;
                 state.confirm_gap();
-                Ok(Some(ReferenceReductionOutcomeV1 {
-                    event: Some(event),
-                    report,
-                }))
+                Ok(Some(output))
             }
             BinanceDepthStitchVerdict::Applied => {
                 let book = state
@@ -977,18 +1183,22 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                 let bid_report = apply_reference_level_updates(
                     &mut book.bids,
                     &mut book.deleted_bids,
+                    &mut book.source_times,
                     &depth.bids,
                     &evidence,
                     "bids",
-                    !quantity_only,
+                    mode != DepthOutputMode::QuantityOnly,
+                    mode == DepthOutputMode::Canonical,
                 )?;
                 let ask_report = apply_reference_level_updates(
                     &mut book.asks,
                     &mut book.deleted_asks,
+                    &mut book.source_times,
                     &depth.asks,
                     &evidence,
                     "asks",
-                    !quantity_only,
+                    mode != DepthOutputMode::QuantityOnly,
+                    mode == DepthOutputMode::Canonical,
                 )?;
                 // 薄入口无报告消费者；只维护共同权威映射及可见性状态。
                 let report = match (bid_report, ask_report) {
@@ -996,8 +1206,14 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                         Some((bid_summary, mut prior_evidence)),
                         Some((ask_summary, ask_prior_evidence)),
                     ) => {
-                        prior_evidence.extend(ask_prior_evidence);
-                        Some((bid_summary.combine(ask_summary)?, prior_evidence))
+                        prior_evidence.combine(ask_prior_evidence);
+                        Some((
+                            match (bid_summary, ask_summary) {
+                                (Some(b), Some(a)) => Some(b.combine(a)?),
+                                _ => None,
+                            },
+                            prior_evidence,
+                        ))
                     }
                     (None, None) => None,
                     _ => unreachable!("两侧采用相同报告模式"),
@@ -1009,25 +1225,19 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                 let Some((summary, prior_evidence)) = report else {
                     return Ok(None);
                 };
-                let event = finalize_binance_depth_event(
+                let output = depth_produced(
+                    mode,
                     &self.canonical_rule_version,
                     book,
                     MarketDataQuality::Fresh,
                     ResyncQuality::NotRequired,
                     prior_evidence,
-                )?;
-                let report = produced_report::<E>(
-                    &self.canonical_rule_version,
                     scope,
                     ReductionOperationKindV1::Overwrite,
                     "BINANCE_DEPTH_APPLIED_UPDATE",
-                    Some(summary.into_report()),
-                    event.event_id.clone(),
+                    summary.map(QuantityTotals::into_report),
                 )?;
-                Ok(Some(ReferenceReductionOutcomeV1 {
-                    event: Some(event),
-                    report,
-                }))
+                Ok(Some(output))
             }
         }
     }
@@ -1189,13 +1399,20 @@ impl QuantityTotals {
 fn apply_reference_level_updates<E: ReductionEvidenceV1>(
     levels: &mut BTreeMap<Decimal, ReferenceLevelState<E>>,
     deleted_levels: &mut BTreeMap<Decimal, E>,
+    source_times: &mut BTreeMap<i64, usize>,
     updates: &[PreparedDepthLevel],
     evidence: &E,
     field: &str,
+    collect_prior: bool,
     collect_report: bool,
-) -> Result<Option<(QuantityTotals, Vec<E>)>, ContractError> {
+) -> Result<Option<(Option<QuantityTotals>, DepthPriorEvidenceV1<E>)>, ContractError> {
     let mut seen = BTreeSet::new();
-    let mut report = collect_report.then(|| (QuantityTotals::default(), Vec::new()));
+    let mut report = collect_prior.then(|| {
+        (
+            collect_report.then(QuantityTotals::default),
+            DepthPriorEvidenceV1::default(),
+        )
+    });
     for update in updates {
         let price = update.price.clone();
         let quantity = update.quantity;
@@ -1210,21 +1427,38 @@ fn apply_reference_level_updates<E: ReductionEvidenceV1>(
         let after = quantity;
         if let Some((summary, prior_evidence)) = report.as_mut() {
             if let Some(previous) = previous {
-                prior_evidence.push(previous.direct_evidence.clone());
+                prior_evidence.record(&previous.direct_evidence, collect_report);
             } else if let Some(previous_deletion) = deleted_levels.get(&key) {
-                prior_evidence.push(previous_deletion.clone());
+                prior_evidence.record(previous_deletion, collect_report);
             }
             let (added, reduced) = match after.cmp(&before) {
                 Ordering::Greater => (after - before, Decimal::ZERO),
                 Ordering::Less => (Decimal::ZERO, before - after),
                 Ordering::Equal => (Decimal::ZERO, Decimal::ZERO),
             };
-            *summary = std::mem::take(summary).combine(QuantityTotals {
-                before,
-                after,
-                added,
-                reduced,
-            })?;
+            if let Some(summary) = summary {
+                *summary = std::mem::take(summary).combine(QuantityTotals {
+                    before,
+                    after,
+                    added,
+                    reduced,
+                })?;
+            }
+        }
+        let retained_before = previous
+            .map(|l| &l.direct_evidence)
+            .or_else(|| deleted_levels.get(&key));
+        if let Some(time) = retained_before.and_then(|e| e.source_time()) {
+            let count = source_times.get_mut(&time).expect("索引随价格证据更新");
+            *count -= 1;
+            if *count == 0 {
+                source_times.remove(&time);
+            }
+        }
+        let retained_after =
+            !after.is_zero() || !before.is_zero() || deleted_levels.contains_key(&key);
+        if retained_after && let Some(time) = evidence.source_time() {
+            *source_times.entry(time).or_default() += 1;
         }
         if after.is_zero() {
             levels.remove(&key);
@@ -1244,6 +1478,50 @@ fn apply_reference_level_updates<E: ReductionEvidenceV1>(
         }
     }
     Ok(report)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn depth_produced<E: ReductionEvidenceV1>(
+    mode: DepthOutputMode,
+    rule: &str,
+    book: &BinanceDepthBookState<E>,
+    availability: MarketDataQuality,
+    resync: ResyncQuality,
+    extra: DepthPriorEvidenceV1<E>,
+    scope: String,
+    operation: ReductionOperationKindV1,
+    reason: &str,
+    quantity: Option<QuantityConservationV1>,
+) -> Result<DepthProjectionResult<E>, ContractError> {
+    if matches!(mode, DepthOutputMode::Day { .. }) {
+        return Ok(DepthProjectionResult::Day(DayDepthReductionV1 {
+            event: Some(DayDepthEventV1 {
+                time: book.dependency_time(&extra),
+                quantities: matches!(mode, DepthOutputMode::Day { quantities: true })
+                    .then(|| std::sync::Arc::new(binance_depth_payload(book))),
+                quality: EventQualityV2 {
+                    availability,
+                    resync,
+                },
+            }),
+            confirmed: false,
+        }));
+    }
+    let event = finalize_binance_depth_event(rule, book, availability, resync, extra.canonical)?;
+    let report = produced_report::<E>(
+        rule,
+        scope,
+        operation,
+        reason,
+        quantity,
+        event.event_id.clone(),
+    )?;
+    Ok(DepthProjectionResult::Canonical(
+        ReferenceReductionOutcomeV1 {
+            event: Some(event),
+            report,
+        },
+    ))
 }
 
 fn finalize_binance_depth_event<E: ReductionEvidenceV1>(

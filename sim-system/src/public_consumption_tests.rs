@@ -3695,6 +3695,11 @@ async fn paper_send_samples_clock_at_request_instead_of_capability_acquisition()
 
 #[test]
 fn shared_day_observation_encoding_preserves_eight_markets_and_lagging_groups() {
+    for day in [false, true] {
+        assert_shared_day_observation_encoding(day);
+    }
+}
+fn assert_shared_day_observation_encoding(day: bool) {
     let mut core = core();
     let mut deliveries = Vec::new();
     let mut inputs = vec![meta(0)];
@@ -3760,7 +3765,9 @@ fn shared_day_observation_encoding_preserves_eight_markets_and_lagging_groups() 
     for input in inputs {
         let first_canonical_position = core.next_canonical_position();
         let prepared = prepare_public_ingress_v1(&core, &input, &BTreeMap::new(), &[]).unwrap();
-        let applied = core.push(&prepared).unwrap().into_owned();
+        let applied = if day {
+            core.push_day(&prepared)
+        } else { core.push(&prepared) }.unwrap().into_owned();
         let prepared_pm = match prepared.current {
             PreparedCanonicalInputV1::PolymarketMessage(pm) => Some(pm),
             _ => None,
@@ -3802,11 +3809,11 @@ fn shared_day_observation_encoding_preserves_eight_markets_and_lagging_groups() 
             .0,
         "0.7"
     );
-    let PublicBusinessPayloadV1::ReferenceFact(
-        CanonicalReferenceEventPayloadV2::BinanceDepthState(fact_depth),
-    ) = &group(8).records[0].payload
-    else {
-        panic!("正式深度事实")
+    let fact_depth = match (&group(8).records[0].payload, day) {
+        (PublicBusinessPayloadV1::ReferenceFact(
+            CanonicalReferenceEventPayloadV2::BinanceDepthState(value)), false) => value,
+        (PublicBusinessPayloadV1::BinanceDepthPositionReference { quantities: Some(value) }, true) => value,
+        _ => panic!("消费者具有真实完整或日内深度表示"),
     };
     let Some(BinanceDepthObservationV1::Full(observed_depth)) = &depth.value else {
         panic!("默认完整深度")
@@ -3899,6 +3906,7 @@ fn shared_day_observation_encoding_preserves_eight_markets_and_lagging_groups() 
         count("depth_values"),
         count("events")
     );
+
 }
 
 mod gamma_resolution_tests {

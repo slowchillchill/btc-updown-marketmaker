@@ -451,6 +451,12 @@ pub enum ResolvedHiddenRecordV1 {
         binding: PublicFactBindingV1,
         time: EventTimeV2,
     },
+    /// 日内参考位置不携带 CanonicalEventId；只推进既有隐藏时序。
+    BinanceDepthPositionReference {
+        canonical_position: u64,
+        position: PublicFactPositionV1,
+        time: EventTimeV2,
+    },
 }
 /// 实际解码扫描计数；不等于磁盘物理读取字节或操作系统缓存未命中。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]

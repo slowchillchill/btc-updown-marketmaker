@@ -616,7 +616,12 @@ where
                         buffer.budget_stopped=buffer.budget_stop_requested && !complete;
                         buffer.requested=None;generation+=1;buffer.generation=generation;hub.0.1.notify_all();last_checkpoint=Instant::now();last_count=count;
                         #[cfg(feature="stage-timing")]
-                        eprintln!("producer_internal_timing={}",serde_json::to_string(producer.stage_timings())?);
+                        {
+                            eprintln!("producer_internal_timing={}",serde_json::to_string(producer.stage_timings())?);
+                            eprintln!("producer_depth_state_sizes={}",serde_json::json!({"generation":generation-1,
+                                "bids_asks_deleted_bids_deleted_asks":producer.core.current_binance_depth_sizes()}));
+                            stages.emit_checkpoint(generation - 1);
+                        }
                         if complete || buffer.budget_stopped {return Ok(());}
                     }
                     if ended {let _=measure_stage!(stages, "producer_wait_startup_checkpoint_or_completion", hub.0.1.wait_timeout(buffer,Duration::from_millis(20))).unwrap();continue;}
@@ -643,7 +648,9 @@ where
                 }
                 let groups=PreparedPublicGroupV1::from_day(&mut next);
                 let hidden=next.hidden.into_iter().map(AcceptedHiddenStepBucketV1::from_day);
-                let mut buffer=hub.0.0.lock().unwrap();buffer.public.extend(groups);buffer.hidden.extend(hidden);hub.0.1.notify_all();
+                if !groups.is_empty() || hidden.len() != 0 {
+                    let mut buffer=hub.0.0.lock().unwrap();buffer.public.extend(groups);buffer.hidden.extend(hidden);hub.0.1.notify_all();
+                }
                 #[cfg(feature = "stage-timing")]
                 stages.record("delivery_assembly_and_publish_including_lock", publish_started.elapsed());
             }
