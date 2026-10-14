@@ -43,14 +43,14 @@ impl StrategyMarketReadV1 for PublicObservationFrameV1<'_> {
 pub struct StrategyInputV1<
     G = SharedExecutionRegistryV2,
     M = FrozenMarketReadV1,
-    A = OwnedActionAccountV1,
+    A = OwnedActionAccountV2,
 > {
     pub action_before: ActionBeforeReadV2<G, A>,
     pub markets: Vec<M>,
     pub trade_economics: Vec<FrozenTradeEconomicsV1>,
 }
 /// 健康读取借用原公开观察，避免重复克隆盘口；账户来自同一真实 Ledger/Registry。
-pub struct StrategyCurrentReadV1<'a, G = SharedExecutionRegistryV2, A = OwnedActionAccountV1> {
+pub struct StrategyCurrentReadV1<'a, G = SharedExecutionRegistryV2, A = OwnedActionAccountV2> {
     pub action_before: ActionBeforeReadV2<G, A>,
     pub trade_economics: Vec<FrozenTradeEconomicsV1>,
     pub markets: Vec<PublicObservationFrameV1<'a>>,
@@ -58,10 +58,10 @@ pub struct StrategyCurrentReadV1<'a, G = SharedExecutionRegistryV2, A = OwnedAct
 pub type BorrowedStrategyInputV1<'a> = StrategyInputV1<
     &'a SharedExecutionRegistryV2,
     PublicObservationFrameV1<'a>,
-    BorrowedActionAccountV1<'a>,
+    BorrowedActionAccountV2<'a>,
 >;
 pub type BorrowedStrategyCurrentReadV1<'a> =
-    StrategyCurrentReadV1<'a, &'a SharedExecutionRegistryV2, BorrowedActionAccountV1<'a>>;
+    StrategyCurrentReadV1<'a, &'a SharedExecutionRegistryV2, BorrowedActionAccountV2<'a>>;
 enum CurrentRead<'a> {
     Owned(StrategyCurrentReadV1<'a>),
     Borrowed(BorrowedStrategyCurrentReadV1<'a>),
@@ -418,7 +418,7 @@ impl SharedExecutionV2 {
     ) -> Vec<PublicObservationFrameV1<'a>> {
         let mut ids = std::collections::BTreeSet::new();
         ids.extend(historical.iter().map(|id| id.0.clone()));
-        if let Some(read) = self.ledger().necessary_read_v1() {
+        if let Some(read) = self.ledger().necessary_read_v2() {
             ids.extend(
                 read.marked_markets()
                     .chain(read.funds_markets())

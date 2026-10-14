@@ -354,7 +354,7 @@ impl LedgerCommittedEffectV1 {
 #[derive(Serialize, Deserialize)]
 enum AdmissionPolicy {
     Legacy(AccountAdmissionPolicyV1),
-    DualCash(crate::projection::AccountAdmissionPolicyV2),
+    ActualCash(crate::projection::AccountAdmissionPolicyV3),
 }
 #[derive(Serialize, Deserialize)]
 pub struct LedgerWriterV1 {
@@ -427,8 +427,8 @@ impl LedgerWriterV1 {
     pub fn new(policy: AccountAdmissionPolicyV1) -> Self {
         Self::with_policy(AdmissionPolicy::Legacy(policy))
     }
-    pub fn new_with_admission_v2(policy: crate::projection::AccountAdmissionPolicyV2) -> Self {
-        Self::with_policy(AdmissionPolicy::DualCash(policy))
+    pub fn new_with_admission_v3(policy: crate::projection::AccountAdmissionPolicyV3) -> Self {
+        Self::with_policy(AdmissionPolicy::ActualCash(policy))
     }
     fn with_policy(policy: AdmissionPolicy) -> Self {
         Self {
@@ -496,15 +496,19 @@ impl LedgerWriterV1 {
                 *recovered = Some(Self::new(policy));
                 Ok(())
             }
-            DurablePayloadV1::GenesisV2 { policy } => {
+            DurablePayloadV1::GenesisV3 { policy } => {
                 if recovered.is_some() {
                     return Err(LedgerDurableErrorV1::InvalidStructure(
                         "Ledger 重复 genesis".into(),
                     ));
                 }
-                *recovered = Some(Self::new_with_admission_v2(policy));
+                *recovered = Some(Self::new_with_admission_v3(policy));
                 Ok(())
             }
+            DurablePayloadV1::GenesisV2 { .. } => Err(LedgerDurableErrorV1::InvalidStructure(
+                "旧 DualCashNoMarketLimit 活动账户不能按实际现金政策恢复；请保留原记录并新建账户"
+                    .into(),
+            )),
             payload => recovered
                 .as_mut()
                 .ok_or_else(|| {
@@ -541,16 +545,16 @@ impl LedgerWriterV1 {
             .map_err(Into::into)
     }
 
-    /// 旧 V1 实例的政策；V2 调用者使用 admission_policy_v2。
+    /// 旧 V1 实例的政策；V3 调用者使用 admission_policy_v3。
     pub fn admission_policy(&self) -> &AccountAdmissionPolicyV1 {
         match &self.policy {
             AdmissionPolicy::Legacy(policy) => policy,
-            AdmissionPolicy::DualCash(_) => panic!("V2 实例没有 V1 市场额度政策"),
+            AdmissionPolicy::ActualCash(_) => panic!("V3 实例没有 V1 市场额度政策"),
         }
     }
-    pub fn admission_policy_v2(&self) -> Option<crate::projection::AccountAdmissionPolicyV2> {
+    pub fn admission_policy_v3(&self) -> Option<crate::projection::AccountAdmissionPolicyV3> {
         match self.policy {
-            AdmissionPolicy::DualCash(policy) => Some(policy),
+            AdmissionPolicy::ActualCash(policy) => Some(policy),
             AdmissionPolicy::Legacy(_) => None,
         }
     }
@@ -559,7 +563,7 @@ impl LedgerWriterV1 {
             AdmissionPolicy::Legacy(policy) => DurablePayloadV1::Genesis {
                 policy: policy.clone(),
             },
-            AdmissionPolicy::DualCash(policy) => DurablePayloadV1::GenesisV2 { policy: *policy },
+            AdmissionPolicy::ActualCash(policy) => DurablePayloadV1::GenesisV3 { policy: *policy },
         }
     }
 
@@ -627,18 +631,6 @@ impl LedgerWriterV1 {
             );
         }
 
-        if matches!(self.policy, AdmissionPolicy::DualCash(_)) {
-            let total_reserved = account.balances.principal_encumbrance_pusd
-                + account.balances.immediate_taker_fee_encumbrance_pusd
-                + pending_total;
-            let maker_available = self.economics.cash.maker_cash - total_reserved;
-            if requested_total > maker_available {
-                return self.cache_capacity_outcome(
-                    request_identity,
-                    LedgerReservationOutcomeV1::InsufficientMakerAvailableFunds,
-                );
-            }
-        }
         let platform_market = account.markets.get(&condition_id.0);
         let platform_principal = platform_market
             .map(|market| market.balances.principal_encumbrance_pusd)
@@ -845,12 +837,12 @@ impl LedgerWriterV1 {
     }
 
     /// 同一动作的各身份先按共同现金精确求和；不产生“首腿已占用、次腿资金不足”的局部预留。
-    /// 双现金宿主使用此入口；既有单身份粘滞决定和原记录机制保持。
+    /// 实际现金宿主使用此入口；既有单身份粘滞决定和原记录机制保持。
     pub fn try_reserve_action_v2(
         &mut self,
         intents: &[ReserveIntentV1],
     ) -> Result<Vec<LedgerReservationOutcomeV1>, LedgerErrorV1> {
-        let (actual, maker, _) = self.cash_balances()?;
+        let (actual, _) = self.cash_balances()?;
         let mut total = Decimal::ZERO;
         let mut parsed = BTreeMap::new();
         for intent in intents {
@@ -873,8 +865,6 @@ impl LedgerWriterV1 {
         }
         let unavailable = if total > actual {
             Some(LedgerReservationOutcomeV1::InsufficientGlobalAvailableFunds)
-        } else if matches!(self.policy, AdmissionPolicy::DualCash(_)) && total > maker {
-            Some(LedgerReservationOutcomeV1::InsufficientMakerAvailableFunds)
         } else {
             None
         };
@@ -1775,11 +1765,11 @@ impl LedgerWriterV1 {
         positions: &mut execution_normalization::NoeRecoveryPositionReader,
     ) -> Result<(), LedgerDurableErrorV1> {
         match payload {
-            DurablePayloadV1::Genesis { .. } | DurablePayloadV1::GenesisV2 { .. } => {
-                Err(LedgerDurableErrorV1::InvalidStructure(
-                    "Ledger 耐久历史包含非首条 genesis".to_owned(),
-                ))
-            }
+            DurablePayloadV1::Genesis { .. }
+            | DurablePayloadV1::GenesisV2 { .. }
+            | DurablePayloadV1::GenesisV3 { .. } => Err(LedgerDurableErrorV1::InvalidStructure(
+                "Ledger 耐久历史包含非首条 genesis".to_owned(),
+            )),
             DurablePayloadV1::ReservationDecision {
                 request_identity,
                 request,

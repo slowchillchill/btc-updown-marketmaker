@@ -20,8 +20,11 @@ pub struct ReserveIntentV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LedgerReservationOutcomeV1 {
-    Reserved { ledger_entry_seq: u64 },
+    Reserved {
+        ledger_entry_seq: u64,
+    },
     InsufficientGlobalAvailableFunds,
+    /// 旧双现金耐久决定的解释值；当前准入不产生此结果。
     InsufficientMakerAvailableFunds,
     PerMarketLimitExceeded,
 }

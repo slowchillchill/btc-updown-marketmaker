@@ -87,8 +87,9 @@ async fn market_estimate_does_not_cap_arrival_fee_and_original_cash_recovers_onc
             .context()
             .context_reference
             .clone();
-        let mut ledger =
-            LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(
+            AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
+        );
         let ledger_root = temp.path().join("ledger");
         execution
             .bind_ledger_recording_v2(&mut ledger, &ledger_root)
@@ -185,16 +186,21 @@ async fn market_estimate_does_not_cap_arrival_fee_and_original_cash_recovers_onc
                 .iter()
                 .all(|m| m.executed[1].actual_fee_pusd.0 == "0")
         );
-        let mut saw_negative_maker_cash = false;
+        let mut saw_negative_attribution = false;
         while driver.next_group().unwrap().is_some() {
             shared.apply_closed().unwrap();
             if let Some(read) = shared.ledger().economic_read() {
-                if read.cash().maker_available_pusd.0 == "-3.67" {
-                    saw_negative_maker_cash = true;
+                if UnmarkedAccountEconomicsReadV3::from_ledger(&read).worst_case_maker_nav_pusd
+                    == (ExactRationalV1 {
+                        numerator: "-367".into(),
+                        denominator: "100".into(),
+                    })
+                {
+                    saw_negative_attribution = true;
                 }
             }
         }
-        assert_eq!(saw_negative_maker_cash, funded);
+        assert_eq!(saw_negative_attribution, funded);
         assert!(shared.apply_closed().unwrap());
         assert_eq!(
             before.economics(),
@@ -235,19 +241,12 @@ async fn market_estimate_does_not_cap_arrival_fee_and_original_cash_recovers_onc
                 read.cash().actual_available_pusd.0,
                 if fails { "200" } else { "104.33" }
             );
-            assert_eq!(
-                read.cash().maker_available_pusd.0,
-                if fails { "92" } else { "-3.67" }
-            );
         } else {
             assert!(market.is_none() || market.unwrap().executed[1].shares.0 == "0");
             assert_eq!(read.cash().actual_available_pusd.0, "92");
-            assert_eq!(read.cash().maker_available_pusd.0, "92");
         }
         assert_eq!(read.cash().actual_reserved_pusd.0, "0");
-        assert_eq!(read.cash().maker_reserved_pusd.0, "0");
-        let expected_cash = read.cash().clone();
-        let nav = AccountEconomicsReadV1::from_ledger(&read);
+        let nav = UnmarkedAccountEconomicsReadV3::from_ledger(&read);
         assert_eq!(
             nav.other_account_residual_pusd,
             ExactRationalV1 {
@@ -286,22 +285,34 @@ async fn market_estimate_does_not_cap_arrival_fee_and_original_cash_recovers_onc
             }
         );
         drop(read);
-        if funded && !fails {
-            assert_eq!(
-                shared
-                    .reserve_action_v2(&[reserve("next-principal", "1")])
+        if funded {
+            // 外部入金到账后仍可用于报价，即使旧来源归属评价为负。
+            let principal = if fails { "93" } else { "1" };
+            let mut checkpoint = Vec::new();
+            shared.ledger().write_checkpoint(&mut checkpoint).unwrap();
+            let mut single = LedgerWriterV1::restore_checkpoint(checkpoint.as_slice()).unwrap();
+            let request = reserve("actual-cash-single-principal", principal);
+            assert!(matches!(
+                single
+                    .try_reserve_intent(
+                        &request.request_identity,
+                        &request.condition_id,
+                        &request.requested_principal_pusd,
+                        &request.immediate_fee_reserve_pusd
+                    )
                     .unwrap(),
-                vec![LedgerReservationOutcomeV1::InsufficientMakerAvailableFunds]
-            );
-        }
-        if funded && fails {
-            assert_eq!(
+                LedgerReservationOutcomeV1::Reserved { .. }
+            ));
+            assert!(matches!(
                 shared
-                    .reserve_action_v2(&[reserve("excluded-cash-not-new-principal", "93")])
-                    .unwrap(),
-                vec![LedgerReservationOutcomeV1::InsufficientMakerAvailableFunds]
-            );
+                    .reserve_action_v2(&[reserve("actual-cash-next-principal", principal)])
+                    .unwrap()[0],
+                LedgerReservationOutcomeV1::Reserved { .. }
+            ));
         }
+        let restored_expected =
+            UnmarkedAccountEconomicsReadV3::from_ledger(&shared.ledger().economic_read().unwrap());
+        let expected_cash = restored_expected.cash.clone();
         // 真实后继订单仍保留原意图，未按估费缩量、改价或自动补腿。
         for order in shared.registry().orders() {
             assert_eq!(
@@ -333,8 +344,8 @@ async fn market_estimate_does_not_cap_arrival_fee_and_original_cash_recovers_onc
             let restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
             assert_eq!(restored.economic_read().unwrap().cash(), &expected_cash);
             assert_eq!(
-                AccountEconomicsReadV1::from_ledger(&restored.economic_read().unwrap()),
-                nav
+                UnmarkedAccountEconomicsReadV3::from_ledger(&restored.economic_read().unwrap()),
+                restored_expected
             );
         }
     }

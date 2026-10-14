@@ -135,11 +135,11 @@ D-0284 已批准的来源健康范围按 #185 §3.5 执行，不由上述研究�
 
 每日分别报告成交、配对、费用、返佣、净收益、资金占用、回撤及日末未闭合状态。同一候选各日的总净损益可按相同经济口径相加；平均日收益率按独立账户初始本金加权，等本金且各日结果齐备时为总净损益÷（2000 pUSD×比较日数）。回撤保留每日结果和最差日，不把日收益率复利串接或拼成三日连续账户净值。未知经济结果不得当作零，账户独立不免除日末未闭合项披露。
 
-通用 NAV/WCM和未闭合数直接读 `HistoricalRunReportV1`；其中 `ledger_consumed_memory: LedgerProjectionV2` 已提供现金、持仓、总费用、已实现PnL与返佣应收等账户/逐市场投影，可进行相应真实汇总，不在研究脚本算另一套。详细配对本金／净价差、成交实际费用、返佣预计／确认／到账、结算与残余池沿原 `LedgerEconomicReadV1`、`MarketEconomicTotalsReadV1`、`TradeEconomicReadV1` 读取。策略风险权益沿公共NAV扣未支付确认返佣，维护同口径H，不把浮盈、预计返佣或迟到修正重复计入合格利润。
+通用 NAV/WCM和未闭合数直接读 `HistoricalRunReportV1`；其中 `ledger_consumed_memory: LedgerProjectionV2` 已提供现金、持仓、总费用、已实现PnL与返佣应收等账户/逐市场投影，可进行相应真实汇总，不在研究脚本算另一套。详细配对本金／净价差、成交实际费用、返佣预计／确认／到账、结算与残余池沿原 `LedgerEconomicReadV2`、`MarketEconomicTotalsReadV1`、`TradeEconomicReadV1` 读取。策略风险权益沿公共NAV扣未支付确认返佣，维护同口径H，不把浮盈、预计返佣或迟到修正重复计入合格利润。
 
 孤腿持续时间／峰值、资金锁占、动作比较、缺信息和终止诊断可在调用真实 `StrategyV1` 时做研究汇总，保留实际观察时间与分母；仅在已知区间积分，未知区间不外推为零，已知空买盘的 `Known(0)` 不当 `Unavailable`。该分析可以累计小型统计量及选定样例，不要求全量逐决策持久化，不复制账本。详细指标包括：配对本金/费用/返佣前与后的净结果，孤腿成本/时长/峰值/判定或未闭合，Maker/FAK/等待增量与反向过补，现金周转/锁占/应收赎回，E/H/回撤及终止后尾部。
 
-**最终公共经济读取：**`HistoricalRunReportV1.account_economics_memory` 现保留同一次report构造的完整 `AccountEconomicsReadV2`，含cash、markets的配对／结算细节、分角色费用、返佣已付等原汇总。`observation_cutoff` 保留原受信观察截止，原 `ledger_consumed_memory` 保留已消费的账本／平台／本地前缀；pending NOE与实际持久前缀分别解释，不假装全部齐平。顶层NAV/WCM来自同一对象。完整字段与结束语义见[公共历史入口](../../../backtest/README.md#有限结束与产物)。
+**最终公共经济读取：**`HistoricalRunReportV1.account_economics_memory` 现保留同一次report构造的完整 `AccountEconomicsReadV3`，含cash、markets的配对／结算细节、分角色费用、返佣已付等原汇总。`observation_cutoff` 保留原受信观察截止，原 `ledger_consumed_memory` 保留已消费的账本／平台／本地前缀；pending NOE与实际持久前缀分别解释，不假装全部齐平。顶层NAV/WCM来自同一对象。完整字段与结束语义见[公共历史入口](../../../backtest/README.md#有限结束与产物)。
 
 [原遗漏与反例](https://github.com/slowchillchill/btc-updown-marketmaker/issues/186#issuecomment-5960925602)说明：末次策略回调（BASE+1601）trade为空／执行0，正常范围尾部（BASE+1899）却已有10份、fee0.168及Taker未成熟返佣0.01344。所属 #186 修复保留该最终公共快照，解除此丰富汇总导出的接口前置；不把最后回调当最终值，不宣称真实研究已执行。
 

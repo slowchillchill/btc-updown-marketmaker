@@ -327,6 +327,9 @@ fn encode_payload(
         DurablePayloadV1::Genesis { policy } => {
             ("GENESIS", serde_json::to_vec(&GenesisBody { policy }))
         }
+        DurablePayloadV1::GenesisV3 { policy } => {
+            ("GENESIS_V3", serde_json::to_vec(&GenesisBody { policy }))
+        }
         DurablePayloadV1::GenesisV2 { policy } => {
             ("GENESIS_V2", serde_json::to_vec(&GenesisBody { policy }))
         }
@@ -349,6 +352,10 @@ fn decode_payload(kind: &str, body: &[u8]) -> Result<DurablePayloadV1, LedgerDur
         "GENESIS" => {
             let GenesisBody { policy } = serde_json::from_slice(body).map_err(invalid)?;
             DurablePayloadV1::Genesis { policy }
+        }
+        "GENESIS_V3" => {
+            let GenesisBody { policy } = serde_json::from_slice(body).map_err(invalid)?;
+            DurablePayloadV1::GenesisV3 { policy }
         }
         "GENESIS_V2" => {
             let GenesisBody { policy } = serde_json::from_slice(body).map_err(invalid)?;

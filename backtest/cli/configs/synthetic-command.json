@@ -96,7 +96,7 @@
     "activation_id": "activate",
     "consumption_sequence_ref": "historical-host",
     "noe_implementation_identity": "public-v4",
-    "admission_policy": "DualCashNoMarketLimit",
+    "admission_policy": "ActualCashNoMarketLimit",
     "max_group_bytes": 16777216,
     "finite_in_flight_groups": 128
   },

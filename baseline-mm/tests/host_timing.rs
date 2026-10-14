@@ -470,8 +470,8 @@ async fn representative_host_calculation_timing() {
                 finality.clone(),
                 &format!("timing-{state}-{id}"),
             );
-            let mut ledger = LedgerWriterV1::new_with_admission_v2(
-                AccountAdmissionPolicyV2::DualCashNoMarketLimit,
+            let mut ledger = LedgerWriterV1::new_with_admission_v3(
+                AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
             );
             execution
                 .bind_ledger_recording_v2(&mut ledger, &root.join("ledger"))
@@ -664,10 +664,10 @@ async fn representative_host_calculation_timing() {
                 let market_totals: Vec<_> = economic_read.market_totals().collect();
                 let market_totals_ns = start.elapsed().as_nanos() as u64;
                 let start = Instant::now();
-                let account_v1 = AccountEconomicsReadV1::from_ledger(&economic_read);
+                let account_v1 = UnmarkedAccountEconomicsReadV3::from_ledger(&economic_read);
                 let account_v1_ns = start.elapsed().as_nanos() as u64;
                 let start = Instant::now();
-                let account = AccountEconomicsReadV2::from_ledger_and_observations(
+                let account = AccountEconomicsReadV3::from_ledger_and_observations(
                     &economic_read,
                     frames.iter().map(|f| f.observation),
                 );
@@ -831,8 +831,9 @@ async fn representative_notrade_host_calculation_timing() {
             finality.clone(),
             &format!("notrade-{state}"),
         );
-        let mut ledger =
-            LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(
+            AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
+        );
         execution
             .bind_ledger_recording_v2(&mut ledger, &state_root.join("ledger"))
             .unwrap();
@@ -1119,8 +1120,9 @@ async fn completed_cancel_history_owned_and_borrowed_strategy_inputs() {
             finality.clone(),
             &format!("cancel-history-{history}"),
         );
-        let mut ledger =
-            LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(
+            AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
+        );
         execution
             .bind_ledger_recording_v2(&mut ledger, &root.join("ledger"))
             .unwrap();
@@ -1375,8 +1377,9 @@ async fn relevant_market_history_growth_timing() {
             finality.clone(),
             &format!("relevant-{completed}"),
         );
-        let mut ledger =
-            LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(
+            AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
+        );
         execution
             .bind_ledger_recording_v2(&mut ledger, &cell_root.join("ledger"))
             .unwrap();

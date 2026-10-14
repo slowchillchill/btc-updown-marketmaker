@@ -36,9 +36,9 @@ impl LedgerRecordMaterialV2 {
     }
     pub fn kind(&self) -> LedgerRecordMaterialKindV2 {
         match self.payload.as_ref() {
-            DurablePayloadV1::Genesis { .. } | DurablePayloadV1::GenesisV2 { .. } => {
-                LedgerRecordMaterialKindV2::Genesis
-            }
+            DurablePayloadV1::Genesis { .. }
+            | DurablePayloadV1::GenesisV2 { .. }
+            | DurablePayloadV1::GenesisV3 { .. } => LedgerRecordMaterialKindV2::Genesis,
             DurablePayloadV1::Transaction(_) => LedgerRecordMaterialKindV2::Transaction,
             DurablePayloadV1::ReservationDecision { .. } => {
                 LedgerRecordMaterialKindV2::ReservationDecision
@@ -446,7 +446,9 @@ impl LedgerBackgroundWriterV2 {
         material: &LedgerRecordMaterialV2,
     ) -> Result<bool, LedgerDurableErrorV1> {
         match material.payload.as_ref() {
-            DurablePayloadV1::Genesis { .. } | DurablePayloadV1::GenesisV2 { .. } => {
+            DurablePayloadV1::Genesis { .. }
+            | DurablePayloadV1::GenesisV2 { .. }
+            | DurablePayloadV1::GenesisV3 { .. } => {
                 self.writer = Some(DurableLedgerV1::create_parquet(
                     &self.root,
                     material.payload.as_ref().clone(),

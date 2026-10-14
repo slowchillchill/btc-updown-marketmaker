@@ -56,6 +56,7 @@ class SixHourPreparation(unittest.TestCase):
             generated = json.loads((output_root / 'configs/research-days.json').read_text())
             for candidate in generated['days'][0]['candidates']:
                 run = candidate['run']
+                self.assertEqual(run['admission_policy'], 'ActualCashNoMarketLimit')
                 metadata = Path(run['metadata_path'])
                 self.assertTrue(metadata.parent.is_dir())
                 self.assertEqual(Path(run['sim_log']).parent, metadata.parent)

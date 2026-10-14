@@ -547,7 +547,7 @@ fn terminal_success_read_is_not_economic_application() {
         },
     });
     let mut writer =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     writer
         .apply_noe_memory_v1(&source.source.opening_record().unwrap())
         .unwrap();
@@ -727,7 +727,7 @@ fn assert_counts(writer: &LedgerWriterV1, open: u64, pending: u64) {
         projection.platform_confirmed_projection.fees_pusd,
         number("0")
     );
-    let read = writer.necessary_read_v1().unwrap();
+    let read = writer.necessary_read_v2().unwrap();
     let ids: Vec<_> = read.funds_markets().collect();
     let value = |v: &ExactDecimal| rust_decimal::Decimal::from_str_exact(&v.0).unwrap();
     for m in &projection.market_projections {
@@ -793,7 +793,7 @@ fn maker_full_match_closes_open_quantity_once_independent_of_finality_and_recove
     let records = source.source.take_closed(500, 700);
     assert_eq!(records.len(), 5);
     let mut writer =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     let materials = Arc::new(Mutex::new(Vec::new()));
     let sink = materials.clone();
     writer.bind_record_sink_v2(Box::new(move |m| sink.lock().unwrap().push(m)));
@@ -906,7 +906,7 @@ fn initial_taker_is_not_deducted_again_and_late_acceptance_keeps_maker_depletion
     let records = source.source.take_closed(500, 700);
     assert_eq!(records.len(), 7);
     let mut writer =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     writer
         .apply_noe_memory_v1(&source.source.opening_record().unwrap())
         .unwrap();
@@ -987,7 +987,7 @@ fn canceled_remainder_and_late_match_keep_open_and_finality_counts_separate() {
     let records = source.source.take_closed(500, 700);
     assert_eq!(records.len(), 9);
     let mut writer =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     writer
         .apply_noe_memory_v1(&source.source.opening_record().unwrap())
         .unwrap();
@@ -1005,4 +1005,37 @@ fn canceled_remainder_and_late_match_keep_open_and_finality_counts_separate() {
         writer.apply_noe_memory_v1(record).unwrap();
         assert_counts(&writer, open, pending);
     }
+}
+
+#[test]
+fn new_policy_checkpoint_preserves_identity_and_rejects_old_dual_cash_identity() {
+    let writer =
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
+    let mut bytes = Vec::new();
+    writer.write_checkpoint(&mut bytes).unwrap();
+    let restored = LedgerWriterV1::restore_checkpoint(bytes.as_slice()).unwrap();
+    assert_eq!(
+        restored.admission_policy_v3(),
+        Some(AccountAdmissionPolicyV3::ActualCashNoMarketLimit)
+    );
+    // 旧持久边界使用 DualCash 枚举及 maker_cash。它不能静默改用新政策。
+    let mut old = serde_json::to_value(&writer).unwrap();
+    let mut same_identity_bytes = Vec::new();
+    ciborium::ser::into_writer(&old, &mut same_identity_bytes).unwrap();
+    assert_eq!(
+        LedgerWriterV1::restore_checkpoint(same_identity_bytes.as_slice())
+            .unwrap()
+            .admission_policy_v3(),
+        writer.admission_policy_v3()
+    );
+    old["policy"] = serde_json::json!({"DualCash":"DualCashNoMarketLimit"});
+    old["economics"]["cash"]["maker_cash"] = serde_json::json!("0");
+    let mut old_bytes = Vec::new();
+    ciborium::ser::into_writer(&old, &mut old_bytes).unwrap();
+    assert!(LedgerWriterV1::restore_checkpoint(old_bytes.as_slice()).is_err());
+    assert!(serde_json::from_str::<AccountAdmissionPolicyV3>("\"DualCashNoMarketLimit\"").is_err());
+    assert_eq!(
+        serde_json::to_string(&AccountAdmissionPolicyV2::DualCashNoMarketLimit).unwrap(),
+        "\"DualCashNoMarketLimit\""
+    );
 }

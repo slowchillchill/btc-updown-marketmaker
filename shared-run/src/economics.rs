@@ -1,37 +1,39 @@
 //! 同一动作前 Ledger 前缀的只读经济组合，不产生 NAV 分录。
 use contracts::economics::{EconomicRational as R, SettlementCostAttributionV1};
 use contracts::{ExactDecimal, ExactRationalV1, ExecutionReadValueV1};
-use ledger::{DualCashReadV1, LedgerEconomicReadV1, MarketEconomicTotalsReadV1};
+use ledger::{CashReadV1, LedgerEconomicReadV2, MarketEconomicTotalsReadV1};
 use rust_decimal::Decimal;
 
 pub type MarketEconomicsReadV1 = MarketEconomicTotalsReadV1;
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AccountEconomicsReadV1 {
-    pub cash: DualCashReadV1,
+pub struct UnmarkedAccountEconomicsReadV3 {
+    pub cash: CashReadV1,
     pub markets: Vec<MarketEconomicsReadV1>,
     pub conservative_nav_pusd: ExactRationalV1,
+    /// 原来源归因评价，不能证明交易路径无需方向回款或外部资金资助。
     pub worst_case_maker_nav_pusd: ExactRationalV1,
     pub directional_residual_pusd: ExactRationalV1,
     pub other_account_residual_pusd: ExactRationalV1,
     pub other_receivable_pusd: ExactRationalV1,
     pub other_liability_pusd: ExactRationalV1,
 }
-/// best bid 标记语义；V1 保留历史判定前零估值，不用于当前动作读取。
-pub const ACCOUNT_ECONOMICS_VERSION: &str = "account_economics_v2";
+/// 实际现金结构的 v3；未判定孤腿仍按原最佳买价标记。
+pub const ACCOUNT_ECONOMICS_VERSION: &str = "account_economics_v3";
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub struct AccountEconomicsReadV2 {
-    pub cash: DualCashReadV1,
+pub struct AccountEconomicsReadV3 {
+    pub cash: CashReadV1,
     pub markets: Vec<MarketEconomicsReadV1>,
     pub conservative_nav_pusd: ExecutionReadValueV1<ExactRationalV1>,
+    /// 原来源归因评价，不能证明交易路径无需方向回款或外部资金资助。
     pub worst_case_maker_nav_pusd: ExactRationalV1,
     pub directional_residual_pusd: ExecutionReadValueV1<ExactRationalV1>,
     pub other_account_residual_pusd: ExactRationalV1,
     pub other_receivable_pusd: ExactRationalV1,
     pub other_liability_pusd: ExactRationalV1,
 }
-impl AccountEconomicsReadV2 {
+impl AccountEconomicsReadV3 {
     pub fn from_ledger_and_observations<'a>(
-        read: &LedgerEconomicReadV1<'_>,
+        read: &LedgerEconomicReadV2<'_>,
         observations: impl IntoIterator<Item = &'a contracts::MarketBusinessObservationV1>,
     ) -> Self {
         use contracts::ExecutionReadValueV1::{Known, Unavailable};
@@ -39,7 +41,7 @@ impl AccountEconomicsReadV2 {
             .into_iter()
             .map(|o| (&o.market.condition_id.0, o))
             .collect();
-        let base = AccountEconomicsReadV1::from_ledger(read);
+        let base = UnmarkedAccountEconomicsReadV3::from_ledger(read);
         let mut mark = Some(R::zero());
         for market in &base.markets {
             if market.settlement_state != ledger::EconomicSettlementStateV1::Unresolved {
@@ -98,13 +100,16 @@ fn amount(value: &ExactDecimal) -> R {
 fn rational(value: &ExactRationalV1) -> R {
     R::try_from(value).expect("Ledger 规范有理数")
 }
-impl AccountEconomicsReadV1 {
-    pub fn from_ledger(read: &LedgerEconomicReadV1<'_>) -> Self {
+impl UnmarkedAccountEconomicsReadV3 {
+    pub fn from_ledger(read: &LedgerEconomicReadV2<'_>) -> Self {
         let cash = read.cash().clone();
         let markets: Vec<_> = read.market_totals().collect();
         let mut conservative =
             amount(&cash.actual_available_pusd).add(&amount(&cash.actual_reserved_pusd));
-        let mut maker = amount(&cash.maker_available_pusd).add(&amount(&cash.maker_reserved_pusd));
+        // 来源归属评价由真实总现金及 D/O 派生，不参与交易资金准入。
+        let mut maker = conservative
+            .sub(&amount(&read.residual_cash().directional_cash_pusd))
+            .sub(&amount(&read.residual_cash().other_cash_pusd));
         let mut directional = amount(&read.residual_cash().directional_cash_pusd);
         let other = amount(&read.residual_cash().other_cash_pusd);
         for market in &markets {
@@ -154,7 +159,7 @@ impl SettlementCoordinatorV1 {
     pub(crate) fn advance<C: Clone + std::fmt::Debug + Eq>(
         &mut self,
         registry: &crate::SharedExecutionRegistry<C>,
-        read: &LedgerEconomicReadV1<'_>,
+        read: &LedgerEconomicReadV2<'_>,
         account: &contracts::AccountInstanceKeyV1,
         decision: &mut sim_system::execution::PublicGroupDecisionV1<'_>,
     ) -> Result<(), sim_system::execution::SimRunActorErrorV2> {

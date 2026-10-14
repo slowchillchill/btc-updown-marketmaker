@@ -51,7 +51,7 @@ fn setup(root: &Path, cash: &str) -> (SharedExecutionV2, Driver, Arc<SealedProce
         cash,
     );
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     execution
         .bind_ledger_recording_v2(&mut ledger, &root.join("ledger"))
         .unwrap();
@@ -550,7 +550,7 @@ async fn profitable_pool(
         "0.0000000000000000000000000001",
     );
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     execution
         .bind_ledger_recording_v2(&mut ledger, &root.join("ledger"))
         .unwrap();
@@ -1067,7 +1067,7 @@ async fn unknown_public_nav_stops_new_pairs_but_independent_repair_remains_possi
         "2000",
     );
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     execution
         .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
         .unwrap();
@@ -1683,7 +1683,7 @@ async fn unrelated_market_commitment_does_not_invalidate_frozen_repair() {
         "2000",
     );
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     execution
         .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
         .unwrap();

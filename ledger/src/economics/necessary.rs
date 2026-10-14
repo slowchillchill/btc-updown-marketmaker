@@ -103,13 +103,13 @@ impl AccountIndex {
         self.contributions.insert(id.into(), value);
     }
 }
-pub struct LedgerNecessaryReadV1<'a> {
+pub struct LedgerNecessaryReadV2<'a> {
     writer: &'a LedgerWriterV1,
 }
 impl LedgerWriterV1 {
-    pub fn necessary_read_v1(&self) -> Option<LedgerNecessaryReadV1<'_>> {
+    pub fn necessary_read_v2(&self) -> Option<LedgerNecessaryReadV2<'_>> {
         self.account.as_ref()?;
-        Some(LedgerNecessaryReadV1 { writer: self })
+        Some(LedgerNecessaryReadV2 { writer: self })
     }
     pub(crate) fn necessary_market_funds(&self, condition: &ConditionId) -> MarketFundsNumbersV1 {
         let id = &condition.0;
@@ -138,7 +138,7 @@ impl LedgerWriterV1 {
         }
     }
 }
-impl LedgerNecessaryReadV1<'_> {
+impl LedgerNecessaryReadV2<'_> {
     fn index(&self) -> &EconomicReadIndex {
         self.writer
             .economics
@@ -154,7 +154,7 @@ impl LedgerNecessaryReadV1<'_> {
     pub fn account(&self) -> &AccountEconomicNumbersV1 {
         &self.account_index().totals
     }
-    pub fn cash(&self) -> (Decimal, Decimal, Decimal) {
+    pub fn cash(&self) -> (Decimal, Decimal) {
         self.writer.cash_balances().expect("已开户余额")
     }
     pub fn marked_markets(&self) -> impl Iterator<Item = &str> {

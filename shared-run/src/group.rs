@@ -25,7 +25,7 @@ struct OrderFunds {
     seq: Option<u64>,
 }
 /// 持有同一组必要标量和原Arc引用；后续动作不能改写本组读取。
-pub struct ActionBeforeRead<R, G = SharedExecutionRegistry<R>, A = OwnedActionAccountV1> {
+pub struct ActionBeforeRead<R, G = SharedExecutionRegistry<R>, A = OwnedActionAccountV2> {
     pub(crate) account: A,
     pending_noe_record_count: usize,
     cutoff: TrustedGroupDecisionCutoffV1,
@@ -34,17 +34,17 @@ pub struct ActionBeforeRead<R, G = SharedExecutionRegistry<R>, A = OwnedActionAc
     requests: Vec<RequestFunds>,
     orders: Vec<OrderFunds>,
 }
-impl<R: Clone + std::fmt::Debug + Eq, G: Borrow<SharedExecutionRegistry<R>>, A: ActionAccountReadV1>
+impl<R: Clone + std::fmt::Debug + Eq, G: Borrow<SharedExecutionRegistry<R>>, A: ActionAccountReadV2>
     ActionBeforeRead<R, G, A>
 {
     /// 已领取、因依赖未满足而尚待 Ledger 应用的原记录数；零不证明未来事实已齐。
     pub fn pending_noe_record_count(&self) -> usize {
         self.pending_noe_record_count
     }
-    pub fn economics(&self) -> &AccountEconomicsReadV2 {
+    pub fn economics(&self) -> &AccountEconomicsReadV3 {
         &self.account.full().economics
     }
-    pub fn cash_available(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+    pub fn cash_available(&self) -> rust_decimal::Decimal {
         self.account.cash_available()
     }
     pub fn profit_and_equity(
@@ -307,8 +307,8 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         let (requests, orders) = self.read_action_funds(registry.borrow());
         Some(ActionBeforeRead {
             pending_noe_record_count: self.pending.len(),
-            account: OwnedActionAccountV1 {
-                economics: AccountEconomicsReadV2::from_ledger_and_observations(
+            account: OwnedActionAccountV2 {
+                economics: AccountEconomicsReadV3::from_ledger_and_observations(
                     &economic,
                     frames.iter().map(|f| f.observation),
                 ),
@@ -330,13 +330,13 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         ActionBeforeRead<
             P::Completion,
             &'a SharedExecutionRegistry<P::Completion>,
-            BorrowedActionAccountV1<'a>,
+            BorrowedActionAccountV2<'a>,
         >,
     > {
         let registry = &self.registry;
         let (requests, orders) = self.read_action_funds(registry);
         Some(ActionBeforeRead {
-            account: BorrowedActionAccountV1::new(&self.ledger, frames, driver)?,
+            account: BorrowedActionAccountV2::new(&self.ledger, frames, driver)?,
             pending_noe_record_count: self.pending.len(),
             cutoff,
             registry,
@@ -511,10 +511,10 @@ pub type SharedExecutionV1 = SharedExecution<sim_system::execution::MeasuredOrde
 pub type SharedExecutionV2 = SharedExecution<sim_system::execution::MeasuredCancellationEvidence>;
 pub type ActionBeforeReadV1 =
     ActionBeforeRead<contracts::execution_normalization::NoCancellationRequestCompletionV0>;
-pub type ActionBeforeReadV2<G = SharedExecutionRegistryV2, A = OwnedActionAccountV1> =
+pub type ActionBeforeReadV2<G = SharedExecutionRegistryV2, A = OwnedActionAccountV2> =
     ActionBeforeRead<contracts::execution_normalization::CancellationRequestCompletedV1, G, A>;
 
-impl<G: Borrow<SharedExecutionRegistryV2>, A: ActionAccountReadV1> ActionBeforeReadV2<G, A> {
+impl<G: Borrow<SharedExecutionRegistryV2>, A: ActionAccountReadV2> ActionBeforeReadV2<G, A> {
     pub fn pending_cancellation_count(
         &self,
         scope: Option<&CancellationScopeV1<'_>>,

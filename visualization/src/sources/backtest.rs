@@ -43,8 +43,10 @@ fn load_json(path: Option<&Path>, report: Option<bool>) -> Document {
                     doc.status = "ready";
                     // economics_version 是报告/启动元数据目前明确发布的版本标识。
                     if report.is_some()
-                        && value.get("economics_version").and_then(|v| v.as_str())
-                            != Some("account_economics_v2")
+                        && !matches!(
+                            value.get("economics_version").and_then(|v| v.as_str()),
+                            Some("account_economics_v2" | "account_economics_v3")
+                        )
                     {
                         doc.status = "unknown_version";
                         doc.detail =
