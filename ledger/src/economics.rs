@@ -1090,7 +1090,11 @@ impl EconomicsState {
         }
         if let Some(account) = index.account.get_mut() {
             for id in affected {
-                account.replace(&id, self);
+                let pending = index
+                    .markets
+                    .get(&id)
+                    .map_or_else(R::zero, |t| t.pending_principal.clone());
+                account.replace(&id, self, pending);
             }
         }
         self.read_index = Some(index);

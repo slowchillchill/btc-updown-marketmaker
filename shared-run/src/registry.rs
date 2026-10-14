@@ -56,14 +56,14 @@ pub struct ExecutionOrderRead<'a, R> {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Order<R> {
     origin: Option<(String, u16)>,
-    accepted: Option<Ref<R>>,
-    formed: Option<Ref<R>>,
-    lifecycle: Option<Ref<R>>,
-    direct: Option<Ref<R>>,
-    known_query: Option<Ref<R>>,
-    canceled: Option<Ref<R>>,
-    cancellation: Option<Ref<R>>,
-    trades: BTreeMap<Identity, Ref<R>>,
+    accepted: Option<R>,
+    formed: Option<R>,
+    lifecycle: Option<R>,
+    direct: Option<R>,
+    known_query: Option<R>,
+    canceled: Option<R>,
+    cancellation: Option<R>,
+    trades: BTreeMap<Identity, R>,
 }
 impl<R> Default for Order<R> {
     fn default() -> Self {
@@ -84,8 +84,8 @@ impl<R> Default for Order<R> {
 struct Submitted<R> {
     origin: FrozenIntentRefV1,
     receipt: Option<MutationRequestReceiptV2>,
-    completed: Option<Ref<R>>,
-    cancel_targets: Vec<Ref<R>>,
+    completed: Option<R>,
+    cancel_targets: Vec<R>,
     outcomes: BTreeMap<u16, Option<Identity>>,
 }
 /// 原 owner 的活动身份集合；不保存第二份订单或成交事实。
@@ -105,8 +105,8 @@ struct ActionPopulation {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SharedExecutionRegistry<R> {
     context: Arc<ExecutionNormalizationContextV1>,
-    intents: BTreeMap<String, Submitted<R>>,
-    orders: BTreeMap<Identity, Order<R>>,
+    intents: BTreeMap<String, Submitted<Ref<R>>>,
+    orders: BTreeMap<Identity, Order<Ref<R>>>,
     markets: BTreeMap<String, Arc<PublicTradingRuleContextV1>>,
     cancel_locations: BTreeMap<Identity, Ref<R>>,
     #[serde(default)]
@@ -458,7 +458,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             self.refresh_request(&id);
         }
     }
-    fn unfinished(&self, id: &Identity, state: &Order<R>) -> bool {
+    fn unfinished(&self, id: &Identity, state: &Order<Ref<R>>) -> bool {
         !matches!(self.order_from(id, state).cancellable, Known(false))
             || state.trades.values().filter_map(trade)
                 .any(|t| !final_disposition(&t.economic_disposition))
@@ -484,7 +484,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
     fn order_from<'a>(
         &'a self,
         id: &'a Identity,
-        state: &'a Order<R>,
+        state: &'a Order<Ref<R>>,
     ) -> ExecutionOrderRead<'a, R> {
         let origin = state.origin.as_ref().and_then(|(id, ordinal)| {
             self.intents.get(id).map(|s| SubmittedLegReadV1 {
@@ -580,7 +580,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
     }
     fn request_commitments<'a>(
         &'a self,
-        s: &'a Submitted<R>,
+        s: &'a Submitted<Ref<R>>,
     ) -> impl Iterator<Item = IntentCommitmentReadV1<'a>> {
         (0..2).filter_map(move |ordinal| {
             let (_, leg) = leg(s.origin.intent(), ordinal)?;
@@ -604,7 +604,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             })
         })
     }
-    fn active_order_entries(&self) -> Box<dyn Iterator<Item = (&Identity, &Order<R>)> + '_> {
+    fn active_order_entries(&self) -> Box<dyn Iterator<Item = (&Identity, &Order<Ref<R>>)> + '_> {
         if let Some(population) = &self.action_population {
             Box::new(
                 population
@@ -620,7 +620,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             )
         }
     }
-    fn commitment_intents(&self) -> Box<dyn Iterator<Item = &Submitted<R>> + '_> {
+    fn commitment_intents(&self) -> Box<dyn Iterator<Item = &Submitted<Ref<R>>> + '_> {
         if let Some(population) = &self.action_population {
             Box::new(
                 population
@@ -632,7 +632,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             Box::new(self.intents.values().filter(|s| s.receipt.is_some()))
         }
     }
-    fn cancellation_intents(&self) -> Box<dyn Iterator<Item = &Submitted<R>> + '_> {
+    fn cancellation_intents(&self) -> Box<dyn Iterator<Item = &Submitted<Ref<R>>> + '_> {
         if let Some(population) = &self.action_population {
             Box::new(
                 population
@@ -983,7 +983,7 @@ fn target(order: &BuyOrderIntentV1) -> ExecutionReadValueV1<ExactDecimal> {
     })
 }
 fn measurement<R: Clone + std::fmt::Debug + Eq>(
-    order: &Order<R>,
+    order: &Order<Ref<R>>,
 ) -> Option<&SourceNeutralSubmissionMeasurementV1> {
     match order.accepted.as_ref()?.record() {
         NormalizationRecord::Evidence {
@@ -999,13 +999,13 @@ fn measurement<R: Clone + std::fmt::Debug + Eq>(
         _ => None,
     }
 }
-fn is_quote<R: Clone + std::fmt::Debug + Eq>(o: &Order<R>) -> bool {
+fn is_quote<R: Clone + std::fmt::Debug + Eq>(o: &Order<Ref<R>>) -> bool {
     matches!(
         measurement(o),
         Some(SourceNeutralSubmissionMeasurementV1::QuoteBudget { .. })
     )
 }
-fn is_closed<R: Clone + std::fmt::Debug + Eq>(o: &Order<R>, id: &Identity) -> bool {
+fn is_closed<R: Clone + std::fmt::Debug + Eq>(o: &Order<Ref<R>>, id: &Identity) -> bool {
     query_is_terminal(o, id)
         || o.canceled.is_some()
         || matches!(
@@ -1025,7 +1025,7 @@ fn is_closed<R: Clone + std::fmt::Debug + Eq>(o: &Order<R>, id: &Identity) -> bo
         )
 }
 fn quantities<R: Clone + std::fmt::Debug + Eq>(
-    o: &Order<R>,
+    o: &Order<Ref<R>>,
     id: &Identity,
 ) -> (
     ExecutionReadValueV1<ExactDecimal>,
@@ -1085,7 +1085,7 @@ fn trade<R: Clone + std::fmt::Debug + Eq>(
         _ => None,
     }
 }
-fn location_records<R>(o: &Order<R>) -> impl Iterator<Item = &Ref<R>> {
+fn location_records<R>(o: &Order<Ref<R>>) -> impl Iterator<Item = &Ref<R>> {
     o.formed
         .iter()
         .chain(o.lifecycle.iter())
@@ -1094,7 +1094,7 @@ fn location_records<R>(o: &Order<R>) -> impl Iterator<Item = &Ref<R>> {
         .chain(o.known_query.iter())
 }
 fn order_location<'a, R: Clone + std::fmt::Debug + Eq>(
-    o: &'a Order<R>,
+    o: &'a Order<Ref<R>>,
     id: &Identity,
 ) -> Option<(&'a ConditionId, &'a TokenId)> {
     location_records(o).find_map(|r| record_location(r, id))
@@ -1322,7 +1322,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
     fn latest_cancel_request(
         &self,
         scope: Option<&CancellationScopeV1<'_>>,
-    ) -> Option<(&Submitted<R>, bool)> {
+    ) -> Option<(&Submitted<Ref<R>>, bool)> {
         self.cancellation_intents()
             .filter_map(|request| {
                 let request_scope = cancellation_scope(request.origin.intent())?;
@@ -1502,7 +1502,10 @@ impl SharedExecutionRegistryV2 {
 }
 
 // 已到终态是单调关闭证据；后到旧 Open 只更新 direct，不覆盖这份原查询引用。
-fn query_is_terminal<R: Clone + std::fmt::Debug + Eq>(order: &Order<R>, id: &Identity) -> bool {
+fn query_is_terminal<R: Clone + std::fmt::Debug + Eq>(
+    order: &Order<Ref<R>>,
+    id: &Identity,
+) -> bool {
     query_snapshot(order, id).is_some_and(|snapshot| {
         matches!(
             snapshot.state,
@@ -1515,7 +1518,7 @@ fn query_is_terminal<R: Clone + std::fmt::Debug + Eq>(order: &Order<R>, id: &Ide
     })
 }
 fn query_base_applicability<R: Clone + std::fmt::Debug + Eq>(
-    order: &Order<R>,
+    order: &Order<Ref<R>>,
     id: &Identity,
 ) -> Option<bool> {
     Some(matches!(
@@ -1524,7 +1527,7 @@ fn query_base_applicability<R: Clone + std::fmt::Debug + Eq>(
     ))
 }
 fn query_snapshot<'a, R: Clone + std::fmt::Debug + Eq>(
-    order: &'a Order<R>,
+    order: &'a Order<Ref<R>>,
     id: &Identity,
 ) -> Option<&'a SourceNeutralOrderSnapshotV2<Identity>> {
     let NormalizationRecord::Evidence {
@@ -1544,4 +1547,111 @@ fn query_snapshot<'a, R: Clone + std::fmt::Debug + Eq>(
         _ => return None,
     };
     Some(snapshot)
+}
+
+/// 只在 checkpoint 边界替换原领取引用，不产生第二份业务登记。
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct RegistryCheckpointV2<F> {
+    context: Arc<ExecutionNormalizationContextV1>,
+    intents: BTreeMap<String, Submitted<F>>,
+    orders: BTreeMap<Identity, Order<F>>,
+    markets: BTreeMap<String, Arc<PublicTradingRuleContextV1>>,
+    cancel_locations: BTreeMap<Identity, F>,
+    #[serde(default)]
+    action_population: Option<ActionPopulation>,
+}
+impl<F> Order<F> {
+    fn map<T, E>(&self, f: &mut impl FnMut(&F) -> Result<T, E>) -> Result<Order<T>, E> {
+        Ok(Order {
+            origin: self.origin.clone(),
+            accepted: self.accepted.as_ref().map(&mut *f).transpose()?,
+            formed: self.formed.as_ref().map(&mut *f).transpose()?,
+            lifecycle: self.lifecycle.as_ref().map(&mut *f).transpose()?,
+            direct: self.direct.as_ref().map(&mut *f).transpose()?,
+            known_query: self.known_query.as_ref().map(&mut *f).transpose()?,
+            canceled: self.canceled.as_ref().map(&mut *f).transpose()?,
+            cancellation: self.cancellation.as_ref().map(&mut *f).transpose()?,
+            trades: self
+                .trades
+                .iter()
+                .map(|(k, v)| f(v).map(|v| (k.clone(), v)))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+impl<F> RegistryCheckpointV2<F> {
+    fn map<T, E>(
+        &self,
+        mut f: impl FnMut(&F) -> Result<T, E>,
+    ) -> Result<RegistryCheckpointV2<T>, E> {
+        Ok(RegistryCheckpointV2 {
+            context: self.context.clone(),
+            markets: self.markets.clone(),
+            action_population: self.action_population.clone(),
+            cancel_locations: self
+                .cancel_locations
+                .iter()
+                .map(|(k, v)| f(v).map(|v| (k.clone(), v)))
+                .collect::<Result<_, _>>()?,
+            orders: self
+                .orders
+                .iter()
+                .map(|(k, v)| v.map(&mut f).map(|v| (k.clone(), v)))
+                .collect::<Result<_, _>>()?,
+            intents: self
+                .intents
+                .iter()
+                .map(|(k, v)| {
+                    Ok((
+                        k.clone(),
+                        Submitted {
+                            origin: v.origin.clone(),
+                            receipt: v.receipt.clone(),
+                            completed: v.completed.as_ref().map(&mut f).transpose()?,
+                            cancel_targets: v
+                                .cancel_targets
+                                .iter()
+                                .map(&mut f)
+                                .collect::<Result<_, _>>()?,
+                            outcomes: v.outcomes.clone(),
+                        },
+                    ))
+                })
+                .collect::<Result<_, E>>()?,
+        })
+    }
+}
+impl<R: Clone> SharedExecutionRegistry<R> {
+    pub(crate) fn capture_checkpoint(
+        &self,
+        pool: &mut ::execution_normalization::NoeCheckpointBatchPoolV1<R>,
+    ) -> RegistryCheckpointV2<::execution_normalization::NoeCheckpointRecordRefV1> {
+        let state = RegistryCheckpointV2 {
+            context: self.context.clone(),
+            intents: self.intents.clone(),
+            orders: self.orders.clone(),
+            markets: self.markets.clone(),
+            cancel_locations: self.cancel_locations.clone(),
+            action_population: self.action_population.clone(),
+        };
+        state
+            .map(|r| Ok::<_, std::convert::Infallible>(pool.capture(r)))
+            .expect("只替换原引用")
+    }
+}
+impl RegistryCheckpointV2<::execution_normalization::NoeCheckpointRecordRefV1> {
+    pub(crate) fn restore<R: Clone>(
+        &self,
+        pool: &::execution_normalization::NoeCheckpointBatchPoolV1<R>,
+    ) -> Result<SharedExecutionRegistry<R>, String> {
+        let state = self.map(|r| pool.restore(r.clone()))?;
+        Ok(SharedExecutionRegistry {
+            context: state.context,
+            intents: state.intents,
+            orders: state.orders,
+            markets: state.markets,
+            cancel_locations: state.cancel_locations,
+            action_population: state.action_population,
+        })
+    }
 }

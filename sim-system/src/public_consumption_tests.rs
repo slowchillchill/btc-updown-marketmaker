@@ -3912,3 +3912,65 @@ fn shared_day_observation_encoding_preserves_eight_markets_and_lagging_groups() 
 mod gamma_resolution_tests {
     include!("gamma_resolution_tests.rs");
 }
+
+/// 固定一活动市场、事件/候选/义务数，仅改变已结束的登记历史。显式短测，非研究入口。
+#[test]
+#[ignore]
+fn long_window_two_scale_observation_cost() {
+    use std::time::Instant;
+    for history in [8_u64,80] {
+        let mut core=core(); core.enable_source_progress();
+        let prepare_started=Instant::now();
+        apply(&mut core,&meta(0));
+        for i in 1..=history {
+            let mut row=metadata_snapshot_row();
+            row.condition_id=format!("0x{:064x}",i+256);
+            row.clob_market_id=(4_000_000+i).to_string();
+            row.asset_ids=format!("[\"{}\",\"{}\"]",1000+2*i,1001+2*i);
+            row.collector_admission_sequence=i+1;
+            row.market_start_utc=0;row.market_end_utc=10_000;row.fixed_identity_verified_at_utc=0;
+            apply(&mut core,&record(i,TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(row)))));
+        }
+        let prepare_ns=prepare_started.elapsed().as_nanos();
+        let mut deliveries=Vec::new();
+        let events=1000_u64;
+        let producer_started=Instant::now();
+        for i in 0..events {
+            let input=pm(history+1+i,i+1,21_000+i as i64,book(if i%2==0 {"100"} else {"99"}));
+            let canonical=core.next_canonical_position();
+            let prepared=prepare_public_ingress_v1(&core,&input,&BTreeMap::new(),&[]).unwrap();
+            let applied=core.push(&prepared).unwrap().into_owned();
+            let prepared_pm=match prepared.current {PreparedCanonicalInputV1::PolymarketMessage(p)=>Some(p),_=>None};
+            let contexts=BTreeMap::from([(CONDITION_ID.into(),core.prepared_pm_context(CONDITION_ID).unwrap())]);
+            let mut day=data_pipeline_training::day_producer::DayAppliedV1 {input,applied:applied.applied, first_canonical_position:canonical,prepared_pm,contexts,initialization_binding:None,hidden:vec![]};
+            deliveries.extend(PreparedPublicGroupV1::from_day(&mut day));
+        }
+        let producer_ns=producer_started.elapsed().as_nanos();
+        // 模拟七个相同规模的只读消费者；不给完整消费者删历史。
+        let candidate_started=Instant::now();
+        for _ in 0..7 { for d in &deliveries {
+            let o=d.prepared.group.observations.get_market(CONDITION_ID).unwrap();
+            std::hint::black_box(&o.assets);
+            assert_eq!(o.visible_prefix.next_input_position,o.group_position+1);
+        }}
+        let candidate_ns=candidate_started.elapsed().as_nanos();
+        let capture_started=Instant::now();
+        let saved=checkpoint::DeliveryBatch::capture(deliveries.iter());
+        let capture_ns=capture_started.elapsed().as_nanos();
+        let encode_started=Instant::now(); let mut encoded=Vec::new();
+        ciborium::into_writer(&saved,&mut encoded).unwrap();
+        let encode_ns=encode_started.elapsed().as_nanos();
+        let temp=tempfile::tempdir().unwrap();
+        let write_started=Instant::now();
+        let mut f=std::fs::File::create(temp.path().join("public.cbor")).unwrap();
+        use std::io::Write; f.write_all(&encoded).unwrap();f.sync_all().unwrap();
+        let write_sync_ns=write_started.elapsed().as_nanos();
+        let restored:checkpoint::DeliveryBatch=ciborium::from_reader(encoded.as_slice()).unwrap();
+        let restored=restored.restore().unwrap();
+        assert_eq!(restored.len(),deliveries.len());
+        for i in [0,events as usize-1] {
+            assert_eq!(deliveries[i].prepared.group,restored[i].prepared.group);
+        }
+        println!("long_window_cost={}",serde_json::json!({"history_markets":history,"active_markets":1,"events":events,"candidates":7,"obligations":0,"prepare_ns":prepare_ns,"producer_ns":producer_ns,"candidate_ns":candidate_ns,"public_capture_ns":capture_ns,"public_encode_ns":encode_ns,"write_sync_ns":write_sync_ns,"public_bytes":encoded.len()}));
+    }
+}

@@ -56,15 +56,53 @@ impl HistoricalInitializationProvenanceV1 {
             .any(|position| self.input_positions.contains(position))
             || self.input_positions.contains(&closed_at)
     }
+    fn anchors_have_initialization_dependency(
+        &self,
+        anchors: &[DirectObservationAnchorV1],
+    ) -> bool {
+        anchors.iter().any(|anchor| {
+            self.source_message_ids
+                .contains(&anchor.source_message_id.0)
+        })
+    }
+    /// 日运行直接借用准确组事实和市场快照；不为统计装配完整市场观察。
+    pub fn observations_have_initialization_dependency(
+        &self,
+        observations: &MarketObservationSetV1,
+    ) -> bool {
+        if self.source_message_ids.is_empty() || observations.is_empty() {
+            return false;
+        }
+        let Some((markets, group)) = observations.shared_parts() else {
+            return observations
+                .iter()
+                .any(|o| self.observation_has_initialization_dependency(o));
+        };
+        macro_rules! fields { ($object:expr; $($field:ident),*) => {
+            false $(|| self.anchors_have_initialization_dependency(&$object.$field.direct_anchors))*
+        }; }
+        fields!(group;
+            chainlink_spot, chainlink_twap_thirty, chainlink_twap_sixty, binance_depth, binance_trade
+        ) || markets.values().any(|market| {
+            fields!(market;
+                lifecycle, active, closed, accepting_orders, terminal, official_anchor, settlement_reference
+            ) || market.assets.iter().any(|asset| self.asset_has_initialization_dependency(asset))
+        })
+    }
+    fn asset_has_initialization_dependency(&self, asset: &AssetBusinessObservationV1) -> bool {
+        self.anchors_have_initialization_dependency(&asset.bids.direct_anchors)
+            || self.anchors_have_initialization_dependency(&asset.asks.direct_anchors)
+            || self.anchors_have_initialization_dependency(&asset.tick.direct_anchors)
+            || self.anchors_have_initialization_dependency(&asset.public_trade.direct_anchors)
+            || self.anchors_have_initialization_dependency(&asset.best_bid_ask.direct_anchors)
+            || self.anchors_have_initialization_dependency(&asset.valuation_best_bid.direct_anchors)
+    }
     pub fn observation_has_initialization_dependency(
         &self,
         observation: &MarketBusinessObservationV1,
     ) -> bool {
         let depends = |anchors: &[DirectObservationAnchorV1]| {
-            anchors.iter().any(|anchor| {
-                self.source_message_ids
-                    .contains(&anchor.source_message_id.0)
-            })
+            self.anchors_have_initialization_dependency(anchors)
         };
         macro_rules! fields { ($($field:ident),*) => { false $(|| depends(&observation.$field.direct_anchors))* }; }
         fields!(
@@ -80,14 +118,10 @@ impl HistoricalInitializationProvenanceV1 {
             chainlink_twap_sixty,
             binance_depth,
             binance_trade
-        ) || observation.assets.iter().any(|asset| {
-            depends(&asset.bids.direct_anchors)
-                || depends(&asset.asks.direct_anchors)
-                || depends(&asset.tick.direct_anchors)
-                || depends(&asset.public_trade.direct_anchors)
-                || depends(&asset.best_bid_ask.direct_anchors)
-                || depends(&asset.valuation_best_bid.direct_anchors)
-        })
+        ) || observation
+            .assets
+            .iter()
+            .any(|asset| self.asset_has_initialization_dependency(asset))
     }
 }
 pub struct PreparedHistoricalRunV1 {

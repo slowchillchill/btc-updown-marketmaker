@@ -278,6 +278,8 @@ pub(crate) struct DayCandidateCheckpointV1<D> {
     pub hidden: Option<AcceptedHiddenStepBucketV1>,
     pub every_events: Option<u64>,
     events: u64,
+    #[cfg(feature = "stage-timing")]
+    stages: crate::stage_timing::StageTimings,
 }
 impl<D> DayCandidateCheckpointV1<D> {
     pub fn new(
@@ -295,6 +297,8 @@ impl<D> DayCandidateCheckpointV1<D> {
             hidden: None,
             every_events,
             events: 0,
+            #[cfg(feature = "stage-timing")]
+            stages: crate::stage_timing::StageTimings::new(format!("candidate_checkpoint:{index}")),
         }
     }
 }
@@ -384,6 +388,8 @@ where
         let Some(generation) = generation else {
             return Ok(());
         };
+        #[cfg(feature = "stage-timing")]
+        let encode_started = std::time::Instant::now();
         let mut execution = Vec::new();
         driver.write_checkpoint(&mut execution)?;
         let mut ledger = Vec::new();
@@ -422,7 +428,17 @@ where
             .root
             .join(format!("checkpoint-{generation:020}"))
             .join(format!("candidate-{:06}.cbor", self.index));
+        #[cfg(feature = "stage-timing")]
+        self.stages
+            .record("encode_subsystems_and_capture", encode_started.elapsed());
+        #[cfg(feature = "stage-timing")]
+        let write_started = std::time::Instant::now();
         let sha256 = write_cbor(&path, &saved)?;
+        #[cfg(feature = "stage-timing")]
+        self.stages
+            .record("encode_candidate_write_and_sync", write_started.elapsed());
+        #[cfg(feature = "stage-timing")]
+        let wait_started = std::time::Instant::now();
         let mut buffer = self.hub.0.0.lock().unwrap();
         buffer.candidates[self.index].ready = Some((generation, sha256));
         self.hub.0.1.notify_all();
@@ -432,6 +448,9 @@ where
         if let Some(error) = &buffer.failure {
             return Err(error.clone().into());
         }
+        #[cfg(feature = "stage-timing")]
+        self.stages
+            .record("wait_shared_publication", wait_started.elapsed());
         self.events = 0;
         Ok(())
     }

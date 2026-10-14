@@ -416,7 +416,7 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             }
         }
         // 原登记只接纳消费到的公开市场。首次读取/跳组后补齐元数据，平时仅处理本组新登记。
-        if self.registry.observed_market_count() < driver.observations_at_current_prefix().len() {
+        if self.registry.observed_market_count() < driver.public_observation_count() {
             for rules in driver.public_rule_contexts() {
                 if self.registry.observe_market(rules) {
                     self.pending_retry_after = None;
@@ -604,6 +604,23 @@ struct SharedExecutionCheckpointV1<R> {
     registry: SharedExecutionRegistry<R>,
     pending: Vec<NoeConsumedRecordRef<R>>,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SharedExecutionCheckpointFormatV2 {
+    SharedExecutionV2,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(
+    serialize = "R:serde::Serialize",
+    deserialize = "R:serde::Deserialize<'de>"
+))]
+struct SharedExecutionCheckpointV2<R> {
+    format: SharedExecutionCheckpointFormatV2,
+    pool: execution_normalization::NoeCheckpointBatchPoolV1<R>,
+    registry:
+        crate::registry::RegistryCheckpointV2<execution_normalization::NoeCheckpointRecordRefV1>,
+    pending: Vec<execution_normalization::NoeCheckpointRecordRefV1>,
+}
 impl<P: SharedOrderEvidence> SharedExecution<P>
 where
     P::Completion: serde::de::DeserializeOwned,
@@ -612,18 +629,16 @@ where
         &self,
         writer: impl std::io::Write,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        #[derive(serde::Serialize)]
-        struct Saved<'a, R: serde::Serialize> {
-            registry: &'a SharedExecutionRegistry<R>,
-            pending: &'a [NoeConsumedRecordRef<R>],
-        }
-        ciborium::ser::into_writer(
-            &Saved {
-                registry: &self.registry,
-                pending: &self.pending,
-            },
-            writer,
-        )?;
+        let mut pool = execution_normalization::NoeCheckpointBatchPoolV1::default();
+        let registry = self.registry.capture_checkpoint(&mut pool);
+        let pending = self.pending.iter().map(|r| pool.capture(r)).collect();
+        let saved = SharedExecutionCheckpointV2 {
+            format: SharedExecutionCheckpointFormatV2::SharedExecutionV2,
+            pool,
+            registry,
+            pending,
+        };
+        ciborium::ser::into_writer(&saved, writer)?;
         Ok(())
     }
     pub fn restore_checkpoint(
@@ -631,12 +646,30 @@ where
         observation: sim_system::execution::MemoryNoeObservation<P>,
         reader: impl std::io::Read,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let saved: SharedExecutionCheckpointV1<P::Completion> = ciborium::de::from_reader(reader)?;
+        // 旧读取只在边界导入一次，原登记和消费可见性保持。
+        #[derive(serde::Deserialize)]
+        #[serde(untagged, bound(deserialize = "R:serde::Deserialize<'de>"))]
+        enum Saved<R> {
+            Current(SharedExecutionCheckpointV2<R>),
+            Legacy(SharedExecutionCheckpointV1<R>),
+        }
+        let saved: Saved<P::Completion> = ciborium::de::from_reader(reader)?;
+        let (registry, pending) = match saved {
+            Saved::Current(saved) => (
+                saved.registry.restore(&saved.pool)?,
+                saved
+                    .pending
+                    .into_iter()
+                    .map(|r| saved.pool.restore(r))
+                    .collect::<Result<_, _>>()?,
+            ),
+            Saved::Legacy(saved) => (saved.registry, saved.pending),
+        };
         Ok(Self {
             ledger,
-            registry: saved.registry,
+            registry,
             observation,
-            pending: saved.pending,
+            pending,
             pending_retry_after: None,
         })
     }

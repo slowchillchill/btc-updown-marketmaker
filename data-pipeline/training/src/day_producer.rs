@@ -15,6 +15,8 @@ pub struct DayProducerV1<'a> {
     pub ingress: DayIngressV1<'a>,
     pub hidden: StreamingHiddenStateV1,
     ended: bool,
+    #[cfg(feature = "stage-timing")]
+    timings: DayProducerStageTimingsV1,
 }
 pub struct DayAppliedV1 {
     pub input: RecordedIngressV1,
@@ -49,16 +51,39 @@ impl<'a> DayProducerV1<'a> {
             ingress,
             hidden: StreamingHiddenStateV1::new(hidden_stream, input_identity, epochs),
             ended: false,
+            #[cfg(feature = "stage-timing")]
+            timings: Default::default(),
         })
     }
     pub fn next_applied(&mut self) -> RecordingResult<Option<DayAppliedV1>> {
+        #[cfg(feature = "stage-timing")]
+        let input_started = std::time::Instant::now();
         let Some(mut input) = self.ingress.next_input()? else {
             return Ok(None);
         };
         let initialization_binding = self.ingress.initialization_binding().cloned();
         let first_canonical_position = self.core.next_canonical_position();
+        #[cfg(feature = "stage-timing")]
+        {
+            self.timings.inputs += 1;
+            self.timings.decode_ns += input_started.elapsed().as_nanos();
+        }
+        #[cfg(feature = "stage-timing")]
+        let prepared_started = std::time::Instant::now();
         let prepared = self.ingress.prepare_input(&self.core, &mut input)?;
+        #[cfg(feature = "stage-timing")]
+        {
+            self.timings.prepare_ns += prepared_started.elapsed().as_nanos();
+        }
+        #[cfg(feature = "stage-timing")]
+        let core_started = std::time::Instant::now();
         let mut applied = self.core.push(&prepared)?.into_owned();
+        #[cfg(feature = "stage-timing")]
+        {
+            self.timings.core_ns += core_started.elapsed().as_nanos();
+        }
+        #[cfg(feature = "stage-timing")]
+        let material_started = std::time::Instant::now();
         let dependencies = prepared.recorded.dependency_record_refs.clone();
         let prepared_pm = match prepared.current {
             PreparedCanonicalInputV1::PolymarketMessage(pm) => Some(pm),
@@ -119,12 +144,16 @@ impl<'a> DayProducerV1<'a> {
                         }
                     })
                     .collect::<std::sync::Arc<[_]>>();
-                for observation in &mut group.observations {
-                    observation.group_events = records.clone();
-                }
+                group.observations.replace_group_events(records.clone());
                 group.records = records;
             }
         }
+        #[cfg(feature = "stage-timing")]
+        {
+            self.timings.material_ns += material_started.elapsed().as_nanos();
+        }
+        #[cfg(feature = "stage-timing")]
+        let hidden_started = std::time::Instant::now();
         let mut canonical = first_canonical_position;
         for group in &applied.applied.closed_groups {
             for fact in group.records.iter() {
@@ -176,6 +205,10 @@ impl<'a> DayProducerV1<'a> {
         {
             hidden.push(bucket);
         }
+        #[cfg(feature = "stage-timing")]
+        {
+            self.timings.hidden_ns += hidden_started.elapsed().as_nanos();
+        }
         Ok(Some(DayAppliedV1 {
             input,
             applied: applied.applied,
@@ -217,6 +250,25 @@ impl<'a> DayProducerV1<'a> {
             ingress: DayIngressV1::restore(files, saved.ingress, rows, bytes, range)?,
             hidden: saved.hidden,
             ended: saved.ended,
+            #[cfg(feature = "stage-timing")]
+            timings: Default::default(),
         })
+    }
+}
+
+#[cfg(feature = "stage-timing")]
+#[derive(Default, serde::Serialize)]
+pub struct DayProducerStageTimingsV1 {
+    pub inputs: u64,
+    pub decode_ns: u128,
+    pub prepare_ns: u128,
+    pub core_ns: u128,
+    pub material_ns: u128,
+    pub hidden_ns: u128,
+}
+#[cfg(feature = "stage-timing")]
+impl DayProducerV1<'_> {
+    pub fn stage_timings(&self) -> &DayProducerStageTimingsV1 {
+        &self.timings
     }
 }

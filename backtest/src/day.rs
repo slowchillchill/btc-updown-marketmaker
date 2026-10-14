@@ -509,8 +509,14 @@ where
                                 cursors:buffer.candidates.iter().map(|c|c.cursor.clone()).collect(),
                             }
                         };
+                        #[cfg(feature="stage-timing")]
+                        stages.record("checkpoint_capture_subsystems", checkpoint_started.elapsed());
+                        #[cfg(feature="stage-timing")]
+                        let write_started=Instant::now();
                         let sha256 = write_cbor(&day.checkpoint_root.join(format!("checkpoint-{generation:020}")).join("day.cbor"),
                             &DayCheckpointV1 { format:DAY_CHECKPOINT_FORMAT.into(),identity:identity.clone(),generation,applied:count,state,completed })?;
+                        #[cfg(feature="stage-timing")]
+                        stages.record("checkpoint_encode_day_write_and_sync",write_started.elapsed());
                         let mut files = vec![CheckpointFileV1 {path:"day.cbor".into(),sha256}];
                         for (index,candidate) in buffer.candidates.iter().enumerate().filter(|(_,c)|c.active) {
                             files.push(CheckpointFileV1 {path:format!("candidate-{index:06}.cbor"),sha256:candidate.ready.as_ref().unwrap().1.clone()});
@@ -520,6 +526,8 @@ where
                         stages.record("checkpoint_capture_write_and_publish", checkpoint_started.elapsed());
                         buffer.budget_stopped=buffer.budget_stop_requested && !complete;
                         buffer.requested=None;generation+=1;buffer.generation=generation;hub.0.1.notify_all();last_checkpoint=Instant::now();last_count=count;
+                        #[cfg(feature="stage-timing")]
+                        eprintln!("producer_internal_timing={}",serde_json::to_string(producer.stage_timings())?);
                         if complete || buffer.budget_stopped {return Ok(());}
                     }
                     if ended {let _=measure_stage!(stages, "producer_wait_startup_checkpoint_or_completion", hub.0.1.wait_timeout(buffer,Duration::from_millis(20))).unwrap();continue;}

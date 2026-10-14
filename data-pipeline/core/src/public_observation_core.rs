@@ -6,7 +6,6 @@ use crate::reduction::*;
 use crate::typed_raw::*;
 use crate::{ContractError, invalid};
 use contracts::*;
-use rayon::prelude::*;
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -524,6 +523,12 @@ pub struct PublicObservationCoreV1 {
     pending: BTreeMap<(String, u64), PendingTerminal>,
     source_progress_enabled: bool,
     source_progress: BTreeMap<SourceStreamScopeV1, SourceStreamProgressV1>,
+    #[serde(skip)]
+    observation_snapshots: Option<MarketObservationSnapshotsV1>,
+    #[serde(skip)]
+    progress_snapshots: Option<SourceProgressSnapshotsV1>,
+    #[serde(skip)]
+    changed_observation_markets: BTreeSet<String>,
 }
 
 /// 内部恢复表示。公共证据沿原编码保存，派生缓存由来源重建。
@@ -667,6 +672,9 @@ impl PublicObservationCoreV1 {
             pending: BTreeMap::new(),
             source_progress_enabled: false,
             source_progress: BTreeMap::new(),
+            observation_snapshots: None,
+            progress_snapshots: None,
+            changed_observation_markets: BTreeSet::new(),
         })
     }
     /// 在消费开始前显式选用；原关闭组与旧消费者默认行为保持。
@@ -1623,6 +1631,8 @@ impl PublicObservationCoreV1 {
             if let (Some(value), Some(anchor)) =
                 (&selection.selected_value, &selection.direct_anchor)
             {
+                self.changed_observation_markets
+                    .insert(market.condition_id.0.clone());
                 self.references
                     .entry(market.condition_id.0.clone())
                     .or_default()
@@ -1648,7 +1658,24 @@ impl PublicObservationCoreV1 {
     ) {
         self.next_canonical_position += records.len() as u64;
         output.closed_fact_count += records.len() as u32;
+        for record in records.iter() {
+            let id = match &record.payload {
+                PublicBusinessPayloadV1::PolymarketMessage(p) => Some(&p.market.condition_id.0),
+                PublicBusinessPayloadV1::MarketFact { market, .. } => Some(&market.condition_id.0),
+                PublicBusinessPayloadV1::ReferenceFact(
+                    CanonicalReferenceEventPayloadV2::MarketPriceAnchorUpdate(p),
+                ) => Some(&p.market.condition_id.0),
+                PublicBusinessPayloadV1::ReferenceFact(
+                    CanonicalReferenceEventPayloadV2::MarketSettlementReferenceUpdate(p),
+                ) => Some(&p.market.condition_id.0),
+                _ => None,
+            };
+            if let Some(id) = id {
+                self.changed_observation_markets.insert(id.clone());
+            }
+        }
         if let Some(groups) = &mut output.compact_groups {
+            self.progress_snapshots = None;
             groups.push(PublicSourceProgressGroupV1 {
                 group_id,
                 group_position: self.next_group_position,
@@ -1676,8 +1703,9 @@ impl PublicObservationCoreV1 {
             self.next_group_position += 1;
             return;
         }
-        output.changed_scopes.clear();
         if let Some(groups) = &mut output.recording_groups {
+            self.progress_snapshots = None;
+            output.changed_scopes.clear();
             groups.push(PublicRecordingGroupV1 {
                 group_id,
                 group_position: self.next_group_position,
@@ -1709,32 +1737,52 @@ impl PublicObservationCoreV1 {
                 dependency_frontier: self.global.depth.dependency_frontier.clone(),
             })
         }));
-        let progress: Arc<[SourceStreamProgressV1]> =
-            self.source_progress.values().cloned().collect();
-        for state in self.markets.values_mut() {
-            state.prepare_book_projection();
+        let mut progress = self.progress_snapshots.take().unwrap_or_else(|| {
+            self.source_progress
+                .iter()
+                .map(|(k, v)| (k.clone(), Arc::new(v.clone())))
+                .collect()
+        });
+        for scope in std::mem::take(&mut output.changed_scopes) {
+            progress.insert(
+                scope.clone(),
+                Arc::new(self.source_progress[&scope].clone()),
+            );
         }
-        let markets = self.markets.iter().collect::<Vec<_>>();
-        let observations = markets
-            .par_iter()
-            .map(|(id, state)| {
-                let mut observation = state.observation(
-                    &group_id,
-                    self.next_group_position,
-                    AppliedIngressPrefixV1 {
-                        input_stream_id: self.header.input_stream_id.clone(),
-                        next_input_position: self.next_input_position + 1,
-                    },
-                    &records,
-                    self.references.get(*id),
-                    &self.global,
-                    &depth,
-                    &self.header.observation_version,
-                );
-                observation.source_progress = Arc::clone(&progress);
-                observation
-            })
-            .collect();
+        self.progress_snapshots = Some(progress.clone());
+        let progress = SharedSourceProgressV1::new(progress);
+        let mut snapshots = self.observation_snapshots.take().unwrap_or_else(|| {
+            self.changed_observation_markets
+                .extend(self.markets.keys().cloned());
+            MarketObservationSnapshotsV1::new()
+        });
+        for id in std::mem::take(&mut self.changed_observation_markets) {
+            if let Some(state) = self.markets.get_mut(&id) {
+                state.prepare_book_projection();
+                let o = state.observation_snapshot(self.references.get(&id));
+                snapshots.insert(id, Arc::new(o));
+            }
+        }
+        self.observation_snapshots = Some(snapshots.clone());
+        let observations = MarketObservationSetV1::shared(
+            snapshots,
+            MarketObservationGroupV1 {
+                schema_version: self.header.observation_version.clone(),
+                group_id: group_id.clone(),
+                group_position: self.next_group_position,
+                visible_prefix: AppliedIngressPrefixV1 {
+                    input_stream_id: self.header.input_stream_id.clone(),
+                    next_input_position: self.next_input_position + 1,
+                },
+                chainlink_spot: self.global.spot.clone(),
+                chainlink_twap_thirty: self.global.thirty.clone(),
+                chainlink_twap_sixty: self.global.sixty.clone(),
+                binance_depth: depth,
+                binance_trade: self.global.trade.clone(),
+                group_events: records.clone(),
+                source_progress: progress,
+            },
+        );
         output
             .applied
             .closed_groups
@@ -2153,17 +2201,10 @@ impl MarketState {
             );
         }
     }
-    fn observation(
+    fn observation_snapshot(
         &self,
-        group: &Sha256Hex,
-        group_position: u64,
-        prefix: AppliedIngressPrefixV1,
-        events: &Arc<[PublicBusinessFactV1]>,
         reference: Option<&PublicMarketReferenceStateV1>,
-        global: &GlobalReferences,
-        depth: &Arc<ObservedFactV1<BinanceDepthObservationV1>>,
-        version: &str,
-    ) -> MarketBusinessObservationV1 {
+    ) -> MarketObservationSnapshotV1 {
         let unknown = PublicMarketReferenceStateV1::default();
         let reference = reference.unwrap_or(&unknown);
         let assets = self
@@ -2195,12 +2236,8 @@ impl MarketState {
         } else {
             EffectiveMarketReferenceV1::Missing
         };
-        MarketBusinessObservationV1 {
-            schema_version: version.to_owned(),
+        MarketObservationSnapshotV1 {
             market: self.pm.context.market.clone(),
-            group_id: group.clone(),
-            group_position,
-            visible_prefix: prefix,
             assets,
             lifecycle: self.lifecycle.clone(),
             active: self.active.clone(),
@@ -2211,13 +2248,6 @@ impl MarketState {
             settlement_reference: reference.rule.clone(),
             temporary_reference: reference.temporary.clone(),
             effective_reference,
-            chainlink_spot: global.spot.clone(),
-            chainlink_twap_thirty: global.thirty.clone(),
-            chainlink_twap_sixty: global.sixty.clone(),
-            binance_depth: Arc::clone(depth),
-            binance_trade: global.trade.clone(),
-            group_events: Arc::clone(events),
-            source_progress: Arc::from([]),
         }
     }
 }

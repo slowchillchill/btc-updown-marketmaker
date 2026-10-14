@@ -106,22 +106,9 @@ impl<'a> BorrowedActionAccountV2<'a> {
         driver: Option<&'a sim_system::execution::PublicConsumptionStateV1>,
     ) -> Option<Self> {
         let read = ledger.necessary_read_v2()?;
-        let (actual, reserved) = read.cash();
-        let totals = read.account();
-        let mut nav = Some(
-            R::from_decimal(actual)
-                .add(&R::from_decimal(reserved))
-                .add(&totals.conservative_positions),
-        );
-
-        for id in read.marked_markets() {
-            let market = read.market(&ConditionId(id.into())).expect("原经济市场");
-            let observation = if let Some(driver) = driver {
-                let observations = driver.observations_at_current_prefix();
-                observations
-                    .binary_search_by(|o| o.market.condition_id.0.as_str().cmp(id))
-                    .ok()
-                    .map(|i| &observations[i])
+        let nav = conservative_nav(&read, |id| {
+            if let Some(driver) = driver {
+                driver.observation_at_current_prefix(id)
             } else {
                 frames
                     .binary_search_by(|f| f.observation.market.condition_id.0.as_str().cmp(id))
@@ -133,36 +120,14 @@ impl<'a> BorrowedActionAccountV2<'a> {
                             .find(|f| f.observation.market.condition_id.0 == id)
                             .map(|f| f.observation)
                     })
-            };
-            for (i, shares) in market
-                .orphan_shares
-                .iter()
-                .enumerate()
-                .filter(|(_, q)| **q > Decimal::ZERO)
-            {
-                let price = market
-                    .assets
-                    .as_ref()
-                    .and_then(|a| a.get(i))
-                    .and_then(|asset| {
-                        observation.and_then(|o| o.assets.iter().find(|a| a.asset == *asset))
-                    })
-                    .map(|a| &a.valuation_best_bid)
-                    .filter(|q| q.quality == MarketDataQuality::Fresh)
-                    .and_then(|q| q.value.as_ref());
-                match (&mut nav, price) {
-                    (Some(nav), Some(price)) => {
-                        *nav = nav.add(&R::from_decimal(*shares).mul(&R::from_decimal(
-                            price.as_ref().map(amount).unwrap_or(Decimal::ZERO),
-                        )))
-                    }
-                    _ => nav = None,
-                }
             }
-        }
-        let equity = nav
-            .map(|n| ExecutionReadValueV1::Known(n.sub(&totals.confirmed_unpaid_rebate)))
-            .unwrap_or(ExecutionReadValueV1::Unavailable);
+        });
+        let equity = match nav {
+            ExecutionReadValueV1::Known(n) => {
+                ExecutionReadValueV1::Known(n.sub(&read.account().confirmed_unpaid_rebate))
+            }
+            _ => ExecutionReadValueV1::Unavailable,
+        };
         Some(Self {
             ledger,
             driver,
@@ -219,4 +184,45 @@ impl ActionAccountReadV2 for BorrowedActionAccountV2<'_> {
             .expect("原已开户")
             .market_funds(condition)
     }
+}
+
+/// 原完整报告的 NAV 数值读取；报价来自消费者实际公开前缀。
+pub fn conservative_nav<'a>(
+    read: &LedgerNecessaryReadV2<'_>,
+    mut observation: impl FnMut(&str) -> Option<&'a MarketBusinessObservationV1>,
+) -> ExecutionReadValueV1<R> {
+    let (actual, reserved) = read.cash();
+    let mut nav = Some(
+        R::from_decimal(actual)
+            .add(&R::from_decimal(reserved))
+            .add(&read.account().conservative_positions),
+    );
+    for id in read.marked_markets() {
+        let (assets, shares) = read.marked_position(id).expect("原未决市场");
+        let observation = observation(id);
+        for (side, shares) in shares
+            .iter()
+            .enumerate()
+            .filter(|(_, q)| **q > Decimal::ZERO)
+        {
+            let price = assets
+                .and_then(|a| a.get(side))
+                .and_then(|asset| {
+                    observation.and_then(|o| o.assets.iter().find(|a| a.asset == *asset))
+                })
+                .map(|a| &a.valuation_best_bid)
+                .filter(|q| q.quality == MarketDataQuality::Fresh)
+                .and_then(|q| q.value.as_ref());
+            match (&mut nav, price) {
+                (Some(nav), Some(price)) => {
+                    *nav = nav.add(&R::from_decimal(*shares).mul(&R::from_decimal(
+                        price.as_ref().map(amount).unwrap_or(Decimal::ZERO),
+                    )))
+                }
+                _ => nav = None,
+            }
+        }
+    }
+    nav.map(ExecutionReadValueV1::Known)
+        .unwrap_or(ExecutionReadValueV1::Unavailable)
 }

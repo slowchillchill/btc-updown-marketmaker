@@ -9,6 +9,12 @@ mod observation_pool {
         events: Vec<Vec<Fact>>,
         progress: Vec<Arc<[SourceStreamProgressV1]>>,
         depth_values: Vec<Arc<BinanceDepthStateReferenceV1>>,
+        #[serde(default)]
+        market_snapshots: Vec<Snapshot>,
+        #[serde(default)]
+        source_states: Vec<Arc<SourceStreamProgressV1>>,
+        #[serde(skip)]
+        resolved_market_snapshots: Vec<Arc<MarketObservationSnapshotV1>>,
         #[serde(skip)]
         resolved_depths: Vec<Arc<ObservedFactV1<BinanceDepthObservationV1>>>,
         #[serde(skip)]
@@ -22,6 +28,8 @@ mod observation_pool {
         events: BTreeMap<usize, usize>,
         progress: BTreeMap<usize, usize>,
         depth_values: BTreeMap<usize, usize>,
+        market_snapshots: BTreeMap<usize,usize>,
+        source_states: BTreeMap<usize,usize>,
     }
     fn intern<T: ?Sized>(
         value: &Arc<T>,
@@ -184,10 +192,14 @@ mod observation_pool {
                         .collect::<Result<Arc<[_]>, String>>()
                 })
                 .collect::<Result<_, String>>()?;
+            self.resolved_market_snapshots = self.market_snapshots.iter().map(|o| {
+                // 复用原观察池；只在恢复边界组装一份原市场版本。
+                o.clone().restore(self).map(Arc::new)
+            }).collect::<Result<_,_>>()?;
             Ok(())
         }
     }
-    #[derive(Serialize, Deserialize)]
+    #[derive(Clone, Serialize, Deserialize)]
     struct Asset {
         asset: AssetIdentityV1,
         bids: usize,
@@ -227,7 +239,7 @@ mod observation_pool {
             })
         }
     }
-    #[derive(Serialize, Deserialize)]
+    #[derive(Clone, Serialize, Deserialize)]
     struct Observation {
         schema_version: String,
         market: MarketIdentityV2,
@@ -281,7 +293,7 @@ mod observation_pool {
                 binance_trade: value.binance_trade.clone(),
                 group_events: builder.events(&value.group_events),
                 source_progress: intern(
-                    &value.source_progress,
+                    value.source_progress.as_arc(),
                     &mut builder.progress,
                     &mut builder.pool.progress,
                 ),
@@ -314,8 +326,84 @@ mod observation_pool {
                 binance_depth: get(&pool.resolved_depths, self.binance_depth)?,
                 binance_trade: self.binance_trade,
                 group_events: get(&pool.resolved_events, self.group_events)?,
-                source_progress: get(&pool.progress, self.source_progress)?,
+                source_progress: get(&pool.progress, self.source_progress)?.into(),
             })
+        }
+    }
+    #[derive(Clone, Serialize, Deserialize)]
+    struct Snapshot {
+    market: MarketIdentityV2,
+    assets: Vec<Asset>,
+    lifecycle: ObservedFactV1<MappedMarketLifecycleStateV1>,
+    active: ObservedFactV1<bool>,
+    closed: ObservedFactV1<bool>,
+    accepting_orders: ObservedFactV1<bool>,
+    terminal: ObservedFactV1<MarketResolutionTerminalV3>,
+    official_anchor: ObservedFactV1<MarketPriceAnchorV1>,
+    settlement_reference: ObservedFactV1<BtcSettlementReferenceV1>,
+    temporary_reference: Option<TemporaryTwapReferenceV1>,
+    effective_reference: EffectiveMarketReferenceV1,
+    }
+    impl Snapshot {
+        fn capture(o:&MarketObservationSnapshotV1,b:&mut Builder)->Self {
+            Self {
+                market:o.market.clone(),
+                assets:o.assets.iter().map(|a|Asset::capture(a,b)).collect(),
+                lifecycle:o.lifecycle.clone(),
+                active:o.active.clone(),
+                closed:o.closed.clone(),
+                accepting_orders:o.accepting_orders.clone(),
+                terminal:o.terminal.clone(),
+                official_anchor:o.official_anchor.clone(),
+                settlement_reference:o.settlement_reference.clone(),
+                temporary_reference:o.temporary_reference.clone(),
+                effective_reference:o.effective_reference.clone(),
+            }
+        }
+        fn restore(self,p:&Pool)->Result<MarketObservationSnapshotV1,String> {
+            Ok(MarketObservationSnapshotV1 {
+                market:self.market,
+                assets:self.assets.into_iter().map(|a|a.restore(p)).collect::<Result<_,_>>()?,
+                lifecycle:self.lifecycle,
+                active:self.active,
+                closed:self.closed,
+                accepting_orders:self.accepting_orders,
+                terminal:self.terminal,
+                official_anchor:self.official_anchor,
+                settlement_reference:self.settlement_reference,
+                temporary_reference:self.temporary_reference,
+                effective_reference:self.effective_reference,
+            })
+        }
+    }
+    #[derive(Serialize,Deserialize)]
+    struct SharedGroup { markets:Vec<usize>, facts:GroupFacts }
+    #[derive(Serialize,Deserialize)]
+    struct GroupFacts {
+        schema_version:String, group_id:Sha256Hex, group_position:u64, visible_prefix:AppliedIngressPrefixV1,
+        chainlink_spot:ObservedFactV1<ChainlinkBtcUsdReferenceV1>,
+        chainlink_twap_thirty:ObservedFactV1<ChainlinkBtcUsdTwapReferenceV1>,
+        chainlink_twap_sixty:ObservedFactV1<ChainlinkBtcUsdTwapReferenceV1>,
+        binance_depth:usize, binance_trade:ObservedFactV1<BinanceAggregateTradeReferenceV1>,
+        group_events:usize, source_progress:Vec<usize>,
+        #[serde(default,skip_serializing_if="Option::is_none")]
+        original_progress:Option<usize>,
+    }
+    impl GroupFacts {
+        fn capture(g:&MarketObservationGroupV1,b:&mut Builder)->Self {
+            Self {schema_version:g.schema_version.clone(),group_id:g.group_id.clone(),group_position:g.group_position,visible_prefix:g.visible_prefix.clone(),
+                chainlink_spot:g.chainlink_spot.clone(),chainlink_twap_thirty:g.chainlink_twap_thirty.clone(),chainlink_twap_sixty:g.chainlink_twap_sixty.clone(),
+                binance_depth:b.depth(&g.binance_depth),binance_trade:g.binance_trade.clone(),group_events:b.events(&g.group_events),
+                source_progress:g.source_progress.shared_values().map(|values|values.values().map(|p|intern(p,&mut b.source_states,&mut b.pool.source_states)).collect()).unwrap_or_default(),
+                original_progress:if g.source_progress.shared_values().is_none() {Some(intern(g.source_progress.as_arc(),&mut b.progress,&mut b.pool.progress))} else {None} }
+        }
+        fn restore(self,p:&Pool)->Result<MarketObservationGroupV1,String> {
+            let progress=if let Some(id)=self.original_progress {get(&p.progress,id)?.into()} else {
+                SharedSourceProgressV1::new(self.source_progress.into_iter().map(|i|get(&p.source_states,i).map(|v|(v.scope.clone(),v)))
+                .collect::<Result<SourceProgressSnapshotsV1,_>>()?) };
+            Ok(MarketObservationGroupV1 {schema_version:self.schema_version,group_id:self.group_id,group_position:self.group_position,visible_prefix:self.visible_prefix,
+                chainlink_spot:self.chainlink_spot,chainlink_twap_thirty:self.chainlink_twap_thirty,chainlink_twap_sixty:self.chainlink_twap_sixty,
+                binance_depth:get(&p.resolved_depths,self.binance_depth)?,binance_trade:self.binance_trade,group_events:get(&p.resolved_events,self.group_events)?,source_progress:progress})
         }
     }
     #[derive(Serialize, Deserialize)]
@@ -325,7 +413,10 @@ mod observation_pool {
         member_input_positions: Vec<u64>,
         closed_at_input_position: u64,
         records: usize,
+        #[serde(default)]
         observations: Vec<Observation>,
+        #[serde(default, skip_serializing_if="Option::is_none")]
+        shared: Option<SharedGroup>,
     }
     impl Group {
         fn capture(value: &ClosedBusinessGroupV1, builder: &mut Builder) -> Self {
@@ -335,11 +426,19 @@ mod observation_pool {
                 member_input_positions: value.member_input_positions.clone(),
                 closed_at_input_position: value.closed_at_input_position,
                 records: builder.events(&value.records),
-                observations: value
-                    .observations
-                    .iter()
-                    .map(|o| Observation::capture(o, builder))
-                    .collect(),
+                observations: if value.observations.shared_parts().is_some() { Vec::new() } else {
+                    value.observations.iter().map(|o| Observation::capture(o,builder)).collect()
+                },
+                shared: value.observations.shared_parts().map(|(markets,group)| {
+                    let markets = markets.values().map(|o| {
+                        let key=Arc::as_ptr(o) as usize;
+                        if let Some(id)=builder.market_snapshots.get(&key) {return *id;}
+                        let id=builder.pool.market_snapshots.len();
+                        let saved=Snapshot::capture(o,builder);
+                        builder.pool.market_snapshots.push(saved); builder.market_snapshots.insert(key,id); id
+                    }).collect();
+                    SharedGroup { markets, facts:GroupFacts::capture(group,builder) }
+                }),
             }
         }
         fn restore(self, pool: &Pool) -> Result<Arc<ClosedBusinessGroupV1>, String> {
@@ -349,17 +448,20 @@ mod observation_pool {
                 member_input_positions: self.member_input_positions,
                 closed_at_input_position: self.closed_at_input_position,
                 records: get(&pool.resolved_events, self.records)?,
-                observations: self
-                    .observations
-                    .into_iter()
-                    .map(|o| o.restore(pool))
-                    .collect::<Result<_, _>>()?,
+                observations: if let Some(shared) = self.shared {
+                    let markets=shared.markets.into_iter().map(|id|get(&pool.resolved_market_snapshots,id)
+                        .map(|o|(o.market.condition_id.0.clone(),o))).collect::<Result<MarketObservationSnapshotsV1,_>>()?;
+                    MarketObservationSetV1::shared(markets,shared.facts.restore(pool)?)
+                } else {
+                    self.observations.into_iter().map(|o|o.restore(pool)).collect::<Result<Vec<_>,_>>()?.into()
+                },
             }))
         }
     }
     #[derive(Serialize, Deserialize)]
     enum Layout {
         SharedObservationV2,
+        SharedObservationV3,
     }
 
     pub(super) mod group {
@@ -377,7 +479,7 @@ mod observation_pool {
             let mut builder = Builder::default();
             let group = Group::capture(value, &mut builder);
             Saved {
-                layout: Layout::SharedObservationV2,
+                layout: Layout::SharedObservationV3,
                 pool: builder.pool,
                 group,
             }
@@ -426,7 +528,7 @@ mod observation_pool {
                 })
                 .collect();
             Saved {
-                layout: Layout::SharedObservationV2,
+                layout: Layout::SharedObservationV3,
                 pool: builder.pool,
                 items,
             }

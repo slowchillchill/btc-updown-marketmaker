@@ -16,6 +16,30 @@ fn r(n: &str, d: &str) -> ExactRationalV1 {
 // 原代理延迟档最大值 29697ms，亦大于这些场景的成交/结算固定延迟。
 // 显式有限脚本 v1：Δ=max(1ms, 所用延迟最大值)，顺序步骤相隔 2Δ。
 const SETTLEMENT_DELTA_MS: u64 = 29_697;
+fn assert_necessary_economics(
+    shared: &SharedExecutionV1,
+    driver: &impl std::ops::Deref<Target = sim_system::execution::PublicConsumptionStateV1>,
+) {
+    let necessary = shared.ledger().necessary_read_v2().unwrap();
+    let full = shared.ledger().economic_read().unwrap();
+    let report = AccountEconomicsReadV3::from_ledger_and_observations(
+        &full,
+        driver.observations_at_current_prefix(),
+    );
+    let nav =
+        shared_run::conservative_nav(&necessary, |id| driver.observation_at_current_prefix(id));
+    assert_eq!(
+        match nav {
+            ExecutionReadValueV1::Known(v) => ExecutionReadValueV1::Known(v.public()),
+            _ => ExecutionReadValueV1::Unavailable,
+        },
+        report.conservative_nav_pusd
+    );
+    assert_eq!(
+        necessary.account().committed_principal.public(),
+        full.committed_principal_pusd()
+    );
+}
 fn script(case: usize) -> ResolutionRedeemScenarioV1 {
     use ResolutionRedeemScenarioEventV1::*;
     use SettlementQueryReplyV1 as Q;
@@ -832,6 +856,7 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
     while driver.next_group().unwrap().is_some() {
         shared.apply_closed().unwrap();
         // 原完整读取与增量读取必须沿同一经济前缀；初始化在成交前，覆盖日期更新及支付。
+        assert_necessary_economics(&shared, &driver);
         let totals = shared.ledger().necessary_read_v2().unwrap();
         let read = shared.ledger().economic_read().unwrap();
         let mut pnl = EconomicRational::zero();
@@ -1245,6 +1270,7 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
                 );
                 saw_unseen_trade = true;
             }
+            assert_necessary_economics(&shared, &driver);
             if shared
                 .advance_settlement(&mut coordinator, &mut driver)
                 .unwrap()
@@ -1825,8 +1851,28 @@ async fn pending_settlement_and_unclaimed_feedback_restore_with_original_modules
     let cursor = consumed.load(std::sync::atomic::Ordering::Relaxed);
     let mut ledger = Vec::new();
     shared.ledger().write_checkpoint(&mut ledger).unwrap();
+    let sample_started = std::time::Instant::now();
+    for _ in 0..1000 {
+        let read = shared.ledger().necessary_read_v2().unwrap();
+        let nav =
+            shared_run::conservative_nav(&read, |id| driver.observation_at_current_prefix(id));
+        std::hint::black_box((
+            nav,
+            read.cash().1,
+            read.account().committed_principal.clone(),
+        ));
+    }
+    let sample_read_ns = sample_started.elapsed().as_nanos();
     let mut registry = Vec::new();
-    shared.write_checkpoint(&mut registry).unwrap();
+    let checkpoint_started = std::time::Instant::now();
+    for _ in 0..5 {
+        registry.clear();
+        shared.write_checkpoint(&mut registry).unwrap();
+    }
+    println!(
+        "economic_cost={}",
+        serde_json::json!({"sample_reads":1000,"sample_read_ns":sample_read_ns,"checkpoint_writes":5,"shared_checkpoint_ns":checkpoint_started.elapsed().as_nanos(),"shared_checkpoint_bytes":registry.len(),"pending_settlement":true})
+    );
     let mut settlement = Vec::new();
     ciborium::ser::into_writer(&coordinator, &mut settlement).unwrap();
     #[derive(serde::Deserialize)]

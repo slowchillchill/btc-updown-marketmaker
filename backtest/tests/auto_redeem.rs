@@ -532,12 +532,8 @@ async fn v4_auto_waits_for_real_resolution_and_restores_original_pending_without
                 shared.pending_noe_record_count(),
                 serde_json::to_string(&saved.observation).unwrap()
             );
-            #[derive(serde::Deserialize)]
-            struct PendingRecords {
-                pending: Vec<::execution_normalization::NoeConsumedRecordRefV2>,
-            }
-            let records: PendingRecords = ciborium::de::from_reader(pending.as_slice()).unwrap();
-            let sources = records.pending.iter().map(|r| serde_json::json!({"position":r.position(),"visibility":r.visibility(),"source":r.record().source_reference()})).collect::<Vec<_>>();
+            let records = checkpoint_pending(&pending);
+            let sources = records.iter().map(|r| serde_json::json!({"position":r.position(),"visibility":r.visibility(),"source":r.record().source_reference()})).collect::<Vec<_>>();
             eprintln!(
                 "V4 original pending references={}",
                 serde_json::to_string(&sources).unwrap()
@@ -586,12 +582,24 @@ async fn v4_auto_waits_for_real_resolution_and_restores_original_pending_without
     shared.ledger().write_checkpoint(&mut ledger).unwrap();
     let mut registry = Vec::new();
     shared.write_checkpoint(&mut registry).unwrap();
-    #[derive(serde::Deserialize)]
-    struct Pending {
-        pending: Vec<::execution_normalization::NoeConsumedRecordRefV2>,
+    let pending = checkpoint_pending(&registry);
+    assert_eq!(pending.len(), 2);
+    // 旧 SharedRun 布局仍导入同一原登记与引用，不重造业务事实。
+    #[derive(serde::Serialize)]
+    struct Legacy<'a> {
+        registry: &'a SharedExecutionRegistryV2,
+        pending: &'a [::execution_normalization::NoeConsumedRecordRefV2],
     }
-    let pending: Pending = ciborium::de::from_reader(registry.as_slice()).unwrap();
-    assert_eq!(pending.pending.len(), 2);
+    let mut legacy = Vec::new();
+    ciborium::ser::into_writer(
+        &Legacy {
+            registry: shared.registry(),
+            pending: &pending,
+        },
+        &mut legacy,
+    )
+    .unwrap();
+    let original_registry = serde_json::to_value(shared.registry()).unwrap();
     while driver.next_group().unwrap().is_some() {
         assert!(shared.apply_closed().unwrap());
     }
@@ -650,8 +658,19 @@ async fn v4_auto_waits_for_real_resolution_and_restores_original_pending_without
         128,
     )
     .unwrap();
+    let restored_legacy = SharedExecutionV2::restore_checkpoint(
+        LedgerWriterV1::restore_checkpoint(ledger.as_slice()).unwrap(),
+        observation.clone(),
+        legacy.as_slice(),
+    )
+    .unwrap();
+    assert_eq!(restored_legacy.pending_noe_record_count(), 2);
+    assert_eq!(
+        serde_json::to_value(restored_legacy.registry()).unwrap(),
+        original_registry
+    );
     let mut ledger = LedgerWriterV1::restore_checkpoint(ledger.as_slice()).unwrap();
-    for record in &pending.pending {
+    for record in &pending {
         assert!(matches!(
             ledger.apply_noe_memory_v2(record).unwrap(),
             LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation
@@ -687,7 +706,7 @@ async fn v4_auto_waits_for_real_resolution_and_restores_original_pending_without
     let mut ledger = Vec::new();
     shared.ledger().write_checkpoint(&mut ledger).unwrap();
     let mut duplicate = LedgerWriterV1::restore_checkpoint(ledger.as_slice()).unwrap();
-    for record in &pending.pending {
+    for record in &pending {
         assert!(matches!(
             duplicate.apply_noe_memory_v2(record).unwrap(),
             LedgerMemoryApplyOutcomeV1::Applied(LedgerApplyOutcomeV1::AlreadyApplied { .. })
@@ -910,4 +929,20 @@ async fn historical_v4_host_applies_original_auto_feedback_in_loop_and_range_tai
         assert_no_requested_settlement(&config.sim_log);
         std::fs::remove_dir_all(temp).unwrap();
     }
+}
+
+fn checkpoint_pending(bytes: &[u8]) -> Vec<::execution_normalization::NoeConsumedRecordRefV2> {
+    #[derive(serde::Deserialize)]
+    struct Pending {
+        pool: ::execution_normalization::NoeCheckpointBatchPoolV1<
+            ::contracts::execution_normalization::CancellationRequestCompletedV1,
+        >,
+        pending: Vec<::execution_normalization::NoeCheckpointRecordRefV1>,
+    }
+    let saved: Pending = ciborium::de::from_reader(bytes).unwrap();
+    saved
+        .pending
+        .into_iter()
+        .map(|r| saved.pool.restore(r).unwrap())
+        .collect()
 }
