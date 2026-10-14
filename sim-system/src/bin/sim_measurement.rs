@@ -1423,9 +1423,9 @@ mod enabled {
                                         "stage-6-gate-a-real-vertical".to_owned(),
                                     ),
                                 },
-                                item: PostOrderItemV1 {
-                                    item_id: "stage-6-gate-a-real-vertical-item".to_owned(),
-                                    order: SimBuyOrderV1 {
+                                item: PostOrderItemV1::new(
+                                    "stage-6-gate-a-real-vertical-item".to_owned(),
+                                    SimBuyOrderV1 {
                                         condition_id: ConditionId(CONDITION.to_owned()),
                                         token_id: TokenId(TOKEN_UP.to_owned()),
                                         kind: SimBuyOrderKindV1::GtcLimit {
@@ -1439,7 +1439,7 @@ mod enabled {
                                             post_only: false,
                                         },
                                     },
-                                },
+                                ),
                             },
                         )
                         .map_err(|error| format!("登记 Gate A 代表订单失败：{error}"))?;
@@ -3827,38 +3827,42 @@ mod enabled {
                 public_visibility: public_visibility.clone(),
                 private_feedback_sequence: 0,
             };
-            let post = |id: &str| PostOrderItemV1 {
-                item_id: id.to_owned(),
-                order: SimBuyOrderV1 {
-                    condition_id: condition_id.clone(),
-                    token_id: token_id.clone(),
-                    kind: SimBuyOrderKindV1::GtcLimit {
-                        limit_price_pusd_per_share: "0.7".parse().expect("固定价格"),
-                        size_shares: "5".parse().expect("固定数量"),
-                        post_only: true,
-                    },
-                },
-            };
-            let first_post = || PostOrderItemV1 {
-                item_id: format!("{prefix}-post-item"),
-                order: SimBuyOrderV1 {
-                    condition_id: condition_id.clone(),
-                    token_id: token_id.clone(),
-                    kind: if targeted_retention && iteration == 0 {
-                        SimBuyOrderKindV1::FokMarket {
-                            spend_pusd: "3".parse().expect("固定 targeted FOK 预算"),
-                            worst_price_pusd_per_share: "0.6"
-                                .parse()
-                                .expect("固定 targeted FOK 最差价"),
-                        }
-                    } else {
-                        SimBuyOrderKindV1::GtcLimit {
+            let post = |id: &str| {
+                PostOrderItemV1::new(
+                    id.to_owned(),
+                    SimBuyOrderV1 {
+                        condition_id: condition_id.clone(),
+                        token_id: token_id.clone(),
+                        kind: SimBuyOrderKindV1::GtcLimit {
                             limit_price_pusd_per_share: "0.7".parse().expect("固定价格"),
                             size_shares: "5".parse().expect("固定数量"),
                             post_only: true,
-                        }
+                        },
                     },
-                },
+                )
+            };
+            let first_post = || {
+                PostOrderItemV1::new(
+                    format!("{prefix}-post-item"),
+                    SimBuyOrderV1 {
+                        condition_id: condition_id.clone(),
+                        token_id: token_id.clone(),
+                        kind: if targeted_retention && iteration == 0 {
+                            SimBuyOrderKindV1::FokMarket {
+                                spend_pusd: "3".parse().expect("固定 targeted FOK 预算"),
+                                worst_price_pusd_per_share: "0.6"
+                                    .parse()
+                                    .expect("固定 targeted FOK 最差价"),
+                            }
+                        } else {
+                            SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: "0.7".parse().expect("固定价格"),
+                                size_shares: "5".parse().expect("固定数量"),
+                                post_only: true,
+                            }
+                        },
+                    },
+                )
             };
             let receipt = execution
                 .post_order(

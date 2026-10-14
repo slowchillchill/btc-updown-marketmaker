@@ -158,6 +158,25 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
     ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
         self.ledger.record_submission_started(event, request, item)
     }
+    pub(crate) fn record_prepared_submission_started(
+        &mut self,
+        event: &LedgerLocalEventIdentityV1,
+        request: &LedgerRequestIdentityV1,
+        item: &LedgerSubmissionItemIdentityV1,
+        platform_order_id: &str,
+    ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
+        use execution_normalization::{MemoryEconomicFactReferenceV1, NormalizationIdentity};
+        let account = Arc::new(self.registry.context().account_identity.clone());
+        let key = execution_normalization::SourceNeutralEntityKeyV1::Order {
+            source_order_id: platform_order_id.to_owned(),
+        };
+        let order = <MemoryLogicalIdentityV1 as NormalizationIdentity<
+            MemoryEconomicFactReferenceV1,
+        >>::entity(&account, &key)
+        .expect("原NOE账户内的规范订单身份");
+        self.ledger
+            .record_prepared_submission_started(event, request, item, &order)
+    }
     pub(crate) fn release_known_unsent(
         &mut self,
         event: &LedgerLocalEventIdentityV1,
@@ -414,6 +433,20 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         intent: Option<Arc<ModelIntentV1>>,
         reserves: &[ReserveIntentV1],
     ) -> Result<Option<MutationRequestReceiptV2>, SharedActionErrorV1> {
+        // 已冻结但尚未登记SIM的请求仍复用首次原意图；首次准备/预留失败不创建冻结状态。
+        let intent = intent.map(|incoming| {
+            self.registry
+                .frozen_intent(&context.global_request_id)
+                .map_or(incoming, |frozen| frozen.intent_arc())
+        });
+        let prepared = intent
+            .as_ref()
+            .map(|intent| {
+                intent_bridge::IntentBridge::bind_sim_group(decision)
+                    .prepare(context.clone(), intent)
+            })
+            .transpose()
+            .map_err(|failure| SharedActionErrorV1::Sim(failure.error))?;
         if !reserves.is_empty() {
             let outcomes = self
                 .reserve_action_v2(reserves)
@@ -432,13 +465,30 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
                 let event = LedgerLocalEventIdentityV1(
                     serde_json::to_string(&("submission-started", &item)).expect("身份序列化"),
                 );
-                self.record_submission_started(&event, &reserve.request_identity, &item)
+                if let Some(id) = prepared
+                    .as_ref()
+                    .and_then(|p| p.order_id(item.batch_item_ordinal))
+                {
+                    self.record_prepared_submission_started(
+                        &event,
+                        &reserve.request_identity,
+                        &item,
+                        &id,
+                    )
                     .map_err(SharedActionErrorV1::Ledger)?;
+                } else {
+                    self.record_submission_started(&event, &reserve.request_identity, &item)
+                        .map_err(SharedActionErrorV1::Ledger)?;
+                }
             }
         }
-        self.execute(decision, context, intent)
-            .await
-            .map_err(SharedActionErrorV1::Sim)
+        if let (Some(prepared), Some(intent)) = (prepared, intent) {
+            self.execute_prepared_with_request_effect(decision, context, intent, prepared)
+                .map(Some)
+                .map_err(|failure| SharedActionErrorV1::Sim(failure.error))
+        } else {
+            Ok(None)
+        }
     }
     /// None为宿主已作出的NoTrade；不制造意图，不调用Bridge。
     pub async fn execute(
@@ -450,6 +500,21 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         self.execute_with_request_effect(decision, context, intent)
             .await
             .map_err(|failure| failure.error)
+    }
+    pub(crate) fn execute_prepared_with_request_effect(
+        &mut self,
+        decision: &mut PublicGroupDecisionV1<'_>,
+        context: RequestContextV2,
+        intent: Arc<ModelIntentV1>,
+        prepared: PreparedBusinessRequestV1,
+    ) -> Result<MutationRequestReceiptV2, RequestFailureV1> {
+        let frozen = self
+            .registry
+            .freeze(context.global_request_id.clone(), intent);
+        let receipt = intent_bridge::IntentBridge::bind_sim_group(decision)
+            .execute_prepared_with_request_effect(prepared)?;
+        self.registry.record_sim_receipt(&frozen, &receipt);
+        Ok(receipt)
     }
     pub(crate) async fn execute_with_request_effect(
         &mut self,

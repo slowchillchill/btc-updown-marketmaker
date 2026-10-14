@@ -215,6 +215,8 @@ enum LedgerTransactionSourceV1 {
         local_event_identity: LedgerLocalEventIdentityV1,
         request_identity: LedgerRequestIdentityV1,
         submission_item_identity: LedgerSubmissionItemIdentityV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prepared_order_identity: Option<execution_normalization::MemoryLogicalIdentityV1>,
     },
     LocalReleaseEvent {
         local_event_identity: LedgerLocalEventIdentityV1,
@@ -920,6 +922,30 @@ impl LedgerWriterV1 {
         request_identity: &LedgerRequestIdentityV1,
         submission_item_identity: &LedgerSubmissionItemIdentityV1,
     ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
+        self.record_submission_started_with_identity(
+            local_event_identity,
+            request_identity,
+            submission_item_identity,
+            None,
+        )
+    }
+    /// 发送前可见的准确身份只建立关联，不宣称平台已受理或已应用经济事实。
+    pub fn record_prepared_submission_started(
+        &mut self,
+        event: &LedgerLocalEventIdentityV1,
+        request: &LedgerRequestIdentityV1,
+        item: &LedgerSubmissionItemIdentityV1,
+        order: &execution_normalization::MemoryLogicalIdentityV1,
+    ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
+        self.record_submission_started_with_identity(event, request, item, Some(order))
+    }
+    fn record_submission_started_with_identity(
+        &mut self,
+        local_event_identity: &LedgerLocalEventIdentityV1,
+        request_identity: &LedgerRequestIdentityV1,
+        submission_item_identity: &LedgerSubmissionItemIdentityV1,
+        prepared_order_identity: Option<&execution_normalization::MemoryLogicalIdentityV1>,
+    ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
         self.account
             .as_ref()
             .ok_or(LedgerErrorV1::AccountNotOpened)?;
@@ -943,6 +969,9 @@ impl LedgerWriterV1 {
         let ledger_local_prefix = self.next_ledger_local_prefix()?;
         let mut keys = SparseLedgerStateKeysV1::default();
         keys.add_request(&self.reservations, request_identity);
+        if let Some(order) = prepared_order_identity {
+            keys.add_order(&self.lifecycle, &order.ledger_key());
+        }
         let mut reservations = reservation_state_slice(&self.reservations, &keys);
         move_reservation_to_submitted_unknown(
             &mut reservations,
@@ -956,12 +985,19 @@ impl LedgerWriterV1 {
         lifecycle
             .submission_requests
             .insert(submission_item_identity.clone(), request_identity.clone());
+        if let Some(identity) = prepared_order_identity {
+            let order = lifecycle.orders.entry(identity.ledger_key()).or_default();
+            order.request_identity = Some(request_identity.clone());
+            order.condition_id = Some(reservation.condition_id.clone());
+            order.last_ledger_entry_seq = ledger_entry_seq;
+        }
         let transaction = LedgerTransactionV1 {
             ledger_entry_seq,
             source: LedgerTransactionSourceV1::LocalSubmissionEvent {
                 local_event_identity: local_event_identity.clone(),
                 request_identity: request_identity.clone(),
                 submission_item_identity: submission_item_identity.clone(),
+                prepared_order_identity: prepared_order_identity.cloned(),
             },
             entries: Vec::new(),
         };
@@ -1888,6 +1924,7 @@ impl LedgerWriterV1 {
                 local_event_identity,
                 request_identity,
                 submission_item_identity,
+                prepared_order_identity: _,
             } => {
                 let _ = (
                     &local_event_identity.0,

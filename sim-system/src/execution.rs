@@ -74,9 +74,30 @@ pub struct SimBuyOrderV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostOrderItemV1 {
+    #[serde(
+        default,
+        skip_serializing_if = "crate::prepared_order::OrderIdentityModeV1::is_legacy"
+    )]
+    pub(crate) order_identity_mode: crate::prepared_order::OrderIdentityModeV1,
     pub item_id: String,
     pub order: SimBuyOrderV1,
 }
+
+impl PostOrderItemV1 {
+    pub fn new(item_id: String, order: SimBuyOrderV1) -> Self {
+        Self {
+            item_id,
+            order,
+            order_identity_mode: Default::default(),
+        }
+    }
+    pub(crate) fn prepared_order_id(&self, request: &str, ordinal: u16) -> Option<String> {
+        self.order_identity_mode.order_id(request, ordinal)
+    }
+}
+pub use crate::prepared_order::{
+    PreparedBusinessRequestV1, prepare_business_request_v1, prepared_order_id_v1,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelOrderItemV1 {

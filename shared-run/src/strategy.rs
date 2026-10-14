@@ -898,6 +898,21 @@ impl SharedExecutionV2 {
                     });
                 }
             }
+            let prepared = match intent_bridge::IntentBridge::bind_sim_group(decision)
+                .prepare(item.context.clone(), &item.intent)
+            {
+                Ok(prepared) => prepared,
+                Err(failure) => {
+                    return Err(BatchExecutionErrorV1 {
+                        error: SharedActionErrorV1::Sim(failure.error),
+                        sent,
+                        attempted_intent_index: Some(index),
+                        failed_request_effect: Some(failure.effect),
+                        release_errors: self.release_unsent_intents(&intents[index..], &owned),
+                    }
+                    .into());
+                }
+            };
             for reserve in &item.reserves {
                 let submission = LedgerSubmissionItemIdentityV1 {
                     global_request_id: item.context.global_request_id.clone(),
@@ -924,11 +939,22 @@ impl SharedExecutionV2 {
                 let event = LedgerLocalEventIdentityV1(
                     serde_json::to_string(&("submission-started", &submission)).expect("原身份"),
                 );
-                if let Err(error) = self.record_submission_started(
-                    &event,
-                    &reserve.reserve.request_identity,
-                    &submission,
-                ) {
+                let registration =
+                    if let Some(id) = prepared.order_id(submission.batch_item_ordinal) {
+                        self.record_prepared_submission_started(
+                            &event,
+                            &reserve.reserve.request_identity,
+                            &submission,
+                            &id,
+                        )
+                    } else {
+                        self.record_submission_started(
+                            &event,
+                            &reserve.reserve.request_identity,
+                            &submission,
+                        )
+                    };
+                if let Err(error) = registration {
                     return Err(BatchExecutionErrorV1 {
                         error: SharedActionErrorV1::Ledger(error),
                         sent,
@@ -940,12 +966,13 @@ impl SharedExecutionV2 {
                 }
             }
             match self
-                .execute_with_request_effect(
+                .execute_prepared_with_request_effect(
                     decision,
                     item.context.clone(),
-                    Some(item.intent.clone()),
+                    item.intent.clone(),
+                    prepared,
                 )
-                .await
+                .map(Some)
             {
                 Ok(Some(receipt)) => {
                     // 已登记／提交成功，不再属于本批明确未发占用。

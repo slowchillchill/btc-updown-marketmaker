@@ -2719,6 +2719,8 @@ async fn actual_partial_fak_final_success_before_economics_drives_gap_without_su
 #[tokio::test(flavor = "current_thread")]
 async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() {
     use contracts::ExecutionReadValueV1::Known;
+    let first_id = sim_system::execution::prepared_order_id_v1("pair-after-empty", 0);
+    let second_id = sim_system::execution::prepared_order_id_v1("pair-after-empty", 1);
     for family in ["single", "paired", "market"] {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("dpt");
@@ -2731,11 +2733,11 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
                 targets: vec![
                     CancelFailureTargetV1 {
                         global_request_id: "finite-failure".into(),
-                        platform_order_id: "sim-1".into(),
+                        platform_order_id: first_id.as_str().into(),
                     },
                     CancelFailureTargetV1 {
                         global_request_id: "post-close".into(),
-                        platform_order_id: "sim-1".into(),
+                        platform_order_id: first_id.as_str().into(),
                     },
                 ],
             })
@@ -2804,15 +2806,15 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
         let before = shared.action_before(&mut driver).unwrap().unwrap();
         let orders: Vec<_> = before.orders().collect();
         assert_eq!(orders.len(), 2);
-        assert_eq!(platform_id(orders[0].order_identity), "sim-1");
+        assert_eq!(platform_id(orders[0].order_identity), first_id.as_str());
         assert!(orders.iter().all(|o| o.cancellable == Known(true)));
         let first = orders[0].order_identity.clone();
         let intent = match family {
             "single" => ModelIntentV1::CancelOrder {
-                platform_order_id: "sim-1".into(),
+                platform_order_id: first_id.as_str().into(),
             },
             "paired" => ModelIntentV1::CancelOrders {
-                platform_order_ids: vec!["sim-1".into(), "sim-2".into()],
+                platform_order_ids: vec![first_id.as_str().into(), second_id.as_str().into()],
             },
             _ => ModelIntentV1::CancelMarketOrders {
                 condition_id: ConditionId(CONDITION_ID.into()),
@@ -2889,7 +2891,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
                         &mut driver.decision().unwrap(),
                         context(request),
                         Some(Arc::new(ModelIntentV1::CancelOrder {
-                            platform_order_id: "sim-1".into(),
+                            platform_order_id: first_id.as_str().into(),
                         })),
                     )
                     .await
@@ -2903,13 +2905,17 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             );
             assert_eq!(
                 overlapping
-                    .cancellation_requests(Some(&CancellationScopeV1::Orders(vec!["sim-1"])))
+                    .cancellation_requests(Some(&CancellationScopeV1::Orders(vec![
+                        first_id.as_str()
+                    ])))
                     .pending_count,
                 Known(2)
             );
             assert_eq!(
                 overlapping
-                    .cancellation_requests(Some(&CancellationScopeV1::Orders(vec!["sim-2"])))
+                    .cancellation_requests(Some(&CancellationScopeV1::Orders(vec![
+                        second_id.as_str()
+                    ])))
                     .pending_count,
                 Known(0),
                 "同市场不同ID不相交"
@@ -2934,7 +2940,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
                             &mut driver.decision().unwrap(),
                             context("post-close"),
                             Some(Arc::new(ModelIntentV1::CancelOrder {
-                                platform_order_id: "sim-1".into(),
+                                platform_order_id: first_id.as_str().into(),
                             })),
                         )
                         .await
@@ -3022,7 +3028,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             .flat_map(|v| v.as_array().unwrap())
             .collect();
         assert_eq!(hits.len(), 1, "只有实际失败分支记录一次命中：{text}");
-        assert_eq!(hits[0]["platform_order_id"], "sim-1");
+        assert_eq!(hits[0]["platform_order_id"], first_id.as_str());
         assert_eq!(hits[0]["global_request_id"], "finite-failure");
     }
 }
@@ -3088,7 +3094,13 @@ async fn v4_cancel_market_relation_keeps_known_unknown_and_closed_order_location
             platform_id(o.order_identity)
         })
         .collect();
-    assert_eq!(ids, ["sim-1", "sim-2"]);
+    assert_eq!(
+        ids,
+        [
+            sim_system::execution::prepared_order_id_v1("lookup-pair", 0),
+            sim_system::execution::prepared_order_id_v1("lookup-pair", 1)
+        ]
+    );
     let market = ConditionId(CONDITION_ID.into());
     let other = ConditionId(OTHER_CONDITION_ID.into());
     for (request, targets, matching, nonmatching) in [
@@ -3283,6 +3295,10 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
             // 同一原固定种子/经验时延：Open 出站29/入站8，Expired 出站30/入站6。
             // 处理299999/300000，收到300007/300006；生命周期独立延迟，未改原图或采样器。
             for request in ["open-query-3645", "terminal-query-248140"] {
+                assert_eq!(
+                    platform_id(id.as_ref().unwrap()),
+                    sim_system::execution::prepared_order_id_v1("terminal-pair", 0)
+                );
                 driver
                     .decision()
                     .unwrap()

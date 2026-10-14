@@ -97,14 +97,14 @@ fn post_order_item(
     condition_id: &ConditionId,
     leg: &BuyLegIntentV1,
 ) -> Result<PostOrderItemV1, SimRunActorErrorV2> {
-    Ok(PostOrderItemV1 {
-        item_id: sim_item_id(global_request_id, batch_item_ordinal),
-        order: SimBuyOrderV1 {
+    Ok(PostOrderItemV1::new(
+        sim_item_id(global_request_id, batch_item_ordinal),
+        SimBuyOrderV1 {
             condition_id: condition_id.clone(),
             token_id: leg.token_id.clone(),
             kind: sim_order_kind(&leg.order)?,
         },
-    })
+    ))
 }
 
 fn sim_order_kind(order: &BuyOrderIntentV1) -> Result<SimBuyOrderKindV1, SimRunActorErrorV2> {
@@ -186,11 +186,11 @@ impl private::Sealed for SimGroupAdapterV1<'_, '_> {
 }
 
 impl SimGroupAdapterV1<'_, '_> {
-    fn dispatch_with_effect(
+    fn prepare(
         &mut self,
         context: RequestContextV2,
         intent: &ModelIntentV1,
-    ) -> Result<MutationRequestReceiptV2, RequestFailureV1> {
+    ) -> Result<sim_system::execution::PreparedBusinessRequestV1, RequestFailureV1> {
         use sim_system::execution::BusinessRequestV2;
         let request = (|| {
             Ok(match intent {
@@ -227,10 +227,35 @@ impl SimGroupAdapterV1<'_, '_> {
         })();
         request
             .map_err(RequestFailureV1::before_request_effect)
-            .and_then(|request| self.decision.request_with_effect(request))
+            .map(sim_system::execution::prepare_business_request_v1)
+    }
+}
+impl SimGroupAdapterV1<'_, '_> {
+    fn dispatch_with_effect(
+        &mut self,
+        context: RequestContextV2,
+        intent: &ModelIntentV1,
+    ) -> Result<MutationRequestReceiptV2, RequestFailureV1> {
+        let prepared = self.prepare(context, intent)?;
+        self.decision.request_with_effect(prepared.into_request())
     }
 }
 impl crate::IntentBridge<SimGroupAdapterV1<'_, '_>> {
+    pub fn prepare(
+        &mut self,
+        context: RequestContextV2,
+        intent: &ModelIntentV1,
+    ) -> Result<sim_system::execution::PreparedBusinessRequestV1, RequestFailureV1> {
+        self.backend.prepare(context, intent)
+    }
+    pub fn execute_prepared_with_request_effect(
+        &mut self,
+        prepared: sim_system::execution::PreparedBusinessRequestV1,
+    ) -> Result<MutationRequestReceiptV2, RequestFailureV1> {
+        self.backend
+            .decision
+            .request_with_effect(prepared.into_request())
+    }
     /// SIM 原构造／注册／提交错误的效果表达；不改泛型及 LIVE 入口。
     pub async fn execute_with_request_effect(
         &mut self,
@@ -635,9 +660,9 @@ mod tests {
             single_buy_request(single_context.clone(), &condition_id, &single_leg),
             Ok(PostOrderRequestV2 {
                 context: single_context,
-                item: PostOrderItemV1 {
-                    item_id: "single-literal:0".to_owned(),
-                    order: SimBuyOrderV1 {
+                item: PostOrderItemV1::new(
+                    "single-literal:0".to_owned(),
+                    SimBuyOrderV1 {
                         condition_id: ConditionId(CONDITION_ID.to_owned()),
                         token_id: TokenId("1".to_owned()),
                         kind: SimBuyOrderKindV1::GtcLimit {
@@ -645,8 +670,8 @@ mod tests {
                             size_shares: decimal("9"),
                             post_only: true,
                         },
-                    },
-                },
+                    }
+                ),
             })
         );
 
@@ -674,31 +699,31 @@ mod tests {
                 items: vec![
                     PostOrderBatchItemV2 {
                         batch_item_ordinal: 0,
-                        item: PostOrderItemV1 {
-                            item_id: "paired-literal:0".to_owned(),
-                            order: SimBuyOrderV1 {
+                        item: PostOrderItemV1::new(
+                            "paired-literal:0".to_owned(),
+                            SimBuyOrderV1 {
                                 condition_id: ConditionId(CONDITION_ID.to_owned()),
                                 token_id: TokenId("2".to_owned()),
                                 kind: SimBuyOrderKindV1::FokMarket {
                                     spend_pusd: decimal("11"),
                                     worst_price_pusd_per_share: decimal("0.71"),
                                 },
-                            },
-                        },
+                            }
+                        ),
                     },
                     PostOrderBatchItemV2 {
                         batch_item_ordinal: 1,
-                        item: PostOrderItemV1 {
-                            item_id: "paired-literal:1".to_owned(),
-                            order: SimBuyOrderV1 {
+                        item: PostOrderItemV1::new(
+                            "paired-literal:1".to_owned(),
+                            SimBuyOrderV1 {
                                 condition_id: ConditionId(CONDITION_ID.to_owned()),
                                 token_id: TokenId("1".to_owned()),
                                 kind: SimBuyOrderKindV1::FakMarket {
                                     spend_pusd: decimal("12"),
                                     worst_price_pusd_per_share: decimal("0.72"),
                                 },
-                            },
-                        },
+                            }
+                        ),
                     },
                 ],
             })

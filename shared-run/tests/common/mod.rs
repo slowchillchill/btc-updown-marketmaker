@@ -507,6 +507,7 @@ pub fn execution_with_identity(
         BusinessProjectionVersionV1::V3,
         None,
         None,
+        SimCallerRoleV1::Paper,
     )
 }
 pub fn execution_with_identity_v4(
@@ -533,6 +534,7 @@ pub fn execution_with_identity_v4(
         BusinessProjectionVersionV1::V4,
         None,
         None,
+        SimCallerRoleV1::Paper,
     )
 }
 pub fn execution_with_rules_v4(
@@ -570,6 +572,7 @@ pub fn execution_with_minimum_v4(
         BusinessProjectionVersionV1::V4,
         Some(minimum_shares),
         None,
+        SimCallerRoleV1::Paper,
     )
 }
 pub fn execution_with_fee_v4(
@@ -593,6 +596,30 @@ pub fn execution_with_fee_v4(
         BusinessProjectionVersionV1::V4,
         None,
         Some(fee_rate),
+        SimCallerRoleV1::Paper,
+    )
+}
+/// 复用原记录、规则、NOE与账户构造，仅选择真实有限历史角色。
+pub fn execution_historical_v4(
+    path: &Path,
+    core: &PublicObservationCoreV1,
+) -> (
+    PublicSimExecutionV1,
+    MemoryNoeObservationV4,
+    Arc<SealedProcessRuleSnapshotV3>,
+) {
+    execution_with_evidence::<MeasuredCancellationEvidence>(
+        path,
+        core,
+        SUCCESS_POLICY,
+        None,
+        "e".repeat(64),
+        "100",
+        "shared-combination",
+        BusinessProjectionVersionV1::V4,
+        None,
+        None,
+        SimCallerRoleV1::HistoricalBacktest,
     )
 }
 // 同一真实夹具仅显式区分源投影版本；不再包装一份运行配置。
@@ -608,6 +635,7 @@ fn execution_with_evidence<P: MemoryOrderEvidence + 'static>(
     projection_version: BusinessProjectionVersionV1,
     minimum_shares: Option<&str>,
     fee_rate: Option<&str>,
+    caller_role: SimCallerRoleV1,
 ) -> (
     PublicSimExecutionV1,
     MemoryNoeObservation<P>,
@@ -738,7 +766,13 @@ fn execution_with_evidence<P: MemoryOrderEvidence + 'static>(
         implementation_identity: opened.implementation_identity,
         market_event_source_identity_sha256: opened.market_event_source_identity_sha256,
     };
-    let mut run = PublicSimExecutionV1::create_new(
+    let create: fn(_, _, _, _, _, _, _, _, _) -> _ =
+        if caller_role == SimCallerRoleV1::HistoricalBacktest {
+            PublicSimExecutionV1::create_new_historical
+        } else {
+            PublicSimExecutionV1::create_new
+        };
+    let mut run = create(
         path,
         spec,
         rules.clone(),
@@ -754,7 +788,7 @@ fn execution_with_evidence<P: MemoryOrderEvidence + 'static>(
         run_id: opened.run_id,
         session_id: "shared-session".into(),
         account_id: "shared-account".into(),
-        caller_role: SimCallerRoleV1::Paper,
+        caller_role,
         caller_instance_id: "shared-caller".into(),
         creation_request_id: "create".into(),
         response_bridge_binding_id: "shared-bridge".into(),

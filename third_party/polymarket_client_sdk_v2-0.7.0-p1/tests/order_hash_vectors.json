@@ -1,0 +1,246 @@
+{
+  "source": "Polymarket/clob-client-v2@8046a89ee9ba75676e31a11830785c046ccee167",
+  "viem": "2.46.3",
+  "vectors": [
+    {
+      "version": 1,
+      "chain_id": 80002,
+      "neg_risk": false,
+      "order": {
+        "salt": "479249096354",
+        "maker": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "taker": "0x0000000000000000000000000000000000000000",
+        "tokenId": "1234",
+        "makerAmount": "100000000",
+        "takerAmount": "50000000",
+        "expiration": "0",
+        "nonce": "0",
+        "feeRateBps": "100",
+        "side": "BUY",
+        "signatureType": 0
+      },
+      "hash": "0x02ca1d1aa31103804173ad1acd70066cb6c1258a4be6dada055111f9a7ea4e55"
+    },
+    {
+      "version": 1,
+      "chain_id": 137,
+      "neg_risk": false,
+      "order": {
+        "salt": "479249096354",
+        "maker": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "taker": "0x0000000000000000000000000000000000000000",
+        "tokenId": "1234",
+        "makerAmount": "100000000",
+        "takerAmount": "50000000",
+        "expiration": "0",
+        "nonce": "0",
+        "feeRateBps": "100",
+        "side": "BUY",
+        "signatureType": 0
+      },
+      "hash": "0x46c2dec73dae47e86b5d589c084e6c54858d8f988db390421c8ec3a361fb78a2"
+    },
+    {
+      "version": 1,
+      "chain_id": 137,
+      "neg_risk": true,
+      "order": {
+        "salt": "479249096354",
+        "maker": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "taker": "0x0000000000000000000000000000000000000000",
+        "tokenId": "1234",
+        "makerAmount": "100000000",
+        "takerAmount": "50000000",
+        "expiration": "0",
+        "nonce": "0",
+        "feeRateBps": "100",
+        "side": "BUY",
+        "signatureType": 0
+      },
+      "hash": "0xd9a5ac502d5ebb63a3afdcaf8ecd0fd85d49c7b6d05589fa35f0bff0fc5c86a3"
+    },
+    {
+      "version": 1,
+      "chain_id": 80002,
+      "neg_risk": true,
+      "order": {
+        "salt": "479249096354",
+        "maker": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "taker": "0x0000000000000000000000000000000000000000",
+        "tokenId": "1234",
+        "makerAmount": "100000000",
+        "takerAmount": "50000000",
+        "expiration": "0",
+        "nonce": "0",
+        "feeRateBps": "100",
+        "side": "BUY",
+        "signatureType": 0
+      },
+      "hash": "0xf15790d3edc4b5aed427b0b543a9206fcf4b1a13dfed016d33bfb313076263b8"
+    },
+    {
+      "version": 2,
+      "chain_id": 137,
+      "neg_risk": false,
+      "order": {
+        "salt": "479249096354",
+        "maker": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "tokenId": "1234",
+        "makerAmount": "100000000",
+        "takerAmount": "50000000",
+        "side": "BUY",
+        "signatureType": 0,
+        "metadata": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "builder": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "timestamp": "1710000000000",
+        "expiration": "0"
+      },
+      "hash": "0x10124949f84e9f7438c88d02bfd546ceb27ed6eb1fdb0175137af535b6e2513d"
+    },
+    {
+      "version": 2,
+      "chain_id": 137,
+      "neg_risk": false,
+      "order": {
+        "salt": "479249096354",
+        "maker": "0x1111111111111111111111111111111111111111",
+        "signer": "0x1111111111111111111111111111111111111111",
+        "tokenId": "1234",
+        "makerAmount": "100000000",
+        "takerAmount": "50000000",
+        "side": "BUY",
+        "signatureType": 3,
+        "metadata": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "builder": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "timestamp": "1710000000000",
+        "expiration": "0"
+      },
+      "hash": "0xc4d204bd50748c59f3c81495bf908694fe8a185b431e1057621c3a9bbea7661b"
+    },
+    {
+      "version": 2,
+      "chain_id": 137,
+      "neg_risk": true,
+      "order": {
+        "salt": "479249096354",
+        "maker": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "tokenId": "1234",
+        "makerAmount": "100000000",
+        "takerAmount": "50000000",
+        "side": "BUY",
+        "signatureType": 0,
+        "metadata": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "builder": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "timestamp": "1710000000000",
+        "expiration": "0"
+      },
+      "hash": "0x9c2976657c4b229cc8e467a32ce9e3281ef40a70aee31cdc4619ebf51e4a7274"
+    },
+    {
+      "version": 2,
+      "chain_id": 137,
+      "neg_risk": true,
+      "order": {
+        "salt": "479249096354",
+        "maker": "0x1111111111111111111111111111111111111111",
+        "signer": "0x1111111111111111111111111111111111111111",
+        "tokenId": "1234",
+        "makerAmount": "100000000",
+        "takerAmount": "50000000",
+        "side": "BUY",
+        "signatureType": 3,
+        "metadata": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "builder": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "timestamp": "1710000000000",
+        "expiration": "0"
+      },
+      "hash": "0x939fa23b7c25f6f39ac18cc0c430e7a4f2ff4b5f4af9663b1c78a6585910c458"
+    },
+    {
+      "version": 2,
+      "chain_id": 80002,
+      "neg_risk": false,
+      "order": {
+        "salt": "479249096354",
+        "maker": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "tokenId": "1234",
+        "makerAmount": "100000000",
+        "takerAmount": "50000000",
+        "side": "BUY",
+        "signatureType": 0,
+        "metadata": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "builder": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "timestamp": "1710000000000",
+        "expiration": "0"
+      },
+      "hash": "0x962c97b18bea292cc94b9479272aa74fb59a905e84a621a40eb339131e9fb6ba"
+    },
+    {
+      "version": 2,
+      "chain_id": 80002,
+      "neg_risk": false,
+      "order": {
+        "salt": "479249096354",
+        "maker": "0x1111111111111111111111111111111111111111",
+        "signer": "0x1111111111111111111111111111111111111111",
+        "tokenId": "1234",
+        "makerAmount": "100000000",
+        "takerAmount": "50000000",
+        "side": "BUY",
+        "signatureType": 3,
+        "metadata": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "builder": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "timestamp": "1710000000000",
+        "expiration": "0"
+      },
+      "hash": "0x2afca94626db91b2d556c351584a4cd93e13da32e377dc48c7983e43afa5ab47"
+    },
+    {
+      "version": 2,
+      "chain_id": 80002,
+      "neg_risk": true,
+      "order": {
+        "salt": "479249096354",
+        "maker": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "tokenId": "1234",
+        "makerAmount": "100000000",
+        "takerAmount": "50000000",
+        "side": "BUY",
+        "signatureType": 0,
+        "metadata": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "builder": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "timestamp": "1710000000000",
+        "expiration": "0"
+      },
+      "hash": "0xde77d067d3067ed5b48bb9b27b963fa4f377ee1ae8725791f133e70dae6ce183"
+    },
+    {
+      "version": 2,
+      "chain_id": 80002,
+      "neg_risk": true,
+      "order": {
+        "salt": "479249096354",
+        "maker": "0x1111111111111111111111111111111111111111",
+        "signer": "0x1111111111111111111111111111111111111111",
+        "tokenId": "1234",
+        "makerAmount": "100000000",
+        "takerAmount": "50000000",
+        "side": "BUY",
+        "signatureType": 3,
+        "metadata": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "builder": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "timestamp": "1710000000000",
+        "expiration": "0"
+      },
+      "hash": "0xb9e7201473db2ebcadec91fbbc16ccedc0b2d4cc8a7997fee8e946bad2a9c055"
+    }
+  ]
+}

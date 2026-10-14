@@ -156,4 +156,14 @@ Ledger 不再维护独立 `maker_cash`。方向及其他归属统计仍按原经
 
 新耐久账户保存 `GENESIS_V3` 和 `ActualCashNoMarketLimit`。旧 `GENESIS_V2` 仍能按原身份解码，但不能由当前入口恢复为新政策活动账户。旧双现金检查点也不能静默续跑；应保留原材料和适用旧版本。当前改变不提供通用旧检查点迁移。历史回测沿原候选配置及源码身份边界建立新运行，不把旧政策结果拼成新政策成绩。
 
-本段没有修复本地预留与平台占用短暂重复扣除的问题。准确订单身份关联是 #301 后续独立步骤；当前不按金额或时间猜配，不提前释放未知义务。B 动作支持及模型账户输入的适配由 #181 交付，公共 Rust 验证不能代替 B 的模型验证。
+## 发送前订单身份与预留转换
+
+[#301 / D-0350](https://github.com/slowchillchill/btc-updown-marketmaker/issues/301#issuecomment-6160337196)让当前公共/A提交先准备原请求，再用原NOE账户和订单实体身份登记请求、批次项与订单的关联，最后发送同一准备正文。关联复用Ledger的原`request_identity`与生命周期索引；它不代表平台已受理，不打开订单，也不设置`economic_applied`。单笔已有首次冻结意图时，准备、发送和回执登记仍复用该原意图；首次准备或资金预留失败不提前创建冻结状态。批次原身份一致性边界保持。
+
+实际经济反馈先到时，Ledger沿准确关联把原本地预留转换为平台义务，实际现金只扣一次。随后到达的提交响应不再重复计入。响应先到但经济事实未到时，原`PlatformConfirmedPendingEconomicFact`继续占用资金；未知义务不释放，明确无效果才沿原规则解除。没有金额或时间猜配，也没有第二份资金状态。
+
+SIM的`prepare_business_request_v1`只选择请求身份模式。新模式的订单ID为`sim-order-v1:<global_request_id的UTF8字节数>:<global_request_id>:<batch_item_ordinal>`，准备读取与撮合沿同一纯函数派生。请求不保存可任意指定的订单ID，不窥探计数器、未来受理或成交；原查询仍按订单索引直接查表。模式随原请求、待动作和检查点保存。旧材料缺少模式时仍按旧`sim-N`解释，不从缺省字段反推新的资金关联。
+
+LIVE Bridge的`prepare`返回原签名正文和基础Order hash；配对两腿都准备成功后才允许`execute_prepared`消费原正文。哈希不加入平台POST JSON，salt、时间和签名正文不在发送阶段重造。普通V1/V2直接复用既有签名摘要。Poly1271依据[D-0351](https://github.com/slowchillchill/btc-updown-marketmaker/issues/301#issuecomment-6161579473)，只在需要提前基础订单身份时复用原结构／域中间值并增加一次66字节Keccak；原`sign`不增加哈希计算，不逐帧计算或做运行时哈希校验，不承诺具体耗时。该能力不是已交付LIVE宿主，也不证明真实平台已经受理。
+
+当前完整日运行使用backtest的v3检查点边界，拒绝旧完整运行续接；底层旧事件和旧身份仍可按原含义解释，没有通用旧研究迁移。B已按[D-0349](https://github.com/slowchillchill/btc-updown-marketmaker/issues/301#issuecomment-6160221232)停止，后续重新基于A的公共接口设计；公共Rust验证不能替代B或真实LIVE验收。

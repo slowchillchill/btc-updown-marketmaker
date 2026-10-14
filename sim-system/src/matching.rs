@@ -3711,10 +3711,19 @@ impl ExecutionStateV2 {
     }
 
     pub(crate) fn apply_buy_order(
+        self,
+        input: BuyOrderActionV2,
+        rules: &PlatformRuleSnapshotV3,
+        finality_policy: &TradeFinalityPolicyV2,
+    ) -> Result<(Self, BuyOrderDispositionV2), MatchingStateErrorV1> {
+        self.apply_buy_order_with_identity(input, rules, finality_policy, None)
+    }
+    pub(crate) fn apply_buy_order_with_identity(
         mut self,
         input: BuyOrderActionV2,
         rules: &PlatformRuleSnapshotV3,
         finality_policy: &TradeFinalityPolicyV2,
+        prepared_order_id: Option<&str>,
     ) -> Result<(Self, BuyOrderDispositionV2), MatchingStateErrorV1> {
         let terms = input.terms;
         let target = terms.target();
@@ -3921,7 +3930,9 @@ impl ExecutionStateV2 {
         let next_order_sequence = order_sequence
             .checked_add(1)
             .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        let platform_order_id = format!("sim-{order_sequence}");
+        let platform_order_id = prepared_order_id
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("sim-{order_sequence}"));
         let mut account_deltas = Vec::new();
         let required_available_pusd_units = accepted_quote_units
             .checked_add(total_immediate_taker_fee_units)

@@ -646,3 +646,8 @@ priority = -1
 [profile.bench]
 lto = "thin"
 codegen-units = 1
+
+[[test]]
+name = "order_hash"
+path = "tests/order_hash.rs"
+required-features = ["clob"]

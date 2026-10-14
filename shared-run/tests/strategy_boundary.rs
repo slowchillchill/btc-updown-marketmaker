@@ -62,6 +62,88 @@ fn buy(id: &str, principal: u32) -> ReservedIntentV1 {
         }],
     }
 }
+#[tokio::test(flavor = "current_thread")]
+async fn single_reentry_after_no_request_effect_sends_the_first_frozen_intent() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver) = setup(temp.path());
+    let first = buy("first-frozen-before-registration", 1);
+    let mut invalid_context = first.context.clone();
+    invalid_context.caller_correlation_id = Some(" invalid ".into());
+    let error = shared
+        .execute(
+            &mut driver.decision().unwrap(),
+            invalid_context,
+            Some(first.intent.clone()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        SimRunActorErrorV2::InvalidBusinessRequest("caller_correlation_id 为空或含首尾空白")
+    );
+    assert!(
+        shared
+            .registry()
+            .frozen_intent(&first.context.global_request_id)
+            .is_some()
+    );
+    assert!(
+        !shared
+            .registry()
+            .all_commitments()
+            .any(|r| r.origin.intent.global_request_id() == first.context.global_request_id)
+    );
+    let mut changed = buy(&first.context.global_request_id, 2);
+    changed.intent = Arc::new(ModelIntentV1::SubmitSingleBuy {
+        condition_id: ConditionId(CONDITION_ID.into()),
+        order: BuyLegIntentV1 {
+            token_id: TokenId(UP_TOKEN_ID.into()),
+            order: BuyOrderIntentV1::GtcLimit {
+                limit_price_pusd_per_share: Decimal::new(4, 1),
+                size_shares: Decimal::from(5),
+                post_only: true,
+            },
+        },
+    });
+    shared
+        .execute_reserved(
+            &mut driver.decision().unwrap(),
+            first.context.clone(),
+            Some(changed.intent),
+            &[first.reserves[0].reserve.clone()],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        shared
+            .registry()
+            .frozen_intent(&first.context.global_request_id)
+            .unwrap()
+            .intent(),
+        first.intent.as_ref()
+    );
+    while driver
+        .next_group_at()
+        .unwrap()
+        .is_some_and(|at| at <= 26_000)
+    {
+        driver.next_group().unwrap().unwrap();
+        shared.apply_closed().unwrap();
+    }
+    let cash = shared.ledger().economic_read().unwrap();
+    assert_eq!(cash.cash().actual_reserved_pusd.0, "1");
+    assert_eq!(cash.cash().actual_available_pusd.0, "99");
+    assert_eq!(
+        shared
+            .registry()
+            .orders()
+            .filter(|o| o.accepted.is_some())
+            .count(),
+        1
+    );
+    driver.stop_and_drain().unwrap();
+}
 /// 只变公开报价、不变Ledger前缀；借用和完整拥有式都必须重估原10份孤腿。
 #[tokio::test(flavor = "current_thread")]
 async fn borrowed_input_revalues_same_ledger_and_keeps_owned_snapshot() {

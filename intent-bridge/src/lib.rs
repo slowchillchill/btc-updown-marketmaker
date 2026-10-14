@@ -7,6 +7,7 @@ mod sim_adapter;
 
 pub use live_adapter::{
     LiveAdapterV1, LiveIntentCallContextV1, LiveIntentErrorV1, LiveIntentImmediateSuccessV1,
+    PreparedLiveIntentV1,
 };
 pub use sim_adapter::SimGroupAdapterV1;
 
