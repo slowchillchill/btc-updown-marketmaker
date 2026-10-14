@@ -23,6 +23,20 @@ async fn memory_execution_with_cash<P: noe_projection::MemoryOrderEvidence + 'st
     PublicSimExecutionV1,
     noe_projection::MemoryNoeObservation<P>,
 ) {
+    memory_execution_with_cash_seed::<P>(path,scenario,role,capacity,rules,cash,None).await
+}
+async fn memory_execution_with_cash_seed<P: noe_projection::MemoryOrderEvidence + 'static>(
+    path: &Path,
+    scenario: Arc<SealedPlatformScenarioV1>,
+    role: SimCallerRoleV1,
+    capacity: usize,
+    rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
+    cash: &str,
+    seed: Option<&str>,
+) -> (
+    PublicSimExecutionV1,
+    noe_projection::MemoryNoeObservation<P>,
+) {
     let rules = match rules {
         Some(rules) => rules,
         None => successful_snapshot_v3_for_sim_tests().await,
@@ -74,6 +88,7 @@ async fn memory_execution_with_cash<P: noe_projection::MemoryOrderEvidence + 'st
     )
     .unwrap();
     let mut session = spec("public-consumption-test", "create-public");
+    if let Some(seed)=seed {session.session_seed=Sha256Hex(seed.into());}
     session.caller_role = role;
     session.initial_account_state.available_pusd = ExactDecimal(cash.into());
     finite_feeding::feed(
@@ -136,9 +151,9 @@ async fn real_memory_noe_delivers_closed_order_feedback_and_cancel_before_finish
         .unwrap(),
     ]);
     let path = temp.path().join("sim.jsonl");
-    let (execution, observation) = memory_execution_with_scenario_capacity::<
+    let (execution, observation) = memory_execution_with_cash_seed::<
         noe_projection::MeasuredOrderEvidence,
-    >(&path, scenario, SimCallerRoleV1::Paper, 128, None)
+    >(&path, scenario, SimCallerRoleV1::Paper, 128, None, "10", Some(&format!("{:064x}",14)))
     .await;
     let release = execution
         .actor
@@ -1334,7 +1349,7 @@ async fn continuous_late_rebates_keep_due_but_use_actual_processing_time_and_rea
                 None,
             )
             .await;
-        let seed = execution
+        let mut expected_sampler = execution
             .actor
             .state
             .as_ref()
@@ -1342,7 +1357,7 @@ async fn continuous_late_rebates_keep_due_but_use_actual_processing_time_and_rea
             .session
             .as_ref()
             .unwrap()
-            .session_seed
+            .latency_sampler
             .clone();
         let latency = Arc::clone(&execution.actor._latency_profile);
         let (mut driver, clock) = controlled_continuous(execution, 900_100);
@@ -1480,6 +1495,9 @@ async fn continuous_late_rebates_keep_due_but_use_actual_processing_time_and_rea
                 .unwrap();
             feedback = observation.take_closed_feedback();
         }
+        feedback.sort_by_key(|r| match r.record().source_reference().record {
+            SimV2SourceRecordReferenceV1::SettlementLifecycle {private_feedback_sequence,..}|SimV2SourceRecordReferenceV1::OrderLifecycle {private_feedback_sequence,..}|SimV2SourceRecordReferenceV1::TradeLifecycle {private_feedback_sequence,..}|SimV2SourceRecordReferenceV1::DirectResponse {private_feedback_sequence,..}=>private_feedback_sequence,_=>0,
+        });
         let mut due_times = Vec::new();
         for item in &feedback {
             if let SimV2SourceRecordReferenceV1::SettlementLifecycle {
@@ -1488,11 +1506,7 @@ async fn continuous_late_rebates_keep_due_but_use_actual_processing_time_and_rea
                 feedback_received_at_utc_ms,
             } = item.record().source_reference().record
             {
-                let delay = latency.sample_delay_ms(
-                    seed.0.as_bytes(),
-                    &private_feedback_sequence.to_string(),
-                    DelaySampleDomainV1::LifecycleFeedbackInbound,
-                );
+                let delay = expected_sampler.sample(&latency, DelaySampleDomainV1::LifecycleFeedbackInbound);
                 assert_eq!(
                     feedback_received_at_utc_ms,
                     processed_at + delay as i64,
@@ -1533,7 +1547,7 @@ async fn continuous_normal_late_timer_preserves_due_delay_and_buy_between_rebate
             None,
         )
         .await;
-    let seed = execution
+    let mut expected_sampler = execution
         .actor
         .state
         .as_ref()
@@ -1541,7 +1555,7 @@ async fn continuous_normal_late_timer_preserves_due_delay_and_buy_between_rebate
         .session
         .as_ref()
         .unwrap()
-        .session_seed
+        .latency_sampler
         .clone();
     let latency = Arc::clone(&execution.actor._latency_profile);
     let (mut driver, clock) = controlled_continuous(execution, 500_000);
@@ -1623,19 +1637,22 @@ async fn continuous_normal_late_timer_preserves_due_delay_and_buy_between_rebate
         .apply_group(source.next().unwrap().unwrap().prepared)
         .unwrap();
     records.extend(observation.take_closed_feedback());
+    records.sort_by_key(|r| match r.record().source_reference().record {
+            SimV2SourceRecordReferenceV1::SettlementLifecycle {private_feedback_sequence,..}|SimV2SourceRecordReferenceV1::OrderLifecycle {private_feedback_sequence,..}|SimV2SourceRecordReferenceV1::TradeLifecycle {private_feedback_sequence,..}|SimV2SourceRecordReferenceV1::DirectResponse {private_feedback_sequence,..}=>private_feedback_sequence,_=>0,
+        });
     let mut settlement_sequences = Vec::new();
+    let mut delay_by_sequence=std::collections::BTreeMap::new();
     for record in records {
+        if let SimV2SourceRecordReferenceV1::OrderLifecycle {private_feedback_sequence,..}|SimV2SourceRecordReferenceV1::TradeLifecycle {private_feedback_sequence,..}|SimV2SourceRecordReferenceV1::SettlementLifecycle {private_feedback_sequence,..}=record.record().source_reference().record {
+            delay_by_sequence.entry(private_feedback_sequence).or_insert_with(||expected_sampler.sample(&latency, DelaySampleDomainV1::LifecycleFeedbackInbound));
+        }
         if let SimV2SourceRecordReferenceV1::SettlementLifecycle {
             private_feedback_sequence,
             platform_event_at_utc_ms,
             feedback_received_at_utc_ms,
         } = record.record().source_reference().record
         {
-            let delay = latency.sample_delay_ms(
-                seed.0.as_bytes(),
-                &private_feedback_sequence.to_string(),
-                DelaySampleDomainV1::LifecycleFeedbackInbound,
-            );
+            let delay = delay_by_sequence[&private_feedback_sequence];
             assert_eq!(
                 feedback_received_at_utc_ms,
                 platform_event_at_utc_ms + delay as i64,

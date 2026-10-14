@@ -70,6 +70,7 @@ fn execution(
     let latency = load_embedded_proxy_latency_profile().unwrap();
     let opened = RunOpenedV2 {
         projection_version: BusinessProjectionVersionV1::V4,
+        latency_sampler_version: "xoshiro256plusplus_jump_multiply_high_empirical_rank_v2".into(),
         run_id: run_id.into(),
         durability_role: RunDurabilityRoleV2::CleanRun,
         platform_rule_snapshot_file_sha256: rules.file_sha256().clone(),

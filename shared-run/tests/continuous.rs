@@ -1005,29 +1005,19 @@ async fn real_same_arrival_delayed_batch_forms_r1_s0_r0_without_reordering_origi
     use sim_system::latency_profile::{DelaySampleDomainV1, load_embedded_proxy_latency_profile};
     let latency = load_embedded_proxy_latency_profile().unwrap();
     // 从冻结经验延迟选择真实 seq1/seq2 接收反序的同源变体，不改事件时间。
-    let seed = (0u64..100)
+    let seed = (0u64..10000)
         .map(|n| format!("{n:064x}"))
         .find(|seed| {
-            latency.sample_delay_ms(
-                seed.as_bytes(),
-                "1",
-                DelaySampleDomainV1::LifecycleFeedbackInbound,
-            ) > latency.sample_delay_ms(
-                seed.as_bytes(),
-                "2",
-                DelaySampleDomainV1::LifecycleFeedbackInbound,
-            )
+            let mut sampler =
+                sim_system::latency_profile::SessionDelaySamplerV2::from_hex(seed).unwrap();
+            let first = sampler.sample(&latency, DelaySampleDomainV1::LifecycleFeedbackInbound);
+            let second = sampler.sample(&latency, DelaySampleDomainV1::LifecycleFeedbackInbound);
+            let outbound_first = sampler.sample(&latency, DelaySampleDomainV1::RequestOutbound);
+            let outbound_second = sampler.sample(&latency, DelaySampleDomainV1::RequestOutbound);
+            first > second && outbound_first == outbound_second
         })
         .unwrap();
-    let mut seen = std::collections::BTreeMap::new();
-    let (r, s) = (0..10_000)
-        .find_map(|i| {
-            let id = format!("same-arrival-{i}");
-            let delay =
-                latency.sample_delay_ms(seed.as_bytes(), &id, DelaySampleDomainV1::RequestOutbound);
-            seen.insert(delay, id.clone()).map(|prior| (prior, id))
-        })
-        .unwrap();
+    let (r, s) = ("same-arrival-r".to_owned(), "same-arrival-s".to_owned());
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let core = recorded_memory_complete(&root);
@@ -1347,7 +1337,13 @@ async fn actual_trade_association_late_only_attributes_existing_entries() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let (core, times) = recorded_trading(&root, "4", false);
-    let (execution, observation) = execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
+    let (execution, observation) = execution_with_seed(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SUCCESS_POLICY,
+        None,
+        format!("{:064x}", 11),
+    );
     let opening = observation.opening_record().unwrap();
     let mut ledger = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
         per_market_all_in_commitment_limit_pusd: ExactDecimal("1000".into()),
@@ -1581,7 +1577,13 @@ async fn pairs_follow_real_formation_not_request_name() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let core = recorded_memory_complete(&root);
-    let (execution, observation) = execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
+    let (execution, observation) = execution_with_seed(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SUCCESS_POLICY,
+        None,
+        format!("{:064x}", 1),
+    );
     let ledger = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
         per_market_all_in_commitment_limit_pusd: ExactDecimal("1000".into()),
     });
@@ -1658,15 +1660,10 @@ async fn equal_start_markets_sort_condition_before_order_formation() {
     let seed = (0u64..100)
         .map(|n| format!("{n:064x}"))
         .find(|seed| {
-            latency.sample_delay_ms(
-                seed.as_bytes(),
-                "higher-first",
-                DelaySampleDomainV1::RequestOutbound,
-            ) < latency.sample_delay_ms(
-                seed.as_bytes(),
-                "lower-second",
-                DelaySampleDomainV1::RequestOutbound,
-            )
+            let mut sampler =
+                sim_system::latency_profile::SessionDelaySamplerV2::from_hex(seed).unwrap();
+            let first = sampler.sample(&latency, DelaySampleDomainV1::RequestOutbound);
+            first < sampler.sample(&latency, DelaySampleDomainV1::RequestOutbound)
         })
         .unwrap();
     let (execution, observation) = execution_with_seed(
@@ -3220,9 +3217,15 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
         400_000,
         2,
         "100",
-        &[298_970, 299_006, 299_007, 299_008, 299_020],
+        &[298_970, 299_008, 299_009, 299_010, 299_020],
     );
-    let (execution, observation) = execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
+    let (execution, observation) = execution_with_seed(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SUCCESS_POLICY,
+        None,
+        format!("{:064x}", 2),
+    );
     let ledger =
         LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     let mut shared = SharedExecutionV1::from_opening(ledger, observation)
@@ -3292,15 +3295,16 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
                     .clone(),
             );
             assert_eq!(initial_funds, Some(Known(ExactDecimal("1.8".into()))));
-            // 同一原固定种子/经验时延：Open 出站29/入站8，Expired 出站30/入站6。
-            // 处理299999/300000，收到300007/300006；生命周期独立延迟，未改原图或采样器。
-            for request in ["open-query-3645", "terminal-query-248140"] {
+            // 固定新版种子2：两次查询出站9ms，Open/Expired入站10/8ms。
+            // 显式发送299990/299991，处理299999/300000，收到300009/300008；
+            // 到300010仍未收到独立延迟16ms的GTD生命周期。
+            for (request, send_at) in [("open-query", 299_990), ("terminal-query", 299_991)] {
                 assert_eq!(
                     platform_id(id.as_ref().unwrap()),
                     sim_system::execution::prepared_order_id_v1("terminal-pair", 0)
                 );
                 driver
-                    .decision()
+                    .send_decision_at(view.cutoff().clone(), send_at)
                     .unwrap()
                     .request(BusinessRequestV2::Order(OrderRequestV2 {
                         context: context(request),
@@ -3309,7 +3313,7 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
                     .unwrap();
             }
         }
-        if at == 300_007 || at == 300_008 {
+        if at == 300_009 || at == 300_010 {
             let id = id.as_ref().unwrap();
             let order = shared.registry().order(id).unwrap();
             let direct = order.latest_direct_feedback.unwrap();
@@ -3328,7 +3332,7 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
             };
             assert_eq!(
                 snapshot.state,
-                if at == 300_007 {
+                if at == 300_009 {
                     SourceNeutralOrderStateV1::Expired
                 } else {
                     SourceNeutralOrderStateV1::Open
@@ -3344,17 +3348,17 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
             };
             assert_eq!(
                 (platform_responded_at_utc_ms, response_received_at_utc_ms),
-                if at == 300_007 {
-                    (300_000, 300_006)
+                if at == 300_009 {
+                    (300_000, 300_008)
                 } else {
-                    (299_999, 300_007)
+                    (299_999, 300_009)
                 }
             );
             assert!(
                 !matches!(order.latest_lifecycle.unwrap().record(), NormalizationRecord::Evidence { evidence: SourceNeutralEvidenceKind::OrderLifecycle { result }, .. } if matches!(result.event, SourceNeutralOrderLifecycleEventV1::GtdExpired)),
                 "终态生命周期尚未收到"
             );
-            if at == 300_007 {
+            if at == 300_009 {
                 terminal = Some(direct.clone());
             } else {
                 assert!(direct.position() != terminal.as_ref().unwrap().position());

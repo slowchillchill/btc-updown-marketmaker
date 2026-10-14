@@ -1161,7 +1161,12 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
             &core,
             policy,
             None,
-            "00000000000000000000000000000000000000000000000000000000000023c8".into(),
+            if late {
+                "eb2a2503f291d45a5f741c7d2674d76aab5976bb2de30c2b207718b8e83db93f"
+            } else {
+                "00000000000000000000000000000000000000000000000000000000000023c8"
+            }
+            .into(),
         );
         execution.configure_resolution_redeem_v1(script(0)).unwrap();
         let mut ledger = LedgerWriterV1::new_with_admission_v3(
@@ -1223,8 +1228,8 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
                     sent_b = true;
                 }
             }
-            // 原 Accepted received=56031；首成交 received=66832、MINED=66022。
-            // 66000 组仍在经济反馈之前，71000 已能领取 PendingApplied。
+            // 新固定晚到种子：Accepted received=56083；首成交MATCHED received=85707，MINED=66019。
+            // 66000组在这两个反馈前；后续按真实前驱归约，不由响应匹配数量提前闭合承诺。
             if late && at == 66_000 {
                 assert!(shared.apply_closed().unwrap());
                 let read = shared.ledger().economic_read().unwrap();

@@ -3818,6 +3818,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f703f4665700daf5512dcca5f43afa6af89f09db47fb56be587f80636bda2d41"
 dependencies = [
  "rand_core 0.9.5",
+ "serde",
 ]
 
 [[package]]
@@ -4629,6 +4630,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "polymarket_client_sdk_v2",
+ "rand_xoshiro",
  "reqwest",
  "rust_decimal",
  "rustix",

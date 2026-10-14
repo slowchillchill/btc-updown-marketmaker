@@ -318,7 +318,7 @@ impl BorrowedStrategyInputV1<'_> {
         })
     }
 }
-#[derive(Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct SentIntentReceiptV1 {
     pub context: RequestContextV2,
     pub receipt: MutationRequestReceiptV2,
@@ -331,6 +331,18 @@ pub struct BatchExecutionErrorV1 {
     pub attempted_intent_index: Option<usize>,
     pub failed_request_effect: Option<RequestEffectV1>,
     pub release_errors: Vec<LedgerErrorV1>,
+}
+/// 错误路径移动交回原计算，正常分派不复制整批意图。
+pub struct StrategyDispatchFailureV1<D, E> {
+    pub calculation: CompletedStrategyCalculationV1<D>,
+    pub error: E,
+}
+impl<D, E: std::fmt::Debug> std::fmt::Debug for StrategyDispatchFailureV1<D, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StrategyDispatchFailureV1")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
 }
 pub enum StrategyDispatchV1<D = ()> {
     Continue {
@@ -593,14 +605,20 @@ impl SharedExecutionV2 {
         decision: &mut PublicGroupDecisionV1<'_>,
         strategy: &mut S,
         calculation: CompletedStrategyCalculationV1<S::Diagnostics>,
-    ) -> Result<StrategyDispatchV1<S::Diagnostics>, BatchExecutionErrorV1> {
+    ) -> Result<
+        StrategyDispatchV1<S::Diagnostics>,
+        StrategyDispatchFailureV1<S::Diagnostics, BatchExecutionErrorV1>,
+    > {
         match &calculation.calculation.output {
             StrategyOutputV1::Exit { .. } => Ok(StrategyDispatchV1::Exit { calculation }),
             StrategyOutputV1::Continue { intents, .. } => {
                 let sent_at_utc_ms = decision.sent_at_utc_ms();
                 let result = self.execute_batch_reserved(decision, intents).await;
                 strategy.dispatched(&calculation.calculation, &result);
-                let receipts = result?;
+                let receipts = match result {
+                    Ok(receipts) => receipts,
+                    Err(error) => return Err(StrategyDispatchFailureV1 { calculation, error }),
+                };
                 Ok(StrategyDispatchV1::Continue {
                     calculation,
                     sent_at_utc_ms,
@@ -660,7 +678,10 @@ impl SharedExecutionV2 {
         decision: &mut PublicGroupDecisionV1<'_>,
         strategy: &mut S,
         calculation: CompletedStrategyCalculationV1<S::Diagnostics>,
-    ) -> Result<QualifiedStrategyDispatchV1<S::Diagnostics>, QualifiedBatchErrorV1<S::Error>> {
+    ) -> Result<
+        QualifiedStrategyDispatchV1<S::Diagnostics>,
+        StrategyDispatchFailureV1<S::Diagnostics, QualifiedBatchErrorV1<S::Error>>,
+    > {
         let StrategyOutputV1::Continue { intents, .. } = &calculation.calculation.output else {
             return Ok(QualifiedStrategyDispatchV1::Dispatched {
                 dispatch: StrategyDispatchV1::Exit { calculation },
@@ -712,7 +733,7 @@ impl SharedExecutionV2 {
                     dispatch: StrategyDispatchV1::Continue {
                         calculation,
                         sent_at_utc_ms,
-                        receipts: original.map_err(QualifiedBatchErrorV1::Execution)?,
+                        receipts: original.expect("已匹配成功发送结果"),
                     },
                     qualification_calls,
                 })
@@ -729,11 +750,14 @@ impl SharedExecutionV2 {
                 let original = Err(error);
                 strategy.dispatched(&calculation.calculation, &original);
                 match original {
-                    Err(error) => Err(QualifiedBatchErrorV1::Execution(error)),
+                    Err(error) => Err(StrategyDispatchFailureV1 {
+                        calculation,
+                        error: QualifiedBatchErrorV1::Execution(error),
+                    }),
                     Ok(_) => unreachable!("原发送错误"),
                 }
             }
-            Err(other) => Err(other),
+            Err(error) => Err(StrategyDispatchFailureV1 { calculation, error }),
         }
     }
     /// 全批先按原 Ledger 检查预留，再按原序通过 Bridge；不保证平台原子效果。

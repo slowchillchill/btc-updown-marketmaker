@@ -188,6 +188,8 @@ JSON/TOML 解析、完整策略参数覆盖和显式 `false` 沿原命令层复�
 
 工程反例在 `tests/historical.rs`、`shared-run/tests/strategy_boundary.rs` 与 DPT 原测试入口覆盖静默期限、接收持续但事件滞后、已发前缀/未发后缀和无新行情重算。`source_health_finite_overhead_measurement` 是显式忽略的合成测量入口，以 `SOURCE_HEALTH_MEASUREMENT_ENABLED=0/1` 和已有 `SOURCE_HEALTH_MEASUREMENT_ROOT` 运行同一有限夹具；可用 `/usr/bin/time -v` 分进程记录 CPU 与峰值内存。其参数、输入和结果不构成正式健康阈值、历史断网证明或在线性能承诺。
 
+D-0353 的失败报告保留待发原批次，以及动作批次在计算时、准入前的实际可用现金和账本序号。批次部分发送时复用原发送回执、失败项、请求效果及释放错误；不重建资金账本。没有实际发送的正常 NoTrade、零发送失败或失效批次，`actual_sent_at_utc_ms` 均为 `None`，计算完成与 `scheduled_send_at_utc_ms` 仍保留原意义。
+
 ## 原Parquet日作业、并行与日内恢复
 
 D-0311/D-0312 下的 `run_historical_days_v1` 接收 `HistoricalDayConfigV1` 日期列表和原 `CheckpointStrategyV1` 工厂。每日期只创建一个公共 `PublicObservationCoreV1`。每候选在线程内创建自己的策略、SIM、NOE、Ledger、共享执行和时序；这些运行对象无需跨线程传递。默认日期并发按可用CPU数和最大候选数安排，调用方也可用 `run_historical_days_with_parallelism_v1` 明确日期并发。同日独立候选同时消费不可变公共组和完整隐藏桶；同一市场、同一账户的原业务因果顺序保持。
@@ -288,3 +290,11 @@ BudgetStop、Failure沿原report终止原因区分。CLI硬截止仅覆盖CLI自
 当前运行的 `admission_policy` 为 `ActualCashNoMarketLimit`，账户经济读取为 `account_economics_v3`。有效配置、结果的 `economics_version` 和耐久账本保存各自准确身份。现金汇总只有实际可用与实际预留；WCM 保留原归因金额与未知语义，但不证明同一交易路径能够脱离方向回款或外部入金执行。公共资金定义见 [shared-run](../shared-run/README.md#实际可用资金准入)。
 
 当前配置解析不把 `DualCashNoMarketLimit` 转成新政策。准备脚本显式生成新政策配置；这只装配新运行，不能迁移旧账户、检查点或成绩。日恢复仍核对原候选配置、源码及检查点身份。旧 v2 结果和已停止研究保留生成时口径；新研究须使用独立输出和新政策身份，本次工程验证不恢复十二小时研究。
+
+## 日研究失败与部分结果
+
+D-0353 下，日入口保留第一个被该日 Hub 确认的原始错误和来源，不声称它是所有线程中最早发生的错误。已启动的候选和日期线程均收取返回结果。候选 `outcome` 区分 `Complete`、`OriginalFailure`、`CollateralStop` 和 `NoReport`；缺报告时 `report` 为 `null`。失败候选不进入完成记录复用。报告的原观察截止、内存经济读取、耐久 NOE 前缀及最后发布点各自保留，失败后不补未来反馈或隐式排空。
+
+CLI 日模式失败时仍输出一次 JSON：`status="failed"`、`error`、`failure_source` 和已有 `days`，并非零退出。`scripts/run_research.sh` 在退出后提取这些已有结果，原 CLI 退出码优先于汇总错误；`scripts/summarize_research.py` 接受缺报告候选和空日期，不把部分前缀标成完整窗口。新日检查点格式为 `original-parquet-day-checkpoint-v4`；SIM 新随机序列的版本、种子及旧材料边界见 [SIM 历史消费合同](../sim-system/historical-consumption.md)。
+
+可选 `stage-timing` 仅在原检查点边界细分 SIM、Ledger、共享执行和策略的编码耗时及字节数。不新增逐帧采样；同日并发候选的等待和阶段耗时不能相加当墙钟。真实研究时长与保存频率由研究配置决定，有限工程测量不代表十二小时持续吞吐。

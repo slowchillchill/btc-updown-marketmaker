@@ -36,6 +36,11 @@ pub(crate) struct CandidateProgressV1 {
     pub requirements: Option<contracts::PublicObservationRequirementsV1>,
     pub runtime_started: bool,
 }
+#[derive(Clone)]
+pub(crate) struct DayFailureSignalV1 {
+    pub source: crate::day::DayFailureSourceV1,
+    pub message: String,
+}
 pub(crate) struct DayBufferV1 {
     pub public_base: usize,
     pub public: VecDeque<PublicGroupDeliveryV1>,
@@ -48,7 +53,7 @@ pub(crate) struct DayBufferV1 {
     pub budget_stop_requested: bool,
     pub budget_stopped: bool,
     pub generation: u64,
-    pub failure: Option<String>,
+    pub failure: Option<DayFailureSignalV1>,
 }
 #[derive(Clone)]
 pub(crate) struct DayHubV1(pub Arc<(Mutex<DayBufferV1>, Condvar)>);
@@ -119,15 +124,26 @@ impl DayHubV1 {
         &self,
         index: usize,
         result: &Result<HistoricalDayCandidateResultV1, MaterialError>,
+        run_id: &str,
     ) {
         let (mut buffer, cv) = (self.0.0.lock().unwrap(), &self.0.1);
         buffer.candidates[index].active = false;
         if let Ok(result) = result {
-            if result.report["end_reason"] != "BudgetStop" {
+            if result.outcome == crate::day::CandidateOutcomeV1::Complete
+                && result.report["end_reason"] != "BudgetStop"
+            {
                 buffer.candidates[index].complete = Some(result.report.clone());
             }
         } else if let Err(error) = result {
-            buffer.failure = Some(error.to_string());
+            if buffer.failure.is_none() {
+                buffer.failure = Some(DayFailureSignalV1 {
+                    source: crate::day::DayFailureSourceV1::Candidate {
+                        index,
+                        run_id: run_id.into(),
+                    },
+                    message: error.to_string(),
+                });
+            }
         }
         Self::compact(&mut buffer);
         cv.notify_all();
@@ -178,7 +194,9 @@ impl Iterator for DayPublicSourceV1 {
             }
             if let Some(error) = buffer.failure.clone() {
                 self.failed = true;
-                return Some(Err(SimRunActorErrorV2::PublicConsumptionSource(error)));
+                return Some(Err(SimRunActorErrorV2::PublicConsumptionSource(
+                    error.message,
+                )));
             }
             match &buffer.production {
                 ProductionV1::Ended => return None,
@@ -234,7 +252,7 @@ impl Iterator for DayHiddenSourceV1 {
             }
             if let Some(error) = buffer.failure.clone() {
                 self.failed = true;
-                return Some(Err(error.into()));
+                return Some(Err(error.message.into()));
             }
             match &buffer.production {
                 ProductionV1::Ended => return None,
@@ -390,14 +408,37 @@ where
         };
         #[cfg(feature = "stage-timing")]
         let encode_started = std::time::Instant::now();
+        #[cfg(feature = "stage-timing")]
+        let timings = &mut self.stages;
         let mut execution = Vec::new();
-        driver.write_checkpoint(&mut execution)?;
+        measure_stage!(
+            timings,
+            "encode_sim_driver",
+            driver.write_checkpoint(&mut execution)
+        )?;
         let mut ledger = Vec::new();
-        shared.ledger().write_checkpoint(&mut ledger)?;
+        measure_stage!(
+            timings,
+            "encode_ledger",
+            shared.ledger().write_checkpoint(&mut ledger)
+        )?;
         let mut registry = Vec::new();
-        shared.write_checkpoint(&mut registry)?;
+        measure_stage!(
+            timings,
+            "encode_shared_execution",
+            shared.write_checkpoint(&mut registry)
+        )?;
         let mut strategy_state = Vec::new();
-        strategy.write_strategy_checkpoint(&mut strategy_state)?;
+        measure_stage!(
+            timings,
+            "encode_strategy",
+            strategy.write_strategy_checkpoint(&mut strategy_state)
+        )?;
+        #[cfg(feature = "stage-timing")]
+        eprintln!(
+            "checkpoint_subsystem_bytes={}",
+            serde_json::json!({"candidate_index":self.index,"generation":generation,"driver":execution.len(),"ledger":ledger.len(),"shared_execution":registry.len(),"strategy":strategy_state.len()})
+        );
         #[derive(Serialize)]
         struct Saved<'a, D> {
             #[serde(with = "checkpoint_bytes")]
@@ -446,7 +487,7 @@ where
             buffer = self.hub.0.1.wait(buffer).unwrap();
         }
         if let Some(error) = &buffer.failure {
-            return Err(error.clone().into());
+            return Err(error.message.clone().into());
         }
         #[cfg(feature = "stage-timing")]
         self.stages
@@ -517,7 +558,7 @@ pub(crate) struct CheckpointPublicationV1 {
     pub generation: u64,
     pub files: Vec<CheckpointFileV1>,
 }
-pub(crate) const DAY_CHECKPOINT_FORMAT: &str = "original-parquet-day-checkpoint-v3";
+pub(crate) const DAY_CHECKPOINT_FORMAT: &str = "original-parquet-day-checkpoint-v4";
 struct DigestWriter<W> {
     inner: W,
     digest: Sha256,

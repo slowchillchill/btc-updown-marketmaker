@@ -2354,6 +2354,8 @@ mod tests {
     fn opened() -> RunOpenedV2 {
         RunOpenedV2 {
             projection_version: Default::default(),
+            latency_sampler_version: "xoshiro256plusplus_jump_multiply_high_empirical_rank_v2"
+                .into(),
             run_id: "run-noe-58".to_owned(),
             durability_role: RunDurabilityRoleV2::CleanRun,
             platform_rule_snapshot_file_sha256: sha('1'),

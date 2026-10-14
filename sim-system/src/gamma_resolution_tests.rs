@@ -433,11 +433,7 @@ async fn gamma_same_millisecond_finality_and_full_checkpoint_pay_five_once() {
     let mut session = spec("gamma-five", "create-gamma-five");
     session.caller_role = SimCallerRoleV1::HistoricalBacktest;
     let matched_at = decision_at
-        + i64::try_from(latency.sample_delay_ms(
-            session.session_seed.0.as_bytes(),
-            "gamma-buy",
-            DelaySampleDomainV1::RequestOutbound,
-        ))
+        + i64::try_from(crate::latency_profile::SessionDelaySamplerV2::from_hex(&session.session_seed.0).unwrap().sample(&latency, DelaySampleDomainV1::RequestOutbound))
         .unwrap();
     let mined_offset = consumed - matched_at;
     let finality = Arc::new(TradeFinalityPolicyV2::decode_and_seal(&serde_json::to_vec(&serde_json::json!({

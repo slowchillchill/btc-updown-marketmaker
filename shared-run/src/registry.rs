@@ -1626,17 +1626,47 @@ impl<R: Clone> SharedExecutionRegistry<R> {
         &self,
         pool: &mut ::execution_normalization::NoeCheckpointBatchPoolV1<R>,
     ) -> RegistryCheckpointV2<::execution_normalization::NoeCheckpointRecordRefV1> {
-        let state = RegistryCheckpointV2 {
+        RegistryCheckpointV2 {
             context: self.context.clone(),
-            intents: self.intents.clone(),
-            orders: self.orders.clone(),
             markets: self.markets.clone(),
-            cancel_locations: self.cancel_locations.clone(),
             action_population: self.action_population.clone(),
-        };
-        state
-            .map(|r| Ok::<_, std::convert::Infallible>(pool.capture(r)))
-            .expect("只替换原引用")
+            cancel_locations: self
+                .cancel_locations
+                .iter()
+                .map(|(k, v)| (k.clone(), pool.capture(v)))
+                .collect(),
+            orders: self
+                .orders
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.map(&mut |r| Ok::<_, std::convert::Infallible>(pool.capture(r)))
+                            .expect("只替换原引用"),
+                    )
+                })
+                .collect(),
+            intents: self
+                .intents
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        Submitted {
+                            origin: v.origin.clone(),
+                            receipt: v.receipt.clone(),
+                            completed: v.completed.as_ref().map(|r| pool.capture(r)),
+                            cancel_targets: v
+                                .cancel_targets
+                                .iter()
+                                .map(|r| pool.capture(r))
+                                .collect(),
+                            outcomes: v.outcomes.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
     }
 }
 impl RegistryCheckpointV2<::execution_normalization::NoeCheckpointRecordRefV1> {

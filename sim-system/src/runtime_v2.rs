@@ -37,6 +37,8 @@ impl BusinessProjectionVersionV1 {
 pub struct RunOpenedV2 {
     #[serde(default, skip_serializing_if = "BusinessProjectionVersionV1::is_v2")]
     pub projection_version: BusinessProjectionVersionV1,
+    /// 采样算法是持久运行合同；旧材料不静默切换到新随机序列。
+    pub latency_sampler_version: String,
     pub run_id: String,
     pub durability_role: RunDurabilityRoleV2,
     pub platform_rule_snapshot_file_sha256: Sha256Hex,
