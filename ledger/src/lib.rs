@@ -26,15 +26,15 @@ pub use core::funds::{LedgerFundsReadV1, OrderFundsReadV1, RequestFundsReadV1};
 pub use reservation::ReservationStatusV1;
 
 pub use core::economics::{
-    DualCashReadV1, ExecutedEconomicsReadV1, LedgerEconomicReadV1, MarketEconomicTotalsReadV1,
+    CashReadV1, ExecutedEconomicsReadV1, LedgerEconomicReadV2, MarketEconomicTotalsReadV1,
     RebateAmountsReadV1, RebateDayReadV1, ResidualCashReadV1, ResolutionAccountReadV1,
     SettlementCostReadV1, SuccessfulTradeReadV1, TradeEconomicReadV1,
 };
 
-pub use projection::AccountAdmissionPolicyV2;
+pub use projection::{AccountAdmissionPolicyV2, AccountAdmissionPolicyV3};
 
 pub use core::economics::EconomicSettlementStateV1;
 
 pub use core::economics::{
-    AccountEconomicNumbersV1, LedgerNecessaryReadV1, MarketEconomicNumbersV1, MarketFundsNumbersV1,
+    AccountEconomicNumbersV1, LedgerNecessaryReadV2, MarketEconomicNumbersV1, MarketFundsNumbersV1,
 };

@@ -2,7 +2,7 @@
 
 本包提供单 Rust 只读 HTTP 服务和 React 浏览界面，消费显式指定的可选历史报告、可选启动元数据、可选公共稳定记录、显式 NOE 原返回引用及真实历史描述研究 JSON。合同入口为 [C 路线 #215](https://github.com/slowchillchill/btc-updown-marketmaker/issues/215)。公共模块不依赖本包。
 
-报告通过 JSON 浏览：`backtest::HistoricalRunReportV1` 当前只有 `Serialize`，本包不另建完整领域模式，也不修改生产报告类型。已知 `account_economics_v2` 与原结束原因可以显示已有终态和有限时序；未知版本保留原 JSON 并停止对应语义解释。JSON 语法读取成功不代表领域完整性或研究验收。
+报告通过 JSON 浏览：`backtest::HistoricalRunReportV1` 当前只有 `Serialize`，本包不另建完整领域模式，也不修改生产报告类型。已知 `account_economics_v2`、`account_economics_v3` 与原结束原因可以显示已有终态和有限时序；未知版本保留原 JSON 并停止对应语义解释。JSON 语法读取成功不代表领域完整性或研究验收。
 
 ## 启动
 
@@ -422,3 +422,6 @@ CARGO_TARGET_DIR=<实际target> node visualization/ui/tests/measurement-missing-
 ## 已保存小时研究快照
 
 `account_economics_v2` 报告含 `research.hours` 时提供累计小时选择。现金、NAV、风险、资金、返佣与执行/决策计数都读取同一 cumulative；缺逐市场与 Ledger 不借最终状态补齐。可通过可选 `report_provenance` 文件保留忠实提取来源、原包装 pointer 与初始资金。字段映射、英文 Demo 六镜、启动/停止和定向验证见[小时快照说明](docs/hour-snapshots.md)。
+
+
+`account_economics_v3` 的现金结构只有实际可用与实际预留。界面仅在旧 v2 报告显示原 Maker 可用／预留字段，不给新报告生成这些值。旧 v2 保留生成时语义；v3 的 WCM 只用于来源归因评价，不证明交易路径无需方向回款或外部入金资助。未知版本仍只保留原 JSON。

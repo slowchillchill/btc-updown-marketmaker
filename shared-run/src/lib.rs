@@ -15,4 +15,4 @@ mod strategy;
 pub use strategy::*;
 
 mod necessary;
-pub use necessary::{ActionAccountReadV1, BorrowedActionAccountV1, OwnedActionAccountV1};
+pub use necessary::{ActionAccountReadV2, BorrowedActionAccountV2, OwnedActionAccountV2};

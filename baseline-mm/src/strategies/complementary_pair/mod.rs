@@ -363,7 +363,7 @@ impl ComplementaryPairV1 {
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
-            impl ActionAccountReadV1,
+            impl ActionAccountReadV2,
         >,
         now: i64,
     ) -> Result<StrategyOutputV1<ComplementaryPairDiagnosticV1>, StrategyErrorV1> {
@@ -423,8 +423,7 @@ impl ComplementaryPairV1 {
                     .or_insert(f.observation.market.window.end_at_utc_ms);
             }
         }
-        let (actual_cash, maker_cash) = input.action_before.cash_available();
-        let mut cash = actual_cash.min(maker_cash).max(Decimal::ZERO);
+        let mut cash = input.action_before.cash_available().max(Decimal::ZERO);
         let mut diagnostic = ComplementaryPairDiagnosticV1 {
             strategy_id: STRATEGY_ID.into(),
             rule_version: RULE_VERSION.into(),

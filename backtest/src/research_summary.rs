@@ -2,7 +2,7 @@
 use crate::run::{CalculationTimingRecordV1, SourceHealthRunSummaryV1};
 use contracts::{economics::EconomicRational as R, *};
 use serde::{Deserialize, Serialize};
-use shared_run::{AccountEconomicsReadV2, SharedExecutionV2, StrategyOutputV1};
+use shared_run::{AccountEconomicsReadV3, SharedExecutionV2, StrategyOutputV1};
 use sim_system::public_consumption::TrustedGroupDecisionCutoffV1;
 use std::collections::BTreeMap;
 
@@ -139,7 +139,7 @@ pub(crate) fn snapshot(
     boundary: i64,
     cutoff: Option<TrustedGroupDecisionCutoffV1>,
     shared: &SharedExecutionV2,
-    economics: Option<&AccountEconomicsReadV2>,
+    economics: Option<&AccountEconomicsReadV3>,
     health: &SourceHealthRunSummaryV1,
     pending: Option<CalculationTimingRecordV1>,
     day_economics: &crate::day_economics::DayEconomicsStateV1,
@@ -155,8 +155,6 @@ pub(crate) fn snapshot(
             amount(&e.cash.actual_available_pusd),
         );
         add("actual_reserved_pusd", amount(&e.cash.actual_reserved_pusd));
-        add("maker_available_pusd", amount(&e.cash.maker_available_pusd));
-        add("maker_reserved_pusd", amount(&e.cash.maker_reserved_pusd));
         add(
             "worst_case_maker_nav_pusd",
             rational(&e.worst_case_maker_nav_pusd),

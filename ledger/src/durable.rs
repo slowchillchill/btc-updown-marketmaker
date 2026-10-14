@@ -78,6 +78,9 @@ pub struct LedgerSealedSegmentReferenceV1 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "body", rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum DurablePayloadV1 {
+    GenesisV3 {
+        policy: crate::projection::AccountAdmissionPolicyV3,
+    },
     GenesisV2 {
         policy: crate::projection::AccountAdmissionPolicyV2,
     },
@@ -94,7 +97,7 @@ pub(crate) enum DurablePayloadV1 {
 impl DurablePayloadV1 {
     fn ledger_entry_seq(&self) -> Option<u64> {
         match self {
-            Self::Genesis { .. } | Self::GenesisV2 { .. } => None,
+            Self::Genesis { .. } | Self::GenesisV2 { .. } | Self::GenesisV3 { .. } => None,
             Self::Transaction(effect) => Some(effect.ledger_entry_seq()),
             Self::ReservationDecision { .. } => None,
         }
@@ -915,6 +918,24 @@ mod tests {
         AccountAdmissionPolicyV1 {
             per_market_all_in_commitment_limit_pusd: ExactDecimal(value.to_owned()),
         }
+    }
+
+    #[test]
+    fn historical_dual_cash_genesis_decodes_without_enabling_new_policy_recovery() {
+        use crate::{AccountAdmissionPolicyV2, LedgerWriterV1};
+        let directory = TempDir::new().unwrap();
+        let mut durable = DurableLedgerV1::create_parquet(
+            directory.path(),
+            DurablePayloadV1::GenesisV2 {
+                policy: AccountAdmissionPolicyV2::DualCashNoMarketLimit,
+            },
+        )
+        .unwrap();
+        durable.seal_active_segment().unwrap();
+        let error = LedgerWriterV1::open_durable(directory.path())
+            .err()
+            .expect("旧身份不能恢复为新政策");
+        assert!(error.to_string().contains("旧 DualCashNoMarketLimit"));
     }
 
     #[test]

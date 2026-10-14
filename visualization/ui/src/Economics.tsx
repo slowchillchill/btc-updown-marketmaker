@@ -95,7 +95,7 @@ export function Economics({
           [tr("实际预留现金"), "actual_reserved_pusd"],
           [tr("Maker 可用现金"), "maker_available_pusd"],
           [tr("Maker 预留现金"), "maker_reserved_pusd"],
-        ].map(([label, key]) => (
+        ].filter(([, key]) => !key.startsWith("maker_") || at(report, "economics_version") === "account_economics_v2").map(([label, key]) => (
           <Field
             key={key}
             label={label}

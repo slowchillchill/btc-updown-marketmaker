@@ -366,7 +366,7 @@ fn real_two_market_boundary_keeps_complete_existing_segment_and_required_evidenc
 struct MemoryProbe {
     callbacks: Vec<i64>,
     dispatched: usize,
-    economics: Option<AccountEconomicsReadV2>,
+    economics: Option<AccountEconomicsReadV3>,
 }
 impl StrategyV1 for MemoryProbe {
     type Error = &'static str;

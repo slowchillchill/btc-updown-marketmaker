@@ -68,8 +68,9 @@ async fn original_auto_redeem_allocates_pair_and_orphan_once_and_preserves_pendi
         let log = path.join("sim.jsonl");
         let (mut execution, observation) = execution(&log, &core, policy);
         let feedback = observation.clone();
-        let mut ledger =
-            LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(
+            AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
+        );
         let ledger_root = path.join("ledger");
         execution
             .bind_ledger_recording_v2(&mut ledger, &ledger_root)
@@ -151,7 +152,7 @@ async fn original_auto_redeem_allocates_pair_and_orphan_once_and_preserves_pendi
         let market = read.market_totals().next().unwrap();
         let cash = read.cash().clone();
         if case == 3 {
-            std::fs::write(path.join("case3-final.json"), serde_json::to_vec_pretty(&serde_json::json!({"market":market,"cash":cash,"account":shared.ledger().projection_v2().unwrap(),"conservative_nav":AccountEconomicsReadV1::from_ledger(&read).conservative_nav_pusd,"pending_noe":shared.pending_noe_record_count()})).unwrap()).unwrap();
+            std::fs::write(path.join("case3-final.json"), serde_json::to_vec_pretty(&serde_json::json!({"market":market,"cash":cash,"account":shared.ledger().projection_v2().unwrap(),"conservative_nav":UnmarkedAccountEconomicsReadV3::from_ledger(&read).conservative_nav_pusd,"pending_noe":shared.pending_noe_record_count()})).unwrap()).unwrap();
         }
         if case != 2 {
             assert_eq!(market.settlement_state, EconomicSettlementStateV1::Redeemed);
@@ -167,11 +168,11 @@ async fn original_auto_redeem_allocates_pair_and_orphan_once_and_preserves_pendi
             // Up10、Down5 的本金为6+3；冻结费率 .07 的费用为 .168+.084。
             // 配对5归 maker，赢家孤腿5归 directional；总现金100-9-.252+10。
             assert_eq!(
-                cash.maker_available_pusd.0,
+                UnmarkedAccountEconomicsReadV3::from_ledger(&read).worst_case_maker_nav_pusd,
                 if case == 0 || case == 3 {
-                    "95.748"
+                    rational("23937", "250")
                 } else {
-                    "96.916"
+                    rational("24229", "250")
                 }
             );
             assert_eq!(
@@ -187,7 +188,7 @@ async fn original_auto_redeem_allocates_pair_and_orphan_once_and_preserves_pendi
                 if case == 0 || case == 3 { "5" } else { "0" }
             );
             assert_eq!(
-                AccountEconomicsReadV1::from_ledger(&read).conservative_nav_pusd,
+                UnmarkedAccountEconomicsReadV3::from_ledger(&read).conservative_nav_pusd,
                 if case == 0 || case == 3 {
                     rational("25187", "250")
                 } else {
@@ -211,6 +212,55 @@ async fn original_auto_redeem_allocates_pair_and_orphan_once_and_preserves_pendi
                 .unwrap(),
             expected_market
         );
+        if case == 0 {
+            // 孤腿结算已到账：实际100.748，旧来源归属95.748。
+            // 单笔97及整批98都应按实际余额准入；分别从同一真实点恢复。
+            let reserve = |id: &str, principal: &str| ReserveIntentV1 {
+                request_identity: LedgerRequestIdentityV1(id.into()),
+                condition_id: ConditionId(CONDITION_ID.into()),
+                requested_principal_pusd: ExactDecimal(principal.into()),
+                immediate_fee_reserve_pusd: ExactDecimal("0".into()),
+            };
+            let mut single = LedgerWriterV1::restore_checkpoint(checkpoint.as_slice()).unwrap();
+            let single_intent = reserve("redeemed-cash-single", "97");
+            assert!(matches!(
+                single
+                    .try_reserve_intent(
+                        &single_intent.request_identity,
+                        &single_intent.condition_id,
+                        &single_intent.requested_principal_pusd,
+                        &single_intent.immediate_fee_reserve_pusd
+                    )
+                    .unwrap(),
+                LedgerReservationOutcomeV1::Reserved { .. }
+            ));
+            let mut batch = LedgerWriterV1::restore_checkpoint(checkpoint.as_slice()).unwrap();
+            assert!(
+                batch
+                    .try_reserve_action_v2(&[
+                        reserve("redeemed-cash-a", "49"),
+                        reserve("redeemed-cash-b", "49")
+                    ])
+                    .unwrap()
+                    .iter()
+                    .all(|outcome| matches!(outcome, LedgerReservationOutcomeV1::Reserved { .. }))
+            );
+            assert_eq!(
+                batch.economic_read().unwrap().cash().actual_reserved_pusd.0,
+                "98"
+            );
+            assert_eq!(
+                batch.admission_policy_v3(),
+                Some(AccountAdmissionPolicyV3::ActualCashNoMarketLimit)
+            );
+            let mut resumed = Vec::new();
+            batch.write_checkpoint(&mut resumed).unwrap();
+            let recovered = LedgerWriterV1::restore_checkpoint(resumed.as_slice()).unwrap();
+            assert_eq!(
+                recovered.economic_read().unwrap().cash(),
+                batch.economic_read().unwrap().cash()
+            );
+        }
         driver.stop_and_drain().unwrap();
         if case == 3 {
             use ::execution_normalization::{NormalizationRecord, SourceNeutralEvidenceKind};
@@ -395,7 +445,7 @@ async fn v4_auto_waits_for_real_resolution_and_restores_original_pending_without
     );
     let ledger_root = temp.as_path().join("ledger");
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     execution
         .bind_ledger_recording_v2(&mut ledger, &ledger_root)
         .unwrap();
@@ -556,7 +606,7 @@ async fn v4_auto_waits_for_real_resolution_and_restores_original_pending_without
     );
     assert_eq!(economic.cash().actual_available_pusd.0, "96.916");
     assert_eq!(
-        AccountEconomicsReadV1::from_ledger(&economic).conservative_nav_pusd,
+        UnmarkedAccountEconomicsReadV3::from_ledger(&economic).conservative_nav_pusd,
         rational("24229", "250")
     );
     driver.stop_and_drain().unwrap();
@@ -848,7 +898,6 @@ async fn historical_v4_host_applies_original_auto_feedback_in_loop_and_range_tai
         assert_eq!(market.executed[1].principal_pusd.0, "5");
         assert_eq!(market.executed[1].actual_fee_pusd.0, "0.175");
         assert_eq!(read.cash.actual_available_pusd.0, "2004.825");
-        assert_eq!(read.cash.maker_available_pusd.0, "1994.825");
         assert_eq!(
             read.directional_residual_pusd,
             ExecutionReadValueV1::Known(rational("10", "1"))

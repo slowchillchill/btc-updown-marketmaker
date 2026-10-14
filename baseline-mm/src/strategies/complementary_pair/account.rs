@@ -16,7 +16,7 @@ impl<'a> DecisionReads<'a> {
     pub(super) fn new(
         read: &'a ActionBeforeReadV2<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-            impl ActionAccountReadV1,
+            impl ActionAccountReadV2,
         >,
     ) -> Self {
         let orders: Vec<_> = read.orders().collect();
@@ -76,7 +76,7 @@ impl ComplementaryPairV1 {
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
-            impl ActionAccountReadV1,
+            impl ActionAccountReadV2,
         >,
         f: &PairMarketRead<'_>,
         reads: &DecisionReads<'_>,

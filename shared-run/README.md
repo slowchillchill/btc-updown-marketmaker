@@ -49,7 +49,7 @@ Ledger 经济更新按 #107 F1b 使用 `EconomicsPatch.day_updates`：追加新�
 
 ## 同步按需账户与市场读取（D-0344）
 
-`ActionBeforeReadV2` 默认仍使用完整拥有式账户数据。`ActionAccountReadV1` 区分完整数据与同步借用表示；借用表示直接读取 Ledger 的精确数值，资金和经济事实来自相同已应用前缀。`cash_available`、`profit_and_equity`、`market_economics` 和 `market_funds` 不先构造全市场投影。`economics`、`ledger` 和 `to_owned_read` 是显式完整读取；借用期间首次请求完整数据才生成独立冻结，其后沿同一借用范围复用。
+`ActionBeforeReadV2` 默认仍使用完整拥有式账户数据。`ActionAccountReadV2` 区分完整数据与同步借用表示；借用表示直接读取 Ledger 的精确数值，资金和经济事实来自相同已应用前缀。`cash_available`、`profit_and_equity`、`market_economics` 和 `market_funds` 不先构造全市场投影。`economics`、`ledger` 和 `to_owned_read` 是显式完整读取；借用期间首次请求完整数据才生成独立冻结，其后沿同一借用范围复用。
 
 策略可通过 `selects_relevant_markets` 显式选择 `strategy_selected_observation_input` 与当前观察入口。公共层合并已公开且尚未结束市场、Ledger 的实际资金义务和孤腿估值市场、原 Registry 的订单与承诺，以及策略提供的必要历史身份。`historical_market_requirements` 携带策略私有修复和利润责任；`calculation_market_requirements` 携带冻结动作依赖。包装器须委托这些选择方法。当前资格读取继续使用本次实际账户和报价，冻结动作参数保持原值。
 
@@ -104,18 +104,18 @@ SIM 的 CleanRun 完成入口在业务义务闭合、投影排空后执行真实
 
 有限测量输出将 `recovery_elapsed_ns` 改为 `finish_or_recovery_elapsed_ns`：CleanRun 分支记录实际完成和封口，RecoverablePaper 分支记录显式恢复。两种运行仍分别汇总，不把封口时间冒称恢复时间；历史测量数值不改写。仅含旧字段的摘要不再作为当前对照输入读取，需要按当前口径重新采集。
 
-## 公共账户估值 v2
+## 公共账户估值 v3
 
-当前动作前读取使用 `AccountEconomicsReadV2`（`account_economics_v2`），组合同截止 Ledger 与所有公开市场观察。
+当前动作前读取使用 `AccountEconomicsReadV3`（`account_economics_v3`），组合同截止 Ledger 与所有公开市场观察。
 未判定剩余孤腿按对应结果侧有效最佳买价乘份额标记；最优档数量不足不折扣。
 DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完整 L2：首档本价位及完整快照的实际来源版本决定 L2 候选；其他价位删除不刷新首档，较低候选不能覆盖仍有效的直接买价；直接买价自身的新数量只证明该价位存在，不刷新整项 BBA 的来源版本；本价位缺失只撤销该直接价，不抹除其对旧更高价的排除证据；直接 `best_bid_ask` 字段保持独立。
 有效空买盘为已知零；必要报价未观测或不可用时 Conservative 与 Directional 为 `Unavailable`。
 无相关孤腿暴露不受缺价影响；窗口结束、关闭或模型角色退役本身不使有效价格失效，也没有新增静默 TTL。
-同一 mark 同时进入 Conservative 与 Directional；WCM、四现金、费用、返佣与已确认 PnL 沿原 Ledger。
+同一标记价值同时进入 Conservative 与 Directional；费用、返佣与已确认 PnL 沿原 Ledger。现金只暴露实际可用和实际预留。WCM 的原金额与未知传播保持，但只作为来源归因评价，不能证明后续交易无需方向回款或外部入金资助。
 配对、正式判定与真实赎回替换原价值；行情重估不产生账本分录。
 
 `action_before`、`freeze_action_before(cutoff, frames)` 及模型直接冻结都使用同截止原组观察；冻结结果后续不可变。
-`AccountEconomicsReadV1::from_ledger` 保留历史判定前零估值版本供历史验收，当前动作读取使用 v2。
+`UnmarkedAccountEconomicsReadV3::from_ledger` 为组合计算及零估值验收保留判定前孤腿零估值，现金结构同属 v3；当前动作读取使用 `AccountEconomicsReadV3`。旧 v1/v2 产物仍按生成时版本解释。
 规则及边界依据 [#183](https://github.com/slowchillchill/btc-updown-marketmaker/issues/183)。
 
 
@@ -144,3 +144,16 @@ DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完�
 `QualifiedStrategyDispatchV1::Invalidated` 保留原完成计算及 `InvalidatedBatchV1`：已发回执前缀、第一失效序号、策略给定原因与来源作用域、当前观察截止、发现时刻和原 Ledger 释放错误。该序号之后的全部后缀只因停批未尝试；其中撤单不被冒称自身健康不合格。只释放本批拥有且明确无请求效果的未发送预留；已发或结果未知沿原义务保留。正常 NoTrade 仍为零请求；资格程序错误经 `QualifiedBatchErrorV1::Qualification` 返回，原提交错误经 `Execution` 返回，二者都不被改成资格失效或平台事实。
 
 无自动重排、重试、改价或逐次诊断落盘。收到失效通知的策略负责在下一次实际计算中按当前条件产生合格动作；本公共交付不证明 `baseline-mm` 健康政策、盈利或 PAPER/LIVE 在线接线已完成。
+
+
+## 实际可用资金准入
+
+[D-0348 / #301](https://github.com/slowchillchill/btc-updown-marketmaker/issues/301#issuecomment-6159979979)替代新 BUY 本金的来源限制。当前宿主使用 `AccountAdmissionPolicyV3::ActualCashNoMarketLimit`。`LedgerWriterV1::new_with_admission_v3` 创建新账户，交易读取使用 `LedgerEconomicReadV2`、`CashReadV1` 和 `AccountEconomicsReadV3`。`ActionAccountReadV2::cash_available` 返回一个实际可用金额；`LedgerNecessaryReadV2::cash` 返回实际可用与实际预留。
+
+实际可用金额来自已确认账户余额，扣除尚未被平台确认替代的本地及在途预留。单笔和整批使用同一金额。整批合计不足仍不新增部分占用；同一请求的已有决定保持粘滞，未知提交义务仍占用资金。实际到账的孤腿回款和外部入金均可再次用于报价。尚未到账的结算款与返佣不提前计成可用现金。FOK/FAK 仍仅预留原本金，实际费用按真实反馈记账；LIMIT 的原费用预留保持。
+
+Ledger 不再维护独立 `maker_cash`。方向及其他归属统计仍按原经济事实更新；旧 M 的统计值由真实总现金减这两项派生。这些统计不参与订单资金准入，Maker/Taker 费用及返佣角色仍按原合同记录。
+
+新耐久账户保存 `GENESIS_V3` 和 `ActualCashNoMarketLimit`。旧 `GENESIS_V2` 仍能按原身份解码，但不能由当前入口恢复为新政策活动账户。旧双现金检查点也不能静默续跑；应保留原材料和适用旧版本。当前改变不提供通用旧检查点迁移。历史回测沿原候选配置及源码身份边界建立新运行，不把旧政策结果拼成新政策成绩。
+
+本段没有修复本地预留与平台占用短暂重复扣除的问题。准确订单身份关联是 #301 后续独立步骤；当前不按金额或时间猜配，不提前释放未知义务。B 动作支持及模型账户输入的适配由 #181 交付，公共 Rust 验证不能代替 B 的模型验证。

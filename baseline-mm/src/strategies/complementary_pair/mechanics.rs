@@ -5,7 +5,7 @@ impl ComplementaryPairV1 {
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
-            impl ActionAccountReadV1,
+            impl ActionAccountReadV2,
         >,
     ) -> Result<(R, ExecutionReadValueV1<ExactRationalV1>), StrategyErrorV1> {
         Self::profit_and_equity_read(&input.action_before)
@@ -13,7 +13,7 @@ impl ComplementaryPairV1 {
     pub(super) fn profit_and_equity_read(
         read: &ActionBeforeReadV2<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-            impl ActionAccountReadV1,
+            impl ActionAccountReadV2,
         >,
     ) -> Result<(R, ExecutionReadValueV1<ExactRationalV1>), StrategyErrorV1> {
         let (pnl, equity) = read.profit_and_equity();
@@ -29,7 +29,7 @@ impl ComplementaryPairV1 {
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
-            impl ActionAccountReadV1,
+            impl ActionAccountReadV2,
         >,
         reads: &DecisionReads<'_>,
         a: &ProfitAllocationV1,
@@ -43,7 +43,7 @@ impl ComplementaryPairV1 {
     pub(super) fn profit_bound_read(
         read: &ActionBeforeReadV2<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-            impl ActionAccountReadV1,
+            impl ActionAccountReadV2,
         >,
         a: &ProfitAllocationV1,
     ) -> Result<Option<R>, StrategyErrorV1> {
@@ -70,7 +70,7 @@ impl ComplementaryPairV1 {
     fn profit_bound_with_remaining(
         read: &ActionBeforeReadV2<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-            impl ActionAccountReadV1,
+            impl ActionAccountReadV2,
         >,
         a: &ProfitAllocationV1,
         commitment: Option<&(R, bool)>,
@@ -105,7 +105,7 @@ impl ComplementaryPairV1 {
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
-            impl ActionAccountReadV1,
+            impl ActionAccountReadV2,
         >,
         reads: &DecisionReads<'_>,
     ) -> Result<R, StrategyErrorV1> {
@@ -269,7 +269,7 @@ impl ComplementaryPairV1 {
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
-            impl ActionAccountReadV1,
+            impl ActionAccountReadV2,
         >,
         ids: Vec<String>,
     ) -> Vec<String> {

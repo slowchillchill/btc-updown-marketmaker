@@ -2740,8 +2740,9 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
                 ],
             })
             .unwrap();
-        let mut ledger =
-            LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(
+            AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
+        );
         execution
             .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
             .unwrap();
@@ -3042,7 +3043,7 @@ async fn v4_cancel_market_relation_keeps_known_unknown_and_closed_order_location
         "100",
     );
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     let ledger_root = temp.path().join("ledger");
     execution
         .bind_ledger_recording_v2(&mut ledger, &ledger_root)
@@ -3211,7 +3212,7 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
     );
     let (execution, observation) = execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
     let ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     let mut shared = SharedExecutionV1::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
@@ -3481,7 +3482,7 @@ fn v3_real_opening_stable_ledger_reopen() {
     );
     let opening = observation.opening_record().unwrap();
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     let ledger_root = temp.path().join("ledger");
     execution
         .bind_ledger_recording_v2(&mut ledger, &ledger_root)
@@ -3522,7 +3523,7 @@ fn v4_real_opening_stable_ledger_reopen() {
     );
     let opening = observation.opening_record().unwrap();
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     let ledger_root = temp.path().join("ledger");
     execution
         .bind_ledger_recording_v2(&mut ledger, &ledger_root)

@@ -313,7 +313,7 @@ fn setup_day_with_terminal(
         activation_id: "activate".into(),
         consumption_sequence_ref: "historical-host".into(),
         noe_implementation_identity: "public-v4".into(),
-        admission_policy: AccountAdmissionPolicyV2::DualCashNoMarketLimit,
+        admission_policy: AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
         max_group_bytes: 1 << 24,
         finite_in_flight_groups: 128,
     };

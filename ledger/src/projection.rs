@@ -104,7 +104,14 @@ pub struct LedgerProjectionV2 {
     pub market_projections: Vec<LedgerMarketProjectionV1>,
 }
 
+/// 仅用于解释旧耐久身份；当前活动账户不使用此政策。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccountAdmissionPolicyV2 {
     DualCashNoMarketLimit,
+}
+
+/// 实际可用资金准入；不按现金来源限制新订单。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AccountAdmissionPolicyV3 {
+    ActualCashNoMarketLimit,
 }

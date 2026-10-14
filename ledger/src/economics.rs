@@ -84,7 +84,6 @@ pub(crate) struct Cost {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct CashAttribution {
-    pub maker_cash: Decimal,
     pub directional_cash: Decimal,
     pub other_cash: Decimal,
     pub unpaid_taker: Decimal,
@@ -606,9 +605,7 @@ impl EconomicsState {
     ) -> Result<(), LedgerErrorV1> {
         let mut cash = self.cash.clone();
         match disposition {
-            SourceNeutralEconomicDispositionV2::AccountOpening { available_pusd } => {
-                cash.maker_cash = decimal(available_pusd)?
-            }
+            SourceNeutralEconomicDispositionV2::AccountOpening { .. } => {}
             SourceNeutralEconomicDispositionV2::AccountTransition {
                 transition,
                 balance_delta,
@@ -649,14 +646,11 @@ impl EconomicsState {
                         if let Some((condition, mut market)) = auto_market {
                             let resolution = market.resolution.as_mut().expect("原判定身份已关联");
                             let paired = market.paired - resolution.redeemed_pair;
-                            cash.maker_cash = add(cash.maker_cash, paired)?;
                             cash.directional_cash = add(cash.directional_cash, delta - paired)?;
                             resolution.redeemed_pair = market.paired;
                             resolution.redeemed_orphan =
                                 [market.pools[0].quantity, market.pools[1].quantity];
                             patch.markets.push((condition.0.clone(), market));
-                        } else {
-                            cash.maker_cash = add(cash.maker_cash, delta)?;
                         }
                         match t {
                             SourceNeutralAccountTransitionKindV1::FillFinalityEconomicApplied { trade_identity, .. }
@@ -695,9 +689,7 @@ impl EconomicsState {
                             .ok_or(LedgerErrorV1::NonEconomicRecord)?
                             .category
                         {
-                            SettlementCostAttributionV1::Maker => {
-                                cash.maker_cash = add(cash.maker_cash, delta)?
-                            }
+                            SettlementCostAttributionV1::Maker => {}
                             SettlementCostAttributionV1::Directional => {
                                 cash.directional_cash = add(cash.directional_cash, delta)?
                             }
@@ -717,7 +709,6 @@ impl EconomicsState {
                             .as_mut()
                             .ok_or(LedgerErrorV1::NonEconomicRecord)?;
                         let paired = market.paired - resolution.redeemed_pair;
-                        cash.maker_cash = add(cash.maker_cash, paired)?;
                         cash.directional_cash = add(cash.directional_cash, delta - paired)?;
                         resolution.redeemed_pair = market.paired;
                         resolution.redeemed_orphan =
@@ -728,13 +719,11 @@ impl EconomicsState {
                     }
                     SourceNeutralAccountTransitionKindV2::SettlementCostRecognized { .. } => {}
                     SourceNeutralAccountTransitionKindV2::ExternalCashApplied { cash_identity } => {
-                        if *self
+                        if !*self
                             .external_cash
                             .get(cash_identity)
                             .ok_or(LedgerErrorV1::NonEconomicRecord)?
                         {
-                            cash.maker_cash = add(cash.maker_cash, delta)?;
-                        } else {
                             cash.other_cash = add(cash.other_cash, delta)?;
                         }
                     }
@@ -1117,11 +1106,9 @@ impl EconomicsState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct DualCashReadV1 {
+pub struct CashReadV1 {
     pub actual_available_pusd: ExactDecimal,
     pub actual_reserved_pusd: ExactDecimal,
-    pub maker_available_pusd: ExactDecimal,
-    pub maker_reserved_pusd: ExactDecimal,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResidualCashReadV1 {
@@ -1211,14 +1198,14 @@ pub struct MarketEconomicTotalsReadV1 {
     pub unpaired_success_fee_pusd: ExecutionReadValueV1<ExactRationalV1>,
     pub successful_investment_pusd: ExactRationalV1,
 }
-pub struct LedgerEconomicReadV1<'a> {
+pub struct LedgerEconomicReadV2<'a> {
     base: crate::projection::LedgerProjectionV2,
-    cash: DualCashReadV1,
+    cash: CashReadV1,
     residual: ResidualCashReadV1,
     state: &'a EconomicsState,
 }
 impl LedgerWriterV1 {
-    pub(crate) fn cash_balances(&self) -> Result<(Decimal, Decimal, Decimal), LedgerErrorV1> {
+    pub(crate) fn cash_balances(&self) -> Result<(Decimal, Decimal), LedgerErrorV1> {
         let account = self
             .account
             .as_ref()
@@ -1230,22 +1217,16 @@ impl LedgerWriterV1 {
         let reserved = account.balances.principal_encumbrance_pusd
             + account.balances.immediate_taker_fee_encumbrance_pusd
             + pending;
-        Ok((
-            account.balances.available_pusd - pending,
-            self.economics.cash.maker_cash - reserved,
-            reserved,
-        ))
+        Ok((account.balances.available_pusd - pending, reserved))
     }
-    pub fn economic_read(&self) -> Option<LedgerEconomicReadV1<'_>> {
+    pub fn economic_read(&self) -> Option<LedgerEconomicReadV2<'_>> {
         let base = self.projection_v2()?;
-        let (actual, maker, reserved) = self.cash_balances().ok()?;
-        let cash = DualCashReadV1 {
+        let (actual, reserved) = self.cash_balances().ok()?;
+        let cash = CashReadV1 {
             actual_available_pusd: exact(actual),
             actual_reserved_pusd: exact(reserved),
-            maker_available_pusd: exact(maker),
-            maker_reserved_pusd: exact(reserved),
         };
-        Some(LedgerEconomicReadV1 {
+        Some(LedgerEconomicReadV2 {
             base,
             cash,
             residual: ResidualCashReadV1 {
@@ -1256,7 +1237,7 @@ impl LedgerWriterV1 {
         })
     }
 }
-impl LedgerEconomicReadV1<'_> {
+impl LedgerEconomicReadV2<'_> {
     /// 原经济已应用但尚未归还的本金；不含预留，不生成现金或费用分录。
     pub fn committed_principal_pusd(&self) -> ExactRationalV1 {
         if let Some(index) = &self.state.read_index {
@@ -1323,7 +1304,7 @@ impl LedgerEconomicReadV1<'_> {
     pub fn base(&self) -> &crate::projection::LedgerProjectionV2 {
         &self.base
     }
-    pub fn cash(&self) -> &DualCashReadV1 {
+    pub fn cash(&self) -> &CashReadV1 {
         &self.cash
     }
     pub fn residual_cash(&self) -> &ResidualCashReadV1 {

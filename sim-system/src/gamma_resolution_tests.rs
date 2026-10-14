@@ -372,7 +372,7 @@ async fn gamma_same_millisecond_finality_and_full_checkpoint_pay_five_once() {
     use contracts::execution_normalization::{
         DurableSourceReferenceV1, ImmutableSourceReferenceV1,
     };
-    use ledger::{AccountAdmissionPolicyV2, LedgerWriterV1};
+    use ledger::{AccountAdmissionPolicyV3, LedgerWriterV1};
     let temp = tempfile::tempdir().unwrap();
     let terminal = gamma_row();
     // 延迟交付真实 Gamma；与原已 MATCHED 成交的 MINED 时钟及隐藏行情桶同毫秒。
@@ -491,7 +491,7 @@ async fn gamma_same_millisecond_finality_and_full_checkpoint_pay_five_once() {
         .configure_gamma_resolution_policy_v1(GammaResolutionPolicyV1::QualifiedPublicConsumption)
         .unwrap();
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     ledger
         .apply_noe_memory_v2(&observation.opening_record().unwrap())
         .unwrap();

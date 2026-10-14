@@ -6,13 +6,13 @@ use rust_decimal::Decimal;
 use std::sync::OnceLock;
 
 #[derive(Clone)]
-pub struct OwnedActionAccountV1 {
+pub struct OwnedActionAccountV2 {
     pub(crate) ledger: LedgerProjectionV2,
-    pub(crate) economics: AccountEconomicsReadV2,
+    pub(crate) economics: AccountEconomicsReadV3,
 }
-pub trait ActionAccountReadV1 {
-    fn full(&self) -> &OwnedActionAccountV1;
-    fn cash_available(&self) -> (Decimal, Decimal);
+pub trait ActionAccountReadV2 {
+    fn full(&self) -> &OwnedActionAccountV2;
+    fn cash_available(&self) -> Decimal;
     fn profit_and_equity(&self) -> (R, ExecutionReadValueV1<R>);
     fn market(&self, condition: &ConditionId) -> Option<MarketEconomicNumbersV1>;
     fn market_funds(&self, condition: &ConditionId) -> MarketFundsNumbersV1;
@@ -23,15 +23,12 @@ fn amount(v: &ExactDecimal) -> Decimal {
 fn rational(v: &ExactRationalV1) -> R {
     R::try_from(v).expect("原精确有理数")
 }
-impl ActionAccountReadV1 for OwnedActionAccountV1 {
+impl ActionAccountReadV2 for OwnedActionAccountV2 {
     fn full(&self) -> &Self {
         self
     }
-    fn cash_available(&self) -> (Decimal, Decimal) {
-        (
-            amount(&self.economics.cash.actual_available_pusd),
-            amount(&self.economics.cash.maker_available_pusd),
-        )
+    fn cash_available(&self) -> Decimal {
+        amount(&self.economics.cash.actual_available_pusd)
     }
     fn profit_and_equity(&self) -> (R, ExecutionReadValueV1<R>) {
         let mut pnl = R::zero();
@@ -95,21 +92,21 @@ impl ActionAccountReadV1 for OwnedActionAccountV1 {
             .unwrap_or_default()
     }
 }
-pub struct BorrowedActionAccountV1<'a> {
+pub struct BorrowedActionAccountV2<'a> {
     ledger: &'a LedgerWriterV1,
     pub(crate) driver: Option<&'a sim_system::execution::PublicConsumptionStateV1>,
     observations: Vec<&'a MarketBusinessObservationV1>,
     equity: ExecutionReadValueV1<R>,
-    full: OnceLock<OwnedActionAccountV1>,
+    full: OnceLock<OwnedActionAccountV2>,
 }
-impl<'a> BorrowedActionAccountV1<'a> {
+impl<'a> BorrowedActionAccountV2<'a> {
     pub(crate) fn new(
         ledger: &'a LedgerWriterV1,
         frames: &[sim_system::public_consumption::PublicObservationFrameV1<'a>],
         driver: Option<&'a sim_system::execution::PublicConsumptionStateV1>,
     ) -> Option<Self> {
-        let read = ledger.necessary_read_v1()?;
-        let (actual, _, reserved) = read.cash();
+        let read = ledger.necessary_read_v2()?;
+        let (actual, reserved) = read.cash();
         let totals = read.account();
         let mut nav = Some(
             R::from_decimal(actual)
@@ -179,33 +176,32 @@ impl<'a> BorrowedActionAccountV1<'a> {
         })
     }
 }
-impl ActionAccountReadV1 for BorrowedActionAccountV1<'_> {
-    fn full(&self) -> &OwnedActionAccountV1 {
+impl ActionAccountReadV2 for BorrowedActionAccountV2<'_> {
+    fn full(&self) -> &OwnedActionAccountV2 {
         self.full.get_or_init(|| {
             let read = self.ledger.economic_read().expect("原已开户前缀");
             let economics = if let Some(driver) = self.driver {
-                AccountEconomicsReadV2::from_ledger_and_observations(
+                AccountEconomicsReadV3::from_ledger_and_observations(
                     &read,
                     driver.observations_at_current_prefix(),
                 )
             } else {
-                AccountEconomicsReadV2::from_ledger_and_observations(
+                AccountEconomicsReadV3::from_ledger_and_observations(
                     &read,
                     self.observations.iter().copied(),
                 )
             };
-            OwnedActionAccountV1 {
+            OwnedActionAccountV2 {
                 ledger: read.into_base(),
                 economics,
             }
         })
     }
-    fn cash_available(&self) -> (Decimal, Decimal) {
-        let (a, m, _) = self.ledger.necessary_read_v1().expect("原已开户").cash();
-        (a, m)
+    fn cash_available(&self) -> Decimal {
+        self.ledger.necessary_read_v2().expect("原已开户").cash().0
     }
     fn profit_and_equity(&self) -> (R, ExecutionReadValueV1<R>) {
-        let read = self.ledger.necessary_read_v1().expect("原已开户");
+        let read = self.ledger.necessary_read_v2().expect("原已开户");
         let totals = read.account();
         (
             totals
@@ -215,11 +211,11 @@ impl ActionAccountReadV1 for BorrowedActionAccountV1<'_> {
         )
     }
     fn market(&self, condition: &ConditionId) -> Option<MarketEconomicNumbersV1> {
-        self.ledger.necessary_read_v1()?.market(condition)
+        self.ledger.necessary_read_v2()?.market(condition)
     }
     fn market_funds(&self, condition: &ConditionId) -> MarketFundsNumbersV1 {
         self.ledger
-            .necessary_read_v1()
+            .necessary_read_v2()
             .expect("原已开户")
             .market_funds(condition)
     }

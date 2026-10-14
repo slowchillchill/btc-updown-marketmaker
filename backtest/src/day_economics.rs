@@ -1,8 +1,8 @@
 //! 日内统计仅采样原 Ledger 与公开估值，不形成新的经济分录。
 use contracts::{ExactRationalV1, ExecutionReadValueV1, economics::EconomicRational as R};
-use ledger::LedgerEconomicReadV1;
+use ledger::LedgerEconomicReadV2;
 use serde::{Deserialize, Serialize};
-use shared_run::AccountEconomicsReadV2;
+use shared_run::AccountEconomicsReadV3;
 
 #[derive(Debug, Serialize)]
 pub struct HistoricalDayEconomicsSummaryV1 {
@@ -60,7 +60,7 @@ impl DayEconomicsStateV1 {
     pub fn sample(
         &mut self,
         at: i64,
-        read: Option<(&LedgerEconomicReadV1<'_>, &AccountEconomicsReadV2)>,
+        read: Option<(&LedgerEconomicReadV2<'_>, &AccountEconomicsReadV3)>,
     ) {
         if let Some(previous) = self.last_at {
             let duration = at.saturating_sub(previous).max(0) as u64;

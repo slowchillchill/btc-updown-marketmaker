@@ -22,7 +22,7 @@
 | 市场标识、正式阈值、结算参考、可交易截止、tick、数量与金额精度、费用规则 | 公共市场与版本化规则；不把临时价格当正式阈值，不硬编码所有市场 60 秒 TWAP |
 | 现金、预留、实际持仓、公共剩余成本池、订单、在途与待撤 | `ActionBeforeReadV2`、Ledger、公共登记；用于真实缺口和潜在成交情景 |
 | 成交身份、成功终态、经济应用、费用确认／修正及配平归属 | 公共事实链；第 3 节提出同截止明细读取需求，市场汇总不足以代替该明细 |
-| NAV、逐市场已确认净损益、两类返佣确认／支付、应收与结算 | `AccountEconomicsReadV2`；派生风险权益与合格利润，不重算公共 NAV |
+| NAV、逐市场已确认净损益、两类返佣确认／支付、应收与结算 | `AccountEconomicsReadV3`；派生风险权益与合格利润，不重算公共 NAV |
 | 生效策略参数及计算／执行时间假设 | 策略参数与所属宿主配置，完整记录来源与版本 |
 
 一次计算输出：精确 `ModelIntentV1` 列表（`NoTrade` 为零请求）、与相应请求关联的成本／风险解释、必要的下次时间评估点，以及生命周期请求。生命周期概念为继续运行、停止新配对并受限修复、实际退出；对应 `StrategyOutputV1<D>` 与候选策略诊断类型。计算错误和预留／发送错误独立返回，不包装为正常不交易。
@@ -240,7 +240,7 @@ Binance 特征候选为因果收益、滚动波动、聚合成交方向、深度
 | 成交费用、公共剩余成本池与费用修正归属 | [Ledger 经济读取](../../../ledger/src/economics.rs)有成功成交、执行汇总及公共池处理；`ActionBeforeReadV2` 市场汇总不足以提供逐成交／配平费用归属。`StrategyInputV1::trade_economics` 提供原事实、成功／经济应用状态、实际净费及公共平均成本池的剩余贡献；旧持久状态无贡献时保留未知，不把全局可变 Ledger 暴露给策略 |
 | 含费 FAK 上界与整动作预留 | [买入成本](../../../sim-system/src/buy_cost.rs)、[Ledger 预留](../../../ledger/src/core.rs)、[共享执行](../../../shared-run/src/group.rs)；已有 `ReserveIntentV1` 支持本金与即时费用，不是 Ledger 完全没有费用预留。`sim_market_buy_bounds_v1` 提供 SIM 全域上界；`execute_batch_reserved` 先整批预留再按原序发送，保持模型原批准预留语义 |
 | 金额目标与可证明过补 | [数量恢复](../../../shared-run/src/quantity.rs)的 `original_target` 依 `q=n/100` 与 `spend=q×price` 的模型假设；公共冻结登记的 `origin.intent` 保留原金额，人工策略直接读取原意图；旧模型 `original_target` 不改。SIM 上界与 LIVE 保证分别验证 |
-| 当前公共经济口径及策略派生 | [经济读取](../../../shared-run/src/economics.rs)的 `AccountEconomicsReadV2`／`account_economics_v2` 已交付；策略只减两类 `confirmed_unpaid_pusd`、保留公共未知表达，不重写 NAV／WCM 或返佣政策 |
+| 当前公共经济口径及策略派生 | [经济读取](../../../shared-run/src/economics.rs)的 `AccountEconomicsReadV3`／`account_economics_v3` 已交付；策略只减两类 `confirmed_unpaid_pusd`、保留公共未知表达，不重写 NAV／WCM 或返佣政策 |
 | 历史可见与隐藏执行、有限时间推进 | [公开回放](../../../data-pipeline/training/src/public_replay.rs)、[隐藏准备](../../../data-pipeline/training/src/hidden_preparation.rs)、[公开／隐藏来源](../../../sim-system/src/public_consumption.rs)、[运行驱动](../../../sim-system/src/run_v2.rs)；`backtest::run_historical_v1` 以准确 `HistoricalBacktest` 身份完成真实材料链、显式调度与连续账户；隐藏材料仅给 SIM，有限正常结束与立即Exit分开，不冒充 PAPER |
 | 可接策略在线宿主和立即退出 | [旧 PAPER 脚本](../../../shared-run/src/paper.rs)含固定 `script_group`，不是任意策略宿主；所属公共工程复用同一调用边界，对齐 V4、SharedExecutionV2、预留与经济链，立即退出不得调用旧排空等待 |
 | LIVE 真实事实与接续 | [SDK 适配](../../../intent-bridge/src/live_adapter.rs)已有发送／撤单，不等于真实账户初始化、私有回报、查询、NOE/Ledger 与赎回已交付。区分 SDK 覆盖缺口与本项目装配缺口；官方 SDK 不足按仓库规则报告并裁决 |
@@ -262,3 +262,6 @@ Binance 特征候选为因果收益、滚动波动、聚合成交方向、深度
 新增 Maker 沿 LIMIT 数量轴与最小份额判断，已接受订单的合法部分余量可以继续维护；FAK 按最低原本金独立判断，不附加 LIMIT 的最小份额门。SIM 金额 BUY 的全域份额界很宽，常见配置下 FAK 没有可行解，策略保留 Maker／等待／留孤腿。未用盘口创造最低成交价，未称 LIVE 同界。测试中的极小正费率与极宽风险额度只是显式合成材料，用于触达撤单—反馈—重算分支。
 
 每轮直接消费公共成本池、逐成交实际费用／剩余贡献、现金、预留、订单与在途。策略记忆包含信号、高水位、终止相关窗口、请求序号和未决增量利润分配。`continuity()` 导出后三者与占用供显式接续；调用者须继续恢复原公共账户并沿用命名空间，信号历史需重新提供因果数据。库没有文件写入、完整账户恢复或三环境宿主。
+
+
+资金准入按 [D-0348](https://github.com/slowchillchill/btc-updown-marketmaker/issues/301#issuecomment-6159979979)使用公共实际可用金额。策略预算直接读取 `ActionAccountReadV2::cash_available`，不再与 Maker 归属金额取最小值。现金来源统计不限制报价；实际不足、策略既有风险限额及原订单资格分别保持。WCM 只用于来源归因评价，不能证明后续交易无需方向回款或外部资金资助。资金与持久边界见 [shared-run](../../../shared-run/README.md#实际可用资金准入)。

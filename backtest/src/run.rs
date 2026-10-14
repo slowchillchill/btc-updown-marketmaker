@@ -1,6 +1,6 @@
 use crate::{MaterialError, *};
 use contracts::{execution_normalization::*, *};
-use ledger::{AccountAdmissionPolicyV2, LedgerProjectionV2, LedgerWriterV1};
+use ledger::{AccountAdmissionPolicyV3, LedgerProjectionV2, LedgerWriterV1};
 use serde::{Deserialize, Serialize};
 use shared_run::*;
 use sim_system::{
@@ -63,7 +63,7 @@ pub struct HistoricalRunConfigV1 {
     pub activation_id: String,
     pub consumption_sequence_ref: String,
     pub noe_implementation_identity: String,
-    pub admission_policy: AccountAdmissionPolicyV2,
+    pub admission_policy: AccountAdmissionPolicyV3,
     pub max_group_bytes: usize,
     pub finite_in_flight_groups: usize,
 }
@@ -92,7 +92,7 @@ pub struct HistoricalPreparedRunConfigV1 {
     pub activation_id: String,
     pub consumption_sequence_ref: String,
     pub noe_implementation_identity: String,
-    pub admission_policy: AccountAdmissionPolicyV2,
+    pub admission_policy: AccountAdmissionPolicyV3,
     pub max_group_bytes: usize,
     pub finite_in_flight_groups: usize,
     /// 库默认关闭；CLI默认30秒，0关闭。输出失败不替代业务错误。
@@ -187,7 +187,7 @@ pub struct HistoricalRunReportV1 {
     pub ledger_consumed_memory: Option<LedgerProjectionV2>,
     /// 与 ledger_consumed_memory 同次读取，按 observation_cutoff 的公开观察估值。
     /// 不表示所有已观察反馈均已被 Ledger 消费或已经持久化。
-    pub account_economics_memory: Option<AccountEconomicsReadV2>,
+    pub account_economics_memory: Option<AccountEconomicsReadV3>,
     pub conservative_nav_pusd: Option<ExecutionReadValueV1<ExactRationalV1>>,
     pub worst_case_maker_nav_pusd: Option<ExactRationalV1>,
     pub unclosed_commitments: usize,
@@ -339,7 +339,7 @@ fn assemble(
             }
         }
     }
-    let mut ledger = LedgerWriterV1::new_with_admission_v2(config.admission_policy);
+    let mut ledger = LedgerWriterV1::new_with_admission_v3(config.admission_policy);
     execution.bind_ledger_recording_v2(&mut ledger, &config.ledger_root)?;
     let shared = SharedExecutionV2::from_opening(ledger, observation.clone())?
         .ok_or("原开户未产生公共事实")?;
@@ -364,7 +364,7 @@ fn sample_day_economics<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunA
 ) {
     if let Some(read) = shared.ledger().economic_read() {
         let frames = driver.frames_at_observation();
-        let economics = AccountEconomicsReadV2::from_ledger_and_observations(
+        let economics = AccountEconomicsReadV3::from_ledger_and_observations(
             &read,
             frames.iter().map(|f| f.observation),
         );
@@ -383,7 +383,7 @@ fn research_snapshot<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActo
 ) -> crate::research_summary::ResearchSnapshotV1 {
     let frames = driver.frames_at_observation();
     let economics = shared.ledger().economic_read().map(|read| {
-        AccountEconomicsReadV2::from_ledger_and_observations(
+        AccountEconomicsReadV3::from_ledger_and_observations(
             &read,
             frames.iter().map(|f| f.observation),
         )
@@ -410,7 +410,7 @@ fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
     let observation_cutoff = driver.observation_cutoff();
     let frames = driver.frames_at_observation();
     let economics = shared.ledger().economic_read().map(|read| {
-        AccountEconomicsReadV2::from_ledger_and_observations(
+        AccountEconomicsReadV3::from_ledger_and_observations(
             &read,
             frames.iter().map(|frame| frame.observation),
         )

@@ -20,7 +20,7 @@ fn setup(root: &Path) -> (SharedExecutionV2, Driver) {
         "100",
     );
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     execution
         .bind_ledger_recording_v2(&mut ledger, &root.join("ledger"))
         .unwrap();
@@ -77,7 +77,7 @@ async fn borrowed_input_revalues_same_ledger_and_keeps_owned_snapshot() {
         "100",
     );
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     execution
         .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
         .unwrap();

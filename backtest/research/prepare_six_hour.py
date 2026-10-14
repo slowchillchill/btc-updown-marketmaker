@@ -40,6 +40,7 @@ def prepare(template, business, dataset_root, output_root, implementation, rules
         candidate['strategy'] = strategy
         identity = 'issue185-six-hour-f0-2026-09-12-' + name
         run = candidate['run']
+        run['admission_policy'] = 'ActualCashNoMarketLimit'
         run['strategy']['effective_parameters'] = copy.deepcopy(strategy)
         run['implementation_identity'] = copy.deepcopy(implementation)
         run['noe_implementation_identity'] = 'normalization_core_v1@' + implementation['git_commit']

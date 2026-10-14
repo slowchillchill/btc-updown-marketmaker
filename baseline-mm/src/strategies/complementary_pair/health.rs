@@ -247,7 +247,7 @@ impl ComplementaryPairV1 {
     pub(super) fn business_dependency(
         read: &ActionBeforeReadV2<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-            impl ActionAccountReadV1,
+            impl ActionAccountReadV2,
         >,
         condition: &ConditionId,
         batch_ids: &[&str],
@@ -258,7 +258,7 @@ impl ComplementaryPairV1 {
     pub(super) fn business_dependency_from_reads(
         read: &ActionBeforeReadV2<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-            impl ActionAccountReadV1,
+            impl ActionAccountReadV2,
         >,
         reads: &DecisionReads<'_>,
         condition: &ConditionId,
@@ -423,7 +423,7 @@ impl ComplementaryPairV1 {
         input: &StrategyCurrentReadV1<
             '_,
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-            impl ActionAccountReadV1,
+            impl ActionAccountReadV2,
         >,
         calculation: &StrategyCalculationV1<ComplementaryPairDiagnosticV1>,
         index: usize,

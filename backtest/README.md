@@ -42,9 +42,9 @@ let report = backtest::run_historical_v1(&run_config, sealed_rules, &mut strateg
 
 策略 Exit 在其显式计算完成事件立即返回；不稳定记录、不排空、不补撤单、不等待结算，也不写最终结果文件。失败保留原策略错误或原批次执行错误并结束，不自动重试。Exit/失败返回的 `ledger_consumed_memory` 明确是已消费的内存读取；`durable_noe_prefix` 只指实际已稳定的原 NOE 前缀，不能拿内存末态当作耐久结果。
 
-启动元数据保存完整有效配置、来源清单与集合摘要、原公共稳定前缀、规则摘要、代码身份及策略版本。通用结果复用 `AccountEconomicsReadV2` 和原 Ledger 投影，保留结束原因、真实观察时刻、记录是否排空、未闭合承诺、缺前驱的 NOE、待发送计算和下一原义务。
+启动元数据保存完整有效配置、来源清单与集合摘要、原公共稳定前缀、规则摘要、代码身份及策略版本。通用结果复用 `AccountEconomicsReadV3` 和原 Ledger 投影，保留结束原因、真实观察时刻、记录是否排空、未闭合承诺、缺前驱的 NOE、待发送计算和下一原义务。
 
-`account_economics_memory` 保留同一次报告构造的完整原 `AccountEconomicsReadV2`（cash、逐市场assets、成功份额与成本、配对／孤腿、分Maker/Taker执行费用、返佣预计／未成熟／确认未付／已付、结算状态与应收等）。顶层NAV/WCM兼容字段直接来自这一对象，不是独立计算；最终范围内义务可能在最后一次策略回调后改变经济事实，不能以最后回调代替此最终读取。
+`account_economics_memory` 保留同一次报告构造的完整原 `AccountEconomicsReadV3`（cash、逐市场assets、成功份额与成本、配对／孤腿、分Maker/Taker执行费用、返佣预计／未成熟／确认未付／已付、结算状态与应收等）。顶层NAV/WCM兼容字段直接来自这一对象，不是独立计算；最终范围内义务可能在最后一次策略回调后改变经济事实，不能以最后回调代替此最终读取。
 
 `observation_cutoff` 保留实际 `TrustedGroupDecisionCutoffV1`，包含原公开组receipt、受信逻辑观察时间和实际领取的私有反馈序列；`last_observed_at_utc_ms` 由它派生。`ledger_consumed_memory` 的账户身份、ledger/platform/local前缀定位已被Ledger消费的内存状态；`pending_noe_records` 说明已领取但尚待前驱的记录，`durable_noe_prefix` 仅定位实际持久的NOE前缀。这些前缀含义不同，不因正常排空或同一报告而声称观察、消费、经济与持久完全齐平。
 
@@ -214,7 +214,7 @@ D-0311/D-0312 下的 `run_historical_days_v1` 接收 `HistoricalDayConfigV1` 日
 
 日后台不再物化并保存重复PM绑定／报告；该次临时归约材料随原接纳组释放。检查点保存实际布局、固定绑定、字节位置和业务序号，按原完整点截去未提交尾部后续写，不扫描已提交长前缀。旧检查点缺布局字段默认JSON；普通历史、PAPER/LIVE及旧JSON证据不转写。`max_group_bytes` 按实际所选布局的记录字节保持原上限；帧和头部不增加业务input_sequence。紧凑格式没有证明174账户日可在现有磁盘内完成，经济记录和检查点的完整日成本仍未知。
 
-`HistoricalRunReportV1.day_economics` 在原事件边界读取同一次 `AccountEconomicsReadV2`，累计公共NAV最大回撤和资金占用。公共NAV回撤与baseline扣除未到账确认返佣后的风险权益／30%高水位分开。资金占用明确为原实际预留（含原在途经济占用）加未赎回成功成交剩余本金，以及已经济扣款尚未成功归约的成交本金；不是另建现金或利润账本。金额按原精确数值，时间积分单位为pUSD·毫秒。未知NAV采样保留 `Unavailable`，已观察最大回撤另列为局部证据；未知资金区间不补零。峰值、积分、采样前沿和未知量均随候选点恢复。
+`HistoricalRunReportV1.day_economics` 在原事件边界读取同一次 `AccountEconomicsReadV3`，累计公共NAV最大回撤和资金占用。公共NAV回撤与baseline扣除未到账确认返佣后的风险权益／30%高水位分开。资金占用明确为原实际预留（含原在途经济占用）加未赎回成功成交剩余本金，以及已经济扣款尚未成功归约的成交本金；不是另建现金或利润账本。金额按原精确数值，时间积分单位为pUSD·毫秒。未知NAV采样保留 `Unavailable`，已观察最大回撤另列为局部证据；未知资金区间不补零。峰值、积分、采样前沿和未知量均随候选点恢复。
 
 `summarize_independent_historical_days_v1` 按策略配置、四项时序、准入、实现及规则身份汇总独立日结果。原确认净损益相加，平均日确认收益率为总确认净损益／各日原初始本金之和；另列扣除未到账确认返佣后的净结果。它保留最差每日公共NAV回撤、未闭合数、待消费NOE及Exit／未完成日数，不串接净值或算复利，不把未知净结果当零。确认结果仍以每日报告的原已消费前缀为界，未闭合日不冒充最终结算。
 
@@ -277,3 +277,10 @@ BudgetStop、Failure沿原report终止原因区分。CLI硬截止仅覆盖CLI自
 再处理原隐藏桶；Gamma 等到执行前沿闭合后才应用经济，且仍等待原成交和返佣前驱。
 公开盘口、成交和一般市场事实不因此驱动隐藏撮合。旧 WS 时序、保守 Maker、宿主延迟和精确经济公式保持。
 窗口外终态、仅 closed、缺少合格结果、输入耗尽和冲突不能生成回款。本政策不提供策略主动赎回动作。
+
+
+## 实际现金政策与历史结果边界
+
+当前运行的 `admission_policy` 为 `ActualCashNoMarketLimit`，账户经济读取为 `account_economics_v3`。有效配置、结果的 `economics_version` 和耐久账本保存各自准确身份。现金汇总只有实际可用与实际预留；WCM 保留原归因金额与未知语义，但不证明同一交易路径能够脱离方向回款或外部入金执行。公共资金定义见 [shared-run](../shared-run/README.md#实际可用资金准入)。
+
+当前配置解析不把 `DualCashNoMarketLimit` 转成新政策。准备脚本显式生成新政策配置；这只装配新运行，不能迁移旧账户、检查点或成绩。日恢复仍核对原候选配置、源码及检查点身份。旧 v2 结果和已停止研究保留生成时口径；新研究须使用独立输出和新政策身份，本次工程验证不恢复十二小时研究。

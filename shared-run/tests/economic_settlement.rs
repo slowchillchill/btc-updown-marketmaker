@@ -117,7 +117,7 @@ fn script(case: usize) -> ResolutionRedeemScenarioV1 {
 fn assert_first_visible_acceptance(
     case: usize,
     at: i64,
-    read: &LedgerEconomicReadV1<'_>,
+    read: &LedgerEconomicReadV2<'_>,
     first_accepted_at: &mut Option<i64>,
 ) {
     if case == 4 || case == 5 || first_accepted_at.is_some() {
@@ -172,7 +172,7 @@ fn assert_first_visible_acceptance(
 fn assert_settlement_cut(
     case: usize,
     elapsed: u64,
-    read: &LedgerEconomicReadV1<'_>,
+    read: &LedgerEconomicReadV2<'_>,
     seen: &mut std::collections::BTreeSet<u64>,
 ) {
     use ResolutionRedeemScenarioEventV1 as E;
@@ -284,16 +284,14 @@ fn assert_settlement_cut(
             - paid,
         "case {case}, cut {cut}"
     );
-    assert_eq!(read.cash().maker_available_pusd.0, "96.916");
     assert_eq!(read.cash().actual_reserved_pusd.0, "0");
-    assert_eq!(read.cash().maker_reserved_pusd.0, "0");
     assert_eq!(
         market.winner_orphan_receivable_pusd.0,
         if success { "0" } else { "5" }
     );
-    let nav = AccountEconomicsReadV1::from_ledger(read);
+    let nav = UnmarkedAccountEconomicsReadV3::from_ledger(read);
     // 正式判定/赎回的当前V2不叠加旧孤腿标记，费用和返佣沿同一原账本。
-    let current = AccountEconomicsReadV2::from_ledger_and_observations(read, std::iter::empty());
+    let current = AccountEconomicsReadV3::from_ledger_and_observations(read, std::iter::empty());
     assert_eq!(
         current.conservative_nav_pusd,
         ExecutionReadValueV1::Known(nav.conservative_nav_pusd.clone())
@@ -352,8 +350,9 @@ async fn actual_chain_requested_settlement_s0_to_s4_and_stable_ledger() {
         execution
             .configure_resolution_redeem_v1(script(case))
             .unwrap();
-        let mut ledger =
-            LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(
+            AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
+        );
         let ledger_root = temp.path().join("ledger");
         execution
             .bind_ledger_recording_v2(&mut ledger, &ledger_root)
@@ -454,7 +453,6 @@ async fn actual_chain_requested_settlement_s0_to_s4_and_stable_ledger() {
             },
             "case {case}"
         );
-        assert_eq!(read.cash().maker_available_pusd.0, "96.916", "case {case}");
         assert_eq!(
             read.cash().actual_available_pusd.0,
             if case == 4 {
@@ -489,7 +487,7 @@ async fn actual_chain_requested_settlement_s0_to_s4_and_stable_ledger() {
             "case {case}: queries"
         );
         assert_eq!(stats.final_success, case != 4);
-        let nav = AccountEconomicsReadV1::from_ledger(&read);
+        let nav = UnmarkedAccountEconomicsReadV3::from_ledger(&read);
         assert_eq!(nav.worst_case_maker_nav_pusd, r("24229", "250"));
         assert_eq!(
             nav.directional_residual_pusd,
@@ -543,8 +541,9 @@ async fn real_partial_makers_fix_average_cost_and_nonterminating_fraction() {
         let (core, times) = recorded_average_pool(&root, fractional);
         let (mut execution, observation) =
             execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
-        let mut ledger =
-            LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(
+            AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
+        );
         execution
             .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
             .unwrap();
@@ -719,7 +718,7 @@ fn actual_opening_dual_cash_atomic_sum_and_original_sticky_recovery() {
         "2000",
     );
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     let ledger_root = temp.path().join("ledger");
     execution
         .bind_ledger_recording_v2(&mut ledger, &ledger_root)
@@ -761,7 +760,6 @@ fn actual_opening_dual_cash_atomic_sum_and_original_sticky_recovery() {
     ));
     let cash = shared.ledger().economic_read().unwrap().cash().clone();
     assert_eq!(cash.actual_available_pusd.0, "800");
-    assert_eq!(cash.maker_available_pusd.0, "800");
     assert_eq!(cash.actual_reserved_pusd.0, "1200");
     execution.stop_and_drain().unwrap();
     let mut restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
@@ -786,14 +784,14 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
         "2000",
     );
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     execution
         .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
         .unwrap();
     let mut shared = SharedExecutionV1::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
-    let initial = shared.ledger().necessary_read_v1().unwrap();
+    let initial = shared.ledger().necessary_read_v2().unwrap();
     assert_eq!(initial.account().confirmed_net_pnl.public(), r("0", "1"));
     assert_eq!(
         initial.account().confirmed_unpaid_rebate.public(),
@@ -834,7 +832,7 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
     while driver.next_group().unwrap().is_some() {
         shared.apply_closed().unwrap();
         // 原完整读取与增量读取必须沿同一经济前缀；初始化在成交前，覆盖日期更新及支付。
-        let totals = shared.ledger().necessary_read_v1().unwrap();
+        let totals = shared.ledger().necessary_read_v2().unwrap();
         let read = shared.ledger().economic_read().unwrap();
         let mut pnl = EconomicRational::zero();
         let mut unpaid = EconomicRational::zero();
@@ -882,7 +880,7 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
         assert_eq!(market.confirmed_net_pnl_pusd, expected);
         assert_eq!(market.rebates[0].confirmed_unpaid_pusd, r("0", "1"));
     }
-    let totals = shared.ledger().necessary_read_v1().unwrap();
+    let totals = shared.ledger().necessary_read_v2().unwrap();
     assert_eq!(totals.account().confirmed_net_pnl.public(), r("1", "1"));
     assert_eq!(
         totals.account().confirmed_unpaid_rebate.public(),
@@ -893,14 +891,14 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
     driver.stop_and_drain().unwrap();
     let restored = LedgerWriterV1::open_durable(temp.path().join("ledger")).unwrap();
     assert_eq!(
-        restored.necessary_read_v1().unwrap().account(),
+        restored.necessary_read_v2().unwrap().account(),
         &expected_totals
     );
     let mut checkpoint = Vec::new();
     restored.write_checkpoint(&mut checkpoint).unwrap();
     let restored_checkpoint = LedgerWriterV1::restore_checkpoint(checkpoint.as_slice()).unwrap();
     assert_eq!(
-        restored_checkpoint.necessary_read_v1().unwrap().account(),
+        restored_checkpoint.necessary_read_v2().unwrap().account(),
         &expected_totals
     );
     let read = restored.economic_read().unwrap();
@@ -1057,7 +1055,7 @@ async fn original_external_cash_identity_correction_and_no_frame_nav() {
     let (mut execution, observation) =
         execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     let ledger_root = temp.path().join("ledger");
     execution
         .bind_ledger_recording_v2(&mut ledger, &ledger_root)
@@ -1113,14 +1111,15 @@ async fn original_external_cash_identity_correction_and_no_frame_nav() {
         shared.apply_closed().unwrap();
     }
     assert!(shared.apply_closed().unwrap());
-    let nav = AccountEconomicsReadV1::from_ledger(&shared.ledger().economic_read().unwrap());
+    let nav =
+        UnmarkedAccountEconomicsReadV3::from_ledger(&shared.ledger().economic_read().unwrap());
     assert_eq!(nav.conservative_nav_pusd, r("99", "1"));
     assert_eq!(nav.worst_case_maker_nav_pusd, r("97", "1"));
     assert_eq!(nav.other_account_residual_pusd, r("2", "1"));
     driver.complete().unwrap();
     let restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
     assert_eq!(
-        AccountEconomicsReadV1::from_ledger(&restored.economic_read().unwrap()),
+        UnmarkedAccountEconomicsReadV3::from_ledger(&restored.economic_read().unwrap()),
         nav
     );
 }
@@ -1140,8 +1139,9 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
             "00000000000000000000000000000000000000000000000000000000000023c8".into(),
         );
         execution.configure_resolution_redeem_v1(script(0)).unwrap();
-        let mut ledger =
-            LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(
+            AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
+        );
         let ledger_root = temp.path().join("ledger");
         execution
             .bind_ledger_recording_v2(&mut ledger, &ledger_root)
@@ -1276,7 +1276,7 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
                         saw_pair = true;
                     }
                 }
-                let nav = AccountEconomicsReadV1::from_ledger(&read);
+                let nav = UnmarkedAccountEconomicsReadV3::from_ledger(&read);
                 if read
                     .market_totals()
                     .next()
@@ -1287,7 +1287,6 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
                 {
                     // 两腿本金6、Taker费0.168，配对应收5，结算费用0.1尚未付款。
                     assert_eq!(read.cash().actual_available_pusd.0, "93.832");
-                    assert_eq!(read.cash().maker_available_pusd.0, "93.832");
                     assert_eq!(nav.conservative_nav_pusd, r("24683", "250"));
                     assert_eq!(
                         nav.worst_case_maker_nav_pusd,
@@ -1328,7 +1327,7 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
         assert!(stats.final_success);
         assert!(saw_pair);
         let read = shared.ledger().economic_read().unwrap();
-        let nav = AccountEconomicsReadV1::from_ledger(&read);
+        let nav = UnmarkedAccountEconomicsReadV3::from_ledger(&read);
         assert_eq!(nav.conservative_nav_pusd, r("24683", "250"));
         assert_eq!(
             nav.worst_case_maker_nav_pusd,
@@ -1348,7 +1347,7 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
         driver.complete().unwrap();
         let restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
         assert_eq!(
-            AccountEconomicsReadV1::from_ledger(&restored.economic_read().unwrap()),
+            UnmarkedAccountEconomicsReadV3::from_ledger(&restored.economic_read().unwrap()),
             nav
         );
     }
@@ -1366,8 +1365,9 @@ async fn stable_request_material_queries_pending_success_and_controlled_retry() 
         execution
             .configure_resolution_redeem_v1(script(case))
             .unwrap();
-        let mut ledger =
-            LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(
+            AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
+        );
         let ledger_root = temp.path().join("ledger");
         execution
             .bind_ledger_recording_v2(&mut ledger, &ledger_root)
@@ -1504,7 +1504,8 @@ async fn stable_request_material_queries_pending_success_and_controlled_retry() 
         assert_all_settlement_cuts(case, &seen_cuts);
         assert_eq!(first_accepted_at.is_some(), case != 4 && case != 5);
         assert!(shared.apply_closed().unwrap());
-        let nav = AccountEconomicsReadV1::from_ledger(&shared.ledger().economic_read().unwrap());
+        let nav =
+            UnmarkedAccountEconomicsReadV3::from_ledger(&shared.ledger().economic_read().unwrap());
         let stats = driver
             .settlement_simulation_read(&ConditionId(CONDITION_ID.into()))
             .unwrap();
@@ -1516,12 +1517,12 @@ async fn stable_request_material_queries_pending_success_and_controlled_retry() 
         driver.complete().unwrap();
         let restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
         assert_eq!(
-            AccountEconomicsReadV1::from_ledger(&restored.economic_read().unwrap()),
+            UnmarkedAccountEconomicsReadV3::from_ledger(&restored.economic_read().unwrap()),
             nav
         );
         let restored_again = LedgerWriterV1::open_durable(&ledger_root).unwrap();
         assert_eq!(
-            AccountEconomicsReadV1::from_ledger(&restored_again.economic_read().unwrap()),
+            UnmarkedAccountEconomicsReadV3::from_ledger(&restored_again.economic_read().unwrap()),
             nav
         );
     }
@@ -1536,7 +1537,7 @@ async fn pure_loser_closes_without_settlement_request_after_original_barriers() 
         execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
     execution.configure_resolution_redeem_v1(script(0)).unwrap();
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     execution
         .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
         .unwrap();
@@ -1590,7 +1591,7 @@ async fn pure_loser_closes_without_settlement_request_after_original_barriers() 
             .settlement_simulation_read(&ConditionId(CONDITION_ID.into()))
             .is_none()
     );
-    let nav = AccountEconomicsReadV1::from_ledger(&read);
+    let nav = UnmarkedAccountEconomicsReadV3::from_ledger(&read);
     assert_eq!(nav.conservative_nav_pusd, r("24229", "250"));
     assert_eq!(
         read.market_totals().next().unwrap().confirmed_net_pnl_pusd,
@@ -1618,7 +1619,7 @@ async fn paired_receivable_precedes_loser_failure_and_compensation_barrier() {
     let (mut execution, observation) = execution(&temp.path().join("sim.jsonl"), &core, &policy);
     execution.configure_resolution_redeem_v1(script(0)).unwrap();
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     let ledger_root = temp.path().join("ledger");
     execution
         .bind_ledger_recording_v2(&mut ledger, &ledger_root)
@@ -1700,7 +1701,6 @@ async fn paired_receivable_precedes_loser_failure_and_compensation_barrier() {
     assert!(shared.apply_closed().unwrap());
     let read = shared.ledger().economic_read().unwrap();
     assert_eq!(read.cash().actual_available_pusd.0, "99.1152");
-    assert_eq!(read.cash().maker_available_pusd.0, "98.1152");
     let market = read.market_totals().next().unwrap();
     assert_eq!(market.executed[1].actual_fee_pusd.0, "0.1848");
     assert_eq!(market.confirmed_net_pnl_pusd, r("-553", "625"));
@@ -1752,7 +1752,7 @@ async fn pending_settlement_and_unclaimed_feedback_restore_with_original_modules
     execution.configure_resolution_redeem_v1(script(1)).unwrap();
     let ledger_root = temp.path().join("ledger");
     let mut ledger =
-        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
     execution
         .bind_ledger_recording_v2(&mut ledger, &ledger_root)
         .unwrap();
@@ -1870,7 +1870,7 @@ async fn pending_settlement_and_unclaimed_feedback_restore_with_original_modules
             .unwrap();
     }
     shared.apply_closed().unwrap();
-    let expected = serde_json::to_value(AccountEconomicsReadV2::from_ledger_and_observations(
+    let expected = serde_json::to_value(AccountEconomicsReadV3::from_ledger_and_observations(
         &shared.ledger().economic_read().unwrap(),
         std::iter::empty(),
     ))
@@ -1943,7 +1943,7 @@ async fn pending_settlement_and_unclaimed_feedback_restore_with_original_modules
     shared.apply_closed().unwrap();
     assert_eq!(shared.ledger().projection_v2(), expected_projection);
     assert_eq!(
-        serde_json::to_value(AccountEconomicsReadV2::from_ledger_and_observations(
+        serde_json::to_value(AccountEconomicsReadV3::from_ledger_and_observations(
             &shared.ledger().economic_read().unwrap(),
             std::iter::empty()
         ))
