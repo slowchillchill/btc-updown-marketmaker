@@ -8,7 +8,13 @@
 
 以 Polymarket 的 BTC 五分钟涨跌市场为研究场景，建设多源行情、人工策略、历史回测、GPU 强化学习与本地模型推理能力。项目关注模型如何理解市场、作出交易决策，以及如何用真实数据和账户结果检验这些决策。
 
-[▶ 观看项目介绍](https://youtu.be/a9qzkJ_NjKA) · [策略研究](baseline-mm/) · [模型训练](model-train/) · [交流与合作](https://github.com/slowchillchill)
+[![点击前往 YouTube 观看项目介绍](https://i.ytimg.com/vi/a9qzkJ_NjKA/maxresdefault.jpg)](https://youtu.be/a9qzkJ_NjKA)
+
+[▶ 前往 YouTube 观看项目介绍](https://youtu.be/a9qzkJ_NjKA)
+
+视频展示早期两小时演示，与下方七小时成绩属于不同回测。
+
+[策略研究](baseline-mm/) · [模型训练](model-train/) · [交流与合作](https://github.com/slowchillchill)
 
 ## 项目目标
 
