@@ -328,9 +328,6 @@ where
     fn research_enabled(&self) -> bool {
         self.hub.0.0.lock().unwrap().research_summary
     }
-    fn budget_stopped(&self) -> bool {
-        self.hub.0.0.lock().unwrap().budget_stopped
-    }
     fn started(&mut self) {
         let mut buffer = self.hub.0.0.lock().unwrap();
         buffer.candidates[self.index].runtime_started = true;
@@ -385,7 +382,7 @@ where
         strategy: &S,
         state: RuntimeLoopCheckpointRefV1<'_, S::Diagnostics>,
         next_hidden: Option<&AcceptedHiddenStepBucketV1>,
-    ) -> Result<(), MaterialError> {
+    ) -> Result<RuntimeCheckpointControlV1, MaterialError> {
         self.events += 1;
         let generation = {
             let mut buffer = self.hub.0.0.lock().unwrap();
@@ -395,16 +392,21 @@ where
                 buffer.requested = Some(buffer.generation);
                 self.hub.0.1.notify_all();
             }
-            buffer.requested.filter(|g| {
+            let generation = buffer.requested.filter(|g| {
                 buffer.candidates[self.index]
                     .ready
                     .as_ref()
                     .map(|(g, _)| *g)
                     != Some(*g)
-            })
-        };
-        let Some(generation) = generation else {
-            return Ok(());
+            });
+            let Some(generation) = generation else {
+                return Ok(if buffer.budget_stopped {
+                    RuntimeCheckpointControlV1::SavedThenStop
+                } else {
+                    RuntimeCheckpointControlV1::Continue
+                });
+            };
+            generation
         };
         #[cfg(feature = "stage-timing")]
         let encode_started = std::time::Instant::now();
@@ -493,7 +495,13 @@ where
         self.stages
             .record("wait_shared_publication", wait_started.elapsed());
         self.events = 0;
-        Ok(())
+        #[cfg(feature = "stage-timing")]
+        self.stages.emit_checkpoint(generation);
+        Ok(if buffer.budget_stopped {
+            RuntimeCheckpointControlV1::SavedThenStop
+        } else {
+            RuntimeCheckpointControlV1::Continue
+        })
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -558,7 +566,7 @@ pub(crate) struct CheckpointPublicationV1 {
     pub generation: u64,
     pub files: Vec<CheckpointFileV1>,
 }
-pub(crate) const DAY_CHECKPOINT_FORMAT: &str = "original-parquet-day-checkpoint-v4";
+pub(crate) const DAY_CHECKPOINT_FORMAT: &str = "original-parquet-day-checkpoint-v5";
 struct DigestWriter<W> {
     inner: W,
     digest: Sha256,
@@ -931,5 +939,18 @@ mod tests {
         let saved: Saved = ciborium::from_reader(std::fs::File::open(&path).unwrap()).unwrap();
         assert_eq!(saved.bytes, vec![0, 24, 255]);
         assert!(write_cbor(&path, &saved).is_err(), "原create_new边界保持");
+    }
+}
+
+#[cfg(test)]
+mod version_boundary_tests {
+    use super::*;
+    #[test]
+    fn old_day_materials_are_not_loaded_as_the_new_position_format() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("checkpoint.json"),
+            br#"{"format":"original-parquet-day-checkpoint-v4","identity":"same-input","generation":0,"files":[]}"#).unwrap();
+        let error = read_publication(temp.path(), "same-input").err().unwrap();
+        assert_eq!(error.to_string(), "日检查点与输入、配置或版本不符");
     }
 }

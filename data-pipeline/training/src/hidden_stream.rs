@@ -118,6 +118,23 @@ impl StreamingHiddenStateV1 {
             );
         }
     }
+    pub fn push_depth_position(
+        &mut self,
+        canonical_position: u64,
+        position: PublicFactPositionV1,
+        time: EventTimeV2,
+    ) {
+        if let Some(at) = time.source_event_at_utc_ms {
+            self.pending_records.insert(
+                (at, 0, 0, 0, 0, canonical_position, 0),
+                ResolvedHiddenRecordV1::BinanceDepthPositionReference {
+                    canonical_position,
+                    position,
+                    time,
+                },
+            );
+        }
+    }
     /// pm_lower覆盖全部未读PM；None表示PM来源已完整结束。
     pub fn advance_pm(&mut self, pm_lower: Option<PmOrder>) -> RecordingResult<()> {
         use rayon::prelude::*;
@@ -280,5 +297,86 @@ impl StreamingHiddenStateV1 {
             },
             records,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pending_depth_positions_restore_order_without_content_identity_or_false_eof() {
+        let mut state = StreamingHiddenStateV1::new(
+            "hidden-test".into(),
+            Sha256Hex("a".repeat(64)),
+            BTreeMap::new(),
+        );
+        let position = |n| PublicFactPositionV1 {
+            input_stream_id: "input-test".into(),
+            closed_at_input_position: n,
+            fact_ordinal: 0,
+        };
+        state.push_depth_position(
+            9,
+            position(9),
+            EventTimeV2 {
+                source_event_at_utc_ms: Some(10),
+                received_at_utc_ms: 100,
+            },
+        );
+        state.push_depth_position(
+            8,
+            position(8),
+            EventTimeV2 {
+                source_event_at_utc_ms: Some(10),
+                received_at_utc_ms: 110,
+            },
+        );
+        state.push_depth_position(
+            10,
+            position(10),
+            EventTimeV2 {
+                source_event_at_utc_ms: Some(20),
+                received_at_utc_ms: 120,
+            },
+        );
+        state.push_depth_position(
+            11,
+            position(11),
+            EventTimeV2 {
+                source_event_at_utc_ms: None,
+                received_at_utc_ms: 130,
+            },
+        );
+        let prefix = AppliedIngressPrefixV1 {
+            input_stream_id: "input-test".into(),
+            next_input_position: 12,
+        };
+        assert!(state.next_bucket(None, prefix.clone(), false).is_none());
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&state, &mut bytes).unwrap();
+        let mut restored: StreamingHiddenStateV1 = ciborium::from_reader(bytes.as_slice()).unwrap();
+        let first = restored
+            .next_bucket(Some(20), prefix.clone(), false)
+            .unwrap();
+        assert_eq!(first.reference.bucket_time_utc_ms, 10);
+        assert_eq!(first.records.len(), 2);
+        for (record, expected) in first.records.iter().zip([8, 9]) {
+            let ResolvedHiddenRecordV1::BinanceDepthPositionReference {
+                canonical_position,
+                position: actual,
+                time,
+            } = record
+            else {
+                panic!("恢复沿正式日内位置交接");
+            };
+            assert_eq!(*canonical_position, expected);
+            assert_eq!(*actual, position(expected));
+            assert_eq!(time.source_event_at_utc_ms, Some(10));
+        }
+        assert!(restored.next_bucket(None, prefix.clone(), false).is_none());
+        let last = restored.next_bucket(None, prefix.clone(), true).unwrap();
+        assert_eq!(last.reference.bucket_time_utc_ms, 20);
+        assert_eq!(last.records.len(), 1);
+        assert!(restored.next_bucket(None, prefix, true).is_none());
     }
 }

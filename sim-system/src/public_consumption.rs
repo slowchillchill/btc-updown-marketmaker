@@ -736,6 +736,12 @@ pub enum HiddenExecutionRecordV1 {
         binding: PublicFactBindingV1,
         time: EventTimeV2,
     },
+    /// 日内参考位置不携带 CanonicalEventId；只推进既有隐藏时序。
+    BinanceDepthPositionReference {
+        canonical_position: u64,
+        position: PublicFactPositionV1,
+        time: EventTimeV2,
+    },
 }
 /// 旧持久材料与新流式来源保持各自真实绑定，共用原隐藏桶归约。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -804,6 +810,15 @@ impl AcceptedHiddenStepBucketV1 {
                 } => HiddenExecutionRecordV1::BinanceDepthReference {
                     canonical_position,
                     binding,
+                    time,
+                },
+                ResolvedHiddenRecordV1::BinanceDepthPositionReference {
+                    canonical_position,
+                    position,
+                    time,
+                } => HiddenExecutionRecordV1::BinanceDepthPositionReference {
+                    canonical_position,
+                    position,
                     time,
                 },
             })
@@ -890,6 +905,15 @@ impl RecordedHiddenBucketSourceV1 {
                 } => HiddenExecutionRecordV1::BinanceDepthReference {
                     canonical_position,
                     binding,
+                    time,
+                },
+                ResolvedHiddenRecordV1::BinanceDepthPositionReference {
+                    canonical_position,
+                    position,
+                    time,
+                } => HiddenExecutionRecordV1::BinanceDepthPositionReference {
+                    canonical_position,
+                    position,
                     time,
                 },
                 ResolvedHiddenRecordV1::Step { stored, market } => HiddenExecutionRecordV1::Step {

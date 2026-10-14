@@ -701,6 +701,10 @@ impl PublicObservationCoreV1 {
             next_input_position: self.next_input_position,
         }
     }
+    /// 低频诊断读取当前 bids/asks/deleted_bids/deleted_asks 四个容器长度。
+    pub fn current_binance_depth_sizes(&self) -> Option<[usize; 4]> {
+        self.binance_depth.current_book_sizes()
+    }
     pub fn object_counts(&self) -> PublicCoreObjectCountsV1 {
         PublicCoreObjectCountsV1 {
             markets: self.markets.len(),
@@ -854,7 +858,19 @@ impl PublicObservationCoreV1 {
         &mut self,
         input: &'a PreparedIngressV1<'_>,
     ) -> Result<PublicAppliedIngressV1<'a>, DptCoreErrorV1> {
-        let result = self.push_application(input, false, false)?;
+        let result = self.push_application(input, false, false, false)?;
+        Ok(PublicAppliedIngressV1 {
+            applied: result.applied,
+            pm_reductions: result.pm_reductions,
+            reductions: result.reductions,
+        })
+    }
+    /// 日内消费使用状态位置，不需要录制的全量深度材料。
+    pub fn push_day<'a>(
+        &mut self,
+        input: &'a PreparedIngressV1<'_>,
+    ) -> Result<PublicAppliedIngressV1<'a>, DptCoreErrorV1> {
+        let result = self.push_application(input, false, false, true)?;
         Ok(PublicAppliedIngressV1 {
             applied: result.applied,
             pm_reductions: result.pm_reductions,
@@ -867,7 +883,7 @@ impl PublicObservationCoreV1 {
         &mut self,
         input: &'a PreparedIngressV1<'_>,
     ) -> Result<PublicRecordingAppliedIngressV1<'a>, DptCoreErrorV1> {
-        let result = self.push_application(input, false, true)?;
+        let result = self.push_application(input, false, true, false)?;
         Ok(PublicRecordingAppliedIngressV1 {
             applied_prefix: result.applied.applied_prefix,
             closed_groups: result.recording_groups.unwrap(),
@@ -882,7 +898,7 @@ impl PublicObservationCoreV1 {
         input: &PreparedIngressV1<'_>,
     ) -> Result<PublicSourceProgressAppliedV1, DptCoreErrorV1> {
         self.enable_source_progress();
-        let result = self.push_application(input, true, false)?;
+        let result = self.push_application(input, true, false, false)?;
         Ok(PublicSourceProgressAppliedV1 {
             applied_prefix: result.applied.applied_prefix,
             closed_groups: result.compact_groups.unwrap(),
@@ -894,13 +910,14 @@ impl PublicObservationCoreV1 {
         &mut self,
         input: &PreparedIngressV1<'_>,
     ) -> Result<Vec<PublicReductionBatchV1>, DptCoreErrorV1> {
-        Ok(self.push_application(input, true, false)?.reductions)
+        Ok(self.push_application(input, true, false, false)?.reductions)
     }
     fn push_application<'a>(
         &mut self,
         input: &'a PreparedIngressV1<'_>,
         compact: bool,
         recording: bool,
+        day: bool,
     ) -> Result<CoreApplicationV1<'a>, DptCoreErrorV1> {
         if input.recorded.input_stream_id != self.header.input_stream_id
             || input.recorded.input_position != self.next_input_position
@@ -951,21 +968,47 @@ impl PublicObservationCoreV1 {
             PreparedCanonicalInputV1::BinanceDepthSnapshot { row, source, depth } => {
                 // compute 可改状态后返回无事件或错误，不能仅按 Produced 失效。
                 self.current_depth_projection = None;
-                let batch = bind_reference_reduction_v1(
-                    self.binance_depth
-                        .compute_prepared_snapshot(row, source.clone(), depth)?,
-                    context.unwrap(),
-                );
+                let batch = if day {
+                    bind_day_depth_reduction_v1(
+                        self.binance_depth.compute_day_snapshot(
+                            row,
+                            source.clone(),
+                            depth,
+                            self.observation_requirements.binance_depth_quantities,
+                        )?,
+                        context.unwrap(),
+                        &self.header.canonical_rule_version,
+                    )
+                } else {
+                    bind_reference_reduction_v1(
+                        self.binance_depth
+                            .compute_prepared_snapshot(row, source.clone(), depth)?,
+                        context.unwrap(),
+                    )
+                };
                 self.close_batch(batch, vec![self.next_input_position], input, &mut result);
             }
             PreparedCanonicalInputV1::BinanceDepthUpdate { row, source, depth } => {
                 // compute 可改状态后返回无事件或错误，不能仅按 Produced 失效。
                 self.current_depth_projection = None;
-                let batch = bind_reference_reduction_v1(
-                    self.binance_depth
-                        .compute_prepared_update(row, source.clone(), depth)?,
-                    context.unwrap(),
-                );
+                let batch = if day {
+                    bind_day_depth_reduction_v1(
+                        self.binance_depth.compute_day_update(
+                            row,
+                            source.clone(),
+                            depth,
+                            self.observation_requirements.binance_depth_quantities,
+                        )?,
+                        context.unwrap(),
+                        &self.header.canonical_rule_version,
+                    )
+                } else {
+                    bind_reference_reduction_v1(
+                        self.binance_depth
+                            .compute_prepared_update(row, source.clone(), depth)?,
+                        context.unwrap(),
+                    )
+                };
                 self.close_batch(batch, vec![self.next_input_position], input, &mut result);
             }
             PreparedCanonicalInputV1::BinanceAggregateTrade {
@@ -1187,7 +1230,7 @@ impl PublicObservationCoreV1 {
                         source_refs: std::iter::once(msg.input_record.clone())
                             .chain(input.recorded.dependency_record_refs.iter().cloned())
                             .collect(),
-                        lineage: msg.lineage.clone(),
+                        lineage: PublicBusinessLineageV1::Canonical(msg.lineage.clone()),
                         direct_time: msg.time.clone(),
                         dependency_time: msg.time.clone(),
                         quality: EventQualityV2 {
@@ -1408,11 +1451,7 @@ impl PublicObservationCoreV1 {
         if !self.source_progress_enabled {
             return false;
         }
-        let produced_or_confirmed = !batch.facts.is_empty()
-            || batch
-                .reports
-                .iter()
-                .any(|r| r.report.operation == ReductionOperationKindV1::Confirm);
+        let produced_or_confirmed = batch.produced_or_confirmed();
         let fresh = EventQualityV2 {
             availability: MarketDataQuality::Fresh,
             resync: ResyncQuality::NotRequired,
@@ -1805,6 +1844,17 @@ impl PublicObservationCoreV1 {
         match &fact.payload {
             PublicBusinessPayloadV1::PolymarketMessage(_)
             | PublicBusinessPayloadV1::BinanceDepthReference(_) => {}
+            PublicBusinessPayloadV1::BinanceDepthPositionReference { quantities } => {
+                self.current_depth_projection = quantities.as_ref().map(|value| {
+                    Arc::new(observed(
+                        BinanceDepthObservationV1::Full(Arc::clone(value)),
+                        fact,
+                        group,
+                        "binance_depth",
+                    ))
+                });
+                self.global.depth = observed((), fact, group, "binance_depth");
+            }
             PublicBusinessPayloadV1::ReferenceFact(payload) => match payload {
                 CanonicalReferenceEventPayloadV2::ChainlinkBtcUsd(value) => {
                     self.global.spot = observed(value.clone(), fact, group, "chainlink_spot")

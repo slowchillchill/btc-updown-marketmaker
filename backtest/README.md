@@ -295,6 +295,13 @@ BudgetStop、Failure沿原report终止原因区分。CLI硬截止仅覆盖CLI自
 
 D-0353 下，日入口保留第一个被该日 Hub 确认的原始错误和来源，不声称它是所有线程中最早发生的错误。已启动的候选和日期线程均收取返回结果。候选 `outcome` 区分 `Complete`、`OriginalFailure`、`CollateralStop` 和 `NoReport`；缺报告时 `report` 为 `null`。失败候选不进入完成记录复用。报告的原观察截止、内存经济读取、耐久 NOE 前缀及最后发布点各自保留，失败后不补未来反馈或隐式排空。
 
-CLI 日模式失败时仍输出一次 JSON：`status="failed"`、`error`、`failure_source` 和已有 `days`，并非零退出。`scripts/run_research.sh` 在退出后提取这些已有结果，原 CLI 退出码优先于汇总错误；`scripts/summarize_research.py` 接受缺报告候选和空日期，不把部分前缀标成完整窗口。新日检查点格式为 `original-parquet-day-checkpoint-v4`；SIM 新随机序列的版本、种子及旧材料边界见 [SIM 历史消费合同](../sim-system/historical-consumption.md)。
+CLI 日模式失败时仍输出一次 JSON：`status="failed"`、`error`、`failure_source` 和已有 `days`，并非零退出。`scripts/run_research.sh` 在退出后提取这些已有结果，原 CLI 退出码优先于汇总错误；`scripts/summarize_research.py` 接受缺报告候选和空日期，不把部分前缀标成完整窗口。新日检查点格式为 `original-parquet-day-checkpoint-v5`；SIM 新随机序列的版本、种子及旧材料边界见 [SIM 历史消费合同](../sim-system/historical-consumption.md)。
 
 可选 `stage-timing` 仅在原检查点边界细分 SIM、Ledger、共享执行和策略的编码耗时及字节数。不新增逐帧采样；同日并发候选的等待和阶段耗时不能相加当墙钟。真实研究时长与保存频率由研究配置决定，有限工程测量不代表十二小时持续吞吐。
+
+
+日内 Binance 深度材料采用 `BinanceDepthPositionReference`，事实位置、直接来源、两种时间和品质按同一归约步骤交付。完整来源谱系保留给录制／独立重放；日内状态引用使用 `PublicBusinessLineageV1::StateReference`，不生成深度内容 ID，也不把位置填入 `CanonicalEventId`。新日研究的观察表示使用 `market_business_observation_v2`，归约规则和行情顺序版本保持原定义。
+
+所有候选的数量需求取并集。数量关闭时不展开完整盘口和累积来源证据；数量开启时只生成一次共享且不可变的数量投影。源时间计数索引随价格证据更新，恢复时从原盘口及删除证据重建，不重复持久化该索引。接收时间沿原可见前沿并合并本次边界证据；源时间可以下降。
+
+新格式覆盖日恢复点中的公共事实、隐藏状态位置和候选观察池；共享观察池写入 `SharedObservationV4`，与新的日内位置表示对应。旧日检查点仍由旧程序解释，不迁入新格式。旧录制的规范内容身份与重放材料保持其原格式。`stage-timing` 在完整检查点发布时输出累计阶段耗时，不要求等待正常退出。空材料不触发发布锁和队列通知，实际控制状态通知继续发送。

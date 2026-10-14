@@ -65,13 +65,14 @@ mod observation_pool {
     enum Payload {
         Full(PublicBusinessPayloadV1),
         Depth(usize),
+        DepthPosition(Option<usize>),
     }
     #[derive(Serialize, Deserialize)]
     struct Fact {
         position: PublicFactPositionV1,
         payload: Payload,
         source_refs: Vec<CanonicalInputRecordRefV1>,
-        lineage: EventLineageV3,
+        lineage: PublicBusinessLineageV1,
         direct_time: EventTimeV2,
         dependency_time: EventTimeV2,
         quality: EventQualityV2,
@@ -118,6 +119,9 @@ mod observation_pool {
                             &mut self.depth_values,
                             &mut self.pool.depth_values,
                         )),
+                        PublicBusinessPayloadV1::BinanceDepthPositionReference { quantities } =>
+                            Payload::DepthPosition(quantities.as_ref().map(|depth|
+                                intern(depth, &mut self.depth_values, &mut self.pool.depth_values))),
                         payload => Payload::Full(payload.clone()),
                     };
                     Fact {
@@ -171,6 +175,9 @@ mod observation_pool {
                         .map(|v| {
                             let payload = match &v.payload {
                                 Payload::Full(payload) => payload.clone(),
+                                Payload::DepthPosition(index) => PublicBusinessPayloadV1::BinanceDepthPositionReference {
+                                    quantities: index.map(|i| get(&self.depth_values, i)).transpose()?,
+                                },
                                 Payload::Depth(index) => PublicBusinessPayloadV1::ReferenceFact(
                                     CanonicalReferenceEventPayloadV2::BinanceDepthState(get(
                                         &self.depth_values,
@@ -462,6 +469,7 @@ mod observation_pool {
     enum Layout {
         SharedObservationV2,
         SharedObservationV3,
+        SharedObservationV4,
     }
 
     pub(super) mod group {
@@ -479,7 +487,7 @@ mod observation_pool {
             let mut builder = Builder::default();
             let group = Group::capture(value, &mut builder);
             Saved {
-                layout: Layout::SharedObservationV3,
+                layout: Layout::SharedObservationV4,
                 pool: builder.pool,
                 group,
             }
@@ -528,7 +536,7 @@ mod observation_pool {
                 })
                 .collect();
             Saved {
-                layout: Layout::SharedObservationV3,
+                layout: Layout::SharedObservationV4,
                 pool: builder.pool,
                 items,
             }

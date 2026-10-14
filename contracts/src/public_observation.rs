@@ -211,6 +211,18 @@ pub enum PublicBusinessPayloadV1 {
     ReferenceFact(CanonicalReferenceEventPayloadV2),
     /// 深度正文由原输入重建；位置、身份和事实时间仍在原组内。
     BinanceDepthReference(PublicFactBindingV1),
+    /// 日内状态事实的位置引用；数量按共同需求从观察投影交付。
+    BinanceDepthPositionReference {
+        quantities: Option<std::sync::Arc<BinanceDepthStateReferenceV1>>,
+    },
+}
+
+/// 完整来源谱系与日内状态位置是不同表示；位置不冒充内容身份。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PublicBusinessLineageV1 {
+    Canonical(EventLineageV3),
+    StateReference { canonical_rule_version: String },
 }
 
 /// 实际归约结果，不需要耐久身份即可消费。
@@ -219,7 +231,7 @@ pub struct PublicBusinessFactV1 {
     pub position: PublicFactPositionV1,
     pub payload: PublicBusinessPayloadV1,
     pub source_refs: Vec<crate::CanonicalInputRecordRefV1>,
-    pub lineage: EventLineageV3,
+    pub lineage: PublicBusinessLineageV1,
     pub direct_time: EventTimeV2,
     pub dependency_time: EventTimeV2,
     pub quality: EventQualityV2,
