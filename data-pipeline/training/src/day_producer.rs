@@ -66,34 +66,26 @@ impl<'a> DayProducerV1<'a> {
             DptIngressV1::Message {
                 source_evidence, ..
             } => match source_evidence.source_kind {
-                CanonicalSourceKindV2::BinanceDepthSnapshot => "binance_depth_snapshot",
-                CanonicalSourceKindV2::BinanceDepthUpdate => "binance_depth_update",
-                CanonicalSourceKindV2::BinanceAggtrade => "binance_aggtrade",
-                CanonicalSourceKindV2::PolymarketMarketMetadata => "polymarket_market_metadata",
-                CanonicalSourceKindV2::PolymarketOrderbook => "polymarket_orderbook",
-                CanonicalSourceKindV2::PolymarketRtdsChainlinkBtcUsd => "chainlink_spot",
-                CanonicalSourceKindV2::PolymarketRtdsChainlinkTwap => "chainlink_twap",
+                CanonicalSourceKindV2::BinanceDepthSnapshot => 2,
+                CanonicalSourceKindV2::BinanceDepthUpdate => 3,
+                CanonicalSourceKindV2::BinanceAggtrade => 1,
+                CanonicalSourceKindV2::PolymarketMarketMetadata => 7,
+                CanonicalSourceKindV2::PolymarketOrderbook => 8,
+                CanonicalSourceKindV2::PolymarketRtdsChainlinkBtcUsd => 4,
+                CanonicalSourceKindV2::PolymarketRtdsChainlinkTwap => 5,
             },
-            DptIngressV1::EndOfInput => "end_of_input",
-            DptIngressV1::Aborted { .. } => "aborted",
+            DptIngressV1::EndOfInput => 6,
+            DptIngressV1::Aborted { .. } => 0,
         };
         let initialization_binding = self.ingress.initialization_binding().cloned();
         let first_canonical_position = self.core.next_canonical_position();
         #[cfg(feature = "stage-timing")]
         {
             self.timings.inputs += 1;
-            self.timings
-                .by_source
-                .entry(timing_source)
-                .or_default()
-                .inputs += 1;
+            self.timings.by_source[timing_source].inputs += 1;
             let elapsed = input_started.elapsed().as_nanos();
             self.timings.decode_ns += elapsed;
-            self.timings
-                .by_source
-                .entry(timing_source)
-                .or_default()
-                .stage_ns[0] += elapsed;
+            self.timings.by_source[timing_source].stage_ns[0] += elapsed;
         }
         #[cfg(feature = "stage-timing")]
         let prepared_started = std::time::Instant::now();
@@ -102,11 +94,7 @@ impl<'a> DayProducerV1<'a> {
         {
             let elapsed = prepared_started.elapsed().as_nanos();
             self.timings.prepare_ns += elapsed;
-            self.timings
-                .by_source
-                .entry(timing_source)
-                .or_default()
-                .stage_ns[1] += elapsed;
+            self.timings.by_source[timing_source].stage_ns[1] += elapsed;
         }
         #[cfg(feature = "stage-timing")]
         let core_started = std::time::Instant::now();
@@ -121,11 +109,7 @@ impl<'a> DayProducerV1<'a> {
         {
             let elapsed = core_started.elapsed().as_nanos();
             self.timings.core_ns += elapsed;
-            self.timings
-                .by_source
-                .entry(timing_source)
-                .or_default()
-                .stage_ns[2] += elapsed;
+            self.timings.by_source[timing_source].stage_ns[2] += elapsed;
         }
         #[cfg(feature = "stage-timing")]
         let material_started = std::time::Instant::now();
@@ -156,11 +140,7 @@ impl<'a> DayProducerV1<'a> {
         {
             let elapsed = material_started.elapsed().as_nanos();
             self.timings.material_ns += elapsed;
-            self.timings
-                .by_source
-                .entry(timing_source)
-                .or_default()
-                .stage_ns[3] += elapsed;
+            self.timings.by_source[timing_source].stage_ns[3] += elapsed;
         }
         #[cfg(feature = "stage-timing")]
         let hidden_started = std::time::Instant::now();
@@ -222,11 +202,7 @@ impl<'a> DayProducerV1<'a> {
         {
             let elapsed = hidden_started.elapsed().as_nanos();
             self.timings.hidden_ns += elapsed;
-            self.timings
-                .by_source
-                .entry(timing_source)
-                .or_default()
-                .stage_ns[4] += elapsed;
+            self.timings.by_source[timing_source].stage_ns[4] += elapsed;
         }
         Ok(Some(DayAppliedV1 {
             input,
@@ -284,7 +260,8 @@ pub struct DayProducerStageTimingsV1 {
     pub core_ns: u128,
     pub material_ns: u128,
     pub hidden_ns: u128,
-    pub by_source: BTreeMap<&'static str, DayProducerSourceTimingsV1>,
+    #[serde(serialize_with = "serialize_source_timings")]
+    pub by_source: [DayProducerSourceTimingsV1; 9],
 }
 #[cfg(feature = "stage-timing")]
 #[derive(Default, serde::Serialize)]
@@ -298,4 +275,32 @@ impl DayProducerV1<'_> {
     pub fn stage_timings(&self) -> &DayProducerStageTimingsV1 {
         &self.timings
     }
+}
+
+#[cfg(feature = "stage-timing")]
+fn serialize_source_timings<S: serde::Serializer>(
+    samples: &[DayProducerSourceTimingsV1; 9],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+    const NAMES: [&str; 9] = [
+        "aborted",
+        "binance_aggtrade",
+        "binance_depth_snapshot",
+        "binance_depth_update",
+        "chainlink_spot",
+        "chainlink_twap",
+        "end_of_input",
+        "polymarket_market_metadata",
+        "polymarket_orderbook",
+    ];
+    let mut map = serializer.serialize_map(None)?;
+    for (name, sample) in NAMES
+        .into_iter()
+        .zip(samples)
+        .filter(|(_, sample)| sample.inputs > 0)
+    {
+        map.serialize_entry(name, sample)?;
+    }
+    map.end()
 }

@@ -20016,6 +20016,7 @@ fn reduce_public_group_v1(
                     &format!("{}:public", group.execution_time.run_id()),
                     *position,
                     true,
+                    true,
                 )
                 .map_err(|error| {
                     fail(MarketEventErrorV1::Decode {

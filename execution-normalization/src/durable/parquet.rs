@@ -465,13 +465,12 @@ fn segment_path(logical: &Path, segment: &SegmentRange) -> Result<PathBuf, Durab
     }
     Ok(logical.parent().expect("提交目录").join(name))
 }
-pub(super) fn publish_segment_manifest(
+pub(super) fn stage_segment_manifest(
     target: &Path,
     version: &str,
     sequence: u64,
     boundary: &NoeSourceCommitBoundaryV1,
     segment: SegmentRange,
-    fault: PublishFaultV1,
 ) -> Result<(), DurableErrorV1> {
     let manifest = Manifest {
         physical_format: SEGMENT_FORMAT.into(),
@@ -483,14 +482,14 @@ pub(super) fn publish_segment_manifest(
     };
     let path = manifest_path(target);
     let name = path.file_name().unwrap().to_str().unwrap();
-    publish_no_replace(
+    rename_no_replace(
         target.parent().unwrap(),
         &format!(".{name}.tmp"),
         name,
         &encode_container(&manifest, &path)?,
         Some(sequence),
-        fault,
     )
+    .map(|_| ())
 }
 /// 截尾只回收不被保留逻辑提交引用的、明确归此 owner 的整段。
 pub(super) fn discard_unreferenced_segments(directory: &Path) -> Result<(), DurableErrorV1> {

@@ -1,5 +1,5 @@
 //! 共用纯盘口计算。数量由调用方拥有；这里只借用前序，并覆盖本消息触及的键。
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use contracts::*;
 use rust_decimal::Decimal;
@@ -665,6 +665,7 @@ struct Worker<'a, 'm, E, S> {
     previous: &'a S,
     input: PmMessageInput<'m, E>,
     public_selection: bool,
+    emit_reports: bool,
     reset: bool,
     member: Option<u32>,
     assets: BTreeMap<String, PmAssetStateV1<E>>,
@@ -742,6 +743,7 @@ pub(crate) fn reduce_epoch<'m, E: PmEvidenceV1, S: PmStateReadV1<E>>(
         previous,
         input,
         public_selection: false,
+        emit_reports: true,
         reset: false,
         member: None,
         assets: BTreeMap::new(),
@@ -770,6 +772,7 @@ pub(crate) fn reduce_message<'m, E: PmEvidenceV1, S: PmStateReadV1<E>>(
         input,
         public_selection,
         public_selection,
+        true,
     )?)
 }
 
@@ -779,12 +782,14 @@ fn compute_message<'m, E: PmEvidenceV1, S: PmStateReadV1<E>>(
     input: PmMessageInput<'m, E>,
     public_selection: bool,
     manage_epoch: bool,
+    emit_reports: bool,
 ) -> Result<PmMessageReductionV1<'m, E, u32>, ContractError> {
     let mut worker = Worker {
         context,
         previous,
         input,
         public_selection,
+        emit_reports,
         reset: false,
         member: None,
         assets: BTreeMap::new(),
@@ -977,6 +982,7 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
                 source_evidence,
             })
             .collect();
+
         self.report(
             scope,
             if suppressed {
@@ -1183,13 +1189,15 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
                 resync,
             },
         )?;
-        self.report(
-            self.scope(asset),
-            operation,
-            reason,
-            None,
-            PmReductionDispositionV2::Produced { derived_id },
-        );
+        if self.emit_reports {
+            self.report(
+                self.scope(asset),
+                operation,
+                reason,
+                None,
+                PmReductionDispositionV2::Produced { derived_id },
+            );
+        }
         Ok(())
     }
 
@@ -1269,17 +1277,19 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
                         "does not match the registered fixed market identity",
                     ));
                 }
-                self.no_event(
-                    format!(
-                        "polymarket_message:{}:{}:{}",
-                        self.context.market.condition_id.0,
-                        self.input.admission.source_sequence_epoch_id,
-                        self.input.admission.collector_admission_sequence
-                    ),
-                    "POLYMARKET_NEW_MARKET_IDENTITY_CONFIRMED",
-                    self.dependencies(None),
-                    true,
-                );
+                if self.emit_reports {
+                    self.no_event(
+                        format!(
+                            "polymarket_message:{}:{}:{}",
+                            self.context.market.condition_id.0,
+                            self.input.admission.source_sequence_epoch_id,
+                            self.input.admission.collector_admission_sequence
+                        ),
+                        "POLYMARKET_NEW_MARKET_IDENTITY_CONFIRMED",
+                        self.dependencies(None),
+                        true,
+                    );
+                }
                 Ok(())
             }
         }
@@ -1318,13 +1328,15 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
                 evidence,
                 fresh(ResyncQuality::NotRequired),
             )?;
-            self.report(
-                self.scope(asset),
-                ReductionOperationKindV1::Merge,
-                "POLYMARKET_INITIAL_BOOK_BASELINE",
-                None,
-                PmReductionDispositionV2::Produced { derived_id },
-            );
+            if self.emit_reports {
+                self.report(
+                    self.scope(asset),
+                    ReductionOperationKindV1::Merge,
+                    "POLYMARKET_INITIAL_BOOK_BASELINE",
+                    None,
+                    PmReductionDispositionV2::Produced { derived_id },
+                );
+            }
             // 首次快照步骤借用原数组，前序数量簿没有被复制。
             if self.public_selection {
                 for (side, levels) in [
@@ -1366,22 +1378,29 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
             .clone()
             .ok_or_else(|| invalid("book", "post-initial book requires an L2 absence baseline"))?;
         let mut identical = true;
-        let mut confirmation_evidence = self.dependencies(None);
+        let mut confirmation_evidence = if self.emit_reports {
+            self.dependencies(None)
+        } else {
+            Vec::new()
+        };
         for (side, incoming) in [
             (BookSide::Bid, incoming_bids),
             (BookSide::Ask, incoming_asks),
         ] {
-            let mut keys: BTreeSet<Decimal> = incoming.keys().copied().collect();
+            let mut keys: Vec<Decimal> = incoming.keys().copied().collect();
             if !self.reset {
                 keys.extend(self.previous.level_keys(&asset.token_id.0, side));
             }
-            let mut keys = keys.into_iter().collect::<Vec<_>>();
+            keys.sort_unstable();
+            keys.dedup();
             if side == BookSide::Bid {
                 keys.reverse();
             }
             for key in keys {
                 let mut previous = self.level(asset, side, key);
-                if let Some(level) = &previous.level {
+                if self.emit_reports
+                    && let Some(level) = &previous.level
+                {
                     confirmation_evidence.extend([level.direct.clone(), level.frontier.clone()]);
                 }
                 let incoming_level = incoming.get(&key).copied();
@@ -1498,12 +1517,14 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
                 vec![baseline.direct, baseline.frontier],
             )?;
         } else if identical {
-            self.no_event(
-                self.scope(asset),
-                "POLYMARKET_IDENTICAL_BOOK_CONFIRMATION",
-                confirmation_evidence,
-                true,
-            );
+            if self.emit_reports {
+                self.no_event(
+                    self.scope(asset),
+                    "POLYMARKET_IDENTICAL_BOOK_CONFIRMATION",
+                    confirmation_evidence,
+                    true,
+                );
+            }
         }
         Ok(())
     }
@@ -1570,13 +1591,15 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
         } else {
             ReductionOperationKindV1::Overwrite
         };
-        self.report(
-            self.level_scope(asset, side, &exact(key)),
-            operation,
-            reason,
-            Some(summary),
-            PmReductionDispositionV2::Produced { derived_id },
-        );
+        if self.emit_reports {
+            self.report(
+                self.level_scope(asset, side, &exact(key)),
+                operation,
+                reason,
+                Some(summary),
+                PmReductionDispositionV2::Produced { derived_id },
+            );
+        }
         Ok(())
     }
 
@@ -1598,12 +1621,14 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
         if let Some(quantity) = &change.quantity_shares {
             let state = self.asset(asset)?;
             if !state.book_ready {
-                self.no_event(
-                    self.scope(asset),
-                    "POLYMARKET_PRICE_CHANGE_FULL_BOOK_REQUIRED",
-                    vec![self.input.source.clone()],
-                    false,
-                );
+                if self.emit_reports {
+                    self.no_event(
+                        self.scope(asset),
+                        "POLYMARKET_PRICE_CHANGE_FULL_BOOK_REQUIRED",
+                        vec![self.input.source.clone()],
+                        false,
+                    );
+                }
                 if let Some(quote) = &change.best_bid_ask {
                     self.bba(asset, quote)?;
                 }
@@ -1625,15 +1650,17 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
                     .clone()
                     .or(previous.absence.clone())
                     .unwrap_or(baseline);
-                let evidence = self.dependencies(Some(&predecessor));
                 if before == after {
-                    self.no_event(
-                        self.level_scope(asset, side, &change.price_pusd_per_share),
-                        "POLYMARKET_ABSOLUTE_LEVEL_CONFIRMATION",
-                        evidence,
-                        true,
-                    );
+                    if self.emit_reports {
+                        self.no_event(
+                            self.level_scope(asset, side, &change.price_pusd_per_share),
+                            "POLYMARKET_ABSOLUTE_LEVEL_CONFIRMATION",
+                            self.dependencies(Some(&predecessor)),
+                            true,
+                        );
+                    }
                 } else {
+                    let evidence = self.dependencies(Some(&predecessor));
                     let next = pair(self.input.source, frontier(evidence.clone())?);
                     self.transition(
                         asset,
@@ -1664,12 +1691,14 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
             self.bba(asset, quote)?;
         } else if change.quantity_shares.is_none() {
             self.asset(asset)?;
-            self.no_event(
-                self.scope(asset),
-                "POLYMARKET_PRICE_CHANGE_WITHOUT_STATE",
-                vec![self.input.source.clone()],
-                false,
-            );
+            if self.emit_reports {
+                self.no_event(
+                    self.scope(asset),
+                    "POLYMARKET_PRICE_CHANGE_WITHOUT_STATE",
+                    vec![self.input.source.clone()],
+                    false,
+                );
+            }
         }
         Ok(())
     }
@@ -1709,12 +1738,14 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
             .as_ref()
             .is_some_and(|value| value.best_bid == bid && value.best_ask == ask)
         {
-            self.no_event(
-                self.scope(asset),
-                "POLYMARKET_BBA_CONFIRMATION",
-                evidence.clone(),
-                true,
-            );
+            if self.emit_reports {
+                self.no_event(
+                    self.scope(asset),
+                    "POLYMARKET_BBA_CONFIRMATION",
+                    evidence.clone(),
+                    true,
+                );
+            }
             return self.confirmation(asset, PmConfirmationComponentV1::BestBidAsk, evidence);
         }
         if state.bba.is_none() {
@@ -1734,17 +1765,19 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
             evidence,
             fresh(ResyncQuality::NotRequired),
         )?;
-        self.report(
-            self.scope(asset),
-            if state.bba.is_some() {
-                ReductionOperationKindV1::Overwrite
-            } else {
-                ReductionOperationKindV1::Merge
-            },
-            "POLYMARKET_BBA_UPDATE",
-            None,
-            PmReductionDispositionV2::Produced { derived_id },
-        );
+        if self.emit_reports {
+            self.report(
+                self.scope(asset),
+                if state.bba.is_some() {
+                    ReductionOperationKindV1::Overwrite
+                } else {
+                    ReductionOperationKindV1::Merge
+                },
+                "POLYMARKET_BBA_UPDATE",
+                None,
+                PmReductionDispositionV2::Produced { derived_id },
+            );
+        }
         state.bba = Some(PmBbaStateV1 {
             best_bid: bid,
             best_ask: ask,
@@ -1765,12 +1798,14 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
         let mut evidence = state.tick_direct_evidence.clone();
         evidence.extend([state.tick_frontier.clone(), self.input.source.clone()]);
         if new == &state.tick_size {
-            self.no_event(
-                self.scope(asset),
-                "POLYMARKET_TICK_CONFIRMATION",
-                evidence.clone(),
-                true,
-            );
+            if self.emit_reports {
+                self.no_event(
+                    self.scope(asset),
+                    "POLYMARKET_TICK_CONFIRMATION",
+                    evidence.clone(),
+                    true,
+                );
+            }
             return self.confirmation(asset, PmConfirmationComponentV1::Tick, evidence);
         }
         if old.as_ref().is_some_and(|value| value != &state.tick_size) {
@@ -1794,13 +1829,15 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
             evidence,
             fresh(ResyncQuality::NotRequired),
         )?;
-        self.report(
-            self.scope(asset),
-            ReductionOperationKindV1::Overwrite,
-            "POLYMARKET_TICK_UPDATE",
-            None,
-            PmReductionDispositionV2::Produced { derived_id },
-        );
+        if self.emit_reports {
+            self.report(
+                self.scope(asset),
+                ReductionOperationKindV1::Overwrite,
+                "POLYMARKET_TICK_UPDATE",
+                None,
+                PmReductionDispositionV2::Produced { derived_id },
+            );
+        }
         state.tick_size = new.clone();
         state.tick_direct_evidence = vec![next.direct];
         state.tick_frontier = next.frontier;
@@ -1818,24 +1855,28 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
     ) -> Result<(), ContractError> {
         self.asset(asset)?;
         let (Some(quantity), Some(side)) = (quantity, side) else {
-            self.no_event(
-                self.scope(asset),
-                "POLYMARKET_PUBLIC_TRADE_INCOMPLETE",
-                vec![self.input.source.clone()],
-                false,
-            );
+            if self.emit_reports {
+                self.no_event(
+                    self.scope(asset),
+                    "POLYMARKET_PUBLIC_TRADE_INCOMPLETE",
+                    vec![self.input.source.clone()],
+                    false,
+                );
+            }
             return Ok(());
         };
         let side = match side {
             CanonicalPmSideV1::Buy => TradeSide::Buy,
             CanonicalPmSideV1::Sell => TradeSide::Sell,
             CanonicalPmSideV1::Unknown => {
-                self.no_event(
-                    self.scope(asset),
-                    "POLYMARKET_PUBLIC_TRADE_UNKNOWN_SIDE",
-                    vec![self.input.source.clone()],
-                    false,
-                );
+                if self.emit_reports {
+                    self.no_event(
+                        self.scope(asset),
+                        "POLYMARKET_PUBLIC_TRADE_UNKNOWN_SIDE",
+                        vec![self.input.source.clone()],
+                        false,
+                    );
+                }
                 return Ok(());
             }
         };
@@ -1865,13 +1906,15 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
             self.dependencies(None),
             fresh(ResyncQuality::NotRequired),
         )?;
-        self.report(
-            self.scope(asset),
-            ReductionOperationKindV1::Merge,
-            "POLYMARKET_PUBLIC_TRADE_ACCEPTED",
-            None,
-            PmReductionDispositionV2::Produced { derived_id },
-        );
+        if self.emit_reports {
+            self.report(
+                self.scope(asset),
+                ReductionOperationKindV1::Merge,
+                "POLYMARKET_PUBLIC_TRADE_ACCEPTED",
+                None,
+                PmReductionDispositionV2::Produced { derived_id },
+            );
+        }
         Ok(())
     }
 }
@@ -2060,15 +2103,21 @@ impl<E: PmEvidenceV1> PreparedPmEvidenceV1<E> {
                 )?,
             );
         }
-        let pm_digest = |domain: &[u8]| {
-            if payload.is_some() {
+        let pm_digest = |domain: &[u8], needed: bool| {
+            if needed {
                 std::sync::OnceLock::from(hash_domain_bytes(domain, &semantic_key))
             } else {
                 std::sync::OnceLock::new()
             }
         };
-        let causal_group_id = pm_digest(b"data-pipeline/polymarket-causal-group/v1\0");
-        let public_trade_id = pm_digest(b"data-pipeline/polymarket-public-trade-id/v1\0");
+        let causal_group_id = pm_digest(
+            b"data-pipeline/polymarket-causal-group/v1\0",
+            matches!(payload, Some(CanonicalPmPayloadV1::Book { .. })),
+        );
+        let public_trade_id = pm_digest(
+            b"data-pipeline/polymarket-public-trade-id/v1\0",
+            matches!(payload, Some(CanonicalPmPayloadV1::PublicTrade { .. })),
+        );
         Ok(Self(std::sync::Arc::new(PreparedEvidenceData {
             value,
             physical_key,
@@ -2178,6 +2227,7 @@ pub fn compute_pm_message_steps_v1<'m>(
     consumer_stream_id: &str,
     canonical_record_position: u64,
     public_selection: bool,
+    emit_reports: bool,
 ) -> Result<
     PmMessageReductionV1<'m, PreparedPmEvidenceV1<SourceEvidenceRefV3>, PmDerivedStepPositionV1>,
     ContractError,
@@ -2203,6 +2253,7 @@ pub fn compute_pm_message_steps_v1<'m>(
         },
         public_selection,
         true,
+        emit_reports,
     )?;
     let positions: Vec<_> = result
         .steps
@@ -2523,6 +2574,7 @@ mod no_encoding_tests {
                     "consumer",
                     0,
                     public_selection,
+                    true,
                 )
                 .unwrap()
                 .into_owned();

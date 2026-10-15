@@ -487,14 +487,22 @@ where
                                 .transpose()?
                                 .into_iter()
                                 .collect();
-                            let public = DayPublicSourceV1::new(hub.clone(), index, prefetched);
-                            let hidden = DayHiddenSourceV1::new(hub.clone(), index);
+                            let delivery = DayLocalDeliveryCacheV1::shared(&hub, index);
+                            let public = DayPublicSourceV1::new(
+                                hub.clone(),
+                                index,
+                                prefetched,
+                                delivery.clone(),
+                            );
+                            let hidden =
+                                DayHiddenSourceV1::new(hub.clone(), index, delivery.clone());
                             let checkpoint = DayCandidateCheckpointV1::new(
                                 hub.clone(),
                                 index,
                                 day.checkpoint_root.clone(),
                                 saved,
                                 day.checkpoint_every_candidate_events,
+                                delivery,
                             );
                             let runtime = tokio::runtime::Builder::new_current_thread().build()?;
                             let report = runtime
@@ -566,7 +574,7 @@ where
                     if day.progress_interval_seconds>0 && progress.elapsed()>=Duration::from_secs(day.progress_interval_seconds) {
                         eprintln!("日作业: phase={}, inputs={count}, active_candidates={}, retained_public_groups={}, retained_hidden_buckets={}, elapsed_seconds={}, total_inputs=unknown",if ended {"consuming"} else if buffer.requested.is_some() {"checkpoint"} else {"producing"},buffer.candidates.iter().filter(|c|c.active).count(),buffer.public.len(),buffer.hidden.len(),started.elapsed().as_secs());progress=Instant::now();
                     }
-                    if buffer.candidates.iter().any(|c|c.active&&(!c.runtime_started||c.source_health.is_none()||c.requirements.is_none())) {let _=measure_stage!(stages, "producer_wait_startup_checkpoint_or_completion", hub.0.1.wait_timeout(buffer,Duration::from_millis(20))).unwrap();continue;}
+                    if buffer.candidates.iter().any(|c|c.active&&(!c.runtime_started||c.source_health.is_none()||c.requirements.is_none())) {let _=measure_stage!(stages, ProducerWaitStartupCheckpointOrCompletion, hub.0.1.wait_timeout(buffer,Duration::from_millis(20))).unwrap();continue;}
                     if buffer.candidates.iter().any(|c|c.source_health==Some(true)) {producer.core.enable_source_progress();}
                     if count == 0 {
                         producer.core.set_observation_requirements(contracts::PublicObservationRequirementsV1 {
@@ -599,20 +607,20 @@ where
                             }
                         };
                         #[cfg(feature="stage-timing")]
-                        stages.record("checkpoint_capture_subsystems", checkpoint_started.elapsed());
+                        stages.record(crate::stage_timing::Stage::CheckpointCaptureSubsystems, checkpoint_started.elapsed());
                         #[cfg(feature="stage-timing")]
                         let write_started=Instant::now();
                         let sha256 = write_cbor(&day.checkpoint_root.join(format!("checkpoint-{generation:020}")).join("day.cbor"),
                             &DayCheckpointV1 { format:DAY_CHECKPOINT_FORMAT.into(),identity:identity.clone(),generation,applied:count,state,completed })?;
                         #[cfg(feature="stage-timing")]
-                        stages.record("checkpoint_encode_day_write_and_sync",write_started.elapsed());
+                        stages.record(crate::stage_timing::Stage::CheckpointEncodeDayWriteAndSync,write_started.elapsed());
                         let mut files = vec![CheckpointFileV1 {path:"day.cbor".into(),sha256}];
                         for (index,candidate) in buffer.candidates.iter().enumerate().filter(|(_,c)|c.active) {
                             files.push(CheckpointFileV1 {path:format!("candidate-{index:06}.cbor"),sha256:candidate.ready.as_ref().unwrap().1.clone()});
                         }
                         publish(&day.checkpoint_root,&identity,generation,files)?;
                         #[cfg(feature = "stage-timing")]
-                        stages.record("checkpoint_capture_write_and_publish", checkpoint_started.elapsed());
+                        stages.record(crate::stage_timing::Stage::CheckpointCaptureWriteAndPublish, checkpoint_started.elapsed());
                         buffer.budget_stopped=buffer.budget_stop_requested && !complete;
                         buffer.requested=None;generation+=1;buffer.generation=generation;hub.0.1.notify_all();last_checkpoint=Instant::now();last_count=count;
                         #[cfg(feature="stage-timing")]
@@ -624,15 +632,17 @@ where
                         }
                         if complete || buffer.budget_stopped {return Ok(());}
                     }
-                    if ended {let _=measure_stage!(stages, "producer_wait_startup_checkpoint_or_completion", hub.0.1.wait_timeout(buffer,Duration::from_millis(20))).unwrap();continue;}
+                    if ended {let _=measure_stage!(stages, ProducerWaitStartupCheckpointOrCompletion, hub.0.1.wait_timeout(buffer,Duration::from_millis(20))).unwrap();continue;}
                     // 已有可消费材料时让慢候选追上；等待必要完整隐藏桶时继续供料，避免互等。
                     if buffer.public.len()+buffer.hidden.len()>lead && buffer.candidates.iter().any(|c|c.active&&!c.waiting&&(buffer.requested.is_none()||c.ready.as_ref().map(|(g,_)|*g)!=buffer.requested)) {
-                        let _=measure_stage!(stages, "producer_backpressure_wait", hub.0.1.wait_timeout(buffer,Duration::from_millis(10))).unwrap();continue;
+                        let _=measure_stage!(stages, ProducerBackpressureWait, hub.0.1.wait_timeout(buffer,Duration::from_millis(10))).unwrap();continue;
                     }
                 }
-                let Some(mut next)=measure_stage!(stages, "next_applied_including_decode_core_hidden", producer.next_applied())? else {ended=true;let mut buffer=hub.0.0.lock().unwrap();buffer.production=ProductionV1::Ended;hub.0.1.notify_all();continue;};
+                let Some(mut next)=measure_stage!(stages, NextAppliedIncludingDecodeCoreHidden, producer.next_applied())? else {ended=true;let mut buffer=hub.0.0.lock().unwrap();buffer.production=ProductionV1::Ended;hub.0.1.notify_all();continue;};
                 #[cfg(feature = "stage-timing")]
                 let publish_started = Instant::now();
+                #[cfg(feature = "stage-timing")]
+                let diagnostic_sample = stages.next_diagnostic_sample();
                 count+=1;
                 let new_markets = next.applied.closed_groups.iter().flat_map(|g|g.records.iter()).filter_map(|fact| {
                     if let contracts::PublicBusinessPayloadV1::MarketFact { market, payload: contracts::CanonicalMarketFactPayloadV1::FixedIdentity { assets } } = &fact.payload {
@@ -640,19 +650,36 @@ where
                     } else { None }
                 }).collect::<Vec<_>>();
                 if next.initialization_binding.is_some() || !new_markets.is_empty() {
+                    #[cfg(feature = "stage-timing")]
+                    let catalog_started = Instant::now();
                     let mut catalog=catalog.write().unwrap();
                     if let Some(binding)=&next.initialization_binding {catalog.initialization.input_positions.insert(next.input.input_position);catalog.initialization.source_message_ids.insert(binding.source_message_id.0.clone());}
                     for (market, assets) in new_markets {
                         catalog.markets.entry(market.condition_id.0.clone()).or_insert(PlatformMarketV1::try_new(market.clone(), assets.clone().try_into().map_err(|_|"原登记市场不是二元市场")?)?);
                     }
-                }
-                let groups=PreparedPublicGroupV1::from_day(&mut next);
-                let hidden=next.hidden.into_iter().map(AcceptedHiddenStepBucketV1::from_day);
-                if !groups.is_empty() || hidden.len() != 0 {
-                    let mut buffer=hub.0.0.lock().unwrap();buffer.public.extend(groups);buffer.hidden.extend(hidden);hub.0.1.notify_all();
+                    #[cfg(feature = "stage-timing")]
+                    stages.record(crate::stage_timing::Stage::ProducerCatalogUpdate, catalog_started.elapsed());
                 }
                 #[cfg(feature = "stage-timing")]
-                stages.record("delivery_assembly_and_publish_including_lock", publish_started.elapsed());
+                let construction_started = diagnostic_sample.then(Instant::now);
+                let groups=PreparedPublicGroupV1::from_day(&mut next);
+                let hidden=next.hidden.into_iter().map(AcceptedHiddenStepBucketV1::from_day);
+                #[cfg(feature = "stage-timing")]
+                if let Some(started) = construction_started { stages.record(crate::stage_timing::Stage::ProducerDeliveryConstruction, started.elapsed()); }
+                if !groups.is_empty() || hidden.len() != 0 {
+                    #[cfg(feature = "stage-timing")]
+                    let lock_started = diagnostic_sample.then(Instant::now);
+                    let mut buffer=hub.0.0.lock().unwrap();
+                    #[cfg(feature = "stage-timing")]
+                    if let Some(started) = lock_started { stages.record(crate::stage_timing::Stage::ProducerHubLockWait, started.elapsed()); }
+                    #[cfg(feature = "stage-timing")]
+                    let held_started = diagnostic_sample.then(Instant::now);
+                    buffer.public.extend(groups);buffer.hidden.extend(hidden);hub.0.1.notify_all();
+                    #[cfg(feature = "stage-timing")]
+                    if let Some(started) = held_started { stages.record(crate::stage_timing::Stage::ProducerHubPublish, started.elapsed()); }
+                }
+                #[cfg(feature = "stage-timing")]
+                stages.record(crate::stage_timing::Stage::DeliveryAssemblyAndPublishIncludingLock, publish_started.elapsed());
             }
         })).unwrap_or_else(|_|Err("日公共生产异常退出".into()));
         if let Err(error) = &production {

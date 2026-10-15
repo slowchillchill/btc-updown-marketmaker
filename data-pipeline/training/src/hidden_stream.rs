@@ -138,6 +138,13 @@ impl StreamingHiddenStateV1 {
     /// pm_lower覆盖全部未读PM；None表示PM来源已完整结束。
     pub fn advance_pm(&mut self, pm_lower: Option<PmOrder>) -> RecordingResult<()> {
         use rayon::prelude::*;
+        if !self
+            .pending_pm
+            .first_key_value()
+            .is_some_and(|(key, _)| pm_lower.is_none_or(|lower| *key < lower))
+        {
+            return Ok(());
+        }
         let mut markets: BTreeMap<String, Vec<(PmOrder, PreparedPmMessageV1)>> = BTreeMap::new();
         while self
             .pending_pm
@@ -161,33 +168,41 @@ impl StreamingHiddenStateV1 {
             })
             .collect::<RecordingResult<Vec<_>>>()?;
         let stream = &self.stream;
-        let completed = work
-            .into_par_iter()
-            .map(|(id, mut state, messages)| -> RecordingResult<_> {
-                let mut output = Vec::new();
-                for (key, prepared) in messages {
-                    let result = compute_pm_message_steps_v1(
-                        state.context(),
-                        &state,
-                        &prepared,
-                        stream,
-                        key.3,
-                        false,
-                    )?;
-                    state.apply(&result);
-                    let material = materialize_pm_step_identity_v1(result)?;
-                    let steps = material
-                        .reduction
-                        .steps
-                        .into_iter()
-                        .zip(material.bindings)
-                        .map(|(step, binding)| (step.into_source_step(), binding))
-                        .collect::<Vec<_>>();
-                    output.push((key, state.context().market.clone(), steps));
-                }
-                Ok((id, state, output))
-            })
-            .collect::<Vec<_>>();
+        let process_market = |(id, mut state, messages): (
+            String,
+            PmOwnedStateV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>,
+            Vec<(PmOrder, PreparedPmMessageV1)>,
+        )|
+         -> RecordingResult<_> {
+            let mut output = Vec::new();
+            for (key, prepared) in messages {
+                let result = compute_pm_message_steps_v1(
+                    state.context(),
+                    &state,
+                    &prepared,
+                    stream,
+                    key.3,
+                    false,
+                    false,
+                )?;
+                state.apply(&result);
+                let material = materialize_pm_step_identity_v1(result)?;
+                let steps = material
+                    .reduction
+                    .steps
+                    .into_iter()
+                    .zip(material.bindings)
+                    .map(|(step, binding)| (step.into_source_step(), binding))
+                    .collect::<Vec<_>>();
+                output.push((key, state.context().market.clone(), steps));
+            }
+            Ok((id, state, output))
+        };
+        let completed = if work.len() == 1 {
+            work.into_iter().map(process_market).collect::<Vec<_>>()
+        } else {
+            work.into_par_iter().map(process_market).collect::<Vec<_>>()
+        };
         let mut output = Vec::new();
         for completed in completed {
             let (id, state, steps) = completed?;

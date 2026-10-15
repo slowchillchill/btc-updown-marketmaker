@@ -239,6 +239,7 @@ pub fn prepare_hidden_with_progress_v1(
             &consumer_stream_id,
             canonical_position,
             false,
+            true,
         )?;
         state.apply(&result);
         let material = materialize_pm_step_identity_v1(result)?;

@@ -8,9 +8,11 @@ use sim_system::{
     public_consumption::*, scenario::*,
 };
 use std::{
+    cell::RefCell,
     collections::VecDeque,
     io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{Arc, Condvar, Mutex},
 };
 
@@ -96,7 +98,10 @@ impl DayHubV1 {
             Condvar::new(),
         )))
     }
-    pub fn compact(buffer: &mut DayBufferV1) {
+    /// 移除原安全消费前缀；调用者在释放 Hub 锁后析构临时引用。
+    pub fn compact(
+        buffer: &mut DayBufferV1,
+    ) -> (Vec<PublicGroupDeliveryV1>, Vec<AcceptedHiddenStepBucketV1>) {
         let public = buffer
             .candidates
             .iter()
@@ -111,14 +116,11 @@ impl DayHubV1 {
             .map(|c| c.cursor.hidden)
             .min()
             .unwrap_or(buffer.hidden_base + buffer.hidden.len());
-        while buffer.public_base < public {
-            buffer.public.pop_front();
-            buffer.public_base += 1;
-        }
-        while buffer.hidden_base < hidden {
-            buffer.hidden.pop_front();
-            buffer.hidden_base += 1;
-        }
+        let retired_public = buffer.public.drain(..public - buffer.public_base).collect();
+        let retired_hidden = buffer.hidden.drain(..hidden - buffer.hidden_base).collect();
+        buffer.public_base = public;
+        buffer.hidden_base = hidden;
+        (retired_public, retired_hidden)
     }
     pub fn finish(
         &self,
@@ -145,23 +147,66 @@ impl DayHubV1 {
                 });
             }
         }
-        Self::compact(&mut buffer);
+        let retired = Self::compact(&mut buffer);
         cv.notify_all();
+        drop(buffer);
+        drop(retired);
+    }
+}
+// 仅由一个候选线程持有；领取不推进共享回收位置。
+const DAY_DELIVERY_BATCH: usize = 64;
+pub(crate) struct DayLocalDeliveryCacheV1 {
+    public: VecDeque<PublicGroupDeliveryV1>,
+    hidden: VecDeque<AcceptedHiddenStepBucketV1>,
+    public_end: usize,
+    hidden_end: usize,
+    times: crate::timing::DeliveryTimes,
+}
+impl DayLocalDeliveryCacheV1 {
+    pub fn shared(hub: &DayHubV1, index: usize) -> Rc<RefCell<Self>> {
+        let buffer = hub.0.0.lock().unwrap();
+        let cursor = &buffer.candidates[index].cursor;
+        Rc::new(RefCell::new(Self {
+            public: VecDeque::new(),
+            hidden: VecDeque::new(),
+            public_end: cursor.public,
+            hidden_end: cursor.hidden,
+            times: cursor.times.clone(),
+        }))
+    }
+    fn publish(&self, buffer: &mut DayBufferV1, index: usize) {
+        let cursor = &mut buffer.candidates[index].cursor;
+        cursor.public = self.public_end - self.public.len();
+        cursor.hidden = self.hidden_end - self.hidden.len();
+        cursor.times.last = self.times.last;
     }
 }
 pub(crate) struct DayPublicSourceV1 {
     pub hub: DayHubV1,
     pub index: usize,
     pub restored: VecDeque<PublicGroupDeliveryV1>,
+    delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     failed: bool,
+    #[cfg(feature = "stage-timing")]
+    stages: crate::stage_timing::StageTimings,
 }
 impl DayPublicSourceV1 {
-    pub fn new(hub: DayHubV1, index: usize, restored: VecDeque<PublicGroupDeliveryV1>) -> Self {
+    pub fn new(
+        hub: DayHubV1,
+        index: usize,
+        restored: VecDeque<PublicGroupDeliveryV1>,
+        delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
+    ) -> Self {
         Self {
             hub,
             index,
             restored,
+            delivery,
             failed: false,
+            #[cfg(feature = "stage-timing")]
+            stages: crate::stage_timing::StageTimings::new(format!(
+                "candidate_public_transport:{index}"
+            )),
         }
     }
 }
@@ -174,63 +219,157 @@ impl Iterator for DayPublicSourceV1 {
         if self.failed {
             return None;
         }
-        let mut buffer = self.hub.0.0.lock().unwrap();
         loop {
-            let position = buffer.candidates[self.index].cursor.public;
-            if let Some(mut group) = buffer.public.get(position - buffer.public_base).cloned() {
-                let cursor = &mut buffer.candidates[self.index].cursor;
-                cursor.public += 1;
-                let time = cursor.times.execution_time_for_visible_group(
-                    &group.prepared.reference,
-                    group.delivered_at_utc_ms,
-                );
-                buffer.candidates[self.index].waiting = false;
-                DayHubV1::compact(&mut buffer);
-                self.hub.0.1.notify_all();
+            let group = self.delivery.borrow_mut().public.pop_front();
+            if let Some(mut group) = group {
+                let time = self
+                    .delivery
+                    .borrow_mut()
+                    .times
+                    .execution_time_for_visible_group(
+                        &group.prepared.reference,
+                        group.delivered_at_utc_ms,
+                    );
                 return Some(time.map(|at| {
                     group.delivered_at_utc_ms = at;
                     group
                 }));
             }
-            if let Some(error) = buffer.failure.clone() {
-                self.failed = true;
-                return Some(Err(SimRunActorErrorV2::PublicConsumptionSource(
-                    error.message,
-                )));
+            #[cfg(feature = "stage-timing")]
+            let lock_started = std::time::Instant::now();
+            let mut buffer = self.hub.0.0.lock().unwrap();
+            #[cfg(feature = "stage-timing")]
+            self.stages.record(
+                crate::stage_timing::Stage::CandidateRefillLockWait,
+                lock_started.elapsed(),
+            );
+            #[cfg(feature = "stage-timing")]
+            let reclaim_started = std::time::Instant::now();
+            #[cfg(feature = "stage-timing")]
+            let bases = (buffer.public_base, buffer.hidden_base);
+            self.delivery.borrow().publish(&mut buffer, self.index);
+            let retired = measure_stage!(
+                self.stages,
+                CandidateReclaimDetach,
+                DayHubV1::compact(&mut buffer)
+            );
+            self.hub.0.1.notify_all();
+            #[cfg(feature = "stage-timing")]
+            {
+                self.stages.record(
+                    crate::stage_timing::Stage::CandidateCursorPublishAndReclaim,
+                    reclaim_started.elapsed(),
+                );
+                self.stages.add_delivery_work(
+                    0,
+                    buffer.public_base - bases.0,
+                    buffer.hidden_base - bases.1,
+                );
             }
-            match &buffer.production {
-                ProductionV1::Ended => return None,
-                ProductionV1::Failed(error) => {
+            // 发布仍在原锁内完成；先解锁并释放本批回收引用，再锁定当前可领取材料。
+            drop(buffer);
+            measure_stage!(self.stages, CandidateReclaimedDrop, drop(retired));
+            #[cfg(feature = "stage-timing")]
+            let lock_started = std::time::Instant::now();
+            let mut buffer = self.hub.0.0.lock().unwrap();
+            #[cfg(feature = "stage-timing")]
+            self.stages.record(
+                crate::stage_timing::Stage::CandidateRefillLockWait,
+                lock_started.elapsed(),
+            );
+            #[cfg(feature = "stage-timing")]
+            let mut emit_transport = false;
+            loop {
+                #[cfg(feature = "stage-timing")]
+                let claim_started = std::time::Instant::now();
+                let mut delivery = self.delivery.borrow_mut();
+                let position = delivery.public_end;
+                delivery.public.extend(
+                    buffer
+                        .public
+                        .iter()
+                        .skip(position - buffer.public_base)
+                        .take(DAY_DELIVERY_BATCH)
+                        .cloned(),
+                );
+                delivery.public_end += delivery.public.len();
+                #[cfg(feature = "stage-timing")]
+                {
+                    self.stages.record(
+                        crate::stage_timing::Stage::CandidateBatchClaim,
+                        claim_started.elapsed(),
+                    );
+                    emit_transport |= self.stages.add_delivery_work(delivery.public.len(), 0, 0);
+                }
+                if !delivery.public.is_empty() {
+                    buffer.candidates[self.index].waiting = false;
+                    break;
+                }
+                drop(delivery);
+                if let Some(error) = buffer.failure.clone() {
                     self.failed = true;
                     return Some(Err(SimRunActorErrorV2::PublicConsumptionSource(
-                        error.clone(),
+                        error.message,
                     )));
                 }
-                ProductionV1::Running => {}
+                match &buffer.production {
+                    ProductionV1::Ended => return None,
+                    ProductionV1::Failed(error) => {
+                        self.failed = true;
+                        return Some(Err(SimRunActorErrorV2::PublicConsumptionSource(
+                            error.clone(),
+                        )));
+                    }
+                    ProductionV1::Running => {}
+                }
+                if !buffer.candidates[self.index].waiting {
+                    buffer.candidates[self.index].waiting = true;
+                    self.hub.0.1.notify_all();
+                }
+                #[cfg(test)]
+                let observed_wait = tests::empty_wait_started();
+                #[cfg(feature = "stage-timing")]
+                let wait_started = std::time::Instant::now();
+                buffer = self.hub.0.1.wait(buffer).unwrap();
+                #[cfg(feature = "stage-timing")]
+                self.stages.record(
+                    crate::stage_timing::Stage::CandidateDataWait,
+                    wait_started.elapsed(),
+                );
+                #[cfg(test)]
+                tests::empty_wait_returned(observed_wait);
             }
-            if !buffer.candidates[self.index].waiting {
-                buffer.candidates[self.index].waiting = true;
-                self.hub.0.1.notify_all();
+            drop(buffer);
+            #[cfg(feature = "stage-timing")]
+            if emit_transport {
+                self.stages.emit_transport();
             }
-            #[cfg(test)]
-            let observed_wait = tests::empty_wait_started();
-            buffer = self.hub.0.1.wait(buffer).unwrap();
-            #[cfg(test)]
-            tests::empty_wait_returned(observed_wait);
         }
     }
 }
 pub(crate) struct DayHiddenSourceV1 {
     pub hub: DayHubV1,
     pub index: usize,
+    delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     failed: bool,
+    #[cfg(feature = "stage-timing")]
+    stages: crate::stage_timing::StageTimings,
 }
 impl DayHiddenSourceV1 {
-    pub fn new(hub: DayHubV1, index: usize) -> Self {
+    pub fn new(
+        hub: DayHubV1,
+        index: usize,
+        delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
+    ) -> Self {
         Self {
             hub,
             index,
+            delivery,
             failed: false,
+            #[cfg(feature = "stage-timing")]
+            stages: crate::stage_timing::StageTimings::new(format!(
+                "candidate_hidden_transport:{index}"
+            )),
         }
     }
 }
@@ -240,37 +379,116 @@ impl Iterator for DayHiddenSourceV1 {
         if self.failed {
             return None;
         }
-        let mut buffer = self.hub.0.0.lock().unwrap();
         loop {
-            let position = buffer.candidates[self.index].cursor.hidden;
-            if let Some(bucket) = buffer.hidden.get(position - buffer.hidden_base).cloned() {
-                buffer.candidates[self.index].cursor.hidden += 1;
-                buffer.candidates[self.index].waiting = false;
-                DayHubV1::compact(&mut buffer);
-                self.hub.0.1.notify_all();
+            let bucket = self.delivery.borrow_mut().hidden.pop_front();
+            if let Some(bucket) = bucket {
                 return Some(Ok(bucket));
             }
-            if let Some(error) = buffer.failure.clone() {
-                self.failed = true;
-                return Some(Err(error.message.into()));
+            #[cfg(feature = "stage-timing")]
+            let lock_started = std::time::Instant::now();
+            let mut buffer = self.hub.0.0.lock().unwrap();
+            #[cfg(feature = "stage-timing")]
+            self.stages.record(
+                crate::stage_timing::Stage::CandidateRefillLockWait,
+                lock_started.elapsed(),
+            );
+            #[cfg(feature = "stage-timing")]
+            let reclaim_started = std::time::Instant::now();
+            #[cfg(feature = "stage-timing")]
+            let bases = (buffer.public_base, buffer.hidden_base);
+            self.delivery.borrow().publish(&mut buffer, self.index);
+            let retired = measure_stage!(
+                self.stages,
+                CandidateReclaimDetach,
+                DayHubV1::compact(&mut buffer)
+            );
+            self.hub.0.1.notify_all();
+            #[cfg(feature = "stage-timing")]
+            {
+                self.stages.record(
+                    crate::stage_timing::Stage::CandidateCursorPublishAndReclaim,
+                    reclaim_started.elapsed(),
+                );
+                self.stages.add_delivery_work(
+                    0,
+                    buffer.public_base - bases.0,
+                    buffer.hidden_base - bases.1,
+                );
             }
-            match &buffer.production {
-                ProductionV1::Ended => return None,
-                ProductionV1::Failed(error) => {
-                    self.failed = true;
-                    return Some(Err(error.clone().into()));
+            // 发布仍在原锁内完成；先解锁并释放本批回收引用，再锁定当前可领取材料。
+            drop(buffer);
+            measure_stage!(self.stages, CandidateReclaimedDrop, drop(retired));
+            #[cfg(feature = "stage-timing")]
+            let lock_started = std::time::Instant::now();
+            let mut buffer = self.hub.0.0.lock().unwrap();
+            #[cfg(feature = "stage-timing")]
+            self.stages.record(
+                crate::stage_timing::Stage::CandidateRefillLockWait,
+                lock_started.elapsed(),
+            );
+            #[cfg(feature = "stage-timing")]
+            let mut emit_transport = false;
+            loop {
+                #[cfg(feature = "stage-timing")]
+                let claim_started = std::time::Instant::now();
+                let mut delivery = self.delivery.borrow_mut();
+                let position = delivery.hidden_end;
+                delivery.hidden.extend(
+                    buffer
+                        .hidden
+                        .iter()
+                        .skip(position - buffer.hidden_base)
+                        .take(DAY_DELIVERY_BATCH)
+                        .cloned(),
+                );
+                delivery.hidden_end += delivery.hidden.len();
+                #[cfg(feature = "stage-timing")]
+                {
+                    self.stages.record(
+                        crate::stage_timing::Stage::CandidateBatchClaim,
+                        claim_started.elapsed(),
+                    );
+                    emit_transport |= self.stages.add_delivery_work(delivery.hidden.len(), 0, 0);
                 }
-                ProductionV1::Running => {}
+                if !delivery.hidden.is_empty() {
+                    buffer.candidates[self.index].waiting = false;
+                    break;
+                }
+                drop(delivery);
+                if let Some(error) = buffer.failure.clone() {
+                    self.failed = true;
+                    return Some(Err(error.message.into()));
+                }
+                match &buffer.production {
+                    ProductionV1::Ended => return None,
+                    ProductionV1::Failed(error) => {
+                        self.failed = true;
+                        return Some(Err(error.clone().into()));
+                    }
+                    ProductionV1::Running => {}
+                }
+                if !buffer.candidates[self.index].waiting {
+                    buffer.candidates[self.index].waiting = true;
+                    self.hub.0.1.notify_all();
+                }
+                #[cfg(test)]
+                let observed_wait = tests::empty_wait_started();
+                #[cfg(feature = "stage-timing")]
+                let wait_started = std::time::Instant::now();
+                buffer = self.hub.0.1.wait(buffer).unwrap();
+                #[cfg(feature = "stage-timing")]
+                self.stages.record(
+                    crate::stage_timing::Stage::CandidateDataWait,
+                    wait_started.elapsed(),
+                );
+                #[cfg(test)]
+                tests::empty_wait_returned(observed_wait);
             }
-            if !buffer.candidates[self.index].waiting {
-                buffer.candidates[self.index].waiting = true;
-                self.hub.0.1.notify_all();
+            drop(buffer);
+            #[cfg(feature = "stage-timing")]
+            if emit_transport {
+                self.stages.emit_transport();
             }
-            #[cfg(test)]
-            let observed_wait = tests::empty_wait_started();
-            buffer = self.hub.0.1.wait(buffer).unwrap();
-            #[cfg(test)]
-            tests::empty_wait_returned(observed_wait);
         }
     }
 }
@@ -289,6 +507,7 @@ pub(crate) struct CandidateCheckpointV1<D> {
     next_hidden: Option<HiddenBucketCheckpointV1>,
 }
 pub(crate) struct DayCandidateCheckpointV1<D> {
+    delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     pub hub: DayHubV1,
     pub index: usize,
     pub root: PathBuf,
@@ -306,6 +525,7 @@ impl<D> DayCandidateCheckpointV1<D> {
         root: PathBuf,
         resumed: Option<CandidateCheckpointV1<D>>,
         every_events: Option<u64>,
+        delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     ) -> Self {
         Self {
             hub,
@@ -315,6 +535,7 @@ impl<D> DayCandidateCheckpointV1<D> {
             hidden: None,
             every_events,
             events: 0,
+            delivery,
             #[cfg(feature = "stage-timing")]
             stages: crate::stage_timing::StageTimings::new(format!("candidate_checkpoint:{index}")),
         }
@@ -384,29 +605,42 @@ where
         next_hidden: Option<&AcceptedHiddenStepBucketV1>,
     ) -> Result<RuntimeCheckpointControlV1, MaterialError> {
         self.events += 1;
-        let generation = {
-            let mut buffer = self.hub.0.0.lock().unwrap();
-            if buffer.requested.is_none()
-                && self.every_events.is_some_and(|n| n > 0 && self.events >= n)
+        #[cfg(feature = "stage-timing")]
+        let sample = self.stages.next_diagnostic_sample();
+        let generation = measure_sampled_stage!(
+            self.stages,
+            sample,
+            CandidateControlAndCursorPublishSampled,
             {
-                buffer.requested = Some(buffer.generation);
-                self.hub.0.1.notify_all();
-            }
-            let generation = buffer.requested.filter(|g| {
-                buffer.candidates[self.index]
-                    .ready
-                    .as_ref()
-                    .map(|(g, _)| *g)
-                    != Some(*g)
-            });
-            let Some(generation) = generation else {
-                return Ok(if buffer.budget_stopped {
-                    RuntimeCheckpointControlV1::SavedThenStop
-                } else {
-                    RuntimeCheckpointControlV1::Continue
+                let mut buffer = measure_sampled_stage!(
+                    self.stages,
+                    sample,
+                    CandidateControlLockWaitSampled,
+                    self.hub.0.0.lock().unwrap()
+                );
+                self.delivery.borrow().publish(&mut buffer, self.index);
+                if buffer.requested.is_none()
+                    && self.every_events.is_some_and(|n| n > 0 && self.events >= n)
+                {
+                    buffer.requested = Some(buffer.generation);
+                    self.hub.0.1.notify_all();
+                }
+                let generation = buffer.requested.filter(|g| {
+                    buffer.candidates[self.index]
+                        .ready
+                        .as_ref()
+                        .map(|(g, _)| *g)
+                        != Some(*g)
                 });
-            };
-            generation
+                (generation, buffer.budget_stopped)
+            }
+        );
+        let (Some(generation), _) = generation else {
+            return Ok(if generation.1 {
+                RuntimeCheckpointControlV1::SavedThenStop
+            } else {
+                RuntimeCheckpointControlV1::Continue
+            });
         };
         #[cfg(feature = "stage-timing")]
         let encode_started = std::time::Instant::now();
@@ -415,25 +649,25 @@ where
         let mut execution = Vec::new();
         measure_stage!(
             timings,
-            "encode_sim_driver",
+            EncodeSimDriver,
             driver.write_checkpoint(&mut execution)
         )?;
         let mut ledger = Vec::new();
         measure_stage!(
             timings,
-            "encode_ledger",
+            EncodeLedger,
             shared.ledger().write_checkpoint(&mut ledger)
         )?;
         let mut registry = Vec::new();
         measure_stage!(
             timings,
-            "encode_shared_execution",
+            EncodeSharedExecution,
             shared.write_checkpoint(&mut registry)
         )?;
         let mut strategy_state = Vec::new();
         measure_stage!(
             timings,
-            "encode_strategy",
+            EncodeStrategy,
             strategy.write_strategy_checkpoint(&mut strategy_state)
         )?;
         #[cfg(feature = "stage-timing")]
@@ -472,14 +706,18 @@ where
             .join(format!("checkpoint-{generation:020}"))
             .join(format!("candidate-{:06}.cbor", self.index));
         #[cfg(feature = "stage-timing")]
-        self.stages
-            .record("encode_subsystems_and_capture", encode_started.elapsed());
+        self.stages.record(
+            crate::stage_timing::Stage::EncodeSubsystemsAndCapture,
+            encode_started.elapsed(),
+        );
         #[cfg(feature = "stage-timing")]
         let write_started = std::time::Instant::now();
         let sha256 = write_cbor(&path, &saved)?;
         #[cfg(feature = "stage-timing")]
-        self.stages
-            .record("encode_candidate_write_and_sync", write_started.elapsed());
+        self.stages.record(
+            crate::stage_timing::Stage::EncodeCandidateWriteAndSync,
+            write_started.elapsed(),
+        );
         #[cfg(feature = "stage-timing")]
         let wait_started = std::time::Instant::now();
         let mut buffer = self.hub.0.0.lock().unwrap();
@@ -492,8 +730,10 @@ where
             return Err(error.message.clone().into());
         }
         #[cfg(feature = "stage-timing")]
-        self.stages
-            .record("wait_shared_publication", wait_started.elapsed());
+        self.stages.record(
+            crate::stage_timing::Stage::WaitSharedPublication,
+            wait_started.elapsed(),
+        );
         self.events = 0;
         #[cfg(feature = "stage-timing")]
         self.stages.emit_checkpoint(generation);
@@ -787,6 +1027,150 @@ mod tests {
         }
     }
     #[test]
+    fn local_batch_publishes_only_returned_prefix_and_delays_tail_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, _) = crate::test_common::setup(temp.path());
+        let prepared = crate::prepare_historical_run_v1(&config.preparation).unwrap();
+        let groups = RecordedPublicGroupSourceV1::open(
+            &prepared.public_root,
+            1,
+            1 << 20,
+            crate::timing::DeliveryTimes {
+                delays: crate::timing::DelayScheduleV1::Fixed(0),
+                last: None,
+            },
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        assert!(groups.len() > 2);
+        let mut candidate = HistoricalPreparedRunConfigV1::from(&config);
+        candidate.timing.public_delivery_delay_ms =
+            crate::timing::DelayScheduleV1::Sequence(vec![3, 4]);
+        let hub = DayHubV1::new(&[candidate.clone(), candidate]);
+        {
+            let mut buffer = hub.0.0.lock().unwrap();
+            buffer.public.extend(groups.iter().cloned());
+            buffer.production = ProductionV1::Ended;
+        }
+        let delivery = DayLocalDeliveryCacheV1::shared(&hub, 0);
+        let mut source = DayPublicSourceV1::new(hub.clone(), 0, VecDeque::new(), delivery.clone());
+        let first = source.next().unwrap().unwrap();
+        assert_eq!(first.delivered_at_utc_ms, groups[0].delivered_at_utc_ms + 3);
+        assert_eq!(
+            delivery.borrow().public.len(),
+            groups.len().min(DAY_DELIVERY_BATCH) - 1
+        );
+        {
+            let mut buffer = hub.0.0.lock().unwrap();
+            assert_eq!(buffer.candidates[0].cursor.public, 0, "领取不提前发布");
+            delivery.borrow().publish(&mut buffer, 0);
+            assert_eq!(buffer.candidates[0].cursor.public, 1);
+            assert_eq!(
+                buffer.candidates[0].cursor.times.last,
+                Some(first.delivered_at_utc_ms)
+            );
+            DayHubV1::compact(&mut buffer);
+            assert_eq!(buffer.public_base, 0, "慢候选仍持有全部前缀");
+        }
+        // 原共享游标足以续接；局部未返回尾项无须持久化。
+        drop(source);
+        drop(delivery);
+        let delivery = DayLocalDeliveryCacheV1::shared(&hub, 0);
+        let mut source = DayPublicSourceV1::new(hub.clone(), 0, VecDeque::new(), delivery);
+        let second = source.next().unwrap().unwrap();
+        assert_eq!(second.prepared.reference, groups[1].prepared.reference);
+        assert_eq!(
+            second.delivered_at_utc_ms,
+            (groups[1].delivered_at_utc_ms + 4).max(first.delivered_at_utc_ms)
+        );
+        assert!(
+            source.next().unwrap().is_err(),
+            "序列耗尽只在第三项真正交付时报错"
+        );
+    }
+    #[test]
+    #[ignore = "#185 有限共享队列回收诊断，手动运行并保留原始计时"]
+    fn bounded_history_handoff_observation() {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, _) = crate::test_common::setup(temp.path());
+        let prepared = crate::prepare_historical_run_v1(&config.preparation).unwrap();
+        let delivered = RecordedPublicGroupSourceV1::open(
+            &prepared.public_root,
+            1,
+            1 << 20,
+            crate::timing::DeliveryTimes {
+                delays: crate::timing::DelayScheduleV1::Fixed(0),
+                last: None,
+            },
+        )
+        .unwrap()
+        .last()
+        .unwrap()
+        .unwrap();
+        let (base, facts) = delivered
+            .prepared
+            .group
+            .observations
+            .shared_parts()
+            .unwrap();
+        let template = base.values().next().unwrap();
+        for history in [128, 8192] {
+            let mut markets = contracts::MarketObservationSnapshotsV1::new();
+            for index in 0..history {
+                let mut market = template.as_ref().clone();
+                market.market.condition_id = contracts::ConditionId(format!("0x{index:064x}"));
+                markets.insert(market.market.condition_id.0.clone(), Arc::new(market));
+            }
+            let key = markets.keys().next().unwrap().clone();
+            let hub = DayHubV1::new(&[HistoricalPreparedRunConfigV1::from(&config)]);
+            for index in 0..4096 {
+                let mut changed = markets[&key].as_ref().clone();
+                changed.active.value = Some(index % 2 == 0);
+                markets.insert(key.clone(), Arc::new(changed));
+                let mut group = delivered.prepared.group.as_ref().clone();
+                group.observations = contracts::MarketObservationSetV1::shared(
+                    markets.clone(),
+                    facts.as_ref().clone(),
+                );
+                // 只运行真实运输/回收入口，不将这份重复引用诊断送入SIM业务应用。
+                hub.0
+                    .0
+                    .lock()
+                    .unwrap()
+                    .public
+                    .push_back(PublicGroupDeliveryV1 {
+                        prepared: Arc::new(PreparedPublicGroupV1 {
+                            reference: delivered.prepared.reference.clone(),
+                            group: Arc::new(group),
+                            pm_inputs: vec![],
+                            pm_contexts: vec![],
+                        }),
+                        delivered_at_utc_ms: delivered.delivered_at_utc_ms,
+                    });
+            }
+            hub.0.0.lock().unwrap().production = ProductionV1::Ended;
+            let delivery = DayLocalDeliveryCacheV1::shared(&hub, 0);
+            let mut source = DayPublicSourceV1::new(hub.clone(), 0, VecDeque::new(), delivery);
+            let started = Instant::now();
+            let mut returned = 0;
+            for group in source.by_ref() {
+                drop(group.unwrap());
+                returned += 1;
+            }
+            assert_eq!(returned, 4096);
+            let buffer = hub.0.0.lock().unwrap();
+            assert!(buffer.public.is_empty());
+            eprintln!(
+                "handoff_history_diagnostic={}",
+                serde_json::json!({"history_markets":history,
+                "groups":returned,"transport_wall_ns":started.elapsed().as_nanos(),"retained_public":buffer.public.len()})
+            );
+            drop(buffer);
+            drop(source);
+        }
+    }
+    #[test]
     #[ignore = "#185 explicit bounded empty-Hub wait observation, not a throughput gate"]
     fn two_empty_day_consumers_observe_existing_wakeups() {
         let hub = DayHubV1::new(&[]);
@@ -827,12 +1211,25 @@ mod tests {
                         // 两条原 next/Condvar 路径共享空Hub；不制造输入或业务超时。
                         if index == 0 {
                             assert!(
-                                DayPublicSourceV1::new(hub, index, VecDeque::new())
-                                    .next()
-                                    .is_none()
+                                DayPublicSourceV1::new(
+                                    hub.clone(),
+                                    index,
+                                    VecDeque::new(),
+                                    DayLocalDeliveryCacheV1::shared(&hub, index)
+                                )
+                                .next()
+                                .is_none()
                             );
                         } else {
-                            assert!(DayHiddenSourceV1::new(hub, index).next().is_none());
+                            assert!(
+                                DayHiddenSourceV1::new(
+                                    hub.clone(),
+                                    index,
+                                    DayLocalDeliveryCacheV1::shared(&hub, index)
+                                )
+                                .next()
+                                .is_none()
+                            );
                         }
                         EMPTY_WAITS.with(|value| value.borrow_mut().take().unwrap())
                     })

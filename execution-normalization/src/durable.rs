@@ -1021,24 +1021,25 @@ impl<
                 .sync_all()
                 .map_err(|e| io_error("同步NOE共享段目录", &directory, e))?;
         }
-        while let Some((watermark, record_count, row_start)) = self.staged.front() {
-            let sequence = self.published;
-            let boundary = NoeSourceCommitBoundaryV1 {
-                context_reference: self.context.context_reference.clone(),
-                source_watermark: watermark.clone(),
-                durable_available_at_utc_ms: now(),
-            };
-            let target_path = self
-                .context_directory
-                .join(COMMITS_DIRECTORY_NAME)
-                .join(format!("{sequence:020}.parquet"));
+        if self.batched && !self.staged.is_empty() {
+            let parent =
+                File::open(&directory).map_err(|e| io_error("打开提交父目录", &directory, e))?;
             #[cfg(test)]
             let fault = std::mem::take(&mut self.publish_fault);
             #[cfg(not(test))]
             let fault = PublishFaultV1::default();
-            if self.batched {
-                parquet::publish_segment_manifest(
-                    &target_path,
+            let mut pending = Vec::with_capacity(self.staged.len());
+            let mut failure = None;
+            for (index, (watermark, record_count, row_start)) in self.staged.iter().enumerate() {
+                let sequence = self.published + index as u64;
+                let boundary = NoeSourceCommitBoundaryV1 {
+                    context_reference: self.context.context_reference.clone(),
+                    source_watermark: watermark.clone(),
+                    durable_available_at_utc_ms: now(),
+                };
+                let target = directory.join(format!("{sequence:020}.parquet"));
+                if let Err(error) = parquet::stage_segment_manifest(
+                    &target,
                     T::COMMIT_VERSION,
                     sequence,
                     &boundary,
@@ -1048,9 +1049,49 @@ impl<
                         record_count: *record_count,
                         source_watermark: watermark.clone(),
                     },
+                ) {
+                    failure = Some(error);
+                    break;
+                }
+                pending.push(PublishedNoeCommitV1 {
+                    boundary,
+                    container_reference: NoePublishedContainerReferenceV1 {
+                        location: target.to_string_lossy().into_owned(),
+                    },
+                    record_count: *record_count,
+                });
+            }
+            if !pending.is_empty() {
+                sync_renamed_prefix(
+                    &parent,
+                    pending.iter().map(|commit| {
+                        Path::new(&commit.container_reference.location)
+                            .with_extension("manifest.json")
+                    }),
                     fault,
                 )?;
-            } else {
+                for commit in pending {
+                    published(&commit);
+                    self.staged.pop_front();
+                    self.published += 1;
+                }
+            }
+            if let Some(error) = failure {
+                return Err(error);
+            }
+        } else {
+            while let Some((watermark, record_count, _)) = self.staged.front() {
+                let sequence = self.published;
+                let boundary = NoeSourceCommitBoundaryV1 {
+                    context_reference: self.context.context_reference.clone(),
+                    source_watermark: watermark.clone(),
+                    durable_available_at_utc_ms: now(),
+                };
+                let target_path = directory.join(format!("{sequence:020}.parquet"));
+                #[cfg(test)]
+                let fault = std::mem::take(&mut self.publish_fault);
+                #[cfg(not(test))]
+                let fault = PublishFaultV1::default();
                 parquet::publish(
                     &self.stage_path(sequence),
                     &target_path,
@@ -1059,16 +1100,16 @@ impl<
                     &boundary,
                     fault,
                 )?;
+                published(&PublishedNoeCommitV1 {
+                    boundary,
+                    container_reference: NoePublishedContainerReferenceV1 {
+                        location: target_path.to_string_lossy().into_owned(),
+                    },
+                    record_count: *record_count,
+                });
+                self.staged.pop_front();
+                self.published += 1;
             }
-            published(&PublishedNoeCommitV1 {
-                boundary,
-                container_reference: NoePublishedContainerReferenceV1 {
-                    location: target_path.to_string_lossy().into_owned(),
-                },
-                record_count: *record_count,
-            });
-            self.staged.pop_front();
-            self.published += 1;
         }
         self.segment = None;
         self.staged_rows = 0;
@@ -1446,6 +1487,22 @@ fn publish_no_replace(
     commit_sequence: Option<u64>,
     fault: PublishFaultV1,
 ) -> Result<(), DurableErrorV1> {
+    let parent_file =
+        rename_no_replace(parent, candidate_name, target_name, bytes, commit_sequence)?;
+    sync_renamed_prefix(
+        &parent_file,
+        std::iter::once(parent.join(target_name)),
+        fault,
+    )
+}
+
+fn rename_no_replace(
+    parent: &Path,
+    candidate_name: &str,
+    target_name: &str,
+    bytes: &[u8],
+    commit_sequence: Option<u64>,
+) -> Result<File, DurableErrorV1> {
     let candidate_path = parent.join(candidate_name);
     let target_path = parent.join(target_name);
     let mut candidate = OpenOptions::new()
@@ -1485,22 +1542,34 @@ fn publish_no_replace(
         });
     }
 
+    Ok(parent_file)
+}
+
+/// 同一次稳定尝试中的真实最终名；失败时按后缀到前缀回滚，保留可判定的连续前缀。
+fn sync_renamed_prefix(
+    parent_file: &File,
+    targets: impl DoubleEndedIterator<Item = PathBuf> + Clone,
+    fault: PublishFaultV1,
+) -> Result<(), DurableErrorV1> {
+    let target_path = targets.clone().next().expect("至少一个已发布候选");
     let publish_sync = if fault.fail_publish_directory_sync {
         Err(injected_io_error("发布后目录同步失败"))
     } else {
         parent_file.sync_all()
     };
     if let Err(error) = publish_sync {
-        let rollback_unlink = if fault.fail_rollback_unlink {
-            Err(injected_io_error("回滚删除最终名失败"))
-        } else {
-            fs::remove_file(&target_path)
-        };
-        if let Err(rollback_error) = rollback_unlink {
-            return Err(DurableErrorV1::DurabilityUncertain {
-                path: target_path,
-                message: format!("{error}; 回滚删除失败：{rollback_error}"),
-            });
+        for target in targets.rev() {
+            let rollback_unlink = if fault.fail_rollback_unlink {
+                Err(injected_io_error("回滚删除最终名失败"))
+            } else {
+                fs::remove_file(&target)
+            };
+            if let Err(rollback_error) = rollback_unlink {
+                return Err(DurableErrorV1::DurabilityUncertain {
+                    path: target,
+                    message: format!("{error}; 回滚删除失败：{rollback_error}"),
+                });
+            }
         }
         let rollback_sync = if fault.fail_rollback_directory_sync {
             Err(injected_io_error("回滚后目录同步失败"))
@@ -2457,6 +2526,110 @@ mod tests {
                 .projection_batch_sequence,
             2
         );
+    }
+
+    #[test]
+    fn coalesced_manifest_failure_keeps_confirmed_prefix_and_original_error() {
+        type Trade = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1;
+        let root = TempDir::new().unwrap();
+        let mut core =
+            crate::core::NormalizationCore::<Trade, SourceNeutralControlResultV1>::new(context());
+        let mut writer =
+            StagedNormalizationWriter::<Trade, SourceNeutralControlResultV1>::create_batched(
+                root.path(),
+                context(),
+            )
+            .unwrap();
+        writer
+            .stage(&core.normalize_and_accept(batch(1)).unwrap())
+            .unwrap();
+        writer.stabilize(|| 3000, |_| {}).unwrap();
+        let directory = writer.context_directory.join(COMMITS_DIRECTORY_NAME);
+        let first = directory.join(format!("{:020}.manifest.json", 0));
+        let first_bytes = fs::read(&first).unwrap();
+        for sequence in [2, 3] {
+            writer
+                .stage(&core.normalize_and_accept(batch(sequence)).unwrap())
+                .unwrap();
+        }
+        fs::write(
+            directory.join(format!(".{:020}.manifest.json.tmp", 2)),
+            b"occupied",
+        )
+        .unwrap();
+        let mut commits = Vec::new();
+        let error = writer
+            .stabilize(|| 4000, |commit| commits.push(commit.clone()))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            DurableErrorV1::Io {
+                operation: "创建提交候选",
+                ..
+            }
+        ));
+        assert_eq!(commits.len(), 1);
+        assert_eq!(
+            commits[0]
+                .boundary
+                .source_watermark
+                .projection_batch_sequence,
+            2
+        );
+        assert_eq!(writer.published, 2);
+        assert_eq!(fs::read(first).unwrap(), first_bytes);
+        drop(writer);
+        let reopened =
+            DurableContextStoreV1::open(root.path(), &context().context_reference).unwrap();
+        assert_eq!(reopened.commits().len(), 2);
+    }
+
+    #[test]
+    fn coalesced_directory_sync_failure_rolls_back_only_unconfirmed_suffix() {
+        type Trade = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1;
+        for (unlink, rollback_sync) in [(false, false), (true, false), (false, true)] {
+            let root = TempDir::new().unwrap();
+            let mut core =
+                crate::core::NormalizationCore::<Trade, SourceNeutralControlResultV1>::new(
+                    context(),
+                );
+            let mut writer =
+                StagedNormalizationWriter::<Trade, SourceNeutralControlResultV1>::create_batched(
+                    root.path(),
+                    context(),
+                )
+                .unwrap();
+            writer
+                .stage(&core.normalize_and_accept(batch(1)).unwrap())
+                .unwrap();
+            writer.stabilize(|| 3000, |_| {}).unwrap();
+            let directory = writer.context_directory.join(COMMITS_DIRECTORY_NAME);
+            let first = directory.join(format!("{:020}.manifest.json", 0));
+            let first_bytes = fs::read(&first).unwrap();
+            for sequence in [2, 3] {
+                writer
+                    .stage(&core.normalize_and_accept(batch(sequence)).unwrap())
+                    .unwrap();
+            }
+            writer.publish_fault = PublishFaultV1 {
+                fail_publish_directory_sync: true,
+                fail_rollback_unlink: unlink,
+                fail_rollback_directory_sync: rollback_sync,
+            };
+            let mut published = 0;
+            let error = writer.stabilize(|| 4000, |_| published += 1).unwrap_err();
+            assert_eq!(
+                matches!(error, DurableErrorV1::DurabilityUncertain { .. }),
+                unlink || rollback_sync
+            );
+            assert_eq!(published, 0);
+            assert_eq!(writer.published, 1);
+            assert_eq!(fs::read(first).unwrap(), first_bytes);
+            drop(writer);
+            let reopened =
+                DurableContextStoreV1::open(root.path(), &context().context_reference).unwrap();
+            assert_eq!(reopened.commits().len(), if unlink { 3 } else { 1 });
+        }
     }
 
     #[test]

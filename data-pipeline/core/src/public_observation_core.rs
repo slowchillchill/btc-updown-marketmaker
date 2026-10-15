@@ -276,10 +276,18 @@ impl<E: PmEvidenceV1> PmStateReadV1<E> for PmOwnedStateV1<E> {
     ) -> Box<dyn Iterator<Item = Decimal> + 'a> {
         Box::new(
             self.levels
-                .keys()
-                .chain(self.absences.keys())
-                .chain(self.selected.keys())
-                .filter(move |(id, ask, _)| id == token && *ask == (side == BookSide::Ask))
+                .range(key(token, side, Decimal::MIN)..=key(token, side, Decimal::MAX))
+                .map(|(key, _)| key)
+                .chain(
+                    self.absences
+                        .range(key(token, side, Decimal::MIN)..=key(token, side, Decimal::MAX))
+                        .map(|(key, _)| key),
+                )
+                .chain(
+                    self.selected
+                        .range(key(token, side, Decimal::MIN)..=key(token, side, Decimal::MAX))
+                        .map(|(key, _)| key),
+                )
                 .map(|(_, _, price)| *price),
         )
     }
@@ -439,7 +447,7 @@ struct MarketState {
     #[serde(with = "checkpoint_level_anchors")]
     level_anchors: BTreeMap<LevelKey, ObservedFactV1<()>>,
     #[serde(skip)]
-    book_projection: BTreeMap<String, [Arc<ObservedFactV1<Vec<PriceLevelV1>>>; 2]>,
+    book_projection: BTreeMap<String, [Option<Arc<ObservedFactV1<Vec<PriceLevelV1>>>>; 2]>,
     seen_epochs: BTreeSet<String>,
     seen_messages: BTreeSet<u64>,
     last_message: Option<(u64, Sha256Hex, E)>,
@@ -1218,6 +1226,7 @@ impl PublicObservationCoreV1 {
                         &self.header.input_stream_id,
                         self.next_canonical_position,
                         true,
+                        !day,
                     )?;
                     let fact = PublicBusinessFactV1 {
                         position: PublicFactPositionV1 {
@@ -1961,20 +1970,28 @@ impl MarketState {
         payload: &CanonicalPmPayloadV1,
     ) {
         for step in &reduction.steps {
-            let affected = match &step.change {
+            match &step.change {
+                PmStepChangeV1::Selection { asset, side, .. } => {
+                    if let Some(sides) = self.book_projection.get_mut(&asset.token_id.0) {
+                        sides[usize::from(*side == BookSide::Ask)] = None;
+                    }
+                }
                 PmStepChangeV1::ResetAsset { asset, .. }
                 | PmStepChangeV1::InitialSnapshot { asset, .. }
-                | PmStepChangeV1::Selection { asset, .. }
-                | PmStepChangeV1::AbsenceBaseline { asset, .. }
-                | PmStepChangeV1::BookReady { asset } => Some(asset),
-                PmStepChangeV1::Quality { boundary } => match &boundary.scope {
-                    QualityScopeV1::Asset(asset) => Some(asset),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some(asset) = affected {
-                self.book_projection.remove(&asset.token_id.0);
+                | PmStepChangeV1::BookReady { asset }
+                | PmStepChangeV1::AbsenceBaseline {
+                    asset,
+                    selected: Some(_),
+                    ..
+                } => {
+                    self.book_projection.remove(&asset.token_id.0);
+                }
+                PmStepChangeV1::Quality { boundary } => {
+                    if let QualityScopeV1::Asset(asset) = &boundary.scope {
+                        self.book_projection.remove(&asset.token_id.0);
+                    }
+                }
+                _ => {}
             }
             match &step.change {
                 PmStepChangeV1::ResetAsset { asset, .. } => {
@@ -2192,23 +2209,27 @@ impl MarketState {
     fn prepare_book_projection(&mut self) {
         for context in &self.pm.context.assets {
             let token = &context.asset.token_id.0;
-            if self.book_projection.contains_key(token) {
-                continue;
-            }
+            let slots = self.book_projection.entry(token.clone()).or_default();
             let state = &self.assets[token];
-            let side = |side: BookSide| {
+            for (side, slot) in [BookSide::Bid, BookSide::Ask].into_iter().zip(slots) {
+                if slot.is_some() {
+                    continue;
+                }
                 if !self.pm.assets[token].book_ready {
-                    return ObservedFactV1 {
+                    *slot = Some(Arc::new(ObservedFactV1 {
                         quality: state.book.quality,
                         ..ObservedFactV1::default()
-                    };
+                    }));
+                    continue;
                 }
                 let mut levels: Vec<_> = self
                     .pm
                     .quantities
                     .iter()
-                    .flat_map(|quantities| quantities.iter())
-                    .filter(|((id, ask, _), _)| id == token && *ask == (side == BookSide::Ask))
+                    .flat_map(|quantities| {
+                        quantities
+                            .range(key(token, side, Decimal::MIN)..=key(token, side, Decimal::MAX))
+                    })
                     .map(|((_, _, price), quantity)| PriceLevelV1 {
                         price_pusd_per_share: ExactDecimal(price.normalize().to_string()),
                         quantity_shares: ExactDecimal(quantity.normalize().to_string()),
@@ -2219,36 +2240,29 @@ impl MarketState {
                 }
                 let mut anchors = Vec::new();
                 let mut frontier = state.book.dependency_frontier.clone();
-                for ((id, ask, _), evidence) in &self.level_anchors {
-                    if id == token && *ask == (side == BookSide::Ask) {
-                        for anchor in &evidence.direct_anchors {
-                            if !anchors.contains(anchor) {
-                                anchors.push(anchor.clone());
-                            }
-                        }
-                        if evidence.dependency_frontier.as_ref().is_some_and(|value| {
-                            frontier.as_ref().is_none_or(|old| {
-                                value.next_input_position > old.next_input_position
-                            })
-                        }) {
-                            frontier = evidence.dependency_frontier.clone();
-                        }
+                for (_, evidence) in self
+                    .level_anchors
+                    .range(key(token, side, Decimal::MIN)..=key(token, side, Decimal::MAX))
+                {
+                    anchors.extend(evidence.direct_anchors.iter().cloned());
+                    if evidence.dependency_frontier.as_ref().is_some_and(|value| {
+                        frontier
+                            .as_ref()
+                            .is_none_or(|old| value.next_input_position > old.next_input_position)
+                    }) {
+                        frontier = evidence.dependency_frontier.clone();
                     }
                 }
                 if anchors.is_empty() {
                     anchors = state.book.direct_anchors.clone();
                 }
-                ObservedFactV1 {
+                *slot = Some(Arc::new(ObservedFactV1 {
                     value: Some(levels),
                     quality: state.book.quality,
                     direct_anchors: anchors,
                     dependency_frontier: frontier,
-                }
-            };
-            self.book_projection.insert(
-                token.clone(),
-                [Arc::new(side(BookSide::Bid)), Arc::new(side(BookSide::Ask))],
-            );
+                }));
+            }
         }
     }
     fn observation_snapshot(
@@ -2266,12 +2280,12 @@ impl MarketState {
                 let token = &context.asset.token_id.0;
                 let state = &self.assets[token];
                 let [bids, asks] = &self.book_projection[token];
-                let bids = Arc::clone(bids);
+                let bids = Arc::clone(bids.as_ref().expect("已准备买侧投影"));
                 let valuation_best_bid = self.valuation_bid(token, &bids);
                 AssetBusinessObservationV1 {
                     asset: context.asset.clone(),
                     bids,
-                    asks: Arc::clone(asks),
+                    asks: Arc::clone(asks.as_ref().expect("已准备卖侧投影")),
                     best_bid_ask: state.bba.clone(),
                     valuation_best_bid,
                     tick: state.tick.clone(),
