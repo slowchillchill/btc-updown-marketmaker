@@ -1512,7 +1512,8 @@ async fn relevant_market_history_growth_timing() {
         for o in &mut missing {
             if o.market.condition_id.0 == condition(0) {
                 for a in &mut o.assets {
-                    a.valuation_best_bid.quality = MarketDataQuality::Stale;
+                    std::sync::Arc::make_mut(&mut a.valuation_best_bid).quality =
+                        MarketDataQuality::Stale;
                 }
             }
         }

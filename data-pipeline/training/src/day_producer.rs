@@ -1,20 +1,18 @@
 //! 单日唯一公共 Core 与隐藏私有状态；只交付本次应用结果。
-use crate::{
-    ValidatedDirectSourceParquetFileV3, day_stream::*, hidden_stream::*,
-    public_recording::RecordingResult,
-};
+use crate::{day_stream::*, hidden_stream::*, public_recording::RecordingResult};
 use contracts::*;
 use data_pipeline_core::{
     pm_reduction::*, public_input::*, public_observation_core::*, public_reduction::*,
 };
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 pub struct DayProducerV1<'a> {
     pub core: PublicObservationCoreV1,
     pub ingress: DayIngressV1<'a>,
     pub hidden: StreamingHiddenStateV1,
     ended: bool,
+    queued: VecDeque<PrefetchedInputV1>,
+    queued_error: Option<String>,
     #[cfg(feature = "stage-timing")]
     timings: DayProducerStageTimingsV1,
 }
@@ -27,11 +25,120 @@ pub struct DayAppliedV1 {
     pub initialization_binding: Option<SourceArtifactBindingV1>,
     pub hidden: Vec<StreamingHiddenBucketV1>,
 }
-#[derive(Serialize, Deserialize)]
-pub struct DayProducerCheckpointV1 {
-    ingress: DayIngressCheckpointV1,
-    hidden: StreamingHiddenStateV1,
-    ended: bool,
+// 只预读有限普通 PM 前缀。下界属于每项的原读取位置，不使用批末下界。
+struct PrefetchedInputV1 {
+    input: RecordedIngressV1,
+    initialization_binding: Option<SourceArtifactBindingV1>,
+    source_lower: Result<Option<i64>, String>,
+    pm_lower: Option<(u64, i64, u64, u64)>,
+    prepared_pm: Option<Result<PreparedPmMessageV1, data_pipeline_core::ContractError>>,
+    #[cfg(feature = "stage-timing")]
+    decode_ns: u128,
+    #[cfg(feature = "stage-timing")]
+    prepare_ns: u128,
+}
+fn ordinary_pm(input: &RecordedIngressV1) -> bool {
+    matches!(&input.ingress, DptIngressV1::Message {row:TypedRawRowV2::Existing(data_pipeline_core::typed_raw::TypedRawRow::PolymarketOrderbook(row)),..} if !matches!(row.event,data_pipeline_core::typed_raw::PolymarketOrderbookEvent::MarketResolved {..}))
+}
+// 批次限制统计原消息实际载荷字符及容器；准备材料随本批消费释放。
+fn pm_payload_bytes(input: &RecordedIngressV1) -> usize {
+    use data_pipeline_core::typed_raw::{PolymarketOrderbookEvent as Event, TypedRawRow};
+    let DptIngressV1::Message {
+        row: TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row)),
+        ..
+    } = &input.ingress
+    else {
+        return 0;
+    };
+    let option = |s: &Option<String>| s.as_ref().map_or(0, String::len);
+    let payload = match &row.event {
+        Event::Book {
+            asset_id,
+            bids,
+            asks,
+            last_trade_price,
+        } => {
+            asset_id.len()
+                + option(last_trade_price)
+                + bids
+                    .iter()
+                    .chain(asks)
+                    .map(|l| std::mem::size_of_val(l) + l.price.len() + l.size.len())
+                    .sum::<usize>()
+        }
+        Event::PriceChange { price_changes } => price_changes
+            .iter()
+            .map(|p| {
+                std::mem::size_of_val(p)
+                    + p.asset_id.len()
+                    + p.price.len()
+                    + option(&p.size)
+                    + option(&p.best_bid)
+                    + option(&p.best_ask)
+            })
+            .sum(),
+        Event::TickSizeChange {
+            asset_id,
+            old_tick_size,
+            new_tick_size,
+        } => asset_id.len() + option(old_tick_size) + new_tick_size.len(),
+        Event::LastTradePrice {
+            asset_id,
+            price,
+            size,
+            fee_rate_bps,
+            ..
+        } => asset_id.len() + price.len() + option(size) + option(fee_rate_bps),
+        Event::BestBidAsk {
+            asset_id,
+            best_bid,
+            best_ask,
+            spread,
+        } => asset_id.len() + option(best_bid) + option(best_ask) + option(spread),
+        Event::NewMarket {
+            clob_market_id,
+            question,
+            description,
+            asset_ids,
+            outcomes,
+            event_message,
+        }
+        | Event::MarketResolved {
+            clob_market_id,
+            question,
+            description,
+            asset_ids,
+            outcomes,
+            event_message,
+            ..
+        } => {
+            clob_market_id.len()
+                + option(question)
+                + option(description)
+                + asset_ids
+                    .iter()
+                    .chain(outcomes)
+                    .map(String::len)
+                    .sum::<usize>()
+                + event_message.as_ref().map_or(0, |e| {
+                    e.id.len()
+                        + option(&e.ticker)
+                        + option(&e.slug)
+                        + option(&e.title)
+                        + option(&e.description)
+                })
+        }
+    };
+    std::mem::size_of_val(input)
+        + std::mem::size_of_val(row)
+        + row.market.len()
+        + option(&row.slug)
+        + row.collector_host_id.len()
+        + row.collector_region.len()
+        + row.source_endpoint.len()
+        + row.schema_version.len()
+        + row.source_sequence_epoch_id.len()
+        + payload
 }
 impl<'a> DayProducerV1<'a> {
     pub fn new(
@@ -51,16 +158,120 @@ impl<'a> DayProducerV1<'a> {
             ingress,
             hidden: StreamingHiddenStateV1::new(hidden_stream, input_identity, epochs),
             ended: false,
+            queued: VecDeque::new(),
+            queued_error: None,
             #[cfg(feature = "stage-timing")]
             timings: Default::default(),
         })
     }
-    pub fn next_applied(&mut self) -> RecordingResult<Option<DayAppliedV1>> {
+    fn fill_queue(&mut self) -> RecordingResult<()> {
+        use rayon::prelude::*;
+        if !self.queued.is_empty() {
+            return Ok(());
+        }
+        if let Some(error) = self.queued_error.take() {
+            return Err(error.into());
+        }
+        let (rows, bytes) = self.ingress.read_batch_limits();
+        let mut retained = 0;
+        loop {
+            #[cfg(feature = "stage-timing")]
+            let started = std::time::Instant::now();
+            let input = match self.ingress.next_input() {
+                Ok(Some(input)) => input,
+                Ok(None) => break,
+                Err(error) if !self.queued.is_empty() => {
+                    self.queued_error = Some(error.to_string());
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
+            #[cfg(feature = "stage-timing")]
+            let decode_ns = started.elapsed().as_nanos();
+            let pm = ordinary_pm(&input);
+            retained += pm_payload_bytes(&input);
+            // 原路径在当前 Core 应用后才消费下界错误，预读不能提前报告它。
+            let source_lower = self
+                .ingress
+                .unread_source_lower_bound()
+                .map_err(|e| e.to_string());
+            self.queued.push_back(PrefetchedInputV1 {
+                input,
+                initialization_binding: self.ingress.initialization_binding().cloned(),
+                source_lower,
+                pm_lower: self.ingress.unread_pm_lower_bound(),
+                prepared_pm: None,
+                #[cfg(feature = "stage-timing")]
+                decode_ns,
+                #[cfg(feature = "stage-timing")]
+                prepare_ns: 0,
+            });
+            // 多读一项才能识别非PM边界；它保持未应用，且不跨越其固定身份变化准备。
+            if !pm || self.queued.len() >= rows.max(1) || retained >= bytes {
+                break;
+            }
+        }
         #[cfg(feature = "stage-timing")]
-        let input_started = std::time::Instant::now();
-        let Some(mut input) = self.ingress.next_input()? else {
+        let batch_started = std::time::Instant::now();
+        let core = &self.core;
+        let prepare = |entry: &mut PrefetchedInputV1| {
+            if !ordinary_pm(&entry.input) {
+                return;
+            }
+            #[cfg(feature = "stage-timing")]
+            let started = std::time::Instant::now();
+            entry.prepared_pm = Some(
+                prepare_public_ingress_v1(core, &entry.input, &BTreeMap::new(), &[]).map(
+                    |p| match p.current {
+                        PreparedCanonicalInputV1::PolymarketMessage(pm) => pm,
+                        _ => unreachable!("普通PM消息"),
+                    },
+                ),
+            );
+            #[cfg(feature = "stage-timing")]
+            {
+                entry.prepare_ns = started.elapsed().as_nanos();
+            }
+        };
+        let entries = self.queued.make_contiguous();
+        let pm_items = entries
+            .iter()
+            .filter(|entry| ordinary_pm(&entry.input))
+            .count();
+        if pm_items > 1 {
+            entries.par_iter_mut().for_each(prepare);
+        } else {
+            entries.iter_mut().for_each(prepare);
+        }
+        #[cfg(feature = "stage-timing")]
+        {
+            if pm_items > 0 {
+                self.timings.pm_preparation_batches += 1;
+                self.timings.parallel_pm_preparation_batches += u64::from(pm_items > 1);
+                self.timings.pm_preparation_items += pm_items as u64;
+                self.timings.pm_preparation_max_batch =
+                    self.timings.pm_preparation_max_batch.max(pm_items as u64);
+                self.timings.pm_preparation_batch_wall_ns += batch_started.elapsed().as_nanos();
+            }
+        }
+        Ok(())
+    }
+    pub fn next_applied(&mut self) -> RecordingResult<Option<DayAppliedV1>> {
+        self.fill_queue()?;
+        let Some(entry) = self.queued.pop_front() else {
             return Ok(None);
         };
+        let PrefetchedInputV1 {
+            mut input,
+            initialization_binding,
+            source_lower,
+            pm_lower,
+            prepared_pm,
+            #[cfg(feature = "stage-timing")]
+            decode_ns,
+            #[cfg(feature = "stage-timing")]
+            prepare_ns,
+        } = entry;
         #[cfg(feature = "stage-timing")]
         let timing_source = match &input.ingress {
             DptIngressV1::Message {
@@ -77,22 +288,38 @@ impl<'a> DayProducerV1<'a> {
             DptIngressV1::EndOfInput => 6,
             DptIngressV1::Aborted { .. } => 0,
         };
-        let initialization_binding = self.ingress.initialization_binding().cloned();
         let first_canonical_position = self.core.next_canonical_position();
         #[cfg(feature = "stage-timing")]
         {
             self.timings.inputs += 1;
             self.timings.by_source[timing_source].inputs += 1;
-            let elapsed = input_started.elapsed().as_nanos();
+            let elapsed = decode_ns;
             self.timings.decode_ns += elapsed;
             self.timings.by_source[timing_source].stage_ns[0] += elapsed;
         }
         #[cfg(feature = "stage-timing")]
         let prepared_started = std::time::Instant::now();
-        let prepared = self.ingress.prepare_input(&self.core, &mut input)?;
+        let prepared = if let Some(pm) = prepared_pm {
+            let pm = pm?;
+            PreparedIngressV1 {
+                prepared_group_id: Some(pm.message().group_id.clone()),
+                recorded: RecordedIngressViewV1 {
+                    input_stream_id: input.input_stream_id.clone(),
+                    input_position: input.input_position,
+                    ingress: &input.ingress,
+                    dependency_record_refs: input.dependency_record_refs.clone(),
+                },
+                current: PreparedCanonicalInputV1::PolymarketMessage(pm),
+                dependencies: std::borrow::Cow::Borrowed(&[]),
+                reference_selection: None,
+                reference_selection_market: None,
+            }
+        } else {
+            self.ingress.prepare_input(&self.core, &mut input)?
+        };
         #[cfg(feature = "stage-timing")]
         {
-            let elapsed = prepared_started.elapsed().as_nanos();
+            let elapsed = prepare_ns + prepared_started.elapsed().as_nanos();
             self.timings.prepare_ns += elapsed;
             self.timings.by_source[timing_source].stage_ns[1] += elapsed;
         }
@@ -183,11 +410,9 @@ impl<'a> DayProducerV1<'a> {
                 canonical += 1;
             }
         }
-        self.hidden
-            .advance_pm(self.ingress.unread_pm_lower_bound())?;
-        let lower = self
-            .ingress
-            .unread_source_lower_bound()?
+        self.hidden.advance_pm(pm_lower)?;
+        let lower = source_lower
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?
             .into_iter()
             .chain(self.core.pending_terminal_source_lower_bound())
             .min();
@@ -214,46 +439,16 @@ impl<'a> DayProducerV1<'a> {
             hidden,
         }))
     }
-    pub fn write_checkpoint(&self, writer: impl std::io::Write) -> RecordingResult<()> {
-        #[derive(Serialize)]
-        struct Saved<'a> {
-            ingress: DayIngressCheckpointV1,
-            hidden: &'a StreamingHiddenStateV1,
-            ended: bool,
-        }
-        ciborium::ser::into_writer(
-            &Saved {
-                ingress: self.ingress.checkpoint(),
-                hidden: &self.hidden,
-                ended: self.ended,
-            },
-            writer,
-        )?;
-        Ok(())
-    }
-    pub fn restore(
-        core: PublicObservationCoreV1,
-        files: &[&'a ValidatedDirectSourceParquetFileV3],
-        reader: impl std::io::Read,
-        rows: usize,
-        bytes: usize,
-        range: std::ops::Range<i64>,
-    ) -> RecordingResult<Self> {
-        let saved: DayProducerCheckpointV1 = ciborium::de::from_reader(reader)?;
-        Ok(Self {
-            core,
-            ingress: DayIngressV1::restore(files, saved.ingress, rows, bytes, range)?,
-            hidden: saved.hidden,
-            ended: saved.ended,
-            #[cfg(feature = "stage-timing")]
-            timings: Default::default(),
-        })
-    }
 }
 
 #[cfg(feature = "stage-timing")]
 #[derive(Default, serde::Serialize)]
 pub struct DayProducerStageTimingsV1 {
+    pub pm_preparation_batches: u64,
+    pub parallel_pm_preparation_batches: u64,
+    pub pm_preparation_items: u64,
+    pub pm_preparation_max_batch: u64,
+    pub pm_preparation_batch_wall_ns: u128,
     pub inputs: u64,
     pub decode_ns: u128,
     pub prepare_ns: u128,

@@ -24,25 +24,16 @@ macro_rules! define_stages {
 define_stages! {
     ApplyClosedIncludingNoeClaimAndLedger => "apply_closed_including_noe_claim_and_ledger",
     CalculationIncludingCutoffCopyAndDecide => "calculation_including_cutoff_copy_and_decide",
-    CheckpointCaptureSubsystems => "checkpoint_capture_subsystems",
-    CheckpointCaptureWriteAndPublish => "checkpoint_capture_write_and_publish",
-    CheckpointEncodeDayWriteAndSync => "checkpoint_encode_day_write_and_sync",
     CurrentPublicObservationAssembly => "current_public_observation_assembly",
     DayEconomicSampling => "day_economic_sampling",
     DeliveryAssemblyAndPublishIncludingLock => "delivery_assembly_and_publish_including_lock",
     DispatchIncludingReserveBridgeSim => "dispatch_including_reserve_bridge_sim",
     DispatchIncludingReserveFullQualificationBridgeSim => "dispatch_including_reserve_full_qualification_bridge_sim",
-    EncodeCandidateWriteAndSync => "encode_candidate_write_and_sync",
-    EncodeLedger => "encode_ledger",
-    EncodeSharedExecution => "encode_shared_execution",
-    EncodeSimDriver => "encode_sim_driver",
-    EncodeStrategy => "encode_strategy",
-    EncodeSubsystemsAndCapture => "encode_subsystems_and_capture",
     HiddenSourceWaitAndAcquisition => "hidden_source_wait_and_acquisition",
     NextAppliedIncludingDecodeCoreHidden => "next_applied_including_decode_core_hidden",
     NextHealthEvaluationIncludingDependencyLookup => "next_health_evaluation_including_dependency_lookup",
     ProducerBackpressureWait => "producer_backpressure_wait",
-    ProducerWaitStartupCheckpointOrCompletion => "producer_wait_startup_checkpoint_or_completion",
+    ProducerWaitStartupOrCompletion => "producer_wait_startup_or_completion",
     PublicQualification => "public_qualification",
     RecordingStabilizationWait => "recording_stabilization_wait",
     RecordingStopAndDrain => "recording_stop_and_drain",
@@ -53,11 +44,9 @@ define_stages! {
     SimNextGroupAtIncludingSourceWait => "sim_next_group_at_including_source_wait",
     SimNextGroupIncludingNoe => "sim_next_group_including_noe",
     StrategyInputAssembly => "strategy_input_assembly",
-    WaitSharedPublication => "wait_shared_publication",
     InitializationCatalogLockWaitSampled => "initialization_catalog_lock_wait_sampled",
     InitializationClassificationSampled => "initialization_classification_sampled",
-    CandidateControlLockWaitSampled => "candidate_control_lock_wait_sampled",
-    CandidateControlAndCursorPublishSampled => "candidate_control_and_cursor_publish_including_lock_sampled",
+    ProducerInitializationClassification => "producer_initialization_classification",
     ProducerCatalogUpdate => "producer_catalog_update_including_lock",
     ProducerDeliveryConstruction => "producer_public_delivery_construction_sampled",
     ProducerHubLockWait => "producer_hub_lock_wait_sampled",
@@ -72,8 +61,9 @@ define_stages! {
 #[cfg(feature = "stage-timing")]
 pub(crate) struct StageTimings {
     label: String,
-    started: std::time::Instant,
+    started: Option<std::time::Instant>,
     samples: [Sample; STAGE_NAMES.len()],
+    diagnostics_enabled: bool,
     diagnostic_calls: u64,
     initialization_market_visits: u64,
     initialization_source_id_visits: u64,
@@ -84,10 +74,19 @@ pub(crate) struct StageTimings {
 #[cfg(feature = "stage-timing")]
 impl StageTimings {
     pub(crate) fn new(label: String) -> Self {
+        Self::with_scope(label, false)
+    }
+    pub(crate) fn new_transport(label: String) -> Self {
+        Self::with_scope(label, true)
+    }
+    fn with_scope(label: String, transport: bool) -> Self {
+        let diagnostics_enabled =
+            std::env::var_os("BACKTEST_TRANSPORT_DIAGNOSTICS").is_some_and(|v| v == "1");
         Self {
             label,
-            started: std::time::Instant::now(),
+            started: (diagnostics_enabled || !transport).then(std::time::Instant::now),
             samples: std::array::from_fn(|_| Sample::default()),
+            diagnostics_enabled,
             diagnostic_calls: 0,
             initialization_market_visits: 0,
             initialization_source_id_visits: 0,
@@ -97,11 +96,17 @@ impl StageTimings {
         }
     }
     pub(crate) fn next_diagnostic_sample(&mut self) -> bool {
+        if !self.diagnostics_enabled {
+            return false;
+        }
         let sample = self.diagnostic_calls.is_multiple_of(64);
         self.diagnostic_calls += 1;
         sample
     }
     pub(crate) fn add_initialization_work(&mut self, markets: u64, sources: u64) {
+        if !self.diagnostics_enabled {
+            return;
+        }
         self.initialization_market_visits += markets;
         self.initialization_source_id_visits += sources;
     }
@@ -111,6 +116,9 @@ impl StageTimings {
         public: usize,
         hidden: usize,
     ) -> bool {
+        if !self.diagnostics_enabled {
+            return false;
+        }
         let prior_claimed = self.claimed;
         self.claimed += claimed as u64;
         self.reclaimed_public += public as u64;
@@ -121,7 +129,7 @@ impl StageTimings {
         eprintln!(
             "stage_timing_transport={}",
             serde_json::json!({"scope":self.label,
-            "scope_wall_ns":self.started.elapsed().as_nanos(),"stages":self.samples(),"diagnostics":self.diagnostics()})
+            "scope_wall_ns":self.started.map_or(0, |started|started.elapsed().as_nanos()),"stages":self.samples(),"diagnostics":self.diagnostics()})
         );
     }
     fn diagnostics(&self) -> serde_json::Value {
@@ -130,6 +138,16 @@ impl StageTimings {
             "initialization_source_id_visits":self.initialization_source_id_visits,
             "claimed_items":self.claimed,"reclaimed_public":self.reclaimed_public,
             "reclaimed_hidden":self.reclaimed_hidden})
+    }
+    pub(crate) fn start(&self, stage: Stage) -> Option<std::time::Instant> {
+        (self.diagnostics_enabled
+            || (stage as usize) < Stage::InitializationCatalogLockWaitSampled as usize)
+            .then(std::time::Instant::now)
+    }
+    pub(crate) fn finish(&mut self, stage: Stage, started: Option<std::time::Instant>) {
+        if let Some(started) = started {
+            self.record(stage, started.elapsed());
+        }
     }
     pub(crate) fn record(&mut self, stage: Stage, elapsed: std::time::Duration) {
         let sample = &mut self.samples[stage as usize];
@@ -146,37 +164,33 @@ impl StageTimings {
             .filter(|(_, sample)| sample.count > 0)
             .collect()
     }
-    pub(crate) fn emit_checkpoint(&self, generation: u64) {
-        eprintln!(
-            "stage_timing_checkpoint={}",
-            serde_json::json!({"scope":self.label,"generation":generation,
-                "scope_wall_ns":self.started.elapsed().as_nanos(),"stages":self.samples(),"diagnostics":self.diagnostics()})
-        );
-    }
     pub(crate) fn emit_hour(&self, boundary_utc_ms: i64) {
         eprintln!(
             "stage_timing_hour={}",
             serde_json::json!({"scope":self.label,"boundary_utc_ms":boundary_utc_ms,
-                "scope_wall_ns":self.started.elapsed().as_nanos(),"stages":self.samples(),"diagnostics":self.diagnostics()})
+                "scope_wall_ns":self.started.map_or(0, |started|started.elapsed().as_nanos()),"stages":self.samples(),"diagnostics":self.diagnostics()})
         );
     }
 }
 #[cfg(feature = "stage-timing")]
 impl Drop for StageTimings {
     fn drop(&mut self) {
+        if self.started.is_none() {
+            return;
+        }
         eprintln!(
             "stage_timing={}",
-            serde_json::json!({"scope":self.label,"scope_wall_ns":self.started.elapsed().as_nanos(),"stages":self.samples(),"diagnostics":self.diagnostics()})
+            serde_json::json!({"scope":self.label,"scope_wall_ns":self.started.map_or(0, |started|started.elapsed().as_nanos()),"stages":self.samples(),"diagnostics":self.diagnostics()})
         );
     }
 }
 macro_rules! measure_stage {
     ($timings:expr, $stage:ident, $expression:expr) => {{
         #[cfg(feature = "stage-timing")]
-        let started = std::time::Instant::now();
+        let started = $timings.start(crate::stage_timing::Stage::$stage);
         let result = $expression;
         #[cfg(feature = "stage-timing")]
-        $timings.record(crate::stage_timing::Stage::$stage, started.elapsed());
+        $timings.finish(crate::stage_timing::Stage::$stage, started);
         result
     }};
 }
@@ -199,8 +213,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn disabled_transport_skips_clocks_and_work_without_disabling_legacy_stages() {
+        let mut stages = StageTimings::new("disabled-transport".into());
+        stages.diagnostics_enabled = false;
+        assert!(stages.start(Stage::CandidateDataWait).is_none());
+        assert!(stages.start(Stage::ProducerHubPublish).is_none());
+        assert!(!stages.next_diagnostic_sample());
+        assert!(!stages.add_delivery_work(64, 32, 16));
+        stages.add_initialization_work(8, 100);
+        assert_eq!(
+            (
+                stages.claimed,
+                stages.reclaimed_public,
+                stages.reclaimed_hidden,
+                stages.diagnostic_calls,
+                stages.initialization_source_id_visits
+            ),
+            (0, 0, 0, 0, 0)
+        );
+        assert!(stages.start(Stage::SimNextGroupIncludingNoe).is_some());
+    }
+
+    #[test]
     fn sampled_diagnostics_keep_expression_count_and_actual_sample_coverage() {
         let mut stages = StageTimings::new("sampling-test".into());
+        stages.diagnostics_enabled = true;
         let mut expressions = 0;
         let started = std::time::Instant::now();
         for _ in 0..65_536 {

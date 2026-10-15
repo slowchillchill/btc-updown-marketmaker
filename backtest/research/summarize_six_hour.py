@@ -12,9 +12,9 @@ def summarize(document):
             report = candidate['report']
             research = report.get('research')
             output.append(dict(run_id=candidate['run_id'], initial_available_pusd=candidate['initial_available_pusd'],
-                               termination=report['end_reason'], published_checkpoint=day.get('published_checkpoint'),
-                               research=research, reused=candidate['reused'],
-                               persistence='BudgetStop仅在成功发布后返回；部分返回报告不放completed。',
+                               termination=report['end_reason'],
+                               research=research,
+                               persistence='BudgetStop返回本次内存成绩；不保存检查点，不能续跑，未完成小时不补齐。',
                                stage_timing='仅日志已输出的原stage-timing汇总；本JSON未携带的值为unknown'))
     return dict(candidates=output, interpretation='连续六小时账户窗口；缺失小时不补零，不日化，不推断真实盈利。')
 

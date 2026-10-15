@@ -1,22 +1,18 @@
-//! 日入口专用的消费前沿与完整恢复点协调。
+//! 日入口的消费前沿、候选启动和预算退出协调。
 use crate::{run::*, *};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use shared_run::*;
-use sim_system::{
-    execution::*, finality::TradeFinalityPolicyV2, platform_rules::SealedProcessRuleSnapshotV3,
-    public_consumption::*, scenario::*,
-};
+use sim_system::execution::SimRunActorErrorV2;
+use sim_system::public_consumption::*;
 use std::{
     cell::RefCell,
     collections::VecDeque,
-    io::{BufReader, BufWriter, Read, Write},
-    path::{Path, PathBuf},
     rc::Rc,
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub(crate) struct CandidateCursorV1 {
     pub public: usize,
     pub hidden: usize,
@@ -32,8 +28,6 @@ pub(crate) struct CandidateProgressV1 {
     pub cursor: CandidateCursorV1,
     pub active: bool,
     pub waiting: bool,
-    pub ready: Option<(u64, String)>,
-    pub complete: Option<serde_json::Value>,
     pub source_health: Option<bool>,
     pub requirements: Option<contracts::PublicObservationRequirementsV1>,
     pub runtime_started: bool,
@@ -45,20 +39,29 @@ pub(crate) struct DayFailureSignalV1 {
 }
 pub(crate) struct DayBufferV1 {
     pub public_base: usize,
-    pub public: VecDeque<PublicGroupDeliveryV1>,
+    pub public: VecDeque<DayPublicDeliveryV1>,
     pub hidden_base: usize,
     pub hidden: VecDeque<AcceptedHiddenStepBucketV1>,
     pub candidates: Vec<CandidateProgressV1>,
     pub production: ProductionV1,
-    pub requested: Option<u64>,
     pub research_summary: bool,
-    pub budget_stop_requested: bool,
-    pub budget_stopped: bool,
-    pub generation: u64,
     pub failure: Option<DayFailureSignalV1>,
 }
 #[derive(Clone)]
-pub(crate) struct DayHubV1(pub Arc<(Mutex<DayBufferV1>, Condvar)>);
+pub(crate) struct DayHubV1(pub Arc<(Mutex<DayBufferV1>, DaySignalsV1)>);
+pub(crate) struct DaySignalsV1 {
+    pub public: Condvar,
+    pub hidden: Condvar,
+    pub control: Condvar,
+    pub budget_stop_requested: AtomicBool,
+}
+impl DaySignalsV1 {
+    pub fn notify_all(&self) {
+        self.public.notify_all();
+        self.hidden.notify_all();
+        self.control.notify_all();
+    }
+}
 impl DayHubV1 {
     pub fn new(candidates: &[HistoricalPreparedRunConfigV1]) -> Self {
         Self(Arc::new((
@@ -80,28 +83,27 @@ impl DayHubV1 {
                         },
                         active: true,
                         waiting: false,
-                        ready: None,
-                        complete: None,
                         source_health: None,
                         requirements: None,
                         runtime_started: false,
                     })
                     .collect(),
                 production: ProductionV1::Running,
-                requested: None,
                 research_summary: false,
-                budget_stop_requested: false,
-                budget_stopped: false,
-                generation: 0,
                 failure: None,
             }),
-            Condvar::new(),
+            DaySignalsV1 {
+                public: Condvar::new(),
+                hidden: Condvar::new(),
+                control: Condvar::new(),
+                budget_stop_requested: AtomicBool::new(false),
+            },
         )))
     }
     /// 移除原安全消费前缀；调用者在释放 Hub 锁后析构临时引用。
     pub fn compact(
         buffer: &mut DayBufferV1,
-    ) -> (Vec<PublicGroupDeliveryV1>, Vec<AcceptedHiddenStepBucketV1>) {
+    ) -> (Vec<DayPublicDeliveryV1>, Vec<AcceptedHiddenStepBucketV1>) {
         let public = buffer
             .candidates
             .iter()
@@ -130,13 +132,7 @@ impl DayHubV1 {
     ) {
         let (mut buffer, cv) = (self.0.0.lock().unwrap(), &self.0.1);
         buffer.candidates[index].active = false;
-        if let Ok(result) = result {
-            if result.outcome == crate::day::CandidateOutcomeV1::Complete
-                && result.report["end_reason"] != "BudgetStop"
-            {
-                buffer.candidates[index].complete = Some(result.report.clone());
-            }
-        } else if let Err(error) = result {
+        if let Err(error) = result {
             if buffer.failure.is_none() {
                 buffer.failure = Some(DayFailureSignalV1 {
                     source: crate::day::DayFailureSourceV1::Candidate {
@@ -155,9 +151,23 @@ impl DayHubV1 {
 }
 // 仅由一个候选线程持有；领取不推进共享回收位置。
 const DAY_DELIVERY_BATCH: usize = 64;
+#[derive(Clone)]
+pub(crate) struct DayPublicDeliveryV1 {
+    pub delivery: PublicGroupDeliveryV1,
+    pub initialization: Option<(bool, bool)>,
+}
+impl From<PublicGroupDeliveryV1> for DayPublicDeliveryV1 {
+    fn from(delivery: PublicGroupDeliveryV1) -> Self {
+        Self {
+            delivery,
+            initialization: None,
+        }
+    }
+}
 pub(crate) struct DayLocalDeliveryCacheV1 {
-    public: VecDeque<PublicGroupDeliveryV1>,
+    public: VecDeque<DayPublicDeliveryV1>,
     hidden: VecDeque<AcceptedHiddenStepBucketV1>,
+    initialization: Option<(u64, bool, bool)>,
     public_end: usize,
     hidden_end: usize,
     times: crate::timing::DeliveryTimes,
@@ -169,6 +179,7 @@ impl DayLocalDeliveryCacheV1 {
         Rc::new(RefCell::new(Self {
             public: VecDeque::new(),
             hidden: VecDeque::new(),
+            initialization: None,
             public_end: cursor.public,
             hidden_end: cursor.hidden,
             times: cursor.times.clone(),
@@ -184,7 +195,6 @@ impl DayLocalDeliveryCacheV1 {
 pub(crate) struct DayPublicSourceV1 {
     pub hub: DayHubV1,
     pub index: usize,
-    pub restored: VecDeque<PublicGroupDeliveryV1>,
     delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     failed: bool,
     #[cfg(feature = "stage-timing")]
@@ -194,17 +204,15 @@ impl DayPublicSourceV1 {
     pub fn new(
         hub: DayHubV1,
         index: usize,
-        restored: VecDeque<PublicGroupDeliveryV1>,
         delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     ) -> Self {
         Self {
             hub,
             index,
-            restored,
             delivery,
             failed: false,
             #[cfg(feature = "stage-timing")]
-            stages: crate::stage_timing::StageTimings::new(format!(
+            stages: crate::stage_timing::StageTimings::new_transport(format!(
                 "candidate_public_transport:{index}"
             )),
         }
@@ -213,15 +221,17 @@ impl DayPublicSourceV1 {
 impl Iterator for DayPublicSourceV1 {
     type Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>;
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(group) = self.restored.pop_front() {
-            return Some(Ok(group));
-        }
         if self.failed {
             return None;
         }
         loop {
             let group = self.delivery.borrow_mut().public.pop_front();
-            if let Some(mut group) = group {
+            if let Some(item) = group {
+                let mut group = item.delivery;
+                self.delivery.borrow_mut().initialization =
+                    item.initialization.map(|(initial, dependency)| {
+                        (group.prepared.group.group_position, initial, dependency)
+                    });
                 let time = self
                     .delivery
                     .borrow_mut()
@@ -236,15 +246,19 @@ impl Iterator for DayPublicSourceV1 {
                 }));
             }
             #[cfg(feature = "stage-timing")]
-            let lock_started = std::time::Instant::now();
+            let lock_started = self
+                .stages
+                .start(crate::stage_timing::Stage::CandidateRefillLockWait);
             let mut buffer = self.hub.0.0.lock().unwrap();
             #[cfg(feature = "stage-timing")]
-            self.stages.record(
+            self.stages.finish(
                 crate::stage_timing::Stage::CandidateRefillLockWait,
-                lock_started.elapsed(),
+                lock_started,
             );
             #[cfg(feature = "stage-timing")]
-            let reclaim_started = std::time::Instant::now();
+            let reclaim_started = self
+                .stages
+                .start(crate::stage_timing::Stage::CandidateCursorPublishAndReclaim);
             #[cfg(feature = "stage-timing")]
             let bases = (buffer.public_base, buffer.hidden_base);
             self.delivery.borrow().publish(&mut buffer, self.index);
@@ -253,12 +267,12 @@ impl Iterator for DayPublicSourceV1 {
                 CandidateReclaimDetach,
                 DayHubV1::compact(&mut buffer)
             );
-            self.hub.0.1.notify_all();
+            self.hub.0.1.control.notify_all();
             #[cfg(feature = "stage-timing")]
             {
-                self.stages.record(
+                self.stages.finish(
                     crate::stage_timing::Stage::CandidateCursorPublishAndReclaim,
-                    reclaim_started.elapsed(),
+                    reclaim_started,
                 );
                 self.stages.add_delivery_work(
                     0,
@@ -267,21 +281,27 @@ impl Iterator for DayPublicSourceV1 {
                 );
             }
             // 发布仍在原锁内完成；先解锁并释放本批回收引用，再锁定当前可领取材料。
-            drop(buffer);
-            measure_stage!(self.stages, CandidateReclaimedDrop, drop(retired));
-            #[cfg(feature = "stage-timing")]
-            let lock_started = std::time::Instant::now();
-            let mut buffer = self.hub.0.0.lock().unwrap();
-            #[cfg(feature = "stage-timing")]
-            self.stages.record(
-                crate::stage_timing::Stage::CandidateRefillLockWait,
-                lock_started.elapsed(),
-            );
+            if !retired.0.is_empty() || !retired.1.is_empty() {
+                drop(buffer);
+                measure_stage!(self.stages, CandidateReclaimedDrop, drop(retired));
+                #[cfg(feature = "stage-timing")]
+                let lock_started = self
+                    .stages
+                    .start(crate::stage_timing::Stage::CandidateRefillLockWait);
+                buffer = self.hub.0.0.lock().unwrap();
+                #[cfg(feature = "stage-timing")]
+                self.stages.finish(
+                    crate::stage_timing::Stage::CandidateRefillLockWait,
+                    lock_started,
+                );
+            }
             #[cfg(feature = "stage-timing")]
             let mut emit_transport = false;
             loop {
                 #[cfg(feature = "stage-timing")]
-                let claim_started = std::time::Instant::now();
+                let claim_started = self
+                    .stages
+                    .start(crate::stage_timing::Stage::CandidateBatchClaim);
                 let mut delivery = self.delivery.borrow_mut();
                 let position = delivery.public_end;
                 delivery.public.extend(
@@ -295,9 +315,9 @@ impl Iterator for DayPublicSourceV1 {
                 delivery.public_end += delivery.public.len();
                 #[cfg(feature = "stage-timing")]
                 {
-                    self.stages.record(
+                    self.stages.finish(
                         crate::stage_timing::Stage::CandidateBatchClaim,
-                        claim_started.elapsed(),
+                        claim_started,
                     );
                     emit_transport |= self.stages.add_delivery_work(delivery.public.len(), 0, 0);
                 }
@@ -324,18 +344,18 @@ impl Iterator for DayPublicSourceV1 {
                 }
                 if !buffer.candidates[self.index].waiting {
                     buffer.candidates[self.index].waiting = true;
-                    self.hub.0.1.notify_all();
+                    self.hub.0.1.control.notify_all();
                 }
                 #[cfg(test)]
                 let observed_wait = tests::empty_wait_started();
                 #[cfg(feature = "stage-timing")]
-                let wait_started = std::time::Instant::now();
-                buffer = self.hub.0.1.wait(buffer).unwrap();
+                let wait_started = self
+                    .stages
+                    .start(crate::stage_timing::Stage::CandidateDataWait);
+                buffer = self.hub.0.1.public.wait(buffer).unwrap();
                 #[cfg(feature = "stage-timing")]
-                self.stages.record(
-                    crate::stage_timing::Stage::CandidateDataWait,
-                    wait_started.elapsed(),
-                );
+                self.stages
+                    .finish(crate::stage_timing::Stage::CandidateDataWait, wait_started);
                 #[cfg(test)]
                 tests::empty_wait_returned(observed_wait);
             }
@@ -367,7 +387,7 @@ impl DayHiddenSourceV1 {
             delivery,
             failed: false,
             #[cfg(feature = "stage-timing")]
-            stages: crate::stage_timing::StageTimings::new(format!(
+            stages: crate::stage_timing::StageTimings::new_transport(format!(
                 "candidate_hidden_transport:{index}"
             )),
         }
@@ -385,15 +405,19 @@ impl Iterator for DayHiddenSourceV1 {
                 return Some(Ok(bucket));
             }
             #[cfg(feature = "stage-timing")]
-            let lock_started = std::time::Instant::now();
+            let lock_started = self
+                .stages
+                .start(crate::stage_timing::Stage::CandidateRefillLockWait);
             let mut buffer = self.hub.0.0.lock().unwrap();
             #[cfg(feature = "stage-timing")]
-            self.stages.record(
+            self.stages.finish(
                 crate::stage_timing::Stage::CandidateRefillLockWait,
-                lock_started.elapsed(),
+                lock_started,
             );
             #[cfg(feature = "stage-timing")]
-            let reclaim_started = std::time::Instant::now();
+            let reclaim_started = self
+                .stages
+                .start(crate::stage_timing::Stage::CandidateCursorPublishAndReclaim);
             #[cfg(feature = "stage-timing")]
             let bases = (buffer.public_base, buffer.hidden_base);
             self.delivery.borrow().publish(&mut buffer, self.index);
@@ -402,12 +426,12 @@ impl Iterator for DayHiddenSourceV1 {
                 CandidateReclaimDetach,
                 DayHubV1::compact(&mut buffer)
             );
-            self.hub.0.1.notify_all();
+            self.hub.0.1.control.notify_all();
             #[cfg(feature = "stage-timing")]
             {
-                self.stages.record(
+                self.stages.finish(
                     crate::stage_timing::Stage::CandidateCursorPublishAndReclaim,
-                    reclaim_started.elapsed(),
+                    reclaim_started,
                 );
                 self.stages.add_delivery_work(
                     0,
@@ -416,21 +440,27 @@ impl Iterator for DayHiddenSourceV1 {
                 );
             }
             // 发布仍在原锁内完成；先解锁并释放本批回收引用，再锁定当前可领取材料。
-            drop(buffer);
-            measure_stage!(self.stages, CandidateReclaimedDrop, drop(retired));
-            #[cfg(feature = "stage-timing")]
-            let lock_started = std::time::Instant::now();
-            let mut buffer = self.hub.0.0.lock().unwrap();
-            #[cfg(feature = "stage-timing")]
-            self.stages.record(
-                crate::stage_timing::Stage::CandidateRefillLockWait,
-                lock_started.elapsed(),
-            );
+            if !retired.0.is_empty() || !retired.1.is_empty() {
+                drop(buffer);
+                measure_stage!(self.stages, CandidateReclaimedDrop, drop(retired));
+                #[cfg(feature = "stage-timing")]
+                let lock_started = self
+                    .stages
+                    .start(crate::stage_timing::Stage::CandidateRefillLockWait);
+                buffer = self.hub.0.0.lock().unwrap();
+                #[cfg(feature = "stage-timing")]
+                self.stages.finish(
+                    crate::stage_timing::Stage::CandidateRefillLockWait,
+                    lock_started,
+                );
+            }
             #[cfg(feature = "stage-timing")]
             let mut emit_transport = false;
             loop {
                 #[cfg(feature = "stage-timing")]
-                let claim_started = std::time::Instant::now();
+                let claim_started = self
+                    .stages
+                    .start(crate::stage_timing::Stage::CandidateBatchClaim);
                 let mut delivery = self.delivery.borrow_mut();
                 let position = delivery.hidden_end;
                 delivery.hidden.extend(
@@ -444,9 +474,9 @@ impl Iterator for DayHiddenSourceV1 {
                 delivery.hidden_end += delivery.hidden.len();
                 #[cfg(feature = "stage-timing")]
                 {
-                    self.stages.record(
+                    self.stages.finish(
                         crate::stage_timing::Stage::CandidateBatchClaim,
-                        claim_started.elapsed(),
+                        claim_started,
                     );
                     emit_transport |= self.stages.add_delivery_work(delivery.hidden.len(), 0, 0);
                 }
@@ -469,18 +499,18 @@ impl Iterator for DayHiddenSourceV1 {
                 }
                 if !buffer.candidates[self.index].waiting {
                     buffer.candidates[self.index].waiting = true;
-                    self.hub.0.1.notify_all();
+                    self.hub.0.1.control.notify_all();
                 }
                 #[cfg(test)]
                 let observed_wait = tests::empty_wait_started();
                 #[cfg(feature = "stage-timing")]
-                let wait_started = std::time::Instant::now();
-                buffer = self.hub.0.1.wait(buffer).unwrap();
+                let wait_started = self
+                    .stages
+                    .start(crate::stage_timing::Stage::CandidateDataWait);
+                buffer = self.hub.0.1.hidden.wait(buffer).unwrap();
                 #[cfg(feature = "stage-timing")]
-                self.stages.record(
-                    crate::stage_timing::Stage::CandidateDataWait,
-                    wait_started.elapsed(),
-                );
+                self.stages
+                    .finish(crate::stage_timing::Stage::CandidateDataWait, wait_started);
                 #[cfg(test)]
                 tests::empty_wait_returned(observed_wait);
             }
@@ -492,502 +522,43 @@ impl Iterator for DayHiddenSourceV1 {
         }
     }
 }
-#[derive(Serialize, Deserialize)]
-pub(crate) struct CandidateCheckpointV1<D> {
-    #[serde(with = "checkpoint_bytes")]
-    driver: Vec<u8>,
-    #[serde(with = "checkpoint_bytes")]
-    ledger: Vec<u8>,
-    #[serde(with = "checkpoint_bytes")]
-    shared: Vec<u8>,
-    #[serde(with = "checkpoint_bytes")]
-    strategy: Vec<u8>,
-    state: RuntimeLoopCheckpointV1<D>,
-    pub prefetched: Option<checkpoint::Delivery>,
-    next_hidden: Option<HiddenBucketCheckpointV1>,
-}
-pub(crate) struct DayCandidateCheckpointV1<D> {
+pub(crate) struct DayCandidateControlV1 {
     delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
-    pub hub: DayHubV1,
-    pub index: usize,
-    pub root: PathBuf,
-    pub resumed: Option<CandidateCheckpointV1<D>>,
-    pub hidden: Option<AcceptedHiddenStepBucketV1>,
-    pub every_events: Option<u64>,
-    events: u64,
-    #[cfg(feature = "stage-timing")]
-    stages: crate::stage_timing::StageTimings,
+    hub: DayHubV1,
+    index: usize,
 }
-impl<D> DayCandidateCheckpointV1<D> {
+impl DayCandidateControlV1 {
     pub fn new(
         hub: DayHubV1,
         index: usize,
-        root: PathBuf,
-        resumed: Option<CandidateCheckpointV1<D>>,
-        every_events: Option<u64>,
         delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     ) -> Self {
         Self {
+            delivery,
             hub,
             index,
-            root,
-            resumed,
-            hidden: None,
-            every_events,
-            events: 0,
-            delivery,
-            #[cfg(feature = "stage-timing")]
-            stages: crate::stage_timing::StageTimings::new(format!("candidate_checkpoint:{index}")),
         }
     }
 }
-impl<S> RuntimeCheckpointV1<S, DayPublicSourceV1> for DayCandidateCheckpointV1<S::Diagnostics>
-where
-    S: CheckpointStrategyV1,
-    S::Diagnostics: Serialize + serde::de::DeserializeOwned,
-{
+impl RuntimeControlV1 for DayCandidateControlV1 {
+    fn initialization_classification(&self, position: u64) -> Option<(bool, bool)> {
+        self.delivery
+            .borrow()
+            .initialization
+            .filter(|(p, ..)| *p == position)
+            .map(|(_, initial, dependency)| (initial, dependency))
+    }
     fn research_enabled(&self) -> bool {
         self.hub.0.0.lock().unwrap().research_summary
     }
     fn started(&mut self) {
         let mut buffer = self.hub.0.0.lock().unwrap();
         buffer.candidates[self.index].runtime_started = true;
-        self.hub.0.1.notify_all();
+        self.hub.0.1.control.notify_all();
     }
-    fn restore(
-        &mut self,
-        config: &HistoricalPreparedRunConfigV1,
-        rules: Arc<SealedProcessRuleSnapshotV3>,
-        strategy: &mut S,
-    ) -> Result<Option<RestoredRuntimeV1<S::Diagnostics>>, MaterialError> {
-        let Some(saved) = self.resumed.take() else {
-            return Ok(None);
-        };
-        let finality = Arc::new(TradeFinalityPolicyV2::decode_and_seal(&std::fs::read(
-            &config.finality_policy_path,
-        )?)?);
-        let scenario = Arc::new(SealedPlatformScenarioV1::decode_and_seal(
-            &serde_json::to_vec(&SimulationScenarioArtifactV1 {
-                schema_version: PLATFORM_SCENARIO_SCHEMA_V1.into(),
-                markets: vec![],
-            })?,
-        )?);
-        let latency = sim_system::latency_profile::load_embedded_proxy_latency_profile()?;
-        let (mut state, observation) = PublicConsumptionStateV1::restore_checkpoint(
-            saved.driver.as_slice(),
-            rules,
-            finality,
-            scenario,
-            latency,
-            config.max_group_bytes,
-            config.finite_in_flight_groups,
-        )?;
-        let mut ledger = ledger::LedgerWriterV1::restore_checkpoint(saved.ledger.as_slice())?;
-        state.reconnect_ledger_recording(&mut ledger, &config.ledger_root)?;
-        let shared = SharedExecutionV2::restore_checkpoint(
-            ledger,
-            observation.clone(),
-            saved.shared.as_slice(),
-        )?;
-        strategy.restore_strategy_checkpoint(&mut saved.strategy.as_slice())?;
-        self.hidden = saved.next_hidden.map(HiddenBucketCheckpointV1::restore);
-        Ok(Some((state, shared, observation, saved.state)))
+    fn stop_requested(&mut self) -> Result<bool, MaterialError> {
+        Ok(self.hub.0.1.budget_stop_requested.load(Ordering::Acquire))
     }
-    fn restored_hidden(&mut self) -> Option<Result<AcceptedHiddenStepBucketV1, MaterialError>> {
-        self.hidden.take().map(Ok)
-    }
-    fn save(
-        &mut self,
-        driver: &mut FinitePublicConsumptionV1<DayPublicSourceV1>,
-        shared: &SharedExecutionV2,
-        strategy: &S,
-        state: RuntimeLoopCheckpointRefV1<'_, S::Diagnostics>,
-        next_hidden: Option<&AcceptedHiddenStepBucketV1>,
-    ) -> Result<RuntimeCheckpointControlV1, MaterialError> {
-        self.events += 1;
-        #[cfg(feature = "stage-timing")]
-        let sample = self.stages.next_diagnostic_sample();
-        let generation = measure_sampled_stage!(
-            self.stages,
-            sample,
-            CandidateControlAndCursorPublishSampled,
-            {
-                let mut buffer = measure_sampled_stage!(
-                    self.stages,
-                    sample,
-                    CandidateControlLockWaitSampled,
-                    self.hub.0.0.lock().unwrap()
-                );
-                self.delivery.borrow().publish(&mut buffer, self.index);
-                if buffer.requested.is_none()
-                    && self.every_events.is_some_and(|n| n > 0 && self.events >= n)
-                {
-                    buffer.requested = Some(buffer.generation);
-                    self.hub.0.1.notify_all();
-                }
-                let generation = buffer.requested.filter(|g| {
-                    buffer.candidates[self.index]
-                        .ready
-                        .as_ref()
-                        .map(|(g, _)| *g)
-                        != Some(*g)
-                });
-                (generation, buffer.budget_stopped)
-            }
-        );
-        let (Some(generation), _) = generation else {
-            return Ok(if generation.1 {
-                RuntimeCheckpointControlV1::SavedThenStop
-            } else {
-                RuntimeCheckpointControlV1::Continue
-            });
-        };
-        #[cfg(feature = "stage-timing")]
-        let encode_started = std::time::Instant::now();
-        #[cfg(feature = "stage-timing")]
-        let timings = &mut self.stages;
-        let mut execution = Vec::new();
-        measure_stage!(
-            timings,
-            EncodeSimDriver,
-            driver.write_checkpoint(&mut execution)
-        )?;
-        let mut ledger = Vec::new();
-        measure_stage!(
-            timings,
-            EncodeLedger,
-            shared.ledger().write_checkpoint(&mut ledger)
-        )?;
-        let mut registry = Vec::new();
-        measure_stage!(
-            timings,
-            EncodeSharedExecution,
-            shared.write_checkpoint(&mut registry)
-        )?;
-        let mut strategy_state = Vec::new();
-        measure_stage!(
-            timings,
-            EncodeStrategy,
-            strategy.write_strategy_checkpoint(&mut strategy_state)
-        )?;
-        #[cfg(feature = "stage-timing")]
-        eprintln!(
-            "checkpoint_subsystem_bytes={}",
-            serde_json::json!({"candidate_index":self.index,"generation":generation,"driver":execution.len(),"ledger":ledger.len(),"shared_execution":registry.len(),"strategy":strategy_state.len()})
-        );
-        #[derive(Serialize)]
-        struct Saved<'a, D> {
-            #[serde(with = "checkpoint_bytes")]
-            driver: Vec<u8>,
-            #[serde(with = "checkpoint_bytes")]
-            ledger: Vec<u8>,
-            #[serde(with = "checkpoint_bytes")]
-            shared: Vec<u8>,
-            #[serde(with = "checkpoint_bytes")]
-            strategy: Vec<u8>,
-            state: RuntimeLoopCheckpointRefV1<'a, D>,
-            prefetched: Option<checkpoint::Delivery>,
-            next_hidden: Option<HiddenBucketCheckpointV1>,
-        }
-        let saved = Saved {
-            driver: execution,
-            ledger,
-            shared: registry,
-            strategy: strategy_state,
-            state,
-            prefetched: driver
-                .prefetched_group()?
-                .as_ref()
-                .map(checkpoint::Delivery::capture),
-            next_hidden: next_hidden.map(HiddenBucketCheckpointV1::capture),
-        };
-        let path = self
-            .root
-            .join(format!("checkpoint-{generation:020}"))
-            .join(format!("candidate-{:06}.cbor", self.index));
-        #[cfg(feature = "stage-timing")]
-        self.stages.record(
-            crate::stage_timing::Stage::EncodeSubsystemsAndCapture,
-            encode_started.elapsed(),
-        );
-        #[cfg(feature = "stage-timing")]
-        let write_started = std::time::Instant::now();
-        let sha256 = write_cbor(&path, &saved)?;
-        #[cfg(feature = "stage-timing")]
-        self.stages.record(
-            crate::stage_timing::Stage::EncodeCandidateWriteAndSync,
-            write_started.elapsed(),
-        );
-        #[cfg(feature = "stage-timing")]
-        let wait_started = std::time::Instant::now();
-        let mut buffer = self.hub.0.0.lock().unwrap();
-        buffer.candidates[self.index].ready = Some((generation, sha256));
-        self.hub.0.1.notify_all();
-        while buffer.requested == Some(generation) && buffer.failure.is_none() {
-            buffer = self.hub.0.1.wait(buffer).unwrap();
-        }
-        if let Some(error) = &buffer.failure {
-            return Err(error.message.clone().into());
-        }
-        #[cfg(feature = "stage-timing")]
-        self.stages.record(
-            crate::stage_timing::Stage::WaitSharedPublication,
-            wait_started.elapsed(),
-        );
-        self.events = 0;
-        #[cfg(feature = "stage-timing")]
-        self.stages.emit_checkpoint(generation);
-        Ok(if buffer.budget_stopped {
-            RuntimeCheckpointControlV1::SavedThenStop
-        } else {
-            RuntimeCheckpointControlV1::Continue
-        })
-    }
-}
-#[derive(Serialize, Deserialize)]
-pub(crate) struct DayCheckpointV1<C = HistoricalRuntimeCatalogV1> {
-    pub format: String,
-    pub identity: String,
-    pub generation: u64,
-    pub applied: u64,
-    pub state: DayCheckpointStateV2<C>,
-    pub completed: Vec<Option<serde_json::Value>>,
-}
-/// 只有所有候选完成才省略运行状态；部分完成仍保留各个消费前沿。
-#[derive(Serialize, Deserialize)]
-pub(crate) enum DayCheckpointStateV2<C = HistoricalRuntimeCatalogV1> {
-    Running {
-        #[serde(with = "checkpoint_bytes")]
-        core: Vec<u8>,
-        #[serde(with = "checkpoint_bytes")]
-        producer: Vec<u8>,
-        catalog: C,
-        public_base: usize,
-        public: checkpoint::DeliveryBatch,
-        hidden_base: usize,
-        hidden: Vec<HiddenBucketCheckpointV1>,
-        cursors: Vec<CandidateCursorV1>,
-    },
-    Complete,
-}
-/// 内部 CBOR 模块字节，不改变所属模块的正式编码。
-mod checkpoint_bytes {
-    use serde::{Deserializer, Serializer};
-    pub fn serialize<S: Serializer>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(value)
-    }
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
-        struct Bytes;
-        impl<'de> serde::de::Visitor<'de> for Bytes {
-            type Value = Vec<u8>;
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("模块检查点字节")
-            }
-            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
-                Ok(value.to_vec())
-            }
-            fn visit_byte_buf<E: serde::de::Error>(self, value: Vec<u8>) -> Result<Self::Value, E> {
-                Ok(value)
-            }
-        }
-        deserializer.deserialize_byte_buf(Bytes)
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct CheckpointFileV1 {
-    pub path: String,
-    pub sha256: String,
-}
-#[derive(Serialize, Deserialize)]
-pub(crate) struct CheckpointPublicationV1 {
-    pub format: String,
-    pub identity: String,
-    pub generation: u64,
-    pub files: Vec<CheckpointFileV1>,
-}
-pub(crate) const DAY_CHECKPOINT_FORMAT: &str = "original-parquet-day-checkpoint-v5";
-struct DigestWriter<W> {
-    inner: W,
-    digest: Sha256,
-}
-impl<W: Write> Write for DigestWriter<W> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let n = self.inner.write(bytes)?;
-        self.digest.update(&bytes[..n]);
-        Ok(n)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
-pub(crate) fn write_cbor(path: &Path, value: &impl Serialize) -> Result<String, MaterialError> {
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    let file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)?;
-    let mut writer = BufWriter::new(DigestWriter {
-        inner: file,
-        digest: Sha256::new(),
-    });
-    ciborium::ser::into_writer(value, &mut writer)?;
-    writer.flush()?;
-    writer.get_ref().inner.sync_all()?;
-    Ok(format!("{:x}", writer.get_ref().digest.clone().finalize()))
-}
-pub(crate) fn hash_file(path: &Path) -> Result<String, MaterialError> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let mut digest = Sha256::new();
-    let mut buffer = vec![0; 1024 * 1024];
-    loop {
-        let n = file.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        digest.update(&buffer[..n]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
-}
-/// 摘要只累计实际读入字节。解码后继续读至EOF，再允许恢复任何写入owner。
-struct DigestReader<R> {
-    inner: R,
-    digest: Sha256,
-}
-impl<R: Read> Read for DigestReader<R> {
-    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(bytes)?;
-        self.digest.update(&bytes[..n]);
-        Ok(n)
-    }
-}
-fn read_verified_cbor<T: serde::de::DeserializeOwned>(
-    path: &Path,
-    expected: &str,
-) -> Result<T, MaterialError> {
-    let mut reader = BufReader::new(DigestReader {
-        inner: std::fs::File::open(path)?,
-        digest: Sha256::new(),
-    });
-    let value = ciborium::de::from_reader(&mut reader)?;
-    std::io::copy(&mut reader, &mut std::io::sink())?;
-    if format!("{:x}", reader.get_ref().digest.clone().finalize()) != expected {
-        return Err("完整日检查点文件身份不符".into());
-    }
-    Ok(value)
-}
-pub(crate) fn read_publication(
-    root: &Path,
-    identity: &str,
-) -> Result<
-    Option<(
-        CheckpointPublicationV1,
-        DayCheckpointV1,
-        std::collections::BTreeMap<String, Vec<u8>>,
-    )>,
-    MaterialError,
-> {
-    let pointer = root.join("checkpoint.json");
-    if !pointer.exists() {
-        return Ok(None);
-    };
-    let published: CheckpointPublicationV1 =
-        serde_json::from_reader(std::fs::File::open(&pointer)?)?;
-    if published.format != DAY_CHECKPOINT_FORMAT || published.identity != identity {
-        return Err("日检查点与输入、配置或版本不符".into());
-    }
-    let directory = root.join(format!("checkpoint-{:020}", published.generation));
-    let mut saved = None;
-    let mut candidates = std::collections::BTreeMap::new();
-    for file in &published.files {
-        let path = directory.join(&file.path);
-        if path.parent() != Some(directory.as_path()) {
-            return Err("完整日检查点文件身份不符".into());
-        }
-        if file.path == "day.cbor" {
-            saved = Some(read_verified_cbor::<DayCheckpointV1>(&path, &file.sha256)?);
-        } else if file.path.starts_with("candidate-") && file.path.ends_with(".cbor") {
-            let mut reader = BufReader::new(DigestReader {
-                inner: std::fs::File::open(&path)?,
-                digest: Sha256::new(),
-            });
-            let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes)?;
-            if format!("{:x}", reader.get_ref().digest.clone().finalize()) != file.sha256 {
-                return Err("完整日检查点文件身份不符".into());
-            }
-            candidates.insert(file.path.clone(), bytes);
-        } else if hash_file(&path)? != file.sha256 {
-            return Err("完整日检查点文件身份不符".into());
-        }
-    }
-    let saved = saved.ok_or("完整日检查点缺少day.cbor")?;
-    if saved.format != DAY_CHECKPOINT_FORMAT
-        || saved.identity != identity
-        || saved.generation != published.generation
-    {
-        return Err("日检查点发布引用不符".into());
-    }
-    Ok(Some((published, saved, candidates)))
-}
-pub(crate) fn publish(
-    root: &Path,
-    identity: &str,
-    generation: u64,
-    files: Vec<CheckpointFileV1>,
-) -> Result<(), MaterialError> {
-    let previous = if root.join("checkpoint.json").exists() {
-        Some(serde_json::from_reader::<_, CheckpointPublicationV1>(
-            std::fs::File::open(root.join("checkpoint.json"))?,
-        )?)
-    } else {
-        None
-    };
-    let directory = root.join(format!("checkpoint-{generation:020}"));
-    std::fs::File::open(&directory)?.sync_all()?;
-    let pointer = root.join(".checkpoint.json.tmp");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&pointer)?;
-    serde_json::to_writer(
-        &mut file,
-        &CheckpointPublicationV1 {
-            format: DAY_CHECKPOINT_FORMAT.into(),
-            identity: identity.into(),
-            generation,
-            files,
-        },
-    )?;
-    file.flush()?;
-    file.sync_all()?;
-    std::fs::rename(pointer, root.join("checkpoint.json"))?;
-    std::fs::File::open(root)?.sync_all()?;
-    // 新引用耐久之后，上一完整点已失去消费者。仅回收其清单列明的准确文件。
-    if let Some(previous) = previous {
-        if previous.format == DAY_CHECKPOINT_FORMAT
-            && previous.identity == identity
-            && previous.generation != generation
-        {
-            let old = root.join(format!("checkpoint-{:020}", previous.generation));
-            for file in previous.files {
-                let path = old.join(file.path);
-                if path.parent() == Some(old.as_path()) && path.is_file() {
-                    std::fs::remove_file(path)?;
-                }
-            }
-            if old.is_dir() {
-                std::fs::File::open(&old)?.sync_all()?;
-                if old.read_dir()?.next().is_none() {
-                    std::fs::remove_dir(old)?;
-                }
-            }
-            std::fs::File::open(root)?.sync_all()?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -998,7 +569,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    #[derive(Default, Serialize)]
+    #[derive(Default, serde::Serialize)]
     struct EmptyWaitObservation {
         wait_calls: u64,
         returned_waits: u64,
@@ -1027,6 +598,35 @@ mod tests {
         }
     }
     #[test]
+    fn budget_poll_uses_atomic_flag_without_locking_or_publishing_a_prefetched_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, _) = crate::test_common::setup(temp.path());
+        let hub = DayHubV1::new(&[HistoricalPreparedRunConfigV1::from(&config)]);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker_hub = hub.clone();
+            scope.spawn(move || {
+                let delivery = DayLocalDeliveryCacheV1::shared(&worker_hub, 0);
+                let mut control = DayCandidateControlV1::new(worker_hub, 0, delivery);
+                ready_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+                result_tx.send(control.stop_requested().unwrap()).unwrap();
+            });
+            ready_rx.recv().unwrap();
+            let buffer = hub.0.0.lock().unwrap();
+            hub.0.1.budget_stop_requested.store(true, Ordering::Release);
+            go_tx.send(()).unwrap();
+            assert!(
+                result_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("停止检查不能等待Hub锁")
+            );
+            assert_eq!(buffer.candidates[0].cursor.public, 0);
+        });
+    }
+    #[test]
     fn local_batch_publishes_only_returned_prefix_and_delays_tail_error() {
         let temp = tempfile::tempdir().unwrap();
         let (config, _) = crate::test_common::setup(temp.path());
@@ -1050,11 +650,11 @@ mod tests {
         let hub = DayHubV1::new(&[candidate.clone(), candidate]);
         {
             let mut buffer = hub.0.0.lock().unwrap();
-            buffer.public.extend(groups.iter().cloned());
+            buffer.public.extend(groups.iter().cloned().map(Into::into));
             buffer.production = ProductionV1::Ended;
         }
         let delivery = DayLocalDeliveryCacheV1::shared(&hub, 0);
-        let mut source = DayPublicSourceV1::new(hub.clone(), 0, VecDeque::new(), delivery.clone());
+        let mut source = DayPublicSourceV1::new(hub.clone(), 0, delivery.clone());
         let first = source.next().unwrap().unwrap();
         assert_eq!(first.delivered_at_utc_ms, groups[0].delivered_at_utc_ms + 3);
         assert_eq!(
@@ -1077,7 +677,7 @@ mod tests {
         drop(source);
         drop(delivery);
         let delivery = DayLocalDeliveryCacheV1::shared(&hub, 0);
-        let mut source = DayPublicSourceV1::new(hub.clone(), 0, VecDeque::new(), delivery);
+        let mut source = DayPublicSourceV1::new(hub.clone(), 0, delivery);
         let second = source.next().unwrap().unwrap();
         assert_eq!(second.prepared.reference, groups[1].prepared.reference);
         assert_eq!(
@@ -1134,12 +734,8 @@ mod tests {
                     facts.as_ref().clone(),
                 );
                 // 只运行真实运输/回收入口，不将这份重复引用诊断送入SIM业务应用。
-                hub.0
-                    .0
-                    .lock()
-                    .unwrap()
-                    .public
-                    .push_back(PublicGroupDeliveryV1 {
+                hub.0.0.lock().unwrap().public.push_back(
+                    PublicGroupDeliveryV1 {
                         prepared: Arc::new(PreparedPublicGroupV1 {
                             reference: delivered.prepared.reference.clone(),
                             group: Arc::new(group),
@@ -1147,11 +743,13 @@ mod tests {
                             pm_contexts: vec![],
                         }),
                         delivered_at_utc_ms: delivered.delivered_at_utc_ms,
-                    });
+                    }
+                    .into(),
+                );
             }
             hub.0.0.lock().unwrap().production = ProductionV1::Ended;
             let delivery = DayLocalDeliveryCacheV1::shared(&hub, 0);
-            let mut source = DayPublicSourceV1::new(hub.clone(), 0, VecDeque::new(), delivery);
+            let mut source = DayPublicSourceV1::new(hub.clone(), 0, delivery);
             let started = Instant::now();
             let mut returned = 0;
             for group in source.by_ref() {
@@ -1188,8 +786,6 @@ mod tests {
                     },
                     active: true,
                     waiting: false,
-                    ready: None,
-                    complete: None,
                     source_health: None,
                     requirements: None,
                     runtime_started: false,
@@ -1214,7 +810,6 @@ mod tests {
                                 DayPublicSourceV1::new(
                                     hub.clone(),
                                     index,
-                                    VecDeque::new(),
                                     DayLocalDeliveryCacheV1::shared(&hub, index)
                                 )
                                 .next()
@@ -1260,94 +855,5 @@ mod tests {
         if let Ok(path) = std::env::var("ISSUE185_WAIT_OUTPUT") {
             std::fs::write(path, serde_json::to_vec_pretty(&output).unwrap()).unwrap();
         }
-    }
-    #[test]
-    fn checkpoint_read_digest_includes_the_complete_decode_tail() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("value.cbor");
-        let digest = write_cbor(&path, &42u64).unwrap();
-        assert_eq!(read_verified_cbor::<u64>(&path, &digest).unwrap(), 42);
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(b"remaining-content")
-            .unwrap();
-        assert!(read_verified_cbor::<u64>(&path, &digest).is_err());
-        // 原格式允许解码后剩余字节；它们必须同样参与整个文件摘要。
-        assert_eq!(
-            read_verified_cbor::<u64>(&path, &hash_file(&path).unwrap()).unwrap(),
-            42
-        );
-    }
-    #[test]
-    fn checkpoint_digest_counts_partial_writes_and_propagates_failures() {
-        struct Partial {
-            bytes: Vec<u8>,
-            failed: bool,
-        }
-        impl Write for Partial {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                if self.failed {
-                    return Err(std::io::Error::other("原写入失败"));
-                }
-                let n = bytes.len().min(3);
-                self.bytes.extend_from_slice(&bytes[..n]);
-                Ok(n)
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Err(std::io::Error::other("原刷新失败"))
-            }
-        }
-        let mut writer = DigestWriter {
-            inner: Partial {
-                bytes: vec![],
-                failed: false,
-            },
-            digest: Sha256::new(),
-        };
-        writer.write_all(b"checkpoint").unwrap();
-        let expected = Sha256::digest(&writer.inner.bytes);
-        assert_eq!(writer.digest.clone().finalize(), expected);
-        writer.inner.failed = true;
-        assert!(writer.write(b"not committed").is_err());
-        assert_eq!(writer.digest.clone().finalize(), expected);
-        assert!(writer.flush().is_err());
-        let tmp = tempfile::tempdir().unwrap();
-        #[derive(Serialize, Deserialize)]
-        struct Saved {
-            #[serde(with = "checkpoint_bytes")]
-            bytes: Vec<u8>,
-        }
-        let path = tmp.path().join("state.cbor");
-        let digest = write_cbor(
-            &path,
-            &Saved {
-                bytes: vec![0, 24, 255],
-            },
-        )
-        .unwrap();
-        assert_eq!(digest, hash_file(&path).unwrap());
-        let value: ciborium::Value =
-            ciborium::from_reader(std::fs::File::open(&path).unwrap()).unwrap();
-        assert!(
-            matches!(&value.as_map().unwrap()[0].1,ciborium::Value::Bytes(b) if b == &[0,24,255])
-        );
-        let saved: Saved = ciborium::from_reader(std::fs::File::open(&path).unwrap()).unwrap();
-        assert_eq!(saved.bytes, vec![0, 24, 255]);
-        assert!(write_cbor(&path, &saved).is_err(), "原create_new边界保持");
-    }
-}
-
-#[cfg(test)]
-mod version_boundary_tests {
-    use super::*;
-    #[test]
-    fn old_day_materials_are_not_loaded_as_the_new_position_format() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("checkpoint.json"),
-            br#"{"format":"original-parquet-day-checkpoint-v4","identity":"same-input","generation":0,"files":[]}"#).unwrap();
-        let error = read_publication(temp.path(), "same-input").err().unwrap();
-        assert_eq!(error.to_string(), "日检查点与输入、配置或版本不符");
     }
 }

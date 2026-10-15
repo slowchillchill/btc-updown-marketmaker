@@ -30,7 +30,6 @@ def summarize(config, result):
                 'calculation_count': report.get('calculation_count'), 'failed_batch': report.get('failed_batch'),
                 'observation_cutoff': report.get('observation_cutoff'),
                 'durable_noe_prefix': report.get('durable_noe_prefix'),
-                'published_checkpoint': day.get('published_checkpoint'),
                 'public_applied_inputs': day['public_applied_inputs'],
             })
     return {'status': result.get('status', 'returned'), 'error': result.get('error'),

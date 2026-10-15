@@ -62,8 +62,9 @@ def prepare(template, business, dataset_root, output_root, implementation, rules
         run['consumption_sequence_ref'] = identity + '-public'
         run['replay_progress_interval_seconds'] = 900
         day['candidates'].append(candidate)
-    day.update(checkpoint_root=str(output_root / 'runs/2026-09-12/checkpoints'),
-               checkpoint_interval_seconds=300, producer_lead_groups=8192)
+    day['producer_lead_groups'] = 8192
+    day.pop('checkpoint_root', None)
+    day.pop('checkpoint_interval_seconds', None)
     day.pop('checkpoint_every_applied_inputs', None)
     day.pop('checkpoint_every_candidate_events', None)
     return document

@@ -517,8 +517,7 @@ fn initialization_classifier_tracks_sources_fields_and_old_consumed_snapshots() 
                 .best_bid_ask
                 .direct_anchors
                 .push(anchor.clone()),
-            12 => market.assets[0]
-                .valuation_best_bid
+            12 => Arc::make_mut(&mut market.assets[0].valuation_best_bid)
                 .direct_anchors
                 .push(anchor.clone()),
             13 => group.chainlink_spot.direct_anchors.push(anchor.clone()),
