@@ -2560,3 +2560,74 @@ fn core_checkpoint_preserves_observed_empty_bid_and_unknown_asset() {
         );
     }
 }
+
+#[test]
+fn pm_side_projection_keeps_other_side_and_old_group_on_same_quantity_confirmation() {
+    let mut core = core();
+    apply(&mut core, &meta(0));
+    let initial = apply(&mut core, &pm(1, 1, 20_001, book("100")));
+    let before = &initial.applied.closed_groups[0].observations[0]
+        .assets
+        .iter()
+        .find(|a| a.asset.token_id.0 == UP_TOKEN_ID)
+        .unwrap();
+    let next = apply(
+        &mut core,
+        &pm(
+            2,
+            2,
+            20_002,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![change(Some("100"))],
+            },
+        ),
+    );
+    let after = &next.applied.closed_groups[0].observations[0]
+        .assets
+        .iter()
+        .find(|a| a.asset.token_id.0 == UP_TOKEN_ID)
+        .unwrap();
+    assert_eq!(before.bids.value, after.bids.value);
+    assert!(!std::sync::Arc::ptr_eq(&before.bids, &after.bids));
+    assert!(std::sync::Arc::ptr_eq(&before.asks, &after.asks));
+    assert_ne!(before.bids.direct_anchors, after.bids.direct_anchors);
+    assert_eq!(
+        before.bids.direct_anchors[0]
+            .position
+            .closed_at_input_position,
+        1
+    );
+    assert_eq!(
+        after.bids.direct_anchors[0]
+            .position
+            .closed_at_input_position,
+        2
+    );
+    let empty = apply(
+        &mut core,
+        &pm(
+            3,
+            3,
+            20_003,
+            PolymarketOrderbookEvent::Book {
+                asset_id: UP_TOKEN_ID.to_owned(),
+                bids: vec![],
+                asks: vec![],
+                last_trade_price: None,
+            },
+        ),
+    );
+    let cleared = &empty.applied.closed_groups[0].observations[0]
+        .assets
+        .iter()
+        .find(|a| a.asset.token_id.0 == UP_TOKEN_ID)
+        .unwrap();
+    assert!(cleared.bids.value.as_ref().unwrap().is_empty());
+    assert!(cleared.asks.value.as_ref().unwrap().is_empty());
+    assert!(!cleared.bids.direct_anchors.is_empty());
+    assert!(!cleared.asks.direct_anchors.is_empty());
+    assert_eq!(
+        before.bids.value.as_ref().unwrap()[0].quantity_shares.0,
+        "100"
+    );
+}

@@ -8,9 +8,11 @@ use sim_system::{
     public_consumption::*, scenario::*,
 };
 use std::{
+    cell::RefCell,
     collections::VecDeque,
     io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{Arc, Condvar, Mutex},
 };
 
@@ -149,18 +151,53 @@ impl DayHubV1 {
         cv.notify_all();
     }
 }
+// 仅由一个候选线程持有；领取不推进共享回收位置。
+const DAY_DELIVERY_BATCH: usize = 64;
+pub(crate) struct DayLocalDeliveryCacheV1 {
+    public: VecDeque<PublicGroupDeliveryV1>,
+    hidden: VecDeque<AcceptedHiddenStepBucketV1>,
+    public_end: usize,
+    hidden_end: usize,
+    times: crate::timing::DeliveryTimes,
+}
+impl DayLocalDeliveryCacheV1 {
+    pub fn shared(hub: &DayHubV1, index: usize) -> Rc<RefCell<Self>> {
+        let buffer = hub.0.0.lock().unwrap();
+        let cursor = &buffer.candidates[index].cursor;
+        Rc::new(RefCell::new(Self {
+            public: VecDeque::new(),
+            hidden: VecDeque::new(),
+            public_end: cursor.public,
+            hidden_end: cursor.hidden,
+            times: cursor.times.clone(),
+        }))
+    }
+    fn publish(&self, buffer: &mut DayBufferV1, index: usize) {
+        let cursor = &mut buffer.candidates[index].cursor;
+        cursor.public = self.public_end - self.public.len();
+        cursor.hidden = self.hidden_end - self.hidden.len();
+        cursor.times.last = self.times.last;
+    }
+}
 pub(crate) struct DayPublicSourceV1 {
     pub hub: DayHubV1,
     pub index: usize,
     pub restored: VecDeque<PublicGroupDeliveryV1>,
+    delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     failed: bool,
 }
 impl DayPublicSourceV1 {
-    pub fn new(hub: DayHubV1, index: usize, restored: VecDeque<PublicGroupDeliveryV1>) -> Self {
+    pub fn new(
+        hub: DayHubV1,
+        index: usize,
+        restored: VecDeque<PublicGroupDeliveryV1>,
+        delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
+    ) -> Self {
         Self {
             hub,
             index,
             restored,
+            delivery,
             failed: false,
         }
     }
@@ -174,62 +211,88 @@ impl Iterator for DayPublicSourceV1 {
         if self.failed {
             return None;
         }
-        let mut buffer = self.hub.0.0.lock().unwrap();
         loop {
-            let position = buffer.candidates[self.index].cursor.public;
-            if let Some(mut group) = buffer.public.get(position - buffer.public_base).cloned() {
-                let cursor = &mut buffer.candidates[self.index].cursor;
-                cursor.public += 1;
-                let time = cursor.times.execution_time_for_visible_group(
-                    &group.prepared.reference,
-                    group.delivered_at_utc_ms,
-                );
-                buffer.candidates[self.index].waiting = false;
-                DayHubV1::compact(&mut buffer);
-                self.hub.0.1.notify_all();
+            let group = self.delivery.borrow_mut().public.pop_front();
+            if let Some(mut group) = group {
+                let time = self
+                    .delivery
+                    .borrow_mut()
+                    .times
+                    .execution_time_for_visible_group(
+                        &group.prepared.reference,
+                        group.delivered_at_utc_ms,
+                    );
                 return Some(time.map(|at| {
                     group.delivered_at_utc_ms = at;
                     group
                 }));
             }
-            if let Some(error) = buffer.failure.clone() {
-                self.failed = true;
-                return Some(Err(SimRunActorErrorV2::PublicConsumptionSource(
-                    error.message,
-                )));
-            }
-            match &buffer.production {
-                ProductionV1::Ended => return None,
-                ProductionV1::Failed(error) => {
+            let mut buffer = self.hub.0.0.lock().unwrap();
+            self.delivery.borrow().publish(&mut buffer, self.index);
+            DayHubV1::compact(&mut buffer);
+            self.hub.0.1.notify_all();
+            loop {
+                let mut delivery = self.delivery.borrow_mut();
+                let position = delivery.public_end;
+                delivery.public.extend(
+                    buffer
+                        .public
+                        .iter()
+                        .skip(position - buffer.public_base)
+                        .take(DAY_DELIVERY_BATCH)
+                        .cloned(),
+                );
+                delivery.public_end += delivery.public.len();
+                if !delivery.public.is_empty() {
+                    buffer.candidates[self.index].waiting = false;
+                    break;
+                }
+                drop(delivery);
+                if let Some(error) = buffer.failure.clone() {
                     self.failed = true;
                     return Some(Err(SimRunActorErrorV2::PublicConsumptionSource(
-                        error.clone(),
+                        error.message,
                     )));
                 }
-                ProductionV1::Running => {}
+                match &buffer.production {
+                    ProductionV1::Ended => return None,
+                    ProductionV1::Failed(error) => {
+                        self.failed = true;
+                        return Some(Err(SimRunActorErrorV2::PublicConsumptionSource(
+                            error.clone(),
+                        )));
+                    }
+                    ProductionV1::Running => {}
+                }
+                if !buffer.candidates[self.index].waiting {
+                    buffer.candidates[self.index].waiting = true;
+                    self.hub.0.1.notify_all();
+                }
+                #[cfg(test)]
+                let observed_wait = tests::empty_wait_started();
+                buffer = self.hub.0.1.wait(buffer).unwrap();
+                #[cfg(test)]
+                tests::empty_wait_returned(observed_wait);
             }
-            if !buffer.candidates[self.index].waiting {
-                buffer.candidates[self.index].waiting = true;
-                self.hub.0.1.notify_all();
-            }
-            #[cfg(test)]
-            let observed_wait = tests::empty_wait_started();
-            buffer = self.hub.0.1.wait(buffer).unwrap();
-            #[cfg(test)]
-            tests::empty_wait_returned(observed_wait);
         }
     }
 }
 pub(crate) struct DayHiddenSourceV1 {
     pub hub: DayHubV1,
     pub index: usize,
+    delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     failed: bool,
 }
 impl DayHiddenSourceV1 {
-    pub fn new(hub: DayHubV1, index: usize) -> Self {
+    pub fn new(
+        hub: DayHubV1,
+        index: usize,
+        delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
+    ) -> Self {
         Self {
             hub,
             index,
+            delivery,
             failed: false,
         }
     }
@@ -240,37 +303,54 @@ impl Iterator for DayHiddenSourceV1 {
         if self.failed {
             return None;
         }
-        let mut buffer = self.hub.0.0.lock().unwrap();
         loop {
-            let position = buffer.candidates[self.index].cursor.hidden;
-            if let Some(bucket) = buffer.hidden.get(position - buffer.hidden_base).cloned() {
-                buffer.candidates[self.index].cursor.hidden += 1;
-                buffer.candidates[self.index].waiting = false;
-                DayHubV1::compact(&mut buffer);
-                self.hub.0.1.notify_all();
+            let bucket = self.delivery.borrow_mut().hidden.pop_front();
+            if let Some(bucket) = bucket {
                 return Some(Ok(bucket));
             }
-            if let Some(error) = buffer.failure.clone() {
-                self.failed = true;
-                return Some(Err(error.message.into()));
-            }
-            match &buffer.production {
-                ProductionV1::Ended => return None,
-                ProductionV1::Failed(error) => {
-                    self.failed = true;
-                    return Some(Err(error.clone().into()));
+            let mut buffer = self.hub.0.0.lock().unwrap();
+            self.delivery.borrow().publish(&mut buffer, self.index);
+            DayHubV1::compact(&mut buffer);
+            self.hub.0.1.notify_all();
+            loop {
+                let mut delivery = self.delivery.borrow_mut();
+                let position = delivery.hidden_end;
+                delivery.hidden.extend(
+                    buffer
+                        .hidden
+                        .iter()
+                        .skip(position - buffer.hidden_base)
+                        .take(DAY_DELIVERY_BATCH)
+                        .cloned(),
+                );
+                delivery.hidden_end += delivery.hidden.len();
+                if !delivery.hidden.is_empty() {
+                    buffer.candidates[self.index].waiting = false;
+                    break;
                 }
-                ProductionV1::Running => {}
+                drop(delivery);
+                if let Some(error) = buffer.failure.clone() {
+                    self.failed = true;
+                    return Some(Err(error.message.into()));
+                }
+                match &buffer.production {
+                    ProductionV1::Ended => return None,
+                    ProductionV1::Failed(error) => {
+                        self.failed = true;
+                        return Some(Err(error.clone().into()));
+                    }
+                    ProductionV1::Running => {}
+                }
+                if !buffer.candidates[self.index].waiting {
+                    buffer.candidates[self.index].waiting = true;
+                    self.hub.0.1.notify_all();
+                }
+                #[cfg(test)]
+                let observed_wait = tests::empty_wait_started();
+                buffer = self.hub.0.1.wait(buffer).unwrap();
+                #[cfg(test)]
+                tests::empty_wait_returned(observed_wait);
             }
-            if !buffer.candidates[self.index].waiting {
-                buffer.candidates[self.index].waiting = true;
-                self.hub.0.1.notify_all();
-            }
-            #[cfg(test)]
-            let observed_wait = tests::empty_wait_started();
-            buffer = self.hub.0.1.wait(buffer).unwrap();
-            #[cfg(test)]
-            tests::empty_wait_returned(observed_wait);
         }
     }
 }
@@ -289,6 +369,7 @@ pub(crate) struct CandidateCheckpointV1<D> {
     next_hidden: Option<HiddenBucketCheckpointV1>,
 }
 pub(crate) struct DayCandidateCheckpointV1<D> {
+    delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     pub hub: DayHubV1,
     pub index: usize,
     pub root: PathBuf,
@@ -306,6 +387,7 @@ impl<D> DayCandidateCheckpointV1<D> {
         root: PathBuf,
         resumed: Option<CandidateCheckpointV1<D>>,
         every_events: Option<u64>,
+        delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     ) -> Self {
         Self {
             hub,
@@ -315,6 +397,7 @@ impl<D> DayCandidateCheckpointV1<D> {
             hidden: None,
             every_events,
             events: 0,
+            delivery,
             #[cfg(feature = "stage-timing")]
             stages: crate::stage_timing::StageTimings::new(format!("candidate_checkpoint:{index}")),
         }
@@ -386,6 +469,7 @@ where
         self.events += 1;
         let generation = {
             let mut buffer = self.hub.0.0.lock().unwrap();
+            self.delivery.borrow().publish(&mut buffer, self.index);
             if buffer.requested.is_none()
                 && self.every_events.is_some_and(|n| n > 0 && self.events >= n)
             {
@@ -415,25 +499,25 @@ where
         let mut execution = Vec::new();
         measure_stage!(
             timings,
-            "encode_sim_driver",
+            EncodeSimDriver,
             driver.write_checkpoint(&mut execution)
         )?;
         let mut ledger = Vec::new();
         measure_stage!(
             timings,
-            "encode_ledger",
+            EncodeLedger,
             shared.ledger().write_checkpoint(&mut ledger)
         )?;
         let mut registry = Vec::new();
         measure_stage!(
             timings,
-            "encode_shared_execution",
+            EncodeSharedExecution,
             shared.write_checkpoint(&mut registry)
         )?;
         let mut strategy_state = Vec::new();
         measure_stage!(
             timings,
-            "encode_strategy",
+            EncodeStrategy,
             strategy.write_strategy_checkpoint(&mut strategy_state)
         )?;
         #[cfg(feature = "stage-timing")]
@@ -472,14 +556,18 @@ where
             .join(format!("checkpoint-{generation:020}"))
             .join(format!("candidate-{:06}.cbor", self.index));
         #[cfg(feature = "stage-timing")]
-        self.stages
-            .record("encode_subsystems_and_capture", encode_started.elapsed());
+        self.stages.record(
+            crate::stage_timing::Stage::EncodeSubsystemsAndCapture,
+            encode_started.elapsed(),
+        );
         #[cfg(feature = "stage-timing")]
         let write_started = std::time::Instant::now();
         let sha256 = write_cbor(&path, &saved)?;
         #[cfg(feature = "stage-timing")]
-        self.stages
-            .record("encode_candidate_write_and_sync", write_started.elapsed());
+        self.stages.record(
+            crate::stage_timing::Stage::EncodeCandidateWriteAndSync,
+            write_started.elapsed(),
+        );
         #[cfg(feature = "stage-timing")]
         let wait_started = std::time::Instant::now();
         let mut buffer = self.hub.0.0.lock().unwrap();
@@ -492,8 +580,10 @@ where
             return Err(error.message.clone().into());
         }
         #[cfg(feature = "stage-timing")]
-        self.stages
-            .record("wait_shared_publication", wait_started.elapsed());
+        self.stages.record(
+            crate::stage_timing::Stage::WaitSharedPublication,
+            wait_started.elapsed(),
+        );
         self.events = 0;
         #[cfg(feature = "stage-timing")]
         self.stages.emit_checkpoint(generation);
@@ -787,6 +877,69 @@ mod tests {
         }
     }
     #[test]
+    fn local_batch_publishes_only_returned_prefix_and_delays_tail_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, _) = crate::test_common::setup(temp.path());
+        let prepared = crate::prepare_historical_run_v1(&config.preparation).unwrap();
+        let groups = RecordedPublicGroupSourceV1::open(
+            &prepared.public_root,
+            1,
+            1 << 20,
+            crate::timing::DeliveryTimes {
+                delays: crate::timing::DelayScheduleV1::Fixed(0),
+                last: None,
+            },
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        assert!(groups.len() > 2);
+        let mut candidate = HistoricalPreparedRunConfigV1::from(&config);
+        candidate.timing.public_delivery_delay_ms =
+            crate::timing::DelayScheduleV1::Sequence(vec![3, 4]);
+        let hub = DayHubV1::new(&[candidate.clone(), candidate]);
+        {
+            let mut buffer = hub.0.0.lock().unwrap();
+            buffer.public.extend(groups.iter().cloned());
+            buffer.production = ProductionV1::Ended;
+        }
+        let delivery = DayLocalDeliveryCacheV1::shared(&hub, 0);
+        let mut source = DayPublicSourceV1::new(hub.clone(), 0, VecDeque::new(), delivery.clone());
+        let first = source.next().unwrap().unwrap();
+        assert_eq!(first.delivered_at_utc_ms, groups[0].delivered_at_utc_ms + 3);
+        assert_eq!(
+            delivery.borrow().public.len(),
+            groups.len().min(DAY_DELIVERY_BATCH) - 1
+        );
+        {
+            let mut buffer = hub.0.0.lock().unwrap();
+            assert_eq!(buffer.candidates[0].cursor.public, 0, "领取不提前发布");
+            delivery.borrow().publish(&mut buffer, 0);
+            assert_eq!(buffer.candidates[0].cursor.public, 1);
+            assert_eq!(
+                buffer.candidates[0].cursor.times.last,
+                Some(first.delivered_at_utc_ms)
+            );
+            DayHubV1::compact(&mut buffer);
+            assert_eq!(buffer.public_base, 0, "慢候选仍持有全部前缀");
+        }
+        // 原共享游标足以续接；局部未返回尾项无须持久化。
+        drop(source);
+        drop(delivery);
+        let delivery = DayLocalDeliveryCacheV1::shared(&hub, 0);
+        let mut source = DayPublicSourceV1::new(hub.clone(), 0, VecDeque::new(), delivery);
+        let second = source.next().unwrap().unwrap();
+        assert_eq!(second.prepared.reference, groups[1].prepared.reference);
+        assert_eq!(
+            second.delivered_at_utc_ms,
+            (groups[1].delivered_at_utc_ms + 4).max(first.delivered_at_utc_ms)
+        );
+        assert!(
+            source.next().unwrap().is_err(),
+            "序列耗尽只在第三项真正交付时报错"
+        );
+    }
+    #[test]
     #[ignore = "#185 explicit bounded empty-Hub wait observation, not a throughput gate"]
     fn two_empty_day_consumers_observe_existing_wakeups() {
         let hub = DayHubV1::new(&[]);
@@ -827,12 +980,25 @@ mod tests {
                         // 两条原 next/Condvar 路径共享空Hub；不制造输入或业务超时。
                         if index == 0 {
                             assert!(
-                                DayPublicSourceV1::new(hub, index, VecDeque::new())
-                                    .next()
-                                    .is_none()
+                                DayPublicSourceV1::new(
+                                    hub.clone(),
+                                    index,
+                                    VecDeque::new(),
+                                    DayLocalDeliveryCacheV1::shared(&hub, index)
+                                )
+                                .next()
+                                .is_none()
                             );
                         } else {
-                            assert!(DayHiddenSourceV1::new(hub, index).next().is_none());
+                            assert!(
+                                DayHiddenSourceV1::new(
+                                    hub.clone(),
+                                    index,
+                                    DayLocalDeliveryCacheV1::shared(&hub, index)
+                                )
+                                .next()
+                                .is_none()
+                            );
                         }
                         EMPTY_WAITS.with(|value| value.borrow_mut().take().unwrap())
                     })

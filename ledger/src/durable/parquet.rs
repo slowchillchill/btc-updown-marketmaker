@@ -19,7 +19,7 @@ pub struct LedgerParquetCheckpointV1 {
     next_record_seq: u64,
 }
 impl ParquetLedger {
-    pub(super) fn checkpoint(&self) -> LedgerParquetCheckpointV1 {
+    pub(crate) fn checkpoint(&self) -> LedgerParquetCheckpointV1 {
         debug_assert!(
             self.writer.is_none() && !self.poisoned,
             "检查点必须先完成原 Ledger 段稳定"
@@ -30,7 +30,7 @@ impl ParquetLedger {
             next_record_seq: self.next_record_seq,
         }
     }
-    pub(super) fn restore_checkpoint(
+    pub(crate) fn restore_checkpoint(
         saved: LedgerParquetCheckpointV1,
     ) -> Result<Self, LedgerDurableErrorV1> {
         let path = saved.directory.join(MANIFEST);
@@ -70,7 +70,7 @@ impl ParquetLedger {
         })
     }
 
-    pub(super) fn create(
+    pub(crate) fn create(
         directory: &Path,
         genesis: DurablePayloadV1,
     ) -> Result<Self, LedgerDurableErrorV1> {
@@ -196,11 +196,30 @@ impl ParquetLedger {
         &mut self,
         payload: &DurablePayloadV1,
     ) -> Result<(), LedgerDurableErrorV1> {
+        let row = self.encode_row(payload, 0)?;
+        self.append_rows(&[row])
+    }
+    pub(crate) fn encode_row(
+        &self,
+        payload: &DurablePayloadV1,
+        offset: usize,
+    ) -> Result<record_file::Row, LedgerDurableErrorV1> {
         if self.poisoned {
             return Err(LedgerDurableErrorV1::HandlePoisoned);
         }
         let (kind, body) = encode_payload(payload)?;
-        let row = (self.next_record_seq, kind.into(), body);
+        Ok((self.next_record_seq + offset as u64, kind.into(), body))
+    }
+    pub(crate) fn append_rows(
+        &mut self,
+        rows: &[record_file::Row],
+    ) -> Result<(), LedgerDurableErrorV1> {
+        if self.poisoned {
+            return Err(LedgerDurableErrorV1::HandlePoisoned);
+        }
+        if rows.is_empty() {
+            return Ok(());
+        }
         if self.writer.is_none() {
             self.writer = Some(
                 record_file::Writer::create(
@@ -211,14 +230,14 @@ impl ParquetLedger {
                 .map_err(|e| io_error("创建 Ledger Parquet 候选", &self.candidate(), e))?,
             );
         }
-        if let Err(e) = self.writer.as_mut().unwrap().append(&[row]) {
+        if let Err(e) = self.writer.as_mut().unwrap().append(rows) {
             self.poisoned = true;
             return Err(io_error("写入 Ledger Parquet 记录", &self.directory, e));
         }
-        self.next_record_seq += 1;
+        self.next_record_seq += rows.len() as u64;
         Ok(())
     }
-    pub(super) fn flush(&mut self) -> Result<(), LedgerDurableErrorV1> {
+    pub(crate) fn flush(&mut self) -> Result<(), LedgerDurableErrorV1> {
         if self.poisoned {
             return Err(LedgerDurableErrorV1::HandlePoisoned);
         }
@@ -230,7 +249,7 @@ impl ParquetLedger {
         }
         Ok(())
     }
-    pub(super) fn seal(
+    pub(crate) fn seal(
         &mut self,
     ) -> Result<Option<LedgerSealedSegmentReferenceV1>, LedgerDurableErrorV1> {
         if self.poisoned {

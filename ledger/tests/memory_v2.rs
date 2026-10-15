@@ -316,17 +316,15 @@ fn verify_memory_recovery(same_batch: bool) {
         1
     );
     assert_eq!(material.len(), 5);
-    for m in material.iter() {
-        assert!(background.write(m).unwrap());
-    }
+    assert_eq!(background.write(material.iter()).unwrap(), material.len());
     background.finish().unwrap();
     // 同一真实三类材料在清单发布失败时，只能恢复先前已提交的Genesis。
     let failed_root = temp.path().join("ledger-manifest-failure");
     let mut failed = LedgerBackgroundWriterV2::new(&failed_root);
-    assert!(failed.write(&material[0]).unwrap());
+    assert_eq!(failed.write(std::iter::once(&material[0])).unwrap(), 1);
     failed.finish().unwrap();
     for m in &material[1..] {
-        assert!(failed.write(m).unwrap());
+        assert_eq!(failed.write(std::iter::once(m)).unwrap(), 1);
     }
     std::fs::write(
         failed_root.join(".ledger-parquet-00000000000000000001.manifest.json.tmp"),
@@ -521,7 +519,7 @@ fn query_pages_keep_their_committed_sequence_and_recovery() {
     let root = temp.path().join("ledger");
     let mut background = LedgerBackgroundWriterV2::new(&root);
     for material in materials.lock().unwrap().iter() {
-        assert!(background.write(material).unwrap());
+        assert_eq!(background.write(std::iter::once(material)).unwrap(), 1);
     }
     background.finish().unwrap();
     let mut restored = LedgerWriterV1::open_durable(&root).unwrap();
@@ -824,7 +822,7 @@ fn maker_full_match_closes_open_quantity_once_independent_of_finality_and_recove
     let root = temp.path().join("ledger");
     let mut background = LedgerBackgroundWriterV2::new(&root);
     for material in materials.lock().unwrap().iter() {
-        background.write(material).unwrap();
+        background.write(std::iter::once(material)).unwrap();
     }
     background.finish().unwrap();
     let mut cold = LedgerWriterV1::open_durable(&root).unwrap();
@@ -1057,4 +1055,49 @@ fn new_policy_checkpoint_preserves_identity_and_rejects_old_dual_cash_identity()
         serde_json::to_string(&AccountAdmissionPolicyV2::DualCashNoMarketLimit).unwrap(),
         "\"DualCashNoMarketLimit\""
     );
+}
+
+#[test]
+fn background_arrow_batch_stops_at_first_unstable_noe_before_later_reservation() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut source = Source::new(&temp.path().join("noe"), "batch-prefix");
+    source.accept(Kind::Economic {
+        evidence: SourceNeutralEconomicEvidenceV1::AccountOpening {
+            opening_evidence_identity: "opening".into(),
+            available_pusd: number("100"),
+        },
+    });
+    let opening = source.source.opening_record().unwrap();
+    let mut writer = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
+        per_market_all_in_commitment_limit_pusd: number("1000"),
+    });
+    let materials = Arc::new(Mutex::new(Vec::new()));
+    let sink = materials.clone();
+    writer.bind_record_sink_v2(Box::new(move |material| {
+        sink.lock().unwrap().push(material)
+    }));
+    writer.apply_noe_memory_v1(&opening).unwrap();
+    writer
+        .try_reserve_intent(
+            &LedgerRequestIdentityV1("rejected".into()),
+            &ConditionId("condition".into()),
+            &number("120"),
+            &number("0"),
+        )
+        .unwrap();
+    let materials = materials.lock().unwrap();
+    assert_eq!(materials.len(), 3);
+    let root = temp.path().join("ledger");
+    let mut background = LedgerBackgroundWriterV2::new(&root);
+    assert_eq!(
+        background.write(materials.iter()).unwrap(),
+        1,
+        "后续预留记录不能越过未稳定来源"
+    );
+    assert_eq!(background.write(materials[1..].iter()).unwrap(), 0);
+    source.stable();
+    assert_eq!(background.write(materials[1..].iter()).unwrap(), 2);
+    background.finish().unwrap();
+    let restored = LedgerWriterV1::open_durable(&root).unwrap();
+    assert_eq!(restored.projection_v2(), writer.projection_v2());
 }

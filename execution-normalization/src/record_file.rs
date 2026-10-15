@@ -15,6 +15,9 @@ use std::{
 };
 
 pub type Row = (u64, String, Vec<u8>);
+/// 原后台 Parquet 行组的排出目标；不限制合法单行大小。
+pub const BACKGROUND_ROW_TARGET: usize = 4096;
+pub const BACKGROUND_BYTES_TARGET: usize = 4 << 20;
 fn invalid(error: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
@@ -181,7 +184,9 @@ impl Writer {
     }
     /// 后台交接不强制每小批产生行组；到有界大小才排出。
     pub fn flush_if_full(&mut self) -> io::Result<()> {
-        if self.writer.in_progress_rows() >= 4096 || self.writer.in_progress_size() >= 4 << 20 {
+        if self.writer.in_progress_rows() >= BACKGROUND_ROW_TARGET
+            || self.writer.in_progress_size() >= BACKGROUND_BYTES_TARGET
+        {
             self.flush()?;
         }
         Ok(())

@@ -734,7 +734,7 @@ where
         }
     };
     let (mut driver, mut shared, observation) =
-        measure_stage!(stages, "runtime_open_and_account_assembly", start()).map_err(|cause| {
+        measure_stage!(stages, RuntimeOpenAndAccountAssembly, start()).map_err(|cause| {
             HistoricalRunFailureV1 {
                 cause: HistoricalFailureCauseV1::Material(cause),
                 report: None,
@@ -792,13 +792,13 @@ where
     let running = async {
         let mut next_hidden = checkpoint
             .restored_hidden()
-            .or_else(|| measure_stage!(stages, "hidden_source_wait_and_acquisition", hidden.next()))
+            .or_else(|| measure_stage!(stages, HiddenSourceWaitAndAcquisition, hidden.next()))
             .transpose()
             .map_err(HistoricalFailureCauseV1::Material)?;
         loop {
             let public_at = measure_stage!(
                 stages,
-                "sim_next_group_at_including_source_wait",
+                SimNextGroupAtIncludingSourceWait,
                 driver.next_group_at()
             )
             .map_err(HistoricalFailureCauseV1::Sim)?;
@@ -879,7 +879,7 @@ where
             {
                 measure_stage!(
                     stages,
-                    "day_economic_sampling",
+                    DayEconomicSampling,
                     sample_day_economics(&driver, &shared, at, &mut day_economics)
                 );
                 return Ok((HistoricalEndReasonV1::StrategyExit, at));
@@ -907,19 +907,19 @@ where
             // 更早原义务先推进；本毫秒仍开放，全部真实公开组保持原序。
             measure_stage!(
                 stages,
-                "recording_stabilization_wait",
+                RecordingStabilizationWait,
                 driver.wait_for_recording_capacity()
             )
             .map_err(HistoricalFailureCauseV1::Sim)?;
             measure_stage!(
                 stages,
-                "sim_advance_before_including_noe",
+                SimAdvanceBeforeIncludingNoe,
                 driver.advance_before(at)
             )
             .map_err(HistoricalFailureCauseV1::Sim)?;
             while measure_stage!(
                 stages,
-                "sim_next_group_at_including_source_wait",
+                SimNextGroupAtIncludingSourceWait,
                 driver.next_group_at()
             )
             .map_err(HistoricalFailureCauseV1::Sim)?
@@ -950,7 +950,7 @@ where
                         if !driver.has_enrolled_market(&pm_context.market.condition_id) {
                             measure_stage!(
                                 stages,
-                                "recording_stabilization_wait",
+                                RecordingStabilizationWait,
                                 driver.wait_for_recording_capacity()
                             )
                             .map_err(HistoricalFailureCauseV1::Sim)?;
@@ -976,12 +976,12 @@ where
                 }
                 measure_stage!(
                     stages,
-                    "recording_stabilization_wait",
+                    RecordingStabilizationWait,
                     driver.wait_for_recording_capacity()
                 )
                 .map_err(HistoricalFailureCauseV1::Sim)?;
                 let applied =
-                    measure_stage!(stages, "sim_next_group_including_noe", driver.next_group())
+                    measure_stage!(stages, SimNextGroupIncludingNoe, driver.next_group())
                         .map_err(HistoricalFailureCauseV1::Sim)?;
                 // 每个合法组都检查，包括发送恰好到期的同毫秒；恢复不能复活旧决定。
                 if health_enabled
@@ -997,7 +997,7 @@ where
                         health_summary.qualification_calls += 1;
                         if let IntentQualificationV1::Invalidated(reason) = measure_stage!(
                             stages,
-                            "public_qualification",
+                            PublicQualification,
                             strategy.qualify_intent_public(
                                 &group.group,
                                 &p.calculation.calculation,
@@ -1043,7 +1043,7 @@ where
                     .map_err(HistoricalFailureCauseV1::Sim)?;
                 measure_stage!(
                     stages,
-                    "current_public_observation_assembly",
+                    CurrentPublicObservationAssembly,
                     if strategy.selects_relevant_markets() {
                         let mut historical = strategy.historical_market_requirements();
                         if let Some(p) = pending.as_ref() {
@@ -1068,7 +1068,7 @@ where
                 {
                     let (invalidated, calls) = measure_stage!(
                         stages,
-                        "revalidation_including_current_read_and_full_qualification",
+                        RevalidationIncludingCurrentReadAndFullQualification,
                         shared.revalidate_calculation(
                             strategy,
                             &p.calculation.calculation,
@@ -1088,7 +1088,7 @@ where
                 }
                 health_at = measure_stage!(
                     stages,
-                    "next_health_evaluation_including_dependency_lookup",
+                    NextHealthEvaluationIncludingDependencyLookup,
                     strategy.next_health_evaluation_at(
                         &current_input,
                         pending
@@ -1124,7 +1124,7 @@ where
                 } else {
                     measure_stage!(
                         stages,
-                        "recording_stabilization_wait",
+                        RecordingStabilizationWait,
                         driver.wait_for_recording_capacity()
                     )
                     .map_err(HistoricalFailureCauseV1::Sim)?;
@@ -1138,7 +1138,7 @@ where
                     let dispatched = if health_enabled {
                         let result = measure_stage!(
                             stages,
-                            "dispatch_including_reserve_full_qualification_bridge_sim",
+                            DispatchIncludingReserveFullQualificationBridgeSim,
                             shared
                                 .dispatch_strategy_qualified(&mut decision, strategy, p.calculation)
                                 .await
@@ -1194,7 +1194,7 @@ where
                         Some(
                             measure_stage!(
                                 stages,
-                                "dispatch_including_reserve_bridge_sim",
+                                DispatchIncludingReserveBridgeSim,
                                 shared
                                     .dispatch_strategy(&mut decision, strategy, p.calculation)
                                     .await
@@ -1239,7 +1239,7 @@ where
                     {
                         measure_stage!(
                             stages,
-                            "recording_stabilization_wait",
+                            RecordingStabilizationWait,
                             driver.wait_for_recording_capacity()
                         )
                         .map_err(HistoricalFailureCauseV1::Sim)?;
@@ -1264,25 +1264,25 @@ where
                 }
                 measure_stage!(
                     stages,
-                    "recording_stabilization_wait",
+                    RecordingStabilizationWait,
                     driver.wait_for_recording_capacity()
                 )
                 .map_err(HistoricalFailureCauseV1::Sim)?;
                 measure_stage!(
                     stages,
-                    "sim_hidden_bucket_including_noe",
+                    SimHiddenBucketIncludingNoe,
                     driver.hidden_bucket(bucket)
                 )
                 .map_err(HistoricalFailureCauseV1::Sim)?;
                 unconsumed_required_trigger_at = None;
                 next_hidden =
-                    measure_stage!(stages, "hidden_source_wait_and_acquisition", hidden.next())
+                    measure_stage!(stages, HiddenSourceWaitAndAcquisition, hidden.next())
                         .transpose()
                         .map_err(HistoricalFailureCauseV1::Material)?;
             }
             measure_stage!(
                 stages,
-                "recording_stabilization_wait",
+                RecordingStabilizationWait,
                 driver.wait_for_recording_capacity()
             )
             .map_err(HistoricalFailureCauseV1::Sim)?;
@@ -1292,7 +1292,7 @@ where
             if operating {
                 measure_stage!(
                     stages,
-                    "apply_closed_including_noe_claim_and_ledger",
+                    ApplyClosedIncludingNoeClaimAndLedger,
                     shared.apply_closed()
                 )
                 .map_err(HistoricalFailureCauseV1::Ledger)?;
@@ -1315,7 +1315,7 @@ where
                 let calculation = if health_enabled && strategy.uses_borrowed_input() {
                     let input = measure_stage!(
                         stages,
-                        "strategy_input_assembly",
+                        StrategyInputAssembly,
                         if strategy.selects_relevant_markets() {
                             shared.strategy_selected_observation_input(
                                 &mut driver,
@@ -1334,7 +1334,7 @@ where
                         .map(|input| {
                             measure_stage!(
                                 stages,
-                                "calculation_including_cutoff_copy_and_decide",
+                                CalculationIncludingCutoffCopyAndDecide,
                                 input.calculate_borrowed(strategy, at)
                             )
                         })
@@ -1344,7 +1344,7 @@ where
                     let input = if health_enabled {
                         measure_stage!(
                             stages,
-                            "strategy_input_assembly",
+                            StrategyInputAssembly,
                             shared.strategy_observation_input_with_trade_details(
                                 &mut driver,
                                 strategy.requires_trade_economics_details(),
@@ -1353,7 +1353,7 @@ where
                     } else {
                         measure_stage!(
                             stages,
-                            "strategy_input_assembly",
+                            StrategyInputAssembly,
                             shared.strategy_input_with_trade_details(
                                 &mut driver,
                                 strategy.requires_trade_economics_details(),
@@ -1365,7 +1365,7 @@ where
                         .map(|input| {
                             measure_stage!(
                                 stages,
-                                "calculation_including_cutoff_copy_and_decide",
+                                CalculationIncludingCutoffCopyAndDecide,
                                 input.calculate(strategy, at)
                             )
                         })
@@ -1401,7 +1401,7 @@ where
                     if health_enabled {
                         health_at = measure_stage!(
                             stages,
-                            "next_health_evaluation_including_dependency_lookup",
+                            NextHealthEvaluationIncludingDependencyLookup,
                             strategy.next_health_evaluation_at(
                                 &if strategy.selects_relevant_markets() {
                                     let mut historical = strategy.historical_market_requirements();
@@ -1455,7 +1455,7 @@ where
             if required == Some(at) && !immediate_pending && !immediate_start {
                 measure_stage!(
                     stages,
-                    "sim_advance_before_including_noe",
+                    SimAdvanceBeforeIncludingNoe,
                     driver.advance_before(at.checked_add(1).ok_or_else(|| {
                         HistoricalFailureCauseV1::Sim(SimRunActorErrorV2::InvalidBusinessRequest(
                             "历史时序溢出",
@@ -1469,7 +1469,7 @@ where
             if at >= economics_start {
                 measure_stage!(
                     stages,
-                    "day_economic_sampling",
+                    DayEconomicSampling,
                     sample_day_economics(&driver, &shared, at, &mut day_economics)
                 );
             }
@@ -1506,7 +1506,7 @@ where
                 }) {
                     measure_stage!(
                         stages,
-                        "day_economic_sampling",
+                        DayEconomicSampling,
                         sample_day_economics(&driver, &shared, at, &mut day_economics)
                     );
                     return Ok((HistoricalEndReasonV1::StrategyExit, at));
@@ -1524,7 +1524,7 @@ where
             .map_err(HistoricalFailureCauseV1::Sim)?;
         measure_stage!(
             stages,
-            "apply_closed_including_noe_claim_and_ledger",
+            ApplyClosedIncludingNoeClaimAndLedger,
             shared.apply_closed()
         )
         .map_err(HistoricalFailureCauseV1::Ledger)?;
@@ -1580,7 +1580,7 @@ where
             result.source_health = health_enabled.then_some(health_summary);
             if normal {
                 if let Err(cause) =
-                    measure_stage!(stages, "recording_stop_and_drain", driver.stop_and_drain())
+                    measure_stage!(stages, RecordingStopAndDrain, driver.stop_and_drain())
                 {
                     result.durable_noe_prefix = observation.durable_through();
                     return Err(HistoricalRunFailureV1 {

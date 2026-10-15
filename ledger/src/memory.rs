@@ -408,7 +408,7 @@ fn ledger_evidence<R>(
 /// 由运行已有后台worker持有；复用唯一交易段和原durable_record_seq。
 pub struct LedgerBackgroundWriterV2 {
     root: std::path::PathBuf,
-    writer: Option<DurableLedgerV1>,
+    writer: Option<crate::durable::parquet::ParquetLedger>,
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LedgerBackgroundCheckpointV1 {
@@ -419,7 +419,7 @@ impl LedgerBackgroundWriterV2 {
     pub fn checkpoint(&self) -> LedgerBackgroundCheckpointV1 {
         LedgerBackgroundCheckpointV1 {
             root: self.root.clone(),
-            writer: self.writer.as_ref().and_then(DurableLedgerV1::checkpoint),
+            writer: self.writer.as_ref().map(|writer| writer.checkpoint()),
         }
     }
     pub fn restore_checkpoint(
@@ -429,7 +429,7 @@ impl LedgerBackgroundWriterV2 {
             root: saved.root,
             writer: saved
                 .writer
-                .map(DurableLedgerV1::restore_checkpoint)
+                .map(crate::durable::parquet::ParquetLedger::restore_checkpoint)
                 .transpose()?,
         })
     }
@@ -440,51 +440,90 @@ impl LedgerBackgroundWriterV2 {
             writer: None,
         }
     }
-    /// false 表示原NOE批尚未真实稳定，原材料必须保留且后续不能越过。
-    pub fn write(
+    /// 只写连续的已具备原 NOE 耐久来源的前缀；返回实际接纳数量。
+    pub fn write<'a>(
         &mut self,
-        material: &LedgerRecordMaterialV2,
-    ) -> Result<bool, LedgerDurableErrorV1> {
-        match material.payload.as_ref() {
-            DurablePayloadV1::Genesis { .. }
-            | DurablePayloadV1::GenesisV2 { .. }
-            | DurablePayloadV1::GenesisV3 { .. } => {
-                self.writer = Some(DurableLedgerV1::create_parquet(
-                    &self.root,
-                    material.payload.as_ref().clone(),
-                )?);
-            }
-            DurablePayloadV1::Transaction(effect) => {
-                let mut effect = (**effect).clone();
-                if let Some(reference) = memory_durable_reference(&effect.transaction.source) {
-                    let Some(reference) = reference else {
-                        return Ok(false);
-                    };
-                    effect.transaction.source = LedgerTransactionSourceV1::NoeConsumed(reference);
+        materials: impl IntoIterator<Item = &'a LedgerRecordMaterialV2>,
+    ) -> Result<usize, LedgerDurableErrorV1> {
+        let mut rows = Vec::new();
+        let mut bytes = 0;
+        let mut count = 0;
+        for material in materials {
+            let payload = material.payload.as_ref();
+            let row = match payload {
+                DurablePayloadV1::Genesis { .. }
+                | DurablePayloadV1::GenesisV2 { .. }
+                | DurablePayloadV1::GenesisV3 { .. } => {
+                    if !rows.is_empty() {
+                        self.writer
+                            .as_mut()
+                            .expect("绑定先交接Genesis")
+                            .append_rows(&rows)?;
+                        rows.clear();
+                        bytes = 0;
+                    }
+                    self.writer = Some(crate::durable::parquet::ParquetLedger::create(
+                        &self.root,
+                        payload.clone(),
+                    )?);
+                    count += 1;
+                    continue;
                 }
-                self.writer
-                    .as_mut()
+                DurablePayloadV1::Transaction(effect) => {
+                    let reference = memory_durable_reference(&effect.transaction.source);
+                    if reference.as_ref().is_some_and(Option::is_none) {
+                        break;
+                    }
+                    if let Some(Some(reference)) = reference {
+                        let mut effect = (**effect).clone();
+                        effect.transaction.source =
+                            LedgerTransactionSourceV1::NoeConsumed(reference);
+                        self.writer
+                            .as_ref()
+                            .expect("绑定先交接Genesis")
+                            .encode_row(
+                                &DurablePayloadV1::Transaction(Box::new(effect)),
+                                rows.len(),
+                            )?
+                    } else {
+                        self.writer
+                            .as_ref()
+                            .expect("绑定先交接Genesis")
+                            .encode_row(payload, rows.len())?
+                    }
+                }
+                _ => self
+                    .writer
+                    .as_ref()
                     .expect("绑定先交接Genesis")
-                    .append_v2(&DurablePayloadV1::Transaction(Box::new(effect)))?;
+                    .encode_row(payload, rows.len())?,
+            };
+            bytes += row.2.len();
+            rows.push(row);
+            count += 1;
+            if rows.len() >= execution_normalization::record_file::BACKGROUND_ROW_TARGET
+                || bytes >= execution_normalization::record_file::BACKGROUND_BYTES_TARGET
+            {
+                self.writer.as_mut().unwrap().append_rows(&rows)?;
+                rows.clear();
+                bytes = 0;
             }
-            payload => self
-                .writer
-                .as_mut()
-                .expect("绑定先交接Genesis")
-                .append_v2(payload)?,
         }
-        Ok(true)
+        if !rows.is_empty() {
+            self.writer.as_mut().unwrap().append_rows(&rows)?;
+        }
+        Ok(count)
     }
     /// 原后台交接组结束即写出行组，释放 Arrow 正文；不宣称已稳定。
     pub fn flush_accepted_batch(&mut self) -> Result<(), LedgerDurableErrorV1> {
         if let Some(writer) = &mut self.writer {
-            writer.flush_background_batch()?;
+            writer.flush()?;
         }
         Ok(())
     }
     pub fn finish(&mut self) -> Result<(), LedgerDurableErrorV1> {
         if let Some(writer) = &mut self.writer {
-            writer.seal_active_segment()?;
+            writer.seal()?;
         }
         Ok(())
     }

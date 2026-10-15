@@ -1,4 +1,4 @@
-mod parquet;
+pub(crate) mod parquet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
@@ -149,30 +149,11 @@ pub(crate) enum DurableLedgerV1 {
 }
 pub use parquet::LedgerParquetCheckpointV1;
 impl DurableLedgerV1 {
-    pub(crate) fn checkpoint(&self) -> Option<LedgerParquetCheckpointV1> {
-        match self {
-            Self::Parquet(writer) => Some(writer.checkpoint()),
-            Self::Legacy(_) => None,
-        }
-    }
-    pub(crate) fn restore_checkpoint(
-        saved: LedgerParquetCheckpointV1,
-    ) -> Result<Self, LedgerDurableErrorV1> {
-        parquet::ParquetLedger::restore_checkpoint(saved).map(|w| Self::Parquet(Box::new(w)))
-    }
-
     pub(crate) fn create(
         directory: &Path,
         policy: &AccountAdmissionPolicyV1,
     ) -> Result<Self, LedgerDurableErrorV1> {
         LegacyDurableLedgerV1::create(directory, policy).map(Self::Legacy)
-    }
-    pub(crate) fn create_parquet(
-        directory: &Path,
-        genesis: DurablePayloadV1,
-    ) -> Result<Self, LedgerDurableErrorV1> {
-        parquet::ParquetLedger::create(directory, genesis)
-            .map(|writer| Self::Parquet(Box::new(writer)))
     }
     pub(crate) fn open<F: FnMut(DurablePayloadV1) -> Result<(), LedgerDurableErrorV1>>(
         directory: &Path,
@@ -192,26 +173,11 @@ impl DurableLedgerV1 {
         match self {
             Self::Legacy(w) => w.append(payload),
             Self::Parquet(w) => {
-                // 恢复后的原同步 API 仍先稳定再返回；后台材料另走 append_v2。
+                // 恢复后的原同步 API 仍先稳定再返回；后台材料由其 Parquet 写入器合批。
                 w.append(payload)?;
                 w.seal()?;
                 Ok(())
             }
-        }
-    }
-    pub(crate) fn append_v2(
-        &mut self,
-        payload: &DurablePayloadV1,
-    ) -> Result<(), LedgerDurableErrorV1> {
-        match self {
-            Self::Legacy(w) => w.append_v2(payload),
-            Self::Parquet(w) => w.append(payload),
-        }
-    }
-    pub(crate) fn flush_background_batch(&mut self) -> Result<(), LedgerDurableErrorV1> {
-        match self {
-            Self::Legacy(_) => Ok(()),
-            Self::Parquet(writer) => writer.flush(),
         }
     }
     pub(crate) fn seal_active_segment(
@@ -492,12 +458,6 @@ impl LegacyDurableLedgerV1 {
         payload: &DurablePayloadV1,
     ) -> Result<(), LedgerDurableErrorV1> {
         self.append_version(payload, 1)
-    }
-    pub(crate) fn append_v2(
-        &mut self,
-        payload: &DurablePayloadV1,
-    ) -> Result<(), LedgerDurableErrorV1> {
-        self.append_version(payload, 2)
     }
     fn append_version(
         &mut self,
@@ -924,14 +884,14 @@ mod tests {
     fn historical_dual_cash_genesis_decodes_without_enabling_new_policy_recovery() {
         use crate::{AccountAdmissionPolicyV2, LedgerWriterV1};
         let directory = TempDir::new().unwrap();
-        let mut durable = DurableLedgerV1::create_parquet(
+        let mut durable = parquet::ParquetLedger::create(
             directory.path(),
             DurablePayloadV1::GenesisV2 {
                 policy: AccountAdmissionPolicyV2::DualCashNoMarketLimit,
             },
         )
         .unwrap();
-        durable.seal_active_segment().unwrap();
+        durable.seal().unwrap();
         let error = LedgerWriterV1::open_durable(directory.path())
             .err()
             .expect("旧身份不能恢复为新政策");

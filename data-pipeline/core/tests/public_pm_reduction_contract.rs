@@ -1399,8 +1399,22 @@ fn prepared_steps_keep_complete_positions_and_original_prestate_after_later_appl
         "public-consumer",
         10,
         true,
+        true,
     )
     .unwrap();
+    let steps_only = compute_pm_message_steps_v1(
+        &prepared_context,
+        &state,
+        &messages[0],
+        "public-consumer",
+        10,
+        true,
+        false,
+    )
+    .unwrap();
+    assert!(steps_only.reports.is_empty());
+    assert!(!initial.reports.is_empty());
+    assert_eq!(steps_only.steps, initial.steps);
     // 原域字面材料独立于准备/归约/物化算法；保留字段顺序及十进制原规范。
     let original_book_material = br#"{"asset":{"token_id":"123","outcome":{"index":0,"label":"UP"}},"bids":[{"price_pusd_per_share":"0.5","quantity_shares":"100"}],"asks":[{"price_pusd_per_share":"0.6","quantity_shares":"80"}]}"#;
     let mut original_hash = Sha256::new();
@@ -1420,6 +1434,7 @@ fn prepared_steps_keep_complete_positions_and_original_prestate_after_later_appl
         &messages[1],
         "public-consumer",
         11,
+        true,
         true,
     )
     .unwrap();
@@ -1450,6 +1465,7 @@ fn prepared_steps_keep_complete_positions_and_original_prestate_after_later_appl
         &messages[2],
         "public-consumer",
         12,
+        true,
         true,
     )
     .unwrap();
