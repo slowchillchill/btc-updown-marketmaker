@@ -98,7 +98,10 @@ impl DayHubV1 {
             Condvar::new(),
         )))
     }
-    pub fn compact(buffer: &mut DayBufferV1) {
+    /// 移除原安全消费前缀；调用者在释放 Hub 锁后析构临时引用。
+    pub fn compact(
+        buffer: &mut DayBufferV1,
+    ) -> (Vec<PublicGroupDeliveryV1>, Vec<AcceptedHiddenStepBucketV1>) {
         let public = buffer
             .candidates
             .iter()
@@ -113,14 +116,11 @@ impl DayHubV1 {
             .map(|c| c.cursor.hidden)
             .min()
             .unwrap_or(buffer.hidden_base + buffer.hidden.len());
-        while buffer.public_base < public {
-            buffer.public.pop_front();
-            buffer.public_base += 1;
-        }
-        while buffer.hidden_base < hidden {
-            buffer.hidden.pop_front();
-            buffer.hidden_base += 1;
-        }
+        let retired_public = buffer.public.drain(..public - buffer.public_base).collect();
+        let retired_hidden = buffer.hidden.drain(..hidden - buffer.hidden_base).collect();
+        buffer.public_base = public;
+        buffer.hidden_base = hidden;
+        (retired_public, retired_hidden)
     }
     pub fn finish(
         &self,
@@ -147,8 +147,10 @@ impl DayHubV1 {
                 });
             }
         }
-        Self::compact(&mut buffer);
+        let retired = Self::compact(&mut buffer);
         cv.notify_all();
+        drop(buffer);
+        drop(retired);
     }
 }
 // 仅由一个候选线程持有；领取不推进共享回收位置。
@@ -185,6 +187,8 @@ pub(crate) struct DayPublicSourceV1 {
     pub restored: VecDeque<PublicGroupDeliveryV1>,
     delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     failed: bool,
+    #[cfg(feature = "stage-timing")]
+    stages: crate::stage_timing::StageTimings,
 }
 impl DayPublicSourceV1 {
     pub fn new(
@@ -199,6 +203,10 @@ impl DayPublicSourceV1 {
             restored,
             delivery,
             failed: false,
+            #[cfg(feature = "stage-timing")]
+            stages: crate::stage_timing::StageTimings::new(format!(
+                "candidate_public_transport:{index}"
+            )),
         }
     }
 }
@@ -227,11 +235,53 @@ impl Iterator for DayPublicSourceV1 {
                     group
                 }));
             }
+            #[cfg(feature = "stage-timing")]
+            let lock_started = std::time::Instant::now();
             let mut buffer = self.hub.0.0.lock().unwrap();
+            #[cfg(feature = "stage-timing")]
+            self.stages.record(
+                crate::stage_timing::Stage::CandidateRefillLockWait,
+                lock_started.elapsed(),
+            );
+            #[cfg(feature = "stage-timing")]
+            let reclaim_started = std::time::Instant::now();
+            #[cfg(feature = "stage-timing")]
+            let bases = (buffer.public_base, buffer.hidden_base);
             self.delivery.borrow().publish(&mut buffer, self.index);
-            DayHubV1::compact(&mut buffer);
+            let retired = measure_stage!(
+                self.stages,
+                CandidateReclaimDetach,
+                DayHubV1::compact(&mut buffer)
+            );
             self.hub.0.1.notify_all();
+            #[cfg(feature = "stage-timing")]
+            {
+                self.stages.record(
+                    crate::stage_timing::Stage::CandidateCursorPublishAndReclaim,
+                    reclaim_started.elapsed(),
+                );
+                self.stages.add_delivery_work(
+                    0,
+                    buffer.public_base - bases.0,
+                    buffer.hidden_base - bases.1,
+                );
+            }
+            // 发布仍在原锁内完成；先解锁并释放本批回收引用，再锁定当前可领取材料。
+            drop(buffer);
+            measure_stage!(self.stages, CandidateReclaimedDrop, drop(retired));
+            #[cfg(feature = "stage-timing")]
+            let lock_started = std::time::Instant::now();
+            let mut buffer = self.hub.0.0.lock().unwrap();
+            #[cfg(feature = "stage-timing")]
+            self.stages.record(
+                crate::stage_timing::Stage::CandidateRefillLockWait,
+                lock_started.elapsed(),
+            );
+            #[cfg(feature = "stage-timing")]
+            let mut emit_transport = false;
             loop {
+                #[cfg(feature = "stage-timing")]
+                let claim_started = std::time::Instant::now();
                 let mut delivery = self.delivery.borrow_mut();
                 let position = delivery.public_end;
                 delivery.public.extend(
@@ -243,6 +293,14 @@ impl Iterator for DayPublicSourceV1 {
                         .cloned(),
                 );
                 delivery.public_end += delivery.public.len();
+                #[cfg(feature = "stage-timing")]
+                {
+                    self.stages.record(
+                        crate::stage_timing::Stage::CandidateBatchClaim,
+                        claim_started.elapsed(),
+                    );
+                    emit_transport |= self.stages.add_delivery_work(delivery.public.len(), 0, 0);
+                }
                 if !delivery.public.is_empty() {
                     buffer.candidates[self.index].waiting = false;
                     break;
@@ -270,9 +328,21 @@ impl Iterator for DayPublicSourceV1 {
                 }
                 #[cfg(test)]
                 let observed_wait = tests::empty_wait_started();
+                #[cfg(feature = "stage-timing")]
+                let wait_started = std::time::Instant::now();
                 buffer = self.hub.0.1.wait(buffer).unwrap();
+                #[cfg(feature = "stage-timing")]
+                self.stages.record(
+                    crate::stage_timing::Stage::CandidateDataWait,
+                    wait_started.elapsed(),
+                );
                 #[cfg(test)]
                 tests::empty_wait_returned(observed_wait);
+            }
+            drop(buffer);
+            #[cfg(feature = "stage-timing")]
+            if emit_transport {
+                self.stages.emit_transport();
             }
         }
     }
@@ -282,6 +352,8 @@ pub(crate) struct DayHiddenSourceV1 {
     pub index: usize,
     delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     failed: bool,
+    #[cfg(feature = "stage-timing")]
+    stages: crate::stage_timing::StageTimings,
 }
 impl DayHiddenSourceV1 {
     pub fn new(
@@ -294,6 +366,10 @@ impl DayHiddenSourceV1 {
             index,
             delivery,
             failed: false,
+            #[cfg(feature = "stage-timing")]
+            stages: crate::stage_timing::StageTimings::new(format!(
+                "candidate_hidden_transport:{index}"
+            )),
         }
     }
 }
@@ -308,11 +384,53 @@ impl Iterator for DayHiddenSourceV1 {
             if let Some(bucket) = bucket {
                 return Some(Ok(bucket));
             }
+            #[cfg(feature = "stage-timing")]
+            let lock_started = std::time::Instant::now();
             let mut buffer = self.hub.0.0.lock().unwrap();
+            #[cfg(feature = "stage-timing")]
+            self.stages.record(
+                crate::stage_timing::Stage::CandidateRefillLockWait,
+                lock_started.elapsed(),
+            );
+            #[cfg(feature = "stage-timing")]
+            let reclaim_started = std::time::Instant::now();
+            #[cfg(feature = "stage-timing")]
+            let bases = (buffer.public_base, buffer.hidden_base);
             self.delivery.borrow().publish(&mut buffer, self.index);
-            DayHubV1::compact(&mut buffer);
+            let retired = measure_stage!(
+                self.stages,
+                CandidateReclaimDetach,
+                DayHubV1::compact(&mut buffer)
+            );
             self.hub.0.1.notify_all();
+            #[cfg(feature = "stage-timing")]
+            {
+                self.stages.record(
+                    crate::stage_timing::Stage::CandidateCursorPublishAndReclaim,
+                    reclaim_started.elapsed(),
+                );
+                self.stages.add_delivery_work(
+                    0,
+                    buffer.public_base - bases.0,
+                    buffer.hidden_base - bases.1,
+                );
+            }
+            // 发布仍在原锁内完成；先解锁并释放本批回收引用，再锁定当前可领取材料。
+            drop(buffer);
+            measure_stage!(self.stages, CandidateReclaimedDrop, drop(retired));
+            #[cfg(feature = "stage-timing")]
+            let lock_started = std::time::Instant::now();
+            let mut buffer = self.hub.0.0.lock().unwrap();
+            #[cfg(feature = "stage-timing")]
+            self.stages.record(
+                crate::stage_timing::Stage::CandidateRefillLockWait,
+                lock_started.elapsed(),
+            );
+            #[cfg(feature = "stage-timing")]
+            let mut emit_transport = false;
             loop {
+                #[cfg(feature = "stage-timing")]
+                let claim_started = std::time::Instant::now();
                 let mut delivery = self.delivery.borrow_mut();
                 let position = delivery.hidden_end;
                 delivery.hidden.extend(
@@ -324,6 +442,14 @@ impl Iterator for DayHiddenSourceV1 {
                         .cloned(),
                 );
                 delivery.hidden_end += delivery.hidden.len();
+                #[cfg(feature = "stage-timing")]
+                {
+                    self.stages.record(
+                        crate::stage_timing::Stage::CandidateBatchClaim,
+                        claim_started.elapsed(),
+                    );
+                    emit_transport |= self.stages.add_delivery_work(delivery.hidden.len(), 0, 0);
+                }
                 if !delivery.hidden.is_empty() {
                     buffer.candidates[self.index].waiting = false;
                     break;
@@ -347,9 +473,21 @@ impl Iterator for DayHiddenSourceV1 {
                 }
                 #[cfg(test)]
                 let observed_wait = tests::empty_wait_started();
+                #[cfg(feature = "stage-timing")]
+                let wait_started = std::time::Instant::now();
                 buffer = self.hub.0.1.wait(buffer).unwrap();
+                #[cfg(feature = "stage-timing")]
+                self.stages.record(
+                    crate::stage_timing::Stage::CandidateDataWait,
+                    wait_started.elapsed(),
+                );
                 #[cfg(test)]
                 tests::empty_wait_returned(observed_wait);
+            }
+            drop(buffer);
+            #[cfg(feature = "stage-timing")]
+            if emit_transport {
+                self.stages.emit_transport();
             }
         }
     }
@@ -467,30 +605,42 @@ where
         next_hidden: Option<&AcceptedHiddenStepBucketV1>,
     ) -> Result<RuntimeCheckpointControlV1, MaterialError> {
         self.events += 1;
-        let generation = {
-            let mut buffer = self.hub.0.0.lock().unwrap();
-            self.delivery.borrow().publish(&mut buffer, self.index);
-            if buffer.requested.is_none()
-                && self.every_events.is_some_and(|n| n > 0 && self.events >= n)
+        #[cfg(feature = "stage-timing")]
+        let sample = self.stages.next_diagnostic_sample();
+        let generation = measure_sampled_stage!(
+            self.stages,
+            sample,
+            CandidateControlAndCursorPublishSampled,
             {
-                buffer.requested = Some(buffer.generation);
-                self.hub.0.1.notify_all();
-            }
-            let generation = buffer.requested.filter(|g| {
-                buffer.candidates[self.index]
-                    .ready
-                    .as_ref()
-                    .map(|(g, _)| *g)
-                    != Some(*g)
-            });
-            let Some(generation) = generation else {
-                return Ok(if buffer.budget_stopped {
-                    RuntimeCheckpointControlV1::SavedThenStop
-                } else {
-                    RuntimeCheckpointControlV1::Continue
+                let mut buffer = measure_sampled_stage!(
+                    self.stages,
+                    sample,
+                    CandidateControlLockWaitSampled,
+                    self.hub.0.0.lock().unwrap()
+                );
+                self.delivery.borrow().publish(&mut buffer, self.index);
+                if buffer.requested.is_none()
+                    && self.every_events.is_some_and(|n| n > 0 && self.events >= n)
+                {
+                    buffer.requested = Some(buffer.generation);
+                    self.hub.0.1.notify_all();
+                }
+                let generation = buffer.requested.filter(|g| {
+                    buffer.candidates[self.index]
+                        .ready
+                        .as_ref()
+                        .map(|(g, _)| *g)
+                        != Some(*g)
                 });
-            };
-            generation
+                (generation, buffer.budget_stopped)
+            }
+        );
+        let (Some(generation), _) = generation else {
+            return Ok(if generation.1 {
+                RuntimeCheckpointControlV1::SavedThenStop
+            } else {
+                RuntimeCheckpointControlV1::Continue
+            });
         };
         #[cfg(feature = "stage-timing")]
         let encode_started = std::time::Instant::now();
@@ -938,6 +1088,87 @@ mod tests {
             source.next().unwrap().is_err(),
             "序列耗尽只在第三项真正交付时报错"
         );
+    }
+    #[test]
+    #[ignore = "#185 有限共享队列回收诊断，手动运行并保留原始计时"]
+    fn bounded_history_handoff_observation() {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, _) = crate::test_common::setup(temp.path());
+        let prepared = crate::prepare_historical_run_v1(&config.preparation).unwrap();
+        let delivered = RecordedPublicGroupSourceV1::open(
+            &prepared.public_root,
+            1,
+            1 << 20,
+            crate::timing::DeliveryTimes {
+                delays: crate::timing::DelayScheduleV1::Fixed(0),
+                last: None,
+            },
+        )
+        .unwrap()
+        .last()
+        .unwrap()
+        .unwrap();
+        let (base, facts) = delivered
+            .prepared
+            .group
+            .observations
+            .shared_parts()
+            .unwrap();
+        let template = base.values().next().unwrap();
+        for history in [128, 8192] {
+            let mut markets = contracts::MarketObservationSnapshotsV1::new();
+            for index in 0..history {
+                let mut market = template.as_ref().clone();
+                market.market.condition_id = contracts::ConditionId(format!("0x{index:064x}"));
+                markets.insert(market.market.condition_id.0.clone(), Arc::new(market));
+            }
+            let key = markets.keys().next().unwrap().clone();
+            let hub = DayHubV1::new(&[HistoricalPreparedRunConfigV1::from(&config)]);
+            for index in 0..4096 {
+                let mut changed = markets[&key].as_ref().clone();
+                changed.active.value = Some(index % 2 == 0);
+                markets.insert(key.clone(), Arc::new(changed));
+                let mut group = delivered.prepared.group.as_ref().clone();
+                group.observations = contracts::MarketObservationSetV1::shared(
+                    markets.clone(),
+                    facts.as_ref().clone(),
+                );
+                // 只运行真实运输/回收入口，不将这份重复引用诊断送入SIM业务应用。
+                hub.0
+                    .0
+                    .lock()
+                    .unwrap()
+                    .public
+                    .push_back(PublicGroupDeliveryV1 {
+                        prepared: Arc::new(PreparedPublicGroupV1 {
+                            reference: delivered.prepared.reference.clone(),
+                            group: Arc::new(group),
+                            pm_inputs: vec![],
+                            pm_contexts: vec![],
+                        }),
+                        delivered_at_utc_ms: delivered.delivered_at_utc_ms,
+                    });
+            }
+            hub.0.0.lock().unwrap().production = ProductionV1::Ended;
+            let delivery = DayLocalDeliveryCacheV1::shared(&hub, 0);
+            let mut source = DayPublicSourceV1::new(hub.clone(), 0, VecDeque::new(), delivery);
+            let started = Instant::now();
+            let mut returned = 0;
+            for group in source.by_ref() {
+                drop(group.unwrap());
+                returned += 1;
+            }
+            assert_eq!(returned, 4096);
+            let buffer = hub.0.0.lock().unwrap();
+            assert!(buffer.public.is_empty());
+            eprintln!(
+                "handoff_history_diagnostic={}",
+                serde_json::json!({"history_markets":history,
+                "groups":returned,"transport_wall_ns":started.elapsed().as_nanos(),"retained_public":buffer.public.len()})
+            );
+            drop(buffer);
+            drop(source);
+        }
     }
     #[test]
     #[ignore = "#185 explicit bounded empty-Hub wait observation, not a throughput gate"]

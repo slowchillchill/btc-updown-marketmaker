@@ -1139,6 +1139,7 @@ dependencies = [
  "data-pipeline-core",
  "data-pipeline-training",
  "execution-normalization",
+ "imbl",
  "ledger",
  "num-bigint",
  "parquet",

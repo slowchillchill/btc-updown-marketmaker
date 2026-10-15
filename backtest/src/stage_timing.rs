@@ -1,4 +1,9 @@
 //! #185 有限测量开关：原研究整点及运行末输出累计值；不参与业务判断。
+//! 新增 *_sampled 每64次机会计一次，count 是样本数，不将 total 外推成全量。
+//! producer 目录更新只记录实际写入（全量）；其他三个子阶段采样。四者互斥，嵌套在既有 delivery_assembly_and_publish_including_lock。
+//! 候选分类锁等待与分类互斥；控制锁等待嵌套于控制检查父阶段。
+//! 运输的锁等待、发布/移除、锁外析构、领取、Condvar等待互斥；移除嵌套在发布/移除。
+//! 运输阶段又嵌套在候选既有来源等待父阶段，不能与父阶段相加或跨候选相加当墙钟。
 #[cfg(feature = "stage-timing")]
 #[derive(Default, serde::Serialize)]
 struct Sample {
@@ -49,12 +54,32 @@ define_stages! {
     SimNextGroupIncludingNoe => "sim_next_group_including_noe",
     StrategyInputAssembly => "strategy_input_assembly",
     WaitSharedPublication => "wait_shared_publication",
+    InitializationCatalogLockWaitSampled => "initialization_catalog_lock_wait_sampled",
+    InitializationClassificationSampled => "initialization_classification_sampled",
+    CandidateControlLockWaitSampled => "candidate_control_lock_wait_sampled",
+    CandidateControlAndCursorPublishSampled => "candidate_control_and_cursor_publish_including_lock_sampled",
+    ProducerCatalogUpdate => "producer_catalog_update_including_lock",
+    ProducerDeliveryConstruction => "producer_public_delivery_construction_sampled",
+    ProducerHubLockWait => "producer_hub_lock_wait_sampled",
+    ProducerHubPublish => "producer_hub_publish_including_hidden_construction_sampled",
+    CandidateRefillLockWait => "candidate_refill_lock_wait",
+    CandidateCursorPublishAndReclaim => "candidate_cursor_publish_and_detach",
+    CandidateReclaimDetach => "candidate_reclaim_detach",
+    CandidateReclaimedDrop => "candidate_reclaimed_drop_outside_lock",
+    CandidateBatchClaim => "candidate_batch_claim",
+    CandidateDataWait => "candidate_data_wait",
 }
 #[cfg(feature = "stage-timing")]
 pub(crate) struct StageTimings {
     label: String,
     started: std::time::Instant,
     samples: [Sample; STAGE_NAMES.len()],
+    diagnostic_calls: u64,
+    initialization_market_visits: u64,
+    initialization_source_id_visits: u64,
+    claimed: u64,
+    reclaimed_public: u64,
+    reclaimed_hidden: u64,
 }
 #[cfg(feature = "stage-timing")]
 impl StageTimings {
@@ -63,7 +88,48 @@ impl StageTimings {
             label,
             started: std::time::Instant::now(),
             samples: std::array::from_fn(|_| Sample::default()),
+            diagnostic_calls: 0,
+            initialization_market_visits: 0,
+            initialization_source_id_visits: 0,
+            claimed: 0,
+            reclaimed_public: 0,
+            reclaimed_hidden: 0,
         }
+    }
+    pub(crate) fn next_diagnostic_sample(&mut self) -> bool {
+        let sample = self.diagnostic_calls.is_multiple_of(64);
+        self.diagnostic_calls += 1;
+        sample
+    }
+    pub(crate) fn add_initialization_work(&mut self, markets: u64, sources: u64) {
+        self.initialization_market_visits += markets;
+        self.initialization_source_id_visits += sources;
+    }
+    pub(crate) fn add_delivery_work(
+        &mut self,
+        claimed: usize,
+        public: usize,
+        hidden: usize,
+    ) -> bool {
+        let prior_claimed = self.claimed;
+        self.claimed += claimed as u64;
+        self.reclaimed_public += public as u64;
+        self.reclaimed_hidden += hidden as u64;
+        prior_claimed / 1_048_576 != self.claimed / 1_048_576
+    }
+    pub(crate) fn emit_transport(&self) {
+        eprintln!(
+            "stage_timing_transport={}",
+            serde_json::json!({"scope":self.label,
+            "scope_wall_ns":self.started.elapsed().as_nanos(),"stages":self.samples(),"diagnostics":self.diagnostics()})
+        );
+    }
+    fn diagnostics(&self) -> serde_json::Value {
+        serde_json::json!({"sampled_stage_stride":64,"diagnostic_calls":self.diagnostic_calls,
+            "initialization_market_visits":self.initialization_market_visits,
+            "initialization_source_id_visits":self.initialization_source_id_visits,
+            "claimed_items":self.claimed,"reclaimed_public":self.reclaimed_public,
+            "reclaimed_hidden":self.reclaimed_hidden})
     }
     pub(crate) fn record(&mut self, stage: Stage, elapsed: std::time::Duration) {
         let sample = &mut self.samples[stage as usize];
@@ -84,14 +150,14 @@ impl StageTimings {
         eprintln!(
             "stage_timing_checkpoint={}",
             serde_json::json!({"scope":self.label,"generation":generation,
-                "scope_wall_ns":self.started.elapsed().as_nanos(),"stages":self.samples()})
+                "scope_wall_ns":self.started.elapsed().as_nanos(),"stages":self.samples(),"diagnostics":self.diagnostics()})
         );
     }
     pub(crate) fn emit_hour(&self, boundary_utc_ms: i64) {
         eprintln!(
             "stage_timing_hour={}",
             serde_json::json!({"scope":self.label,"boundary_utc_ms":boundary_utc_ms,
-                "scope_wall_ns":self.started.elapsed().as_nanos(),"stages":self.samples()})
+                "scope_wall_ns":self.started.elapsed().as_nanos(),"stages":self.samples(),"diagnostics":self.diagnostics()})
         );
     }
 }
@@ -100,12 +166,12 @@ impl Drop for StageTimings {
     fn drop(&mut self) {
         eprintln!(
             "stage_timing={}",
-            serde_json::json!({"scope":self.label,"scope_wall_ns":self.started.elapsed().as_nanos(),"stages":self.samples()})
+            serde_json::json!({"scope":self.label,"scope_wall_ns":self.started.elapsed().as_nanos(),"stages":self.samples(),"diagnostics":self.diagnostics()})
         );
     }
 }
 macro_rules! measure_stage {
-    ($timings:ident, $stage:ident, $expression:expr) => {{
+    ($timings:expr, $stage:ident, $expression:expr) => {{
         #[cfg(feature = "stage-timing")]
         let started = std::time::Instant::now();
         let result = $expression;
@@ -114,11 +180,49 @@ macro_rules! measure_stage {
         result
     }};
 }
+/// 只对新增高频诊断采样；原 measure_stage 的统计区间与计数不变。
+macro_rules! measure_sampled_stage {
+    ($timings:expr, $sample:expr, $stage:ident, $expression:expr) => {{
+        #[cfg(feature = "stage-timing")]
+        let started = $sample.then(std::time::Instant::now);
+        let result = $expression;
+        #[cfg(feature = "stage-timing")]
+        if let Some(started) = started {
+            $timings.record(crate::stage_timing::Stage::$stage, started.elapsed());
+        }
+        result
+    }};
+}
 
 #[cfg(all(test, feature = "stage-timing"))]
 mod tests {
     use super::*;
 
+    #[test]
+    fn sampled_diagnostics_keep_expression_count_and_actual_sample_coverage() {
+        let mut stages = StageTimings::new("sampling-test".into());
+        let mut expressions = 0;
+        let started = std::time::Instant::now();
+        for _ in 0..65_536 {
+            let sample = stages.next_diagnostic_sample();
+            measure_sampled_stage!(stages, sample, InitializationClassificationSampled, {
+                expressions += 1;
+                std::hint::black_box(expressions);
+            });
+        }
+        let wall = started.elapsed().as_nanos();
+        assert_eq!(expressions, 65_536);
+        assert_eq!(
+            stages.samples[Stage::InitializationClassificationSampled as usize].count,
+            1024
+        );
+        assert_eq!(stages.diagnostic_calls, 65_536);
+        eprintln!(
+            "timing_sampling_diagnostic={}",
+            serde_json::json!({"opportunities":65_536,
+            "sample_count":1024,"wall_ns":wall,"includes_loop_and_expression":true})
+        );
+    }
     #[test]
     fn hourly_output_keeps_cumulative_counts_and_maximum() {
         let mut timings = StageTimings::new("candidate cumulative-test".into());

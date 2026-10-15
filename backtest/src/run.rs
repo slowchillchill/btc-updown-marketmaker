@@ -784,6 +784,8 @@ where
             baseline, fresh,
         ));
     }
+    let mut initialization_classifier =
+        crate::preparation::InitializationDependencyClassifier::default();
     let mut failed_timing = None;
     let mut failed_calculation = None;
     let mut failed_dispatch_effects = None;
@@ -931,19 +933,22 @@ where
                     .map_err(HistoricalFailureCauseV1::Sim)?;
                 if let Some(group) = &prepared_group {
                     if operating_start.is_some() {
-                        let catalog = context.catalog.read().unwrap();
-                        let initial = catalog
-                            .initialization
-                            .group_is_initialization(&group.group.member_input_positions);
-                        let dependency =
-                            catalog.initialization.group_has_initialization_dependency(
-                                &group.group.member_input_positions,
-                                group.group.closed_at_input_position,
-                            ) || catalog
-                                .initialization
-                                .observations_have_initialization_dependency(
-                                    &group.group.observations,
-                                );
+                        #[cfg(feature = "stage-timing")]
+                        let sample = stages.next_diagnostic_sample();
+                        let catalog = measure_sampled_stage!(stages, sample, InitializationCatalogLockWaitSampled,
+                            context.catalog.read().unwrap());
+                        let initial = catalog.initialization.group_is_initialization(&group.group.member_input_positions);
+                        let position_dependency = catalog.initialization.group_has_initialization_dependency(
+                            &group.group.member_input_positions, group.group.closed_at_input_position);
+                        // 位置命中仍推进局部缓存；未来未命中的组不能沿用旧市场汇总。
+                        let (observation_dependency, work) = measure_sampled_stage!(stages, sample,
+                            InitializationClassificationSampled,
+                            initialization_classifier.classify(&catalog.initialization, &group.group.observations));
+                        #[cfg(feature = "stage-timing")]
+                        stages.add_initialization_work(work.markets, work.source_ids);
+                        #[cfg(not(feature = "stage-timing"))]
+                        let _ = work;
+                        let dependency = position_dependency || observation_dependency;
                         delivered_group = Some((group.group.group_position, initial, dependency));
                     }
                     for pm_context in &group.pm_contexts {

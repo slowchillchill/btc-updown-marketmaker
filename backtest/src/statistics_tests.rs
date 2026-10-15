@@ -418,6 +418,7 @@ fn initialization_dependency_uses_exact_shared_group_and_keeps_legacy_arrays() {
         ..Default::default()
     };
     for provenance in [&prepared.initialization, &later, &missing] {
+        let mut classifier = crate::preparation::InitializationDependencyClassifier::default();
         for group in &groups {
             let legacy_values: Vec<_> = group.observations.clone().iter().cloned().collect();
             let original = legacy_values
@@ -438,6 +439,10 @@ fn initialization_dependency_uses_exact_shared_group_and_keeps_legacy_arrays() {
                 original
             );
             assert_eq!(
+                classifier.classify(provenance, &group.observations).0,
+                original
+            );
+            assert_eq!(
                 holders,
                 books
                     .iter()
@@ -450,5 +455,244 @@ fn initialization_dependency_uses_exact_shared_group_and_keeps_legacy_arrays() {
                 original
             );
         }
+    }
+}
+
+fn dependency_fixture() -> (MarketObservationSnapshotsV1, MarketObservationGroupV1) {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, _) = common::setup(temp.path());
+    let prepared = prepare_historical_run_v1(&config.preparation).unwrap();
+    let mut replay = PublicReplayV1::open(&prepared.public_root, 1, 1 << 20).unwrap();
+    let mut latest = None;
+    while let Some((_, applied)) = replay.next_applied().unwrap() {
+        for group in applied.applied.closed_groups {
+            let (markets, facts) = group.observations.shared_parts().unwrap();
+            latest = Some((markets.clone(), facts.as_ref().clone()));
+        }
+    }
+    latest.unwrap()
+}
+
+#[test]
+fn initialization_classifier_tracks_sources_fields_and_old_consumed_snapshots() {
+    use crate::preparation::InitializationDependencyClassifier;
+    let (base, facts) = dependency_fixture();
+    let key = base.keys().next().unwrap().clone();
+    let marker = "a".repeat(64);
+    let replacement = "b".repeat(64);
+    let provenance = |ids: &[&str]| HistoricalInitializationProvenanceV1 {
+        source_message_ids: ids.iter().map(|id| (*id).into()).collect(),
+        ..Default::default()
+    };
+    let initial = provenance(&[&marker]);
+    let mut anchor = base[&key].lifecycle.direct_anchors[0].clone();
+    anchor.source_message_id = Sha256Hex(marker.clone());
+    for field in 0..18 {
+        let mut markets = base.clone();
+        let mut market = markets[&key].as_ref().clone();
+        let mut group = facts.clone();
+        match field {
+            0 => market.lifecycle.direct_anchors.push(anchor.clone()),
+            1 => market.active.direct_anchors.push(anchor.clone()),
+            2 => market.closed.direct_anchors.push(anchor.clone()),
+            3 => market.accepting_orders.direct_anchors.push(anchor.clone()),
+            4 => market.terminal.direct_anchors.push(anchor.clone()),
+            5 => market.official_anchor.direct_anchors.push(anchor.clone()),
+            6 => market
+                .settlement_reference
+                .direct_anchors
+                .push(anchor.clone()),
+            7 => Arc::make_mut(&mut market.assets[0].bids)
+                .direct_anchors
+                .push(anchor.clone()),
+            8 => Arc::make_mut(&mut market.assets[0].asks)
+                .direct_anchors
+                .push(anchor.clone()),
+            9 => market.assets[0].tick.direct_anchors.push(anchor.clone()),
+            10 => market.assets[0]
+                .public_trade
+                .direct_anchors
+                .push(anchor.clone()),
+            11 => market.assets[0]
+                .best_bid_ask
+                .direct_anchors
+                .push(anchor.clone()),
+            12 => market.assets[0]
+                .valuation_best_bid
+                .direct_anchors
+                .push(anchor.clone()),
+            13 => group.chainlink_spot.direct_anchors.push(anchor.clone()),
+            14 => group
+                .chainlink_twap_thirty
+                .direct_anchors
+                .push(anchor.clone()),
+            15 => group
+                .chainlink_twap_sixty
+                .direct_anchors
+                .push(anchor.clone()),
+            16 => Arc::make_mut(&mut group.binance_depth)
+                .direct_anchors
+                .push(anchor.clone()),
+            17 => group.binance_trade.direct_anchors.push(anchor.clone()),
+            _ => unreachable!(),
+        }
+        markets.insert(key.clone(), Arc::new(market));
+        let clean = MarketObservationSetV1::shared(base.clone(), facts.clone());
+        let dependent = MarketObservationSetV1::shared(markets.clone(), group.clone());
+        let mut classifier = InitializationDependencyClassifier::default();
+        assert!(!classifier.classify(&initial, &clean).0);
+        assert!(classifier.classify(&initial, &dependent).0, "field={field}");
+        assert!(
+            !classifier
+                .classify(&provenance(&[&replacement]), &dependent)
+                .0,
+            "等大小替换"
+        );
+        assert!(
+            classifier
+                .classify(&provenance(&[&replacement, &marker]), &dependent)
+                .0,
+            "扩充"
+        );
+        assert!(!classifier.classify(&provenance(&[]), &dependent).0, "清空");
+        assert!(classifier.classify(&initial, &dependent).0);
+        assert!(
+            !classifier.classify(&initial, &clean).0,
+            "消费滞后组，不读生产者最新状态"
+        );
+        let mut restored = InitializationDependencyClassifier::default();
+        assert!(!restored.classify(&initial, &clean).0);
+        assert!(restored.classify(&initial, &dependent).0);
+        let legacy: Vec<_> = dependent.iter().cloned().collect();
+        assert!(classifier.classify(&initial, &legacy.into()).0);
+        assert!(
+            !classifier
+                .classify(&initial, &Vec::<MarketBusinessObservationV1>::new().into())
+                .0
+        );
+        assert!(classifier.classify(&initial, &dependent).0);
+        assert!(
+            !classifier
+                .classify(
+                    &initial,
+                    &MarketObservationSetV1::shared(Default::default(), group)
+                )
+                .0,
+            "空市场仍是原空观察语义"
+        );
+    }
+    let mut markets = base.clone();
+    let mut changed = markets[&key].as_ref().clone();
+    changed.active.direct_anchors.push(anchor.clone());
+    markets.insert(key.clone(), Arc::new(changed));
+    let dependent = MarketObservationSetV1::shared(markets.clone(), facts.clone());
+    let mut classifier = InitializationDependencyClassifier::default();
+    assert!(classifier.classify(&initial, &dependent).0);
+    markets.remove(&key);
+    assert!(
+        !classifier
+            .classify(
+                &initial,
+                &MarketObservationSetV1::shared(markets, facts.clone())
+            )
+            .0
+    );
+    assert!(
+        classifier.classify(&initial, &dependent).0,
+        "重新新增依赖市场"
+    );
+    let mut global = facts.clone();
+    global.chainlink_spot.direct_anchors.push(anchor);
+    assert!(
+        classifier
+            .classify(
+                &initial,
+                &MarketObservationSetV1::shared(base, global.clone())
+            )
+            .0
+    );
+    let (markets, _) = dependent.shared_parts().unwrap();
+    assert!(
+        classifier
+            .classify(
+                &initial,
+                &MarketObservationSetV1::shared(markets.clone(), global)
+            )
+            .0
+    );
+    assert!(
+        classifier.classify(&initial, &dependent).0,
+        "全局命中期间也必须更新市场缓存"
+    );
+}
+
+#[test]
+fn initialization_classifier_visits_only_changed_market_after_history_build() {
+    use crate::preparation::InitializationDependencyClassifier;
+    let (base, facts) = dependency_fixture();
+    let template = base.values().next().unwrap();
+    let initial = HistoricalInitializationProvenanceV1 {
+        source_message_ids: ["a".repeat(64)].into_iter().collect(),
+        ..Default::default()
+    };
+    for history in [128, 2048, 8192] {
+        let mut markets = MarketObservationSnapshotsV1::new();
+        for index in 0..history {
+            let mut market = template.as_ref().clone();
+            market.market.condition_id = ConditionId(format!("0x{index:064x}"));
+            market.market.clob_market_id = ClobMarketId((index + 1).to_string());
+            for (side, asset) in market.assets.iter_mut().enumerate() {
+                asset.asset.token_id = TokenId((index * 2 + side + 1).to_string());
+            }
+            if index > 0 {
+                market.lifecycle.value = Some(MappedMarketLifecycleStateV1::Known {
+                    value: KnownMarketLifecycleState::Retired,
+                });
+                market.active.value = Some(false);
+                market.closed.value = Some(true);
+                market.accepting_orders.value = Some(false);
+                market.market.window.start_at_utc_ms -= index as i64 * 300_000;
+                market.market.window.end_at_utc_ms -= index as i64 * 300_000;
+            }
+            markets.insert(market.market.condition_id.0.clone(), Arc::new(market));
+        }
+        let mut classifier = InitializationDependencyClassifier::default();
+        let started = std::time::Instant::now();
+        let (dependent, build) = classifier.classify(
+            &initial,
+            &MarketObservationSetV1::shared(markets.clone(), facts.clone()),
+        );
+        assert!(!dependent);
+        assert_eq!(build.markets, history as u64);
+        let build_ns = started.elapsed().as_nanos();
+        let key = markets.keys().next().unwrap().clone();
+        let mut visits = 0;
+        let mut source_ids = 0;
+        let started = std::time::Instant::now();
+        for index in 0..256 {
+            let mut changed = markets[&key].as_ref().clone();
+            changed.active.value = Some(index % 2 == 0);
+            markets.insert(key.clone(), Arc::new(changed));
+            let (dependent, work) = classifier.classify(
+                &initial,
+                &MarketObservationSetV1::shared(markets.clone(), facts.clone()),
+            );
+            assert!(!dependent);
+            assert!(work.markets <= 2, "只分类一个变化市场的旧、新版本");
+            visits += work.markets;
+            source_ids += work.source_ids;
+        }
+        eprintln!(
+            "initialization_history_diagnostic={}",
+            json!({"history_markets":history,
+            "active_markets":1,"groups":256,"build_ns":build_ns,"build_market_visits":build.markets,
+            "incremental_wall_ns":started.elapsed().as_nanos(),"incremental_market_visits":visits,
+            "incremental_source_id_visits":source_ids})
+        );
+        let (_, unchanged) = classifier.classify(
+            &initial,
+            &MarketObservationSetV1::shared(markets, facts.clone()),
+        );
+        assert_eq!(unchanged.markets, 0);
     }
 }
