@@ -202,7 +202,7 @@ fn prepare_mode_publishes_without_strategy_or_account_and_reuse_mode_uses_only_t
 }
 
 #[test]
-fn day_command_uses_full_candidate_configuration_and_reuses_completed_outputs() {
+fn day_command_uses_full_candidate_configuration_and_has_no_resume_outputs() {
     let temp = tempfile::tempdir().unwrap();
     let (config, _) = common::setup(temp.path());
     let strategy = ComplementaryPairConfigV1::parse_toml(include_str!(
@@ -217,10 +217,9 @@ fn day_command_uses_full_candidate_configuration_and_reuses_completed_outputs() 
     let mut run =
         serde_json::to_value(backtest::HistoricalPreparedRunConfigV1::from(&config)).unwrap();
     run.as_object_mut().unwrap().remove("strategy");
-    let checkpoint_root = temp.path().join("day-checkpoints");
     let value = json!({"rules":{"snapshot_path":rules,"expected_file_sha256":format!("{:x}",Sha256::digest(std::fs::read(&rules).unwrap())),"replay_causal_start_utc_ms":common::BASE},
         "parallel_dates":2,"days":[{"preparation":config.preparation,"candidates":[{"run":run,"strategy":strategy,"request_namespace":"day-cli-engineering"}],
-        "checkpoint_root":checkpoint_root,"checkpoint_interval_seconds":0,"checkpoint_every_candidate_events":1,"producer_lead_groups":1}]});
+        "producer_lead_groups":1}]});
     let path = temp.path().join("day-command.json");
     std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
     let execute = || {
@@ -249,7 +248,9 @@ fn day_command_uses_full_candidate_configuration_and_reuses_completed_outputs() 
         first["days"][0]["candidates"][0]["report"]["end_reason"],
         "RangeEnd"
     );
-    assert_eq!(first["days"][0]["candidates"][0]["reused"], false);
+    assert!(first["days"][0]["candidates"][0].get("reused").is_none());
+    assert!(first["days"][0].get("published_checkpoint").is_none());
+    assert!(!temp.path().join("day-checkpoints").exists());
     assert_eq!(first["summaries"][0]["days"], 1);
     let metadata: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&config.metadata_path).unwrap()).unwrap();
@@ -268,17 +269,9 @@ fn day_command_uses_full_candidate_configuration_and_reuses_completed_outputs() 
     let sim = std::fs::read(&config.sim_log).unwrap();
     let second = execute();
     assert!(
-        second.status.success(),
-        "{}",
-        String::from_utf8_lossy(&second.stderr)
+        !second.status.success(),
+        "已有运行产物不能作为新运行自动恢复或复用"
     );
-    let second: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
-    assert_eq!(second["days"][0]["candidates"][0]["reused"], true);
-    assert_eq!(
-        first["days"][0]["candidates"][0]["report"],
-        second["days"][0]["candidates"][0]["report"]
-    );
-    assert_eq!(first["summaries"], second["summaries"]);
     assert_eq!(std::fs::read(&config.sim_log).unwrap(), sim);
 }
 
@@ -299,7 +292,7 @@ fn day_session_failure_outputs_one_partial_json_and_nonzero_status() {
     let mut run =
         serde_json::to_value(backtest::HistoricalPreparedRunConfigV1::from(&config)).unwrap();
     run["session"]["session_seed"] = json!("old arbitrary seed");
-    let command = json!({"rules":{"snapshot_path":rule_path,"expected_file_sha256":format!("{:x}",Sha256::digest(std::fs::read(&rule_path).unwrap())),"replay_causal_start_utc_ms":common::BASE},"days":[{"preparation":config.preparation,"candidates":[{"run":run,"strategy":strategy,"request_namespace":"failure-json"}],"checkpoint_root":temp.path().join("state"),"checkpoint_interval_seconds":60}]});
+    let command = json!({"rules":{"snapshot_path":rule_path,"expected_file_sha256":format!("{:x}",Sha256::digest(std::fs::read(&rule_path).unwrap())),"replay_causal_start_utc_ms":common::BASE},"days":[{"preparation":config.preparation,"candidates":[{"run":run,"strategy":strategy,"request_namespace":"failure-json"}]}]});
     let path = temp.path().join("day.json");
     std::fs::write(&path, serde_json::to_vec(&command).unwrap()).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_backtest-cli"))
@@ -382,7 +375,7 @@ fn day_result_output_failure_preserves_completed_business_json_and_nonzero_statu
         .parent()
         .unwrap();
     let rules = root.join("sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
-    let command = json!({"rules":{"snapshot_path":rules,"expected_file_sha256":format!("{:x}",Sha256::digest(std::fs::read(&rules).unwrap())),"replay_causal_start_utc_ms":common::BASE},"days":[{"preparation":config.preparation,"candidates":[{"run":backtest::HistoricalPreparedRunConfigV1::from(&config),"strategy":strategy,"request_namespace":"tail-output-failure"}],"checkpoint_root":temp.path().join("state"),"checkpoint_interval_seconds":60}]});
+    let command = json!({"rules":{"snapshot_path":rules,"expected_file_sha256":format!("{:x}",Sha256::digest(std::fs::read(&rules).unwrap())),"replay_causal_start_utc_ms":common::BASE},"days":[{"preparation":config.preparation,"candidates":[{"run":backtest::HistoricalPreparedRunConfigV1::from(&config),"strategy":strategy,"request_namespace":"tail-output-failure"}]}]});
     let path = temp.path().join("day-result-output-error.json");
     std::fs::write(&path, serde_json::to_vec(&command).unwrap()).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_backtest-cli"))
@@ -402,7 +395,7 @@ fn day_result_output_failure_preserves_completed_business_json_and_nonzero_statu
     assert_eq!(result["status"], "failed");
     let candidate = &result["days"][0]["candidates"][0];
     assert_eq!(candidate["outcome"], "OriginalFailure");
-    assert_eq!(candidate["reused"], false);
+    assert!(candidate.get("reused").is_none());
     assert_eq!(candidate["report"]["end_reason"], "RangeEnd");
     assert_eq!(candidate["report"]["recording_drained"], true);
     assert!(candidate["report"]["account_economics_memory"].is_object());

@@ -2259,6 +2259,64 @@ fn valuation_bid_selects_public_versions_without_rewriting_direct_bba() {
 }
 
 #[test]
+fn valuation_projection_reuses_unchanged_bid_and_preserves_owned_wire_shape() {
+    let mut core = core();
+    push(&mut core, &meta(0));
+    let full = push(&mut core, &pm(1, 1, 21_000, book("1")));
+    let initial = up(&full.closed_groups[0].observations[0]);
+    let retained = initial.valuation_best_bid.clone();
+    let owned_wire = serde_json::to_value(retained.as_ref()).unwrap();
+    assert_eq!(serde_json::to_value(&retained).unwrap(), owned_wire);
+    let ask = push(
+        &mut core,
+        &pm(
+            2,
+            2,
+            22_000,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![PolymarketPriceChangeEntry {
+                    asset_id: UP_TOKEN_ID.into(),
+                    price: "0.6".into(),
+                    size: Some("90".into()),
+                    side: PolymarketSide::Sell,
+                    best_bid: None,
+                    best_ask: None,
+                }],
+            },
+        ),
+    );
+    let after_ask = up(&ask.closed_groups[0].observations[0]);
+    assert!(Arc::ptr_eq(&retained, &after_ask.valuation_best_bid));
+    assert!(Arc::ptr_eq(&initial.bids, &after_ask.bids));
+    let changed = push(
+        &mut core,
+        &pm(
+            3,
+            3,
+            23_000,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![change(Some("1"))],
+            },
+        ),
+    );
+    let after_bid = up(&changed.closed_groups[0].observations[0]);
+    assert_eq!(after_bid.valuation_best_bid.value, retained.value);
+    assert!(
+        !Arc::ptr_eq(&retained, &after_bid.valuation_best_bid),
+        "同值新来源仍失效"
+    );
+    assert_ne!(
+        after_bid.valuation_best_bid.direct_anchors,
+        retained.direct_anchors
+    );
+    assert_eq!(
+        serde_json::to_value(retained.as_ref()).unwrap(),
+        owned_wire,
+        "旧快照保持不可变"
+    );
+}
+
+#[test]
 fn unrelated_high_delete_cannot_promote_old_l2_over_new_direct_bid() {
     let mut core = core();
     push(&mut core, &meta(0));

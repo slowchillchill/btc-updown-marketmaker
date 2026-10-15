@@ -448,6 +448,8 @@ struct MarketState {
     level_anchors: BTreeMap<LevelKey, ObservedFactV1<()>>,
     #[serde(skip)]
     book_projection: BTreeMap<String, [Option<Arc<ObservedFactV1<Vec<PriceLevelV1>>>>; 2]>,
+    #[serde(skip)]
+    valuation_projection: BTreeMap<String, Arc<ObservedFactV1<Option<ExactDecimal>>>>,
     seen_epochs: BTreeSet<String>,
     seen_messages: BTreeSet<u64>,
     last_message: Option<(u64, Sha256Hex, E)>,
@@ -1105,6 +1107,7 @@ impl PublicObservationCoreV1 {
                             assets,
                             level_anchors: BTreeMap::new(),
                             book_projection: BTreeMap::new(),
+                            valuation_projection: BTreeMap::new(),
                             seen_epochs: BTreeSet::new(),
                             seen_messages: BTreeSet::new(),
                             last_message: None,
@@ -1972,6 +1975,9 @@ impl MarketState {
         for step in &reduction.steps {
             match &step.change {
                 PmStepChangeV1::Selection { asset, side, .. } => {
+                    if *side == BookSide::Bid {
+                        self.valuation_projection.remove(&asset.token_id.0);
+                    }
                     if let Some(sides) = self.book_projection.get_mut(&asset.token_id.0) {
                         sides[usize::from(*side == BookSide::Ask)] = None;
                     }
@@ -1985,12 +1991,15 @@ impl MarketState {
                     ..
                 } => {
                     self.book_projection.remove(&asset.token_id.0);
+                    self.valuation_projection.remove(&asset.token_id.0);
                 }
                 PmStepChangeV1::Quality { boundary } => {
                     if let QualityScopeV1::Asset(asset) = &boundary.scope {
                         self.book_projection.remove(&asset.token_id.0);
+                        self.valuation_projection.remove(&asset.token_id.0);
                     }
                 }
+                PmStepChangeV1::Epoch { .. } => self.valuation_projection.clear(),
                 _ => {}
             }
             match &step.change {
@@ -2136,6 +2145,7 @@ impl MarketState {
                         .and_then(|q| q.best_bid_pusd_per_share.clone());
                     state.valuation_bba = observed_pm(bid, step, fact, group, "valuation_best_bid");
                     state.valuation_bba_version = Some(version);
+                    self.valuation_projection.remove(&asset.token_id.0);
                 }
             }
         }
@@ -2151,10 +2161,10 @@ impl MarketState {
             return state.valuation_bba.clone();
         }
         let baseline = self.pm.assets[token].selection_baseline.as_ref();
-        let selected_at = |price: &ExactDecimal| {
+        let selected_at = |price: Decimal| {
             self.pm
                 .selected
-                .get(&key(token, BookSide::Bid, d(&price.0)))
+                .get(&key(token, BookSide::Bid, price))
                 .into_iter()
                 .chain(baseline)
                 .max_by_key(|s| {
@@ -2169,33 +2179,42 @@ impl MarketState {
             .valuation_bba_version
             .as_ref()
             .filter(|v| self.pm.epoch.as_ref() == Some(&v.source_sequence_epoch_id));
-        let bid = state.valuation_bba.value.as_ref().and_then(|p| p.as_ref());
+        let bid = state
+            .valuation_bba
+            .value
+            .as_ref()
+            .and_then(|p| p.as_ref())
+            .map(|p| d(&p.0));
         // 点位删除只撤销该直接买价，不能抹除BBA排除了旧更高价的证据。
         let quote_removed = direct.is_some_and(|v| {
             bid.is_some_and(|p| {
                 selected_at(p).is_some_and(|s| s.version != *v && s.version.is_at_least(v))
-                    && self.pm.quantity(token, BookSide::Bid, d(&p.0)).is_zero()
+                    && self.pm.quantity(token, BookSide::Bid, p).is_zero()
             })
         });
-        let best = bids
-            .value
-            .as_ref()
-            .unwrap()
+        // 数量簿已保存精确 Decimal 且仅保留非零档位；无需把投影字符串再次解析。
+        let best = self
+            .pm
+            .quantities
             .iter()
-            .filter(|l| d(&l.quantity_shares.0) > Decimal::ZERO)
-            .find(|l| {
+            .flat_map(|q| {
+                q.range(
+                    key(token, BookSide::Bid, Decimal::MIN)
+                        ..=key(token, BookSide::Bid, Decimal::MAX),
+                )
+                .rev()
+            })
+            .map(|((_, _, price), _)| *price)
+            .find(|price| {
                 direct.is_none_or(|v| {
-                    let newer = selected_at(&l.price_pusd_per_share)
-                        .is_some_and(|s| !v.is_at_least(&s.version));
+                    let newer = selected_at(*price).is_some_and(|s| !v.is_at_least(&s.version));
                     match bid {
-                        Some(p) if d(&l.price_pusd_per_share.0) <= d(&p.0) => {
-                            quote_removed || (d(&l.price_pusd_per_share.0) == d(&p.0) && newer)
-                        }
+                        Some(p) if *price <= p => quote_removed || (*price == p && newer),
                         _ => newer,
                     }
                 })
             })
-            .map(|l| l.price_pusd_per_share.clone());
+            .map(|price| ExactDecimal(price.normalize().to_string()));
         if direct.is_some() && best.is_none() && !quote_removed {
             return state.valuation_bba.clone();
         }
@@ -2206,62 +2225,102 @@ impl MarketState {
             dependency_frontier: bids.dependency_frontier.clone(),
         }
     }
+    fn book_side_projection(
+        &self,
+        token: &str,
+        side: BookSide,
+    ) -> Arc<ObservedFactV1<Vec<PriceLevelV1>>> {
+        let state = &self.assets[token];
+        if !self.pm.assets[token].book_ready {
+            return Arc::new(ObservedFactV1 {
+                quality: state.book.quality,
+                ..ObservedFactV1::default()
+            });
+        }
+        let mut levels: Vec<_> = self
+            .pm
+            .quantities
+            .iter()
+            .flat_map(|quantities| {
+                quantities.range(key(token, side, Decimal::MIN)..=key(token, side, Decimal::MAX))
+            })
+            .map(|((_, _, price), quantity)| PriceLevelV1 {
+                price_pusd_per_share: ExactDecimal(price.normalize().to_string()),
+                quantity_shares: ExactDecimal(quantity.normalize().to_string()),
+            })
+            .collect();
+        if side == BookSide::Bid {
+            levels.reverse();
+        }
+        let mut anchors = Vec::new();
+        let mut frontier = state.book.dependency_frontier.clone();
+        for (_, evidence) in self
+            .level_anchors
+            .range(key(token, side, Decimal::MIN)..=key(token, side, Decimal::MAX))
+        {
+            anchors.extend(evidence.direct_anchors.iter().cloned());
+            if evidence.dependency_frontier.as_ref().is_some_and(|value| {
+                frontier
+                    .as_ref()
+                    .is_none_or(|old| value.next_input_position > old.next_input_position)
+            }) {
+                frontier = evidence.dependency_frontier.clone();
+            }
+        }
+        if anchors.is_empty() {
+            anchors = state.book.direct_anchors.clone();
+        }
+        Arc::new(ObservedFactV1 {
+            value: Some(levels),
+            quality: state.book.quality,
+            direct_anchors: anchors,
+            dependency_frontier: frontier,
+        })
+    }
     fn prepare_book_projection(&mut self) {
+        use rayon::prelude::*;
+        let work = self
+            .pm
+            .context
+            .assets
+            .iter()
+            .flat_map(|context| {
+                let token = &context.asset.token_id.0;
+                [BookSide::Bid, BookSide::Ask]
+                    .into_iter()
+                    .filter_map(|side| {
+                        self.book_projection
+                            .get(token)
+                            .and_then(|slots| slots[usize::from(side == BookSide::Ask)].as_ref())
+                            .is_none()
+                            .then(|| (token.clone(), side))
+                    })
+            })
+            .collect::<Vec<_>>();
+        let prepare = |(token, side): &(String, BookSide)| {
+            (
+                token.clone(),
+                *side,
+                self.book_side_projection(token, *side),
+            )
+        };
+        let projections = if work.len() > 1 {
+            work.par_iter().map(prepare).collect::<Vec<_>>()
+        } else {
+            work.iter().map(prepare).collect()
+        };
+        for (token, side, value) in projections {
+            self.book_projection.entry(token).or_default()[usize::from(side == BookSide::Ask)] =
+                Some(value);
+        }
         for context in &self.pm.context.assets {
             let token = &context.asset.token_id.0;
-            let slots = self.book_projection.entry(token.clone()).or_default();
-            let state = &self.assets[token];
-            for (side, slot) in [BookSide::Bid, BookSide::Ask].into_iter().zip(slots) {
-                if slot.is_some() {
-                    continue;
-                }
-                if !self.pm.assets[token].book_ready {
-                    *slot = Some(Arc::new(ObservedFactV1 {
-                        quality: state.book.quality,
-                        ..ObservedFactV1::default()
-                    }));
-                    continue;
-                }
-                let mut levels: Vec<_> = self
-                    .pm
-                    .quantities
-                    .iter()
-                    .flat_map(|quantities| {
-                        quantities
-                            .range(key(token, side, Decimal::MIN)..=key(token, side, Decimal::MAX))
-                    })
-                    .map(|((_, _, price), quantity)| PriceLevelV1 {
-                        price_pusd_per_share: ExactDecimal(price.normalize().to_string()),
-                        quantity_shares: ExactDecimal(quantity.normalize().to_string()),
-                    })
-                    .collect();
-                if side == BookSide::Bid {
-                    levels.reverse();
-                }
-                let mut anchors = Vec::new();
-                let mut frontier = state.book.dependency_frontier.clone();
-                for (_, evidence) in self
-                    .level_anchors
-                    .range(key(token, side, Decimal::MIN)..=key(token, side, Decimal::MAX))
-                {
-                    anchors.extend(evidence.direct_anchors.iter().cloned());
-                    if evidence.dependency_frontier.as_ref().is_some_and(|value| {
-                        frontier
-                            .as_ref()
-                            .is_none_or(|old| value.next_input_position > old.next_input_position)
-                    }) {
-                        frontier = evidence.dependency_frontier.clone();
-                    }
-                }
-                if anchors.is_empty() {
-                    anchors = state.book.direct_anchors.clone();
-                }
-                *slot = Some(Arc::new(ObservedFactV1 {
-                    value: Some(levels),
-                    quality: state.book.quality,
-                    direct_anchors: anchors,
-                    dependency_frontier: frontier,
-                }));
+            if !self.valuation_projection.contains_key(token) {
+                let bid = self.book_projection[token][0]
+                    .as_ref()
+                    .expect("已准备买侧投影");
+                self.valuation_projection
+                    .insert(token.clone(), Arc::new(self.valuation_bid(token, bid)));
             }
         }
     }
@@ -2281,7 +2340,7 @@ impl MarketState {
                 let state = &self.assets[token];
                 let [bids, asks] = &self.book_projection[token];
                 let bids = Arc::clone(bids.as_ref().expect("已准备买侧投影"));
-                let valuation_best_bid = self.valuation_bid(token, &bids);
+                let valuation_best_bid = Arc::clone(&self.valuation_projection[token]);
                 AssetBusinessObservationV1 {
                     asset: context.asset.clone(),
                     bids,

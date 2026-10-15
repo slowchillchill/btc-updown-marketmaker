@@ -89,16 +89,30 @@ impl HistoricalInitializationProvenanceV1 {
         .observation(observation)
     }
 }
-/// 仅候选消费统计使用；恢复后从候选实际组及当前目录重新建立，不进入检查点。
-#[derive(Default)]
+/// 按已知初始化来源增量分类；日作业共享发布边界和旧录制读取复用同一实现。
 pub(crate) struct InitializationDependencyClassifier {
+    diagnostics_enabled: bool,
     previous: Option<MarketObservationSnapshotsV1>,
     sources: std::collections::BTreeSet<String>,
-    dependent_markets: usize,
+    dependent_markets: std::collections::BTreeSet<String>,
+}
+impl Default for InitializationDependencyClassifier {
+    fn default() -> Self {
+        Self {
+            previous: None,
+            sources: Default::default(),
+            dependent_markets: Default::default(),
+            diagnostics_enabled: cfg!(test)
+                || (cfg!(feature = "stage-timing")
+                    && std::env::var_os("BACKTEST_TRANSPORT_DIAGNOSTICS")
+                        .is_some_and(|v| v == "1")),
+        }
+    }
 }
 /// 实际分类访问量；不包含 OrdMap 为定位差分而比较的树节点。
 #[derive(Default)]
 pub(crate) struct InitializationDependencyWork {
+    enabled: bool,
     pub markets: u64,
     pub source_ids: u64,
 }
@@ -109,7 +123,9 @@ struct InitializationDependencyProbe<'a> {
 impl InitializationDependencyProbe<'_> {
     fn anchors(&mut self, anchors: &[DirectObservationAnchorV1]) -> bool {
         anchors.iter().any(|anchor| {
-            self.work.source_ids += 1;
+            if self.work.enabled {
+                self.work.source_ids += 1;
+            }
             self.sources.contains(&anchor.source_message_id.0)
         })
     }
@@ -122,7 +138,9 @@ impl InitializationDependencyProbe<'_> {
             || self.anchors(&asset.valuation_best_bid.direct_anchors)
     }
     fn market(&mut self, market: &MarketObservationSnapshotV1) -> bool {
-        self.work.markets += 1;
+        if self.work.enabled {
+            self.work.markets += 1;
+        }
         self.anchors(&market.lifecycle.direct_anchors)
             || self.anchors(&market.active.direct_anchors)
             || self.anchors(&market.closed.direct_anchors)
@@ -132,8 +150,46 @@ impl InitializationDependencyProbe<'_> {
             || self.anchors(&market.settlement_reference.direct_anchors)
             || market.assets.iter().any(|asset| self.asset(asset))
     }
+    // 前一市场已证实不依赖初始化时，未变 Arc 侧仍为假，无需重扫全部价位来源。
+    fn changed_market(
+        &mut self,
+        market: &MarketObservationSnapshotV1,
+        known_independent: Option<&MarketObservationSnapshotV1>,
+    ) -> bool {
+        let Some(old) = known_independent else {
+            return self.market(market);
+        };
+        if self.work.enabled {
+            self.work.markets += 1;
+        }
+        self.anchors(&market.lifecycle.direct_anchors)
+            || self.anchors(&market.active.direct_anchors)
+            || self.anchors(&market.closed.direct_anchors)
+            || self.anchors(&market.accepting_orders.direct_anchors)
+            || self.anchors(&market.terminal.direct_anchors)
+            || self.anchors(&market.official_anchor.direct_anchors)
+            || self.anchors(&market.settlement_reference.direct_anchors)
+            || market.assets.iter().any(|asset| {
+                let Some(previous) = old.assets.iter().find(|a| a.asset == asset.asset) else {
+                    return self.asset(asset);
+                };
+                (!std::sync::Arc::ptr_eq(&asset.bids, &previous.bids)
+                    && self.anchors(&asset.bids.direct_anchors))
+                    || (!std::sync::Arc::ptr_eq(&asset.asks, &previous.asks)
+                        && self.anchors(&asset.asks.direct_anchors))
+                    || (!std::sync::Arc::ptr_eq(
+                        &asset.valuation_best_bid,
+                        &previous.valuation_best_bid,
+                    ) && self.anchors(&asset.valuation_best_bid.direct_anchors))
+                    || self.anchors(&asset.tick.direct_anchors)
+                    || self.anchors(&asset.public_trade.direct_anchors)
+                    || self.anchors(&asset.best_bid_ask.direct_anchors)
+            })
+    }
     fn observation(&mut self, observation: &MarketBusinessObservationV1) -> bool {
-        self.work.markets += 1;
+        if self.work.enabled {
+            self.work.markets += 1;
+        }
         macro_rules! fields { ($($field:ident),*) => {
             false $(|| self.anchors(&observation.$field.direct_anchors))*
         }; }
@@ -166,11 +222,14 @@ impl InitializationDependencyClassifier {
         provenance: &HistoricalInitializationProvenanceV1,
         observations: &MarketObservationSetV1,
     ) -> (bool, InitializationDependencyWork) {
-        let mut work = InitializationDependencyWork::default();
+        let mut work = InitializationDependencyWork {
+            enabled: self.diagnostics_enabled,
+            ..Default::default()
+        };
         if provenance.source_message_ids.is_empty() {
             self.previous = None;
             self.sources.clear();
-            self.dependent_markets = 0;
+            self.dependent_markets.clear();
             return (false, work);
         }
         let Some((markets, group)) = observations.shared_parts() else {
@@ -195,31 +254,37 @@ impl InitializationDependencyClassifier {
             for change in previous.diff(markets) {
                 use imbl::ordmap::DiffItem;
                 match change {
-                    DiffItem::Add(_, new) => {
-                        self.dependent_markets += usize::from(probe.market(new))
+                    DiffItem::Add(id, new) => {
+                        if probe.market(new) {
+                            self.dependent_markets.insert(id.clone());
+                        }
                     }
-                    DiffItem::Remove(_, old) => {
-                        self.dependent_markets -= usize::from(probe.market(old))
+                    DiffItem::Remove(id, _) => {
+                        self.dependent_markets.remove(id);
                     }
                     DiffItem::Update {
                         old: (_, old),
-                        new: (_, new),
+                        new: (id, new),
                     } => {
-                        self.dependent_markets -= usize::from(probe.market(old));
-                        self.dependent_markets += usize::from(probe.market(new));
+                        let dependent = self.dependent_markets.remove(id);
+                        if probe.changed_market(new, (!dependent).then_some(old)) {
+                            self.dependent_markets.insert(id.clone());
+                        }
                     }
                 }
             }
         } else {
             self.dependent_markets = markets
-                .values()
-                .filter(|market| probe.market(market))
-                .count();
+                .iter()
+                .filter(|(_, market)| probe.market(market))
+                .map(|(id, _)| id.clone())
+                .collect();
             self.sources.clone_from(&provenance.source_message_ids);
         }
         // 即使本组全局字段已经命中，也更新市场缓存，防止下一组使用旧汇总。
         self.previous = Some(markets.clone());
-        let dependent = !markets.is_empty() && (probe.group(group) || self.dependent_markets != 0);
+        let dependent =
+            !markets.is_empty() && (!self.dependent_markets.is_empty() || probe.group(group));
         (dependent, work)
     }
 }

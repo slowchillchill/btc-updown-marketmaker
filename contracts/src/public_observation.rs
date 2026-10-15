@@ -350,7 +350,7 @@ pub struct AssetBusinessObservationV1 {
     pub best_bid_ask: ObservedFactV1<crate::CanonicalBbaFactV1>,
     /// 同来源版本选择的最佳买价；Some(None) 是有效空买盘。直接 BBA 保持独立语义。
     #[serde(default)]
-    pub valuation_best_bid: ObservedFactV1<Option<ExactDecimal>>,
+    pub valuation_best_bid: std::sync::Arc<ObservedFactV1<Option<ExactDecimal>>>,
     pub tick: ObservedFactV1<ExactDecimal>,
     pub public_trade: ObservedFactV1<crate::PublicTradeV2>,
 }

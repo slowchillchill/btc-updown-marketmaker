@@ -200,7 +200,7 @@ fn original_parquet_day_keeps_head_order_private_quantities_and_complete_buckets
     let ingress = DayIngressV1::open(
         &files,
         "day-test".into(),
-        1,
+        256,
         1 << 20,
         range,
         vec![],
@@ -214,70 +214,18 @@ fn original_parquet_day_keeps_head_order_private_quantities_and_complete_buckets
         "hidden-test".into(),
     )
     .unwrap();
-    // 公共生产已领先、隐藏桶尚未关闭时保存真实状态；恢复不应用已提交前缀。
+    // 公共生产已领先时隐藏桶仍不能提前关闭；预取不应用后续输入。
     let first = producer.next_applied().unwrap().unwrap();
     assert_eq!(first.input.input_position, 0);
     let second = producer.next_applied().unwrap().unwrap();
     assert_eq!(second.input.input_position, 1);
     assert!(second.hidden.is_empty());
-    let order_path = tmp.path().join("source-order.cbor");
-    producer.ingress.persist_order_index(&order_path).unwrap();
-    let mut core_state = Vec::new();
-    producer.core.write_checkpoint(&mut core_state).unwrap();
-    let mut source_state = Vec::new();
-    producer.write_checkpoint(&mut source_state).unwrap();
     let mut buckets = Vec::new();
     let mut applied = 2;
-    let mut remainder = Vec::new();
     while let Some(next) = producer.next_applied().unwrap() {
         applied += 1;
-        remainder.push((
-            next.input.input_position,
-            serde_json::to_value(&next.applied).unwrap(),
-            serde_json::to_value(&next.hidden).unwrap(),
-        ));
         buckets.extend(next.hidden);
     }
-    let restored_core = PublicObservationCoreV1::read_checkpoint(core_state.as_slice()).unwrap();
-    assert_eq!(restored_core.applied_prefix().next_input_position, 2);
-    let mut restored = DayProducerV1::restore(
-        restored_core,
-        &files,
-        source_state.as_slice(),
-        1,
-        1 << 20,
-        RECEIVED - 1..RECEIVED + 1000,
-    )
-    .unwrap();
-    let mut resumed = Vec::new();
-    while let Some(next) = restored.next_applied().unwrap() {
-        resumed.push((
-            next.input.input_position,
-            serde_json::to_value(&next.applied).unwrap(),
-            serde_json::to_value(&next.hidden).unwrap(),
-        ));
-    }
-    assert_eq!(resumed, remainder);
-    // 解码后的尾部也属于发布摘要；损坏索引必须在恢复供料前拒绝。
-    use std::io::Write;
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(&order_path)
-        .unwrap()
-        .write_all(b"tail")
-        .unwrap();
-    assert!(
-        DayProducerV1::restore(
-            PublicObservationCoreV1::read_checkpoint(core_state.as_slice()).unwrap(),
-            &files,
-            source_state.as_slice(),
-            1,
-            1 << 20,
-            RECEIVED - 1..RECEIVED + 1000,
-        )
-        .is_err()
-    );
-
     assert_eq!(applied, 5);
     assert!(
         buckets
@@ -517,19 +465,6 @@ fn day_initialization_and_prior_twap_follow_original_visible_reference_selection
     let first = producer.next_applied().unwrap().unwrap();
     assert!(first.initialization_binding.is_some());
     let mut actual = vec![serde_json::to_value(&first.applied).unwrap()];
-    let mut core = Vec::new();
-    producer.core.write_checkpoint(&mut core).unwrap();
-    let mut saved = Vec::new();
-    producer.write_checkpoint(&mut saved).unwrap();
-    let mut producer = DayProducerV1::restore(
-        PublicObservationCoreV1::read_checkpoint(core.as_slice()).unwrap(),
-        &files,
-        saved.as_slice(),
-        1,
-        1 << 20,
-        RECEIVED + 100..RECEIVED + 1000,
-    )
-    .unwrap();
     while let Some(next) = producer.next_applied().unwrap() {
         actual.push(serde_json::to_value(next.applied).unwrap());
     }
@@ -759,4 +694,175 @@ fn day_quantity_projection_keeps_original_binding_hidden_buckets_and_pm_asks() {
         up.asks.value.as_ref().unwrap()[0].quantity_shares,
         ExactDecimal("80".into())
     );
+}
+
+#[test]
+fn parallel_pm_preparation_keeps_valid_prefix_before_later_unknown_asset() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut row = common_metadata();
+    row.condition_id = ID.into();
+    row.clob_market_id = "3195576".into();
+    let metadata = polymarket_market_metadata_v6_rows_to_batch(
+        polymarket_market_metadata_v6_schema(),
+        &[PolymarketMarketMetadataV6Row::Existing(
+            PolymarketMarketMetadataV5Row::from_common(row, None, None),
+        )],
+    )
+    .unwrap();
+    let mut invalid = book("8");
+    if let PolymarketOrderbookV3Event::Book(ref mut value) = invalid {
+        value.asset_id = "999".into();
+    }
+    let manifests = [
+        write(
+            &tmp.path().join("meta"),
+            METADATA_SOURCE,
+            POLYMARKET_MARKET_METADATA_SCHEMA_V6,
+            vec![metadata],
+            0,
+        ),
+        write(
+            &tmp.path().join("pm"),
+            "polymarket_market",
+            POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+            vec![
+                polymarket_orderbook_v3_messages_to_batch(&[
+                    pm(1, RECEIVED + 200, book("1")),
+                    pm(2, RECEIVED + 150, change("2")),
+                    pm(3, RECEIVED + 250, invalid),
+                    pm(4, RECEIVED + 300, change("4")),
+                ])
+                .unwrap(),
+            ],
+            0,
+        ),
+    ];
+    let admissions = manifests
+        .iter()
+        .map(|p| crate::validate_public_source_daily_manifest_admission_v1(p).unwrap())
+        .collect::<Vec<_>>();
+    let files = admissions
+        .iter()
+        .flat_map(|a| a.files())
+        .collect::<Vec<_>>();
+    let ingress = DayIngressV1::open(
+        &files,
+        "day-test".into(),
+        256,
+        1 << 20,
+        RECEIVED - 1..RECEIVED + 1000,
+        vec![],
+        8,
+    )
+    .unwrap();
+    let mut producer = DayProducerV1::new(
+        ingress,
+        header(),
+        Sha256Hex("a".repeat(64)),
+        "hidden-test".into(),
+    )
+    .unwrap();
+    for position in 0..3 {
+        let applied = producer.next_applied().unwrap().unwrap();
+        assert_eq!(applied.input.input_position, position);
+        assert_eq!(
+            applied.applied.applied_prefix.next_input_position,
+            position + 1
+        );
+    }
+    let error = producer
+        .next_applied()
+        .err()
+        .expect("未知资产在其原位置失败");
+    assert!(error.to_string().contains("asset_id"));
+    assert_eq!(
+        producer.core.applied_prefix().next_input_position,
+        3,
+        "并行准备的后续项不覆盖成功前缀"
+    );
+}
+
+#[test]
+fn prefetched_decoder_failure_does_not_discard_earlier_successful_inputs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut row = common_metadata();
+    row.condition_id = ID.into();
+    row.clob_market_id = "3195576".into();
+    let metadata = polymarket_market_metadata_v6_rows_to_batch(
+        polymarket_market_metadata_v6_schema(),
+        &[PolymarketMarketMetadataV6Row::Existing(
+            PolymarketMarketMetadataV5Row::from_common(row, None, None),
+        )],
+    )
+    .unwrap();
+    let valid = polymarket_orderbook_v3_messages_to_batch(&[
+        pm(1, RECEIVED + 150, book("1")),
+        pm(2, RECEIVED + 200, change("2")),
+    ])
+    .unwrap();
+    let original =
+        polymarket_orderbook_v3_messages_to_batch(&[pm(3, RECEIVED + 250, book("3"))]).unwrap();
+    // 真实 Arrow/Parquet 边界中的非法资产编码；顺序定位列仍有效。
+    let mut columns = original.columns().to_vec();
+    columns[original.schema().index_of("asset_id").unwrap()] =
+        std::sync::Arc::new(arrow_array::StringArray::from(vec!["not-a-decimal-id"]));
+    let invalid = RecordBatch::try_new(original.schema(), columns).unwrap();
+    let manifests = [
+        write(
+            &tmp.path().join("meta"),
+            METADATA_SOURCE,
+            POLYMARKET_MARKET_METADATA_SCHEMA_V6,
+            vec![metadata],
+            0,
+        ),
+        write(
+            &tmp.path().join("valid"),
+            "polymarket_market",
+            POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+            vec![valid],
+            0,
+        ),
+        write(
+            &tmp.path().join("invalid"),
+            "polymarket_market",
+            POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+            vec![invalid],
+            1,
+        ),
+    ];
+    let admissions = manifests
+        .iter()
+        .map(|p| crate::validate_public_source_daily_manifest_admission_v1(p).unwrap())
+        .collect::<Vec<_>>();
+    let files = admissions
+        .iter()
+        .flat_map(|a| a.files())
+        .collect::<Vec<_>>();
+    let ingress = DayIngressV1::open(
+        &files,
+        "day-test".into(),
+        256,
+        1 << 20,
+        RECEIVED - 1..RECEIVED + 1000,
+        vec![],
+        8,
+    )
+    .unwrap();
+    let mut producer = DayProducerV1::new(
+        ingress,
+        header(),
+        Sha256Hex("a".repeat(64)),
+        "hidden-test".into(),
+    )
+    .unwrap();
+    for position in 0..3 {
+        let next = producer.next_applied().unwrap().unwrap();
+        assert_eq!(next.input.input_position, position);
+        assert_eq!(
+            next.applied.applied_prefix.next_input_position,
+            position + 1
+        );
+    }
+    assert!(producer.next_applied().is_err());
+    assert_eq!(producer.core.applied_prefix().next_input_position, 3);
 }

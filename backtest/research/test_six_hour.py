@@ -66,11 +66,11 @@ class SixHourPreparation(unittest.TestCase):
                 self.assertFalse(Path(run['noe_root']).exists())
                 self.assertFalse(Path(run['ledger_root']).exists())
 
-    def test_partial_result_keeps_missing_hours_and_last_published_generation(self):
-        document=dict(days=[dict(published_checkpoint=dict(generation=3), candidates=[dict(run_id='one', initial_available_pusd='2000', reused=False,
+    def test_partial_result_keeps_missing_hours_and_real_termination(self):
+        document=dict(days=[dict(candidates=[dict(run_id='one', initial_available_pusd='2000',
                        report=dict(end_reason='BudgetStop',research=dict(decisions=None,hours=[])))])])
         result=summarize(document)['candidates'][0]
-        self.assertEqual(result['published_checkpoint']['generation'],3)
+        self.assertNotIn('published_checkpoint',result)
         self.assertEqual(result['research']['hours'],[])
         self.assertIsNone(result['research']['decisions'])
         self.assertEqual(result['termination'],'BudgetStop')

@@ -224,7 +224,7 @@ mod observation_pool {
                 bids: intern(&value.bids, &mut builder.books, &mut builder.pool.books),
                 asks: intern(&value.asks, &mut builder.books, &mut builder.pool.books),
                 best_bid_ask: value.best_bid_ask.clone(),
-                valuation_best_bid: value.valuation_best_bid.clone(),
+                valuation_best_bid: value.valuation_best_bid.as_ref().clone(),
                 tick: value.tick.clone(),
                 public_trade: value.public_trade.clone(),
                 empty_valuation_bid: value.valuation_best_bid.value == Some(None),
@@ -240,7 +240,7 @@ mod observation_pool {
                 bids: get(&pool.books, self.bids)?,
                 asks: get(&pool.books, self.asks)?,
                 best_bid_ask: self.best_bid_ask,
-                valuation_best_bid,
+                valuation_best_bid: Arc::new(valuation_best_bid),
                 tick: self.tick,
                 public_trade: self.public_trade,
             })

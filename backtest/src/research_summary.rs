@@ -45,12 +45,12 @@ pub struct ResearchHourV1 {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResearchSummaryV1 {
-    /// 旧检查点没有分类时保持None，不能从原total回造NoTrade。
+    /// 旧成绩没有分类时保持None，不能从原total回造NoTrade。
     pub decisions: Option<DecisionCountsV1>,
     pub hours: Vec<ResearchHourV1>,
     pub final_snapshot: Option<ResearchSnapshotV1>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub(crate) struct ResearchStateV1 {
     pub decisions: Option<DecisionCountsV1>,
     pub next_boundary: i64,
@@ -64,8 +64,8 @@ fn amount(v: &ExactDecimal) -> R {
     R::from_decimal(v.0.parse().expect("原经济读取的精确金额"))
 }
 impl ResearchStateV1 {
-    pub fn new(mut baseline: ResearchSnapshotV1, fresh: bool) -> Self {
-        baseline.decisions = fresh.then(DecisionCountsV1::default);
+    pub fn new(mut baseline: ResearchSnapshotV1) -> Self {
+        baseline.decisions = Some(DecisionCountsV1::default());
         Self {
             decisions: baseline.decisions.clone(),
             next_boundary: (baseline.boundary_utc_ms.div_euclid(3_600_000) + 1) * 3_600_000,
@@ -360,7 +360,7 @@ pub(crate) fn snapshot(
 mod tests {
     use super::*;
     #[test]
-    fn successful_classification_and_legacy_unknown_survive_hour_checkpoint() {
+    fn successful_classification_and_hour_changes_preserve_exact_results() {
         let mut counts = DecisionCountsV1::default();
         counts.record(&StrategyOutputV1::Continue {
             intents: vec![],
@@ -403,7 +403,8 @@ mod tests {
             pending_calculation: None,
             day_economics: serde_json::Value::Null,
         };
-        let mut legacy = ResearchStateV1::new(baseline.clone(), false);
+        let mut state = ResearchStateV1::new(baseline.clone());
+        state.decisions = Some(counts.clone());
         let mut next = baseline.clone();
         next.boundary_utc_ms = 3_600_000;
         next.metrics.insert(
@@ -411,18 +412,14 @@ mod tests {
             ExecutionReadValueV1::Known(R::from_decimal(9.into()).public()),
         );
         next.counters.insert("open".into(), 1);
-        legacy.push(next);
-        assert_eq!(legacy.hours[0].start_utc_ms, 1_000);
-        assert_eq!(legacy.hours[0].counter_changes["open"], -1);
+        state.push(next);
+        assert_eq!(state.hours[0].start_utc_ms, 1_000);
+        assert_eq!(state.hours[0].counter_changes["open"], -1);
         assert_eq!(
-            legacy.hours[0].metric_changes["nav"],
+            state.hours[0].metric_changes["nav"],
             ExecutionReadValueV1::Known(R::from_decimal((-1).into()).public())
         );
-        let mut bytes = vec![];
-        ciborium::into_writer(&legacy, &mut bytes).unwrap();
-        let restored: ResearchStateV1 = ciborium::from_reader(bytes.as_slice()).unwrap();
-        assert_eq!(restored.next_boundary, 7_200_000);
-        assert!(restored.decisions.is_none());
-        assert!(restored.hours[0].decision_changes.is_none());
+        assert_eq!(state.next_boundary, 7_200_000);
+        assert_eq!(state.hours[0].decision_changes, Some(counts));
     }
 }

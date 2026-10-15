@@ -5,14 +5,12 @@ use crate::{
 };
 use contracts::*;
 use data_pipeline_core::{public_input::*, public_observation_core::*, public_reference::*};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
 };
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 struct FileCursorV1 {
     file: usize,
     cursor: TypedRawCursorV1,
@@ -65,11 +63,10 @@ impl FileStreamV1<'_> {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct DayIngressCheckpointV1 {
+#[derive(Clone)]
+struct DayIngressStateV1 {
     files: Vec<FileCursorV1>,
     order: Arc<Vec<Vec<crate::day_order::LocatedInputV1>>>,
-    order_reference: Option<DayOrderReferenceV1>,
     epochs: BTreeMap<(u8, String), u64>,
     stream: String,
     position: u64,
@@ -77,36 +74,10 @@ pub struct DayIngressCheckpointV1 {
     initial: VecDeque<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>,
     twap: Vec<(u64, PolymarketRtdsChainlinkTwapInput, SourceEvidenceRefV3)>,
 }
-#[derive(Clone, Serialize, Deserialize)]
-struct DayOrderReferenceV1 {
-    path: std::path::PathBuf,
-    sha256: String,
-}
-struct DigestIo<T> {
-    inner: T,
-    digest: Sha256,
-}
-impl<T: std::io::Read> std::io::Read for DigestIo<T> {
-    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(bytes)?;
-        self.digest.update(&bytes[..n]);
-        Ok(n)
-    }
-}
-impl<T: std::io::Write> std::io::Write for DigestIo<T> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let n = self.inner.write(bytes)?;
-        self.digest.update(&bytes[..n]);
-        Ok(n)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
 /// 六个逻辑来源的首项归并；快照和更新共用 BinanceDepth 来源。
 pub struct DayIngressV1<'a> {
     files: Vec<FileStreamV1<'a>>,
-    saved: DayIngressCheckpointV1,
+    saved: DayIngressStateV1,
     rows: usize,
     bytes: usize,
     last_initialization_binding: Option<SourceArtifactBindingV1>,
@@ -151,6 +122,9 @@ fn admission(row: &TypedRawRowV2, e: &SourceEvidenceRefV3) -> (i64, u64) {
     }
 }
 impl<'a> DayIngressV1<'a> {
+    pub(crate) fn read_batch_limits(&self) -> (usize, usize) {
+        (self.rows, self.bytes)
+    }
     pub fn open(
         files: &[&'a ValidatedDirectSourceParquetFileV3],
         stream: String,
@@ -192,10 +166,9 @@ impl<'a> DayIngressV1<'a> {
             .into_iter()
             .map(|(_, row, binding)| (row, binding))
             .collect::<Vec<_>>();
-        let saved = DayIngressCheckpointV1 {
+        let saved = DayIngressStateV1 {
             files: cursors,
             order: Arc::new(order),
-            order_reference: None,
             epochs,
             stream,
             position: 0,
@@ -205,38 +178,13 @@ impl<'a> DayIngressV1<'a> {
         };
         Self::from_opened(files, saved, rows, bytes, opened)
     }
-    pub fn restore(
-        files: &[&'a ValidatedDirectSourceParquetFileV3],
-        saved: DayIngressCheckpointV1,
-        rows: usize,
-        bytes: usize,
-        _received_range: std::ops::Range<i64>,
-    ) -> RecordingResult<Self> {
-        let opened = files
-            .iter()
-            .map(|file| file.take_opened())
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::from_opened(files, saved, rows, bytes, opened)
-    }
     fn from_opened(
         files: &[&'a ValidatedDirectSourceParquetFileV3],
-        mut saved: DayIngressCheckpointV1,
+        saved: DayIngressStateV1,
         rows: usize,
         bytes: usize,
         opened: Vec<crate::typed_raw::OpenedParquetV1>,
     ) -> RecordingResult<Self> {
-        if let Some(reference) = &saved.order_reference {
-            let mut reader = std::io::BufReader::new(DigestIo {
-                inner: std::fs::File::open(&reference.path)?,
-                digest: Sha256::new(),
-            });
-            let order = ciborium::de::from_reader(&mut reader)?;
-            std::io::copy(&mut reader, &mut std::io::sink())?;
-            if format!("{:x}", reader.get_ref().digest.clone().finalize()) != reference.sha256 {
-                return Err("原日顺序索引损坏".into());
-            }
-            saved.order = order;
-        }
         let mut source_minima = Vec::new();
         let mut pm_minima = Vec::new();
         let mut heads = BTreeMap::new();
@@ -278,45 +226,6 @@ impl<'a> DayIngressV1<'a> {
             pm_minima,
             heads,
         })
-    }
-    /// 不可变窄列顺序索引只保存一次；周期检查点只引用它并保存消费位置。
-    pub fn persist_order_index(&mut self, path: &std::path::Path) -> RecordingResult<()> {
-        if self.saved.order_reference.is_some() {
-            return Ok(());
-        }
-        use std::io::Write;
-        std::fs::create_dir_all(path.parent().ok_or("日顺序索引没有父目录")?)?;
-        let mut path = path.to_owned();
-        let mut suffix = 0u64;
-        while path.exists() {
-            suffix += 1;
-            path = path.with_file_name(format!("source-order-{suffix:020}.cbor"));
-        }
-        let file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)?;
-        let mut writer = std::io::BufWriter::new(DigestIo {
-            inner: file,
-            digest: Sha256::new(),
-        });
-        ciborium::ser::into_writer(&self.saved.order, &mut writer)?;
-        writer.flush()?;
-        writer.get_ref().inner.sync_all()?;
-        std::fs::File::open(path.parent().unwrap())?.sync_all()?;
-        self.saved.order_reference = Some(DayOrderReferenceV1 {
-            sha256: format!("{:x}", writer.get_ref().digest.clone().finalize()),
-            path,
-        });
-        Ok(())
-    }
-    pub fn checkpoint(&self) -> DayIngressCheckpointV1 {
-        let mut saved = self.saved.clone();
-        saved.files = self.files.iter().map(|file| file.saved.clone()).collect();
-        if saved.order_reference.is_some() {
-            saved.order = Arc::new(Vec::new());
-        }
-        saved
     }
     /// 全部未消费的原行都在最小顺序索引中；批次预读不推进消费位置。
     pub fn unread_source_lower_bound(&self) -> RecordingResult<Option<i64>> {

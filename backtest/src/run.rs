@@ -76,7 +76,7 @@ pub struct HistoricalPreparedRunConfigV1 {
         skip_serializing_if = "GammaResolutionPolicyV1::is_source_time_only"
     )]
     pub gamma_resolution_policy: GammaResolutionPolicyV1,
-    /// 日作业将策略的固定请求命名空间纳入恢复身份；旧入口由原命令提供。
+    /// 日作业记录策略的固定请求命名空间；旧入口由原命令提供。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_request_namespace: Option<String>,
     pub timing: HistoricalTimingV1,
@@ -678,7 +678,7 @@ where
         strategy,
         source,
         hidden,
-        NoRuntimeCheckpointV1,
+        NoRuntimeControlV1,
     )
     .await
 }
@@ -690,48 +690,35 @@ pub(crate) async fn run_context_with_hook<S, I, H, C>(
     strategy: &mut S,
     source: I,
     mut hidden: H,
-    mut checkpoint: C,
+    mut control: C,
 ) -> Result<HistoricalRunReportV1, HistoricalRunFailureV1<S::Error>>
 where
     S: StrategyV1,
     I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
     H: Iterator<Item = Result<AcceptedHiddenStepBucketV1, MaterialError>>,
-    C: RuntimeCheckpointV1<S, I>,
+    C: RuntimeControlV1,
 {
     #[cfg(feature = "stage-timing")]
     let mut stages =
         crate::stage_timing::StageTimings::new(format!("candidate:{}", config.session.run_id));
     let health_enabled = strategy.uses_source_health();
-    let resumed = checkpoint
-        .restore(config, rules.clone(), strategy)
-        .map_err(material_failure)?;
-    let mut saved_loop = None;
     let start = || -> Result<_, MaterialError> {
         serde_json::to_writer(std::fs::File::create(&config.metadata_path)?, &metadata)?;
-        if let Some((state, shared, observation, saved)) = resumed {
-            saved_loop = Some(saved);
-            Ok((
-                FinitePublicConsumptionV1::from_checkpoint_state(state, source),
-                shared,
-                observation,
-            ))
-        } else {
-            let (execution, shared, observation) = assemble(
-                config,
-                rules,
-                context.source_identity.clone(),
-                context.day_log_binding.clone(),
-            )?;
-            Ok((
-                FinitePublicConsumptionV1::new(
-                    execution,
-                    source,
-                    config.consumption_sequence_ref.clone(),
-                ),
-                shared,
-                observation,
-            ))
-        }
+        let (execution, shared, observation) = assemble(
+            config,
+            rules,
+            context.source_identity.clone(),
+            context.day_log_binding.clone(),
+        )?;
+        Ok((
+            FinitePublicConsumptionV1::new(
+                execution,
+                source,
+                config.consumption_sequence_ref.clone(),
+            ),
+            shared,
+            observation,
+        ))
     };
     let (mut driver, mut shared, observation) =
         measure_stage!(stages, RuntimeOpenAndAccountAssembly, start()).map_err(|cause| {
@@ -746,9 +733,8 @@ where
             cause: HistoricalFailureCauseV1::Sim(cause),
             report: None,
         })?;
-    checkpoint.started();
-    let fresh = saved_loop.is_none();
-    let RuntimeLoopCheckpointV1 {
+    control.started();
+    let RuntimeLoopStateV1 {
         mut pending,
         mut start_at,
         mut dirty,
@@ -761,14 +747,12 @@ where
         mut delivery_summary,
         mut day_economics,
         mut research,
-    } = saved_loop.unwrap_or_default();
+    } = RuntimeLoopStateV1::default();
     let end = context.end;
     let operating_start = context.operating_start;
     let economics_start = context.start.max(operating_start.unwrap_or(context.start));
-    if fresh {
-        sample_day_economics(&driver, &shared, economics_start, &mut day_economics);
-    }
-    if research.is_none() && checkpoint.research_enabled() {
+    sample_day_economics(&driver, &shared, economics_start, &mut day_economics);
+    if control.research_enabled() {
         let baseline_at = driver.observation_cutoff().map_or(economics_start, |c| {
             c.decision_time().logical_time_utc_ms().max(economics_start)
         });
@@ -780,9 +764,7 @@ where
             pending.as_ref().map(|p| p.record.clone()),
             &day_economics,
         );
-        research = Some(crate::research_summary::ResearchStateV1::new(
-            baseline, fresh,
-        ));
+        research = Some(crate::research_summary::ResearchStateV1::new(baseline));
     }
     let mut initialization_classifier =
         crate::preparation::InitializationDependencyClassifier::default();
@@ -792,9 +774,7 @@ where
     let mut failed_calculation_cash = None;
     let mut admission_cash = None;
     let running = async {
-        let mut next_hidden = checkpoint
-            .restored_hidden()
-            .or_else(|| measure_stage!(stages, HiddenSourceWaitAndAcquisition, hidden.next()))
+        let mut next_hidden = measure_stage!(stages, HiddenSourceWaitAndAcquisition, hidden.next())
             .transpose()
             .map_err(HistoricalFailureCauseV1::Material)?;
         loop {
@@ -933,6 +913,9 @@ where
                     .map_err(HistoricalFailureCauseV1::Sim)?;
                 if let Some(group) = &prepared_group {
                     if operating_start.is_some() {
+                        let (initial, dependency) = if let Some(classification) = control.initialization_classification(group.group.group_position) {
+                            classification
+                        } else {
                         #[cfg(feature = "stage-timing")]
                         let sample = stages.next_diagnostic_sample();
                         let catalog = measure_sampled_stage!(stages, sample, InitializationCatalogLockWaitSampled,
@@ -949,6 +932,8 @@ where
                         #[cfg(not(feature = "stage-timing"))]
                         let _ = work;
                         let dependency = position_dependency || observation_dependency;
+                            (initial, dependency)
+                        };
                         delivered_group = Some((group.group.group_position, initial, dependency));
                     }
                     for pm_context in &group.pm_contexts {
@@ -1478,30 +1463,8 @@ where
                     sample_day_economics(&driver, &shared, at, &mut day_economics)
                 );
             }
-            let checkpoint_control = checkpoint
-                .save(
-                    &mut driver,
-                    &shared,
-                    strategy,
-                    RuntimeLoopCheckpointRefV1 {
-                        pending: &pending,
-                        start_at,
-                        dirty,
-                        calculation_index,
-                        timing: &timing,
-                        evaluation_at,
-                        health_at,
-                        health_summary: &health_summary,
-                        unconsumed_required_trigger_at,
-                        delivery_summary: &delivery_summary,
-                        day_economics: &day_economics,
-                        research: &research,
-                    },
-                    next_hidden.as_ref(),
-                )
-                .map_err(HistoricalFailureCauseV1::Material)?;
-            if checkpoint_control == RuntimeCheckpointControlV1::SavedThenStop {
-                // 同毫秒已算完的Exit沿原下一轮立即终止；未到期的Exit仍随Running保存。
+            if control.stop_requested().map_err(HistoricalFailureCauseV1::Material)? {
+                // 同毫秒已算完的Exit保持原终止原因；未到期的计算保持部分成绩中的原状态。
                 if pending.as_ref().is_some_and(|p| {
                     p.completed_at == at
                         && matches!(
@@ -1684,8 +1647,7 @@ where
     }
 }
 
-#[derive(Serialize, Deserialize)]
-pub(crate) struct RuntimeLoopCheckpointV1<D> {
+struct RuntimeLoopStateV1<D> {
     pending: Option<Pending<D>>,
     start_at: Option<i64>,
     dirty: bool,
@@ -1697,10 +1659,9 @@ pub(crate) struct RuntimeLoopCheckpointV1<D> {
     unconsumed_required_trigger_at: Option<i64>,
     delivery_summary: HistoricalDeliverySummaryV1,
     day_economics: crate::day_economics::DayEconomicsStateV1,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     research: Option<crate::research_summary::ResearchStateV1>,
 }
-impl<D> Default for RuntimeLoopCheckpointV1<D> {
+impl<D> Default for RuntimeLoopStateV1<D> {
     fn default() -> Self {
         Self {
             pending: None,
@@ -1723,77 +1684,20 @@ impl<D> Default for RuntimeLoopCheckpointV1<D> {
         }
     }
 }
-#[derive(Serialize)]
-pub(crate) struct RuntimeLoopCheckpointRefV1<'a, D> {
-    pending: &'a Option<Pending<D>>,
-    start_at: Option<i64>,
-    dirty: bool,
-    calculation_index: usize,
-    timing: &'a Option<CalculationTimingRecordV1>,
-    evaluation_at: Option<i64>,
-    health_at: Option<i64>,
-    health_summary: &'a SourceHealthRunSummaryV1,
-    unconsumed_required_trigger_at: Option<i64>,
-    delivery_summary: &'a HistoricalDeliverySummaryV1,
-    day_economics: &'a crate::day_economics::DayEconomicsStateV1,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    research: &'a Option<crate::research_summary::ResearchStateV1>,
-}
-pub(crate) type RestoredRuntimeV1<D> = (
-    PublicConsumptionStateV1,
-    SharedExecutionV2,
-    MemoryNoeObservationV4,
-    RuntimeLoopCheckpointV1<D>,
-);
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RuntimeCheckpointControlV1 {
-    Continue,
-    SavedThenStop,
-}
-pub(crate) trait RuntimeCheckpointV1<
-    S: StrategyV1,
-    I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
->
-{
+pub(crate) trait RuntimeControlV1 {
+    fn initialization_classification(&self, _position: u64) -> Option<(bool, bool)> {
+        None
+    }
     fn started(&mut self) {}
     fn research_enabled(&self) -> bool {
         false
     }
-    fn restore(
-        &mut self,
-        _config: &HistoricalPreparedRunConfigV1,
-        _rules: Arc<SealedProcessRuleSnapshotV3>,
-        _strategy: &mut S,
-    ) -> Result<Option<RestoredRuntimeV1<S::Diagnostics>>, MaterialError> {
-        Ok(None)
-    }
-    fn restored_hidden(&mut self) -> Option<Result<AcceptedHiddenStepBucketV1, MaterialError>> {
-        None
-    }
-    fn save(
-        &mut self,
-        driver: &mut FinitePublicConsumptionV1<I>,
-        shared: &SharedExecutionV2,
-        strategy: &S,
-        state: RuntimeLoopCheckpointRefV1<'_, S::Diagnostics>,
-        next_hidden: Option<&AcceptedHiddenStepBucketV1>,
-    ) -> Result<RuntimeCheckpointControlV1, MaterialError>;
-}
-struct NoRuntimeCheckpointV1;
-impl<S: StrategyV1, I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
-    RuntimeCheckpointV1<S, I> for NoRuntimeCheckpointV1
-{
-    fn save(
-        &mut self,
-        _driver: &mut FinitePublicConsumptionV1<I>,
-        _shared: &SharedExecutionV2,
-        _strategy: &S,
-        _state: RuntimeLoopCheckpointRefV1<'_, S::Diagnostics>,
-        _next_hidden: Option<&AcceptedHiddenStepBucketV1>,
-    ) -> Result<RuntimeCheckpointControlV1, MaterialError> {
-        Ok(RuntimeCheckpointControlV1::Continue)
+    fn stop_requested(&mut self) -> Result<bool, MaterialError> {
+        Ok(false)
     }
 }
+struct NoRuntimeControlV1;
+impl RuntimeControlV1 for NoRuntimeControlV1 {}
 
 #[cfg(test)]
 mod failure_preservation_tests {

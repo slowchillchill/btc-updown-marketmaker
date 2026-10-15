@@ -32,12 +32,6 @@ struct DayCandidateCommand {
 struct DayCommand {
     preparation: HistoricalPreparationConfigV1,
     candidates: Vec<DayCandidateCommand>,
-    checkpoint_root: PathBuf,
-    checkpoint_interval_seconds: u64,
-    #[serde(default)]
-    checkpoint_every_applied_inputs: Option<u64>,
-    #[serde(default)]
-    checkpoint_every_candidate_events: Option<u64>,
     #[serde(default)]
     producer_lead_groups: Option<usize>,
 }
@@ -318,15 +312,15 @@ fn research_args(
             "--wall-budget-seconds" => {
                 result.budget_seconds = Some(args.next().ok_or("墙钟预算缺值")?.parse()?)
             }
-            "--checkpoint-reserve-seconds" => {
-                result.reserve_seconds = Some(args.next().ok_or("保存预留缺值")?.parse()?)
+            "--summary-reserve-seconds" => {
+                result.reserve_seconds = Some(args.next().ok_or("汇总预留缺值")?.parse()?)
             }
             _ => remaining.push(arg),
         }
     }
     if let Some(budget) = result.budget_seconds {
         if budget <= result.reserve_seconds.unwrap_or(900) {
-            return Err("墙钟预算须大于保存/汇总预留".into());
+            return Err("墙钟预算须大于汇总输出预留".into());
         }
     }
     Ok((result, remaining))
@@ -343,7 +337,7 @@ fn write_day_failure_json(value: &serde_json::Value) -> std::io::Result<()> {
 async fn main() {
     if std::env::args().any(|arg| arg == "--help") {
         println!(
-            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，checkpoint_root存在时恢复，完成点复用\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--checkpoint-reserve-seconds <秒>（默认900）\n全部策略字段可覆盖（day对各候选显式覆盖）：\n{}",
+            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，每次从头运行，不保存或恢复检查点\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--summary-reserve-seconds <秒>（默认900）\n全部策略字段可覆盖（day对各候选显式覆盖）：\n{}",
             PARAMETERS
                 .iter()
                 .map(|(field, _)| *field)
@@ -364,13 +358,13 @@ async fn main() {
         if mode != Mode::Day && (research.summary || research.budget_seconds.is_some() || research.reserve_seconds.is_some()) {
             return Err("研究汇总及预算选项仅适用于day入口".into());
         }
-        // 外层硬截止覆盖输入准备、运行及最后输出；只保留最后成功发布点。
+        // 外层硬截止覆盖输入准备、运行及最后输出；汇总预留用于返回已有成绩。
         let _budget_guard = research.budget_seconds.map(|budget| {
             let (tx, rx) = std::sync::mpsc::channel::<()>();
             std::thread::spawn(move || {
                 let remaining=std::time::Duration::from_secs(budget).saturating_sub(started.elapsed());
                 if matches!(rx.recv_timeout(remaining), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
-                    eprintln!("正式研究墙钟预算硬截止；仅承认最后成功发布检查点，未输出阶段计时为未知");
+                    eprintln!("正式研究墙钟预算硬截止；未返回的成绩和阶段计时为未知，本次不可续跑");
                     std::process::exit(124);
                 }
             });
@@ -389,9 +383,7 @@ async fn main() {
                     run.strategy_request_namespace=Some(candidate.request_namespace);
                     candidates.push(run);
                 }
-                days.push(HistoricalDayConfigV1 {preparation:day.preparation,candidates,checkpoint_root:day.checkpoint_root,
-                    checkpoint_interval_seconds:day.checkpoint_interval_seconds,progress_interval_seconds:interval,
-                    checkpoint_every_applied_inputs:day.checkpoint_every_applied_inputs,checkpoint_every_candidate_events:day.checkpoint_every_candidate_events,producer_lead_groups:day.producer_lead_groups});
+                days.push(HistoricalDayConfigV1 {preparation:day.preparation,candidates,progress_interval_seconds:interval,producer_lead_groups:day.producer_lead_groups});
             }
             let factory=|run:&HistoricalPreparedRunConfigV1|->Result<ComplementaryPairV1,MaterialError> {
                 let strategy=serde_json::from_value(run.strategy.effective_parameters.clone())?;
@@ -399,7 +391,7 @@ async fn main() {
                 Ok(ComplementaryPairV1::new(strategy,rules.clone(),namespace,StrategyContinuityV1::new_account())?)
             };
             let options=HistoricalDayRunOptionsV1 { research_summary:research.summary, started,
-                budget_save_after:research.budget_seconds.map(|budget| std::time::Duration::from_secs(budget-research.reserve_seconds.unwrap_or(900))) };
+                budget_stop_after:research.budget_seconds.map(|budget| std::time::Duration::from_secs(budget-research.reserve_seconds.unwrap_or(900))) };
             let result=if research.summary || research.budget_seconds.is_some() {
                 run_historical_days_with_options_v1(&days,rules.clone(),&factory,command.parallel_dates.unwrap_or(1),&options)
             } else if let Some(parallel)=command.parallel_dates {run_historical_days_with_parallelism_v1(&days,rules.clone(),&factory,parallel)}
@@ -534,13 +526,13 @@ mod tests {
 mod research_option_tests {
     use super::*;
     #[test]
-    fn explicit_budget_preserves_original_args_and_requires_save_reserve() {
+    fn explicit_budget_preserves_original_args_and_requires_summary_reserve() {
         let (r, args) = research_args(
             [
                 "--research-summary",
                 "--wall-budget-seconds",
                 "25200",
-                "--checkpoint-reserve-seconds",
+                "--summary-reserve-seconds",
                 "900",
                 "--mode",
                 "day",

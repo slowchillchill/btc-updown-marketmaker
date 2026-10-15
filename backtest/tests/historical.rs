@@ -4,7 +4,6 @@ use common::*;
 use contracts::*;
 use ledger::*;
 use rust_decimal::Decimal;
-use sha2::Digest;
 use shared_run::*;
 use sim_system::{execution::*, platform_rules::*};
 use std::sync::Arc;
@@ -12,14 +11,11 @@ use std::sync::Arc;
 struct Probe {
     no_trade_only: bool,
     exit_immediately: bool,
-    block_next_publication: Option<std::path::PathBuf>,
     source_health: bool,
     trade_details: Option<bool>,
     quantity_demand: Option<bool>,
     expected_quantity_projection: Option<bool>,
     saw_depth: Option<Arc<std::sync::atomic::AtomicBool>>,
-    checkpoint_capture: Option<(std::path::PathBuf, std::path::PathBuf)>,
-    checkpoint_publication_interrupt: Option<std::path::PathBuf>,
     rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
     cancel_first: bool,
     canceled: bool,
@@ -1670,18 +1666,12 @@ fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
     let day = HistoricalDayConfigV1 {
         preparation: config.preparation.clone(),
         candidates: vec![first, second],
-        checkpoint_root: tmp.path().join("day-state"),
-        checkpoint_interval_seconds: 60,
         progress_interval_seconds: 0,
-        checkpoint_every_applied_inputs: None,
-        checkpoint_every_candidate_events: Some(1),
         producer_lead_groups: Some(1),
     };
-    let archive = tmp.path().join("test-retained-points");
     let results = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| {
         Ok(Probe {
             rules: Some(rules.clone()),
-            checkpoint_capture: Some((day.checkpoint_root.clone(), archive.clone())),
             ..Default::default()
         })
     })
@@ -1694,207 +1684,24 @@ fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
         assert!(candidate.report["recording_drained"].as_bool().unwrap());
         assert!(candidate.report["calculation_count"].as_u64().unwrap() > 0);
     }
-    let mut adjusted = day.clone();
-    adjusted.progress_interval_seconds = 17;
-    adjusted.checkpoint_interval_seconds = 23;
-    adjusted.producer_lead_groups = Some(7);
-    let reused = run_historical_days_v1(&[adjusted], rules.clone(), &|_| -> Result<
-        Probe,
-        MaterialError,
-    > {
-        panic!("完成复用不应创建策略或运行账户")
-    })
-    .unwrap();
-    assert!(reused[0].candidates.iter().all(|c| c.reused));
-    assert_eq!(
-        std::fs::read_dir(&day.checkpoint_root)
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().starts_with("checkpoint-"))
-            .count(),
-        1,
-        "生产只保留最近完整点"
-    );
-    let uninterrupted_logs = day
-        .candidates
-        .iter()
-        .map(|c| std::fs::read(&c.sim_log).unwrap())
-        .collect::<Vec<_>>();
-    // 已完成执行的尾部模拟检查点发布前中断：恢复旧的完整点并撤回同一写入器尾部。
-    let latest: serde_json::Value = serde_json::from_reader(
-        std::fs::File::open(day.checkpoint_root.join("checkpoint.json")).unwrap(),
-    )
-    .unwrap();
-    let completed_day = day.checkpoint_root.join(format!(
-        "checkpoint-{:020}/day.cbor",
-        latest["generation"].as_u64().unwrap()
-    ));
-    let completed: serde_json::Value =
-        ciborium::from_reader(std::fs::File::open(&completed_day).unwrap()).unwrap();
-    assert_eq!(completed["state"], "Complete");
-    assert!(completed.get("core").is_none());
-    assert!(completed.get("producer").is_none());
-    assert!(
-        latest["files"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|f| f["path"] == "day.cbor")
-    );
-    let latest_generation = latest["generation"].as_u64().unwrap();
-    assert!(latest_generation > 1);
-    let mut target = None;
-    let mut prepared_target = None;
-    fn field<'a>(value: &'a ciborium::Value, name: &str) -> Option<&'a ciborium::Value> {
-        value
-            .as_map()?
-            .iter()
-            .find_map(|(key, value)| (key.as_text() == Some(name)).then_some(value))
-    }
-    fn has_prepared_mode(value: &ciborium::Value) -> bool {
-        match value {
-            ciborium::Value::Map(values) => values.iter().any(|(k, v)| {
-                (k.as_text() == Some("order_identity_mode")
-                    && v.as_text() == Some("PublicRequestV1"))
-                    || has_prepared_mode(v)
-            }),
-            ciborium::Value::Array(values) => values.iter().any(has_prepared_mode),
-            _ => false,
-        }
-    }
-    for generation in 0..latest_generation {
-        let directory = archive.join(format!("checkpoint-{generation:020}"));
-        #[derive(serde::Deserialize)]
-        struct State {
-            pending: Option<serde_json::Value>,
-        }
-        #[derive(serde::Deserialize)]
-        struct Saved {
-            state: State,
-            driver: Vec<u8>,
-        }
-        if let Ok(file) = std::fs::File::open(directory.join("candidate-000000.cbor")) {
-            let saved: Saved = ciborium::de::from_reader(file).unwrap();
-            if saved.state.pending.is_some() && target.is_none() {
-                target = Some(generation);
-            }
-            let driver: ciborium::Value =
-                ciborium::de::from_reader(saved.driver.as_slice()).unwrap();
-            let pending = field(&driver, "state")
-                .and_then(|v| field(v, "session"))
-                .and_then(|v| field(v, "mutation_requests"))
-                .and_then(|v| field(v, "pending_actions"));
-            if prepared_target.is_none() && pending.is_some_and(has_prepared_mode) {
-                prepared_target = Some(generation);
-            }
-            if target.is_some() && prepared_target.is_some() {
-                break;
-            }
-        }
-    }
-    for generation in [
-        target.expect("必须在待发送计算处保存完整检查点"),
-        prepared_target.expect("必须在新身份BUY尚未处理时保存完整SIM检查点"),
-    ] {
-        eprintln!("完整原运行恢复 generation={generation}，覆盖待发送计算或prepared BUY待处理请求");
-        let directory = day
-            .checkpoint_root
-            .join(format!("checkpoint-{generation:020}"));
-        std::fs::create_dir_all(&directory).unwrap();
-        let mut files = vec![];
-        for name in ["day.cbor", "candidate-000000.cbor", "candidate-000001.cbor"] {
-            std::fs::copy(
-                archive
-                    .join(format!("checkpoint-{generation:020}"))
-                    .join(name),
-                directory.join(name),
-            )
-            .unwrap();
-            files.push(serde_json::json!({"path":name,"sha256":format!("{:x}",sha2::Sha256::digest(std::fs::read(directory.join(name)).unwrap()))}));
-        }
-        let previous = serde_json::json!({"format":latest["format"],"identity":latest["identity"],"generation":generation,"files":files});
-        std::fs::write(
-            day.checkpoint_root.join("checkpoint.json"),
-            serde_json::to_vec(&previous).unwrap(),
-        )
-        .unwrap();
-        let resumed = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| {
-            Ok(Probe {
-                rules: Some(rules.clone()),
-                ..Default::default()
-            })
-        })
-        .unwrap();
-        assert_eq!(
-            resumed[0].public_applied_inputs, results[0].public_applied_inputs,
-            "恢复不重新归约已提交公共前缀"
-        );
-        for (before, after) in results[0].candidates.iter().zip(&resumed[0].candidates) {
-            assert_eq!(before.report, after.report);
-        }
-        for (candidate, before) in day.candidates.iter().zip(&uninterrupted_logs) {
-            assert_eq!(
-                std::fs::read(&candidate.sim_log).unwrap(),
-                *before,
-                "请求/成交/反馈执行日志与不中断运行逐字一致"
+    fn assert_no_resume_files(root: &std::path::Path) {
+        for entry in std::fs::read_dir(root).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                name != "source-order.cbor"
+                    && name != "checkpoint.json"
+                    && !name.starts_with("checkpoint-"),
+                "回测不得保存恢复材料: {}",
+                entry.path().display()
             );
+            if entry.file_type().unwrap().is_dir() {
+                assert_no_resume_files(&entry.path());
+            }
         }
     }
-    // 旧完整运行格式不能被当前prepared身份运行静默接续。
-    let pointer_path = day.checkpoint_root.join("checkpoint.json");
-    let pointer_bytes = std::fs::read(&pointer_path).unwrap();
-    let mut old: serde_json::Value = serde_json::from_slice(&pointer_bytes).unwrap();
-    old["format"] = serde_json::json!("original-parquet-day-checkpoint-v2");
-    std::fs::write(&pointer_path, serde_json::to_vec(&old).unwrap()).unwrap();
-    let error = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| -> Result<
-        Probe,
-        MaterialError,
-    > {
-        panic!("旧运行版本不得创建新策略或账户")
-    })
-    .unwrap_err();
-    assert!(error.to_string().contains("日检查点与输入、配置或版本不符"));
-    std::fs::write(&pointer_path, pointer_bytes).unwrap();
-    // 尚未发布的局部文件不覆盖完整引用，也不阻止完成复用。
-    let latest: serde_json::Value = serde_json::from_reader(
-        std::fs::File::open(day.checkpoint_root.join("checkpoint.json")).unwrap(),
-    )
-    .unwrap();
-    let generation = latest["generation"].as_u64().unwrap();
-    let incomplete = day
-        .checkpoint_root
-        .join(format!("checkpoint-{:020}", generation + 1));
-    std::fs::create_dir_all(&incomplete).unwrap();
-    std::fs::write(incomplete.join("day.cbor"), [0xa1]).unwrap();
-    let reuse = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| -> Result<
-        Probe,
-        MaterialError,
-    > {
-        panic!("未发布点不得创建新账户")
-    })
-    .unwrap();
-    assert!(reuse[0].candidates.iter().all(|c| c.reused));
-    // 发布点损坏须在创建策略及修改任何经济尾之前失败。
-    let path = day
-        .checkpoint_root
-        .join(format!("checkpoint-{generation:020}"))
-        .join("day.cbor");
-    std::fs::write(path, [0xa1]).unwrap();
-    let logs = day
-        .candidates
-        .iter()
-        .map(|c| std::fs::read(&c.sim_log).unwrap())
-        .collect::<Vec<_>>();
-    let damaged = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| -> Result<
-        Probe,
-        MaterialError,
-    > {
-        panic!("损坏点不得创建新账户")
-    });
-    assert!(damaged.is_err());
-    for (candidate, log) in day.candidates.iter().zip(logs) {
-        assert_eq!(std::fs::read(&candidate.sim_log).unwrap(), log);
-    }
+    assert_no_resume_files(tmp.path());
     assert!(
         !config.preparation.work_root.exists(),
         "日入口不得生成完整宽录制"
@@ -1918,11 +1725,7 @@ fn candidate_unwind_publishes_failure_and_wakes_daily_waiters() {
     let day = HistoricalDayConfigV1 {
         preparation: config.preparation.clone(),
         candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
-        checkpoint_root: tmp.path().join("state"),
-        checkpoint_interval_seconds: 60,
         progress_interval_seconds: 0,
-        checkpoint_every_applied_inputs: None,
-        checkpoint_every_candidate_events: None,
         producer_lead_groups: Some(1),
     };
     let error = run_historical_days_v1(&[day], rules, &|_| -> Result<Probe, MaterialError> {
@@ -1931,170 +1734,6 @@ fn candidate_unwind_publishes_failure_and_wakes_daily_waiters() {
     .unwrap_err();
     assert!(error.to_string().contains("候选线程异常退出"));
     assert!(!config.result_path.exists());
-}
-
-impl CheckpointStrategyV1 for Probe {
-    fn write_strategy_checkpoint(
-        &self,
-        writer: &mut dyn std::io::Write,
-    ) -> Result<(), MaterialError> {
-        if let Some(root) = &self.block_next_publication {
-            std::fs::create_dir(root.join(".checkpoint.json.tmp"))?;
-        }
-        if let Some(root) = &self.checkpoint_publication_interrupt {
-            if self.saw_cancel_in_flight_after_one_leg_fill
-                && root.join("checkpoint.json").exists()
-                && !root.join(".checkpoint.json.tmp").exists()
-            {
-                // 经济已稳定且候选仍有在途撤单/已成交腿；阻断最后的发布文件创建。
-                std::fs::create_dir(root.join(".checkpoint.json.tmp"))?;
-            }
-        }
-        // 仅夹具保存此前已发布点：生产协调器仍只保留最近一个完整点。
-        if let Some((root, archive)) = &self.checkpoint_capture {
-            if let Ok(file) = std::fs::File::open(root.join("checkpoint.json")) {
-                let pointer: serde_json::Value = serde_json::from_reader(file)?;
-                let name = format!("checkpoint-{:020}", pointer["generation"].as_u64().unwrap());
-                let destination = archive.join(&name);
-                std::fs::create_dir_all(&destination)?;
-                for file in pointer["files"].as_array().unwrap() {
-                    let path = file["path"].as_str().unwrap();
-                    std::fs::copy(root.join(&name).join(path), destination.join(path))?;
-                }
-            }
-        }
-        ciborium::ser::into_writer(
-            &(
-                self.cancel_first,
-                self.canceled,
-                self.saw_cancel_in_flight_after_one_leg_fill,
-                self.saw_later_down_quote,
-                self.frozen_down_price,
-                self.bought_first,
-                self.bought_second,
-                self.exit,
-                self.fail,
-                self.bad_batch,
-                self.observed.clone(),
-                self.dispatched,
-                self.failed_callback_sent,
-                self.calculation_budget,
-            ),
-            writer,
-        )?;
-        Ok(())
-    }
-    fn restore_strategy_checkpoint(
-        &mut self,
-        reader: &mut dyn std::io::Read,
-    ) -> Result<(), MaterialError> {
-        let saved = ciborium::de::from_reader(reader)?;
-        (
-            self.cancel_first,
-            self.canceled,
-            self.saw_cancel_in_flight_after_one_leg_fill,
-            self.saw_later_down_quote,
-            self.frozen_down_price,
-            self.bought_first,
-            self.bought_second,
-            self.exit,
-            self.fail,
-            self.bad_batch,
-            self.observed,
-            self.dispatched,
-            self.failed_callback_sent,
-            self.calculation_budget,
-        ) = saved;
-        Ok(())
-    }
-}
-
-#[test]
-fn partial_fill_cancel_in_flight_before_publication_restores_previous_complete_point() {
-    let temp = tempfile::tempdir().unwrap();
-    let (config, rules) = setup(temp.path());
-    let before_day = HistoricalDayConfigV1 {
-        preparation: config.preparation.clone(),
-        candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
-        checkpoint_root: temp.path().join("complete-state"),
-        checkpoint_interval_seconds: 60,
-        progress_interval_seconds: 0,
-        checkpoint_every_applied_inputs: None,
-        checkpoint_every_candidate_events: Some(1),
-        producer_lead_groups: Some(1),
-    };
-    let before = run_historical_days_v1(&[before_day], rules.clone(), &|_| {
-        Ok(Probe {
-            rules: Some(rules.clone()),
-            cancel_first: true,
-            ..Default::default()
-        })
-    })
-    .unwrap();
-    let fault_root = temp.path().join("interrupted-output");
-    let candidate = reuse_outputs(&config, &fault_root);
-    let day = HistoricalDayConfigV1 {
-        preparation: config.preparation.clone(),
-        candidates: vec![candidate.clone()],
-        checkpoint_root: temp.path().join("interrupted-state"),
-        checkpoint_interval_seconds: 60,
-        progress_interval_seconds: 0,
-        checkpoint_every_applied_inputs: None,
-        checkpoint_every_candidate_events: Some(1),
-        producer_lead_groups: Some(1),
-    };
-    let interrupted = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| {
-        Ok(Probe {
-            rules: Some(rules.clone()),
-            cancel_first: true,
-            checkpoint_publication_interrupt: Some(day.checkpoint_root.clone()),
-            ..Default::default()
-        })
-    });
-    assert!(interrupted.is_err());
-    assert!(!candidate.result_path.exists());
-    assert!(day.checkpoint_root.join("checkpoint.json").is_file());
-    #[derive(serde::Deserialize)]
-    struct Candidate {
-        strategy: Vec<u8>,
-    }
-    let mut actual_partial_state = false;
-    for entry in std::fs::read_dir(&day.checkpoint_root).unwrap() {
-        if let Ok(file) = std::fs::File::open(entry.unwrap().path().join("candidate-000000.cbor")) {
-            let saved: Candidate = ciborium::de::from_reader(file).unwrap();
-            let saved: serde_json::Value =
-                ciborium::de::from_reader(saved.strategy.as_slice()).unwrap();
-            actual_partial_state |= saved[3].as_bool() == Some(true);
-        }
-    }
-    assert!(actual_partial_state, "故障边界必须实际含已成交腿及在途撤单");
-    std::fs::remove_dir(day.checkpoint_root.join(".checkpoint.json.tmp")).unwrap();
-    let after = run_historical_days_v1(&[day], rules.clone(), &|_| {
-        Ok(Probe {
-            rules: Some(rules.clone()),
-            cancel_first: true,
-            ..Default::default()
-        })
-    })
-    .unwrap();
-    let mut before_report = before[0].candidates[0].report.clone();
-    let mut after_report = after[0].candidates[0].report.clone();
-    normalize_output_paths(&mut before_report, temp.path());
-    normalize_output_paths(&mut after_report, &fault_root);
-    assert_eq!(before_report, after_report);
-    let normalize_log = |path: &std::path::Path, root: &std::path::Path| {
-        sim_log_values(path)
-            .into_iter()
-            .map(|mut value| {
-                normalize_output_paths(&mut value, root);
-                value
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        normalize_log(&config.sim_log, temp.path()),
-        normalize_log(&candidate.sim_log, &fault_root)
-    );
 }
 
 #[test]
@@ -2111,11 +1750,7 @@ fn two_original_dates_keep_two_thousand_and_same_day_cross_market_continuity() {
         days.push(HistoricalDayConfigV1 {
             preparation: config.preparation,
             candidates: vec![candidate],
-            checkpoint_root: root.join("state"),
-            checkpoint_interval_seconds: 60,
             progress_interval_seconds: 0,
-            checkpoint_every_applied_inputs: None,
-            checkpoint_every_candidate_events: None,
             producer_lead_groups: Some(1),
         });
     }
@@ -2201,11 +1836,7 @@ fn original_day_quantity_demand_union_preserves_complete_and_quantity_free_candi
         let day = HistoricalDayConfigV1 {
             preparation: config.preparation.clone(),
             candidates: vec![first, second],
-            checkpoint_root: tmp.path().join("day-state"),
-            checkpoint_interval_seconds: 0,
             progress_interval_seconds: 0,
-            checkpoint_every_applied_inputs: None,
-            checkpoint_every_candidate_events: None,
             producer_lead_groups: Some(1),
         };
         let seen = [
@@ -2278,15 +1909,11 @@ async fn source_health_host_honors_trade_detail_demand_without_changing_observat
     );
 }
 
-fn research_day(config: &HistoricalRunConfigV1, root: &std::path::Path) -> HistoricalDayConfigV1 {
+fn research_day(config: &HistoricalRunConfigV1, _root: &std::path::Path) -> HistoricalDayConfigV1 {
     HistoricalDayConfigV1 {
         preparation: config.preparation.clone(),
         candidates: vec![HistoricalPreparedRunConfigV1::from(config)],
-        checkpoint_root: root.to_owned(),
-        checkpoint_interval_seconds: 60,
         progress_interval_seconds: 0,
-        checkpoint_every_applied_inputs: None,
-        checkpoint_every_candidate_events: Some(1),
         producer_lead_groups: Some(1),
     }
 }
@@ -2357,10 +1984,12 @@ fn research_hours_exclude_same_millisecond_boundary_and_keep_empty_hours() {
 }
 
 #[test]
-fn research_budget_retains_pending_and_resumes_without_recount_or_business_change() {
+fn research_budget_returns_partial_results_and_fresh_run_keeps_business_results() {
     let tmp = tempfile::tempdir().unwrap();
     let (config, rules) = setup(tmp.path());
     let day = research_day(&config, &tmp.path().join("state"));
+    let mut stopped_day = day.clone();
+    stopped_day.candidates = vec![reuse_outputs(&config, &tmp.path().join("stopped"))];
     let factory = |_: &HistoricalPreparedRunConfigV1| {
         Ok(Probe {
             rules: Some(rules.clone()),
@@ -2368,13 +1997,13 @@ fn research_budget_retains_pending_and_resumes_without_recount_or_business_chang
         })
     };
     let stopped = run_historical_days_with_options_v1(
-        &[day.clone()],
+        &[stopped_day],
         rules.clone(),
         &factory,
         1,
         &HistoricalDayRunOptionsV1 {
             research_summary: true,
-            budget_save_after: Some(std::time::Duration::ZERO),
+            budget_stop_after: Some(std::time::Duration::ZERO),
             ..Default::default()
         },
     )
@@ -2392,76 +2021,10 @@ fn research_budget_retains_pending_and_resumes_without_recount_or_business_chang
             .as_bool()
             .unwrap()
     );
-    let pointer: serde_json::Value = serde_json::from_reader(
-        std::fs::File::open(day.checkpoint_root.join("checkpoint.json")).unwrap(),
-    )
-    .unwrap();
-    let directory = day.checkpoint_root.join(format!(
-        "checkpoint-{:020}",
-        pointer["generation"].as_u64().unwrap()
-    ));
-    #[derive(serde::Deserialize)]
-    enum DayState {
-        Running {},
-        Complete,
-    }
-    #[derive(serde::Deserialize)]
-    struct SavedDay {
-        state: DayState,
-        completed: Vec<Option<serde_json::Value>>,
-    }
-    #[derive(serde::Deserialize)]
-    struct State {
-        pending: Option<serde_json::Value>,
-        research: serde_json::Value,
-    }
-    #[derive(serde::Deserialize)]
-    struct SavedCandidate {
-        state: State,
-    }
-    let saved: SavedDay =
-        ciborium::from_reader(std::fs::File::open(directory.join("day.cbor")).unwrap()).unwrap();
-    assert!(matches!(saved.state, DayState::Running {}));
-    assert!(saved.completed.iter().all(Option::is_none));
-    let candidate: SavedCandidate = ciborium::from_reader(
-        std::fs::File::open(directory.join("candidate-000000.cbor")).unwrap(),
-    )
-    .unwrap();
-    assert!(candidate.state.pending.is_some());
-    assert_eq!(
-        candidate.state.research["decisions"],
-        stopped[0].candidates[0].report["research"]["decisions"]
-    );
-    assert_eq!(
-        candidate.state.research["hours"],
-        stopped[0].candidates[0].report["research"]["hours"]
-    );
-    let published_before = std::fs::read(day.checkpoint_root.join("checkpoint.json")).unwrap();
-    let failure = run_historical_days_with_options_v1(
-        &[day.clone()],
-        rules.clone(),
-        &|_| {
-            Ok(Probe {
-                rules: Some(rules.clone()),
-                block_next_publication: Some(day.checkpoint_root.clone()),
-                ..Default::default()
-            })
-        },
-        1,
-        &HistoricalDayRunOptionsV1 {
-            research_summary: true,
-            budget_save_after: Some(std::time::Duration::ZERO),
-            ..Default::default()
-        },
-    );
-    assert!(failure.is_err(), "发布失败不能返回预算完成报告");
-    assert_eq!(
-        published_before,
-        std::fs::read(day.checkpoint_root.join("checkpoint.json")).unwrap()
-    );
-    std::fs::remove_dir(day.checkpoint_root.join(".checkpoint.json.tmp")).unwrap();
-    assert!(stopped[0].public_applied_inputs < 9, "预算保留未消费来源");
-    let resumed = run_historical_days_with_options_v1(
+    assert!(stopped[0].candidates[0].report["pending_calculation_timing"].is_object());
+    assert!(!tmp.path().join("state").exists());
+    // 使用独立的运行产物；保留已停止账户的证据，不从它恢复。
+    let fresh = run_historical_days_with_options_v1(
         &[day.clone()],
         rules.clone(),
         &factory,
@@ -2472,10 +2035,9 @@ fn research_budget_retains_pending_and_resumes_without_recount_or_business_chang
         },
     )
     .unwrap();
-    let expected = resumed[0].candidates[0].report.clone();
+    let expected = fresh[0].candidates[0].report.clone();
     let sim = std::fs::read(&config.sim_log).unwrap();
     // 同一小夹具同一路径重新运行原默认入口，比较原业务报告及逐帧输出。
-    std::fs::remove_dir_all(&day.checkpoint_root).unwrap();
     for root in [&config.noe_root, &config.ledger_root] {
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2507,7 +2069,7 @@ fn research_budget_retains_pending_and_resumes_without_recount_or_business_chang
 }
 
 #[test]
-fn research_budget_mixed_completed_candidate_keeps_hour_cursor_and_exit_time() {
+fn research_mixed_candidates_keep_independent_exit_and_hour_boundaries() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut config, rules) = setup(tmp.path());
     config.preparation.scope.received_end_utc_ms = BASE + 3 * 3_600_000;
@@ -2518,131 +2080,42 @@ fn research_budget_mixed_completed_candidate_keeps_hour_cursor_and_exit_time() {
     second.session.account_id = "continue-account".into();
     second.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(3_599_200);
     day.candidates.push(second);
-    let archive = tmp.path().join("retained-points");
-    let factory = |run: &HistoricalPreparedRunConfigV1| {
-        Ok(Probe {
-            no_trade_only: run.session.run_id == "continue-research",
-            exit: run.session.run_id != "continue-research",
-            rules: Some(rules.clone()),
-            checkpoint_capture: Some((day.checkpoint_root.clone(), archive.clone())),
-            ..Default::default()
-        })
-    };
-    let options = HistoricalDayRunOptionsV1 {
-        research_summary: true,
-        ..Default::default()
-    };
-    let complete =
-        run_historical_days_with_options_v1(&[day.clone()], rules.clone(), &factory, 1, &options)
-            .unwrap();
-    assert_eq!(
-        complete[0].candidates[0].report["end_reason"],
-        "StrategyExit"
-    );
-    assert_eq!(
-        complete[0].candidates[0].report["research"]["decisions"]["exits"],
-        1
-    );
-    assert_eq!(
-        complete[0].candidates[0].report["research"]["hours"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    assert!(
-        complete[0].candidates[0].report["last_observed_at_utc_ms"]
-            .as_i64()
-            .unwrap()
-            < BASE + 2 * 3_600_000
-    );
-    #[derive(serde::Deserialize)]
-    struct DaySaved {
-        completed: Vec<Option<serde_json::Value>>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Loop {
-        research: serde_json::Value,
-    }
-    #[derive(serde::Deserialize)]
-    struct CandidateSaved {
-        state: Loop,
-    }
-    let mut selected = None;
-    for entry in std::fs::read_dir(&archive).unwrap() {
-        let directory = entry.unwrap().path();
-        let saved: DaySaved =
-            ciborium::from_reader(std::fs::File::open(directory.join("day.cbor")).unwrap())
-                .unwrap();
-        if saved.completed[0].is_some() && saved.completed[1].is_none() {
-            let candidate: CandidateSaved = ciborium::from_reader(
-                std::fs::File::open(directory.join("candidate-000001.cbor")).unwrap(),
-            )
-            .unwrap();
-            if candidate.state.research["hours"].as_array().unwrap().len() == 1 {
-                selected = Some(directory);
-                break;
-            }
-        }
-    }
-    let selected = selected.expect("保留点须真实含已退出候选及另一候选第一小时状态");
-    let generation: u64 = selected
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .trim_start_matches("checkpoint-")
-        .parse()
-        .unwrap();
-    let latest: serde_json::Value = serde_json::from_reader(
-        std::fs::File::open(day.checkpoint_root.join("checkpoint.json")).unwrap(),
-    )
-    .unwrap();
-    let directory = day
-        .checkpoint_root
-        .join(format!("checkpoint-{generation:020}"));
-    std::fs::create_dir_all(&directory).unwrap();
-    let mut files = vec![];
-    for name in ["day.cbor", "candidate-000001.cbor"] {
-        std::fs::copy(selected.join(name), directory.join(name)).unwrap();
-        files.push(serde_json::json!({"path":name,"sha256":format!("{:x}",sha2::Sha256::digest(std::fs::read(directory.join(name)).unwrap()))}));
-    }
-    std::fs::write(day.checkpoint_root.join("checkpoint.json"),serde_json::to_vec(&serde_json::json!({"format":latest["format"],"identity":latest["identity"],"generation":generation,"files":files})).unwrap()).unwrap();
-    let stopped = run_historical_days_with_options_v1(
-        &[day.clone()],
+    let complete = run_historical_days_with_options_v1(
+        &[day],
         rules.clone(),
-        &factory,
+        &|run: &HistoricalPreparedRunConfigV1| {
+            Ok(Probe {
+                no_trade_only: run.session.run_id == "continue-research",
+                exit: run.session.run_id != "continue-research",
+                rules: Some(rules.clone()),
+                ..Default::default()
+            })
+        },
         1,
         &HistoricalDayRunOptionsV1 {
             research_summary: true,
-            budget_save_after: Some(std::time::Duration::ZERO),
             ..Default::default()
         },
     )
     .unwrap();
-    assert!(stopped[0].candidates[0].reused);
-    assert_eq!(
-        stopped[0].candidates[0].report,
-        complete[0].candidates[0].report
+    assert_eq!(complete[0].candidates.len(), 2);
+    let exited = &complete[0].candidates[0].report;
+    assert_eq!(exited["end_reason"], "StrategyExit");
+    assert_eq!(exited["research"]["decisions"]["exits"], 1);
+    assert_eq!(exited["research"]["hours"].as_array().unwrap().len(), 1);
+    assert!(exited["last_observed_at_utc_ms"].as_i64().unwrap() < BASE + 2 * 3_600_000);
+    let continued = &complete[0].candidates[1].report;
+    assert_eq!(continued["end_reason"], "RangeEnd");
+    assert_eq!(continued["research"]["decisions"]["exits"], 0);
+    assert_eq!(continued["research"]["hours"].as_array().unwrap().len(), 3);
+    assert!(
+        continued["last_observed_at_utc_ms"].as_i64().unwrap()
+            > exited["last_observed_at_utc_ms"].as_i64().unwrap()
     );
-    assert_eq!(stopped[0].candidates[1].report["end_reason"], "BudgetStop");
-    assert_eq!(
-        stopped[0].candidates[1].report["research"]["hours"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    let resumed =
-        run_historical_days_with_options_v1(&[day.clone()], rules.clone(), &factory, 1, &options)
-            .unwrap();
-    for (a, b) in complete[0].candidates.iter().zip(&resumed[0].candidates) {
-        assert_eq!(a.report, b.report, "已保存小时/分类在恢复后不得重计");
-    }
 }
 
 #[test]
-fn research_zero_duration_exit_keeps_original_terminal_boundary_on_budget_save() {
+fn research_zero_duration_exit_keeps_original_terminal_boundary_on_budget_stop() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut config, rules) = setup(tmp.path());
     config.timing.calculation_duration_ms = DelayScheduleV1::Fixed(0);
@@ -2661,7 +2134,7 @@ fn research_zero_duration_exit_keeps_original_terminal_boundary_on_budget_save()
         1,
         &HistoricalDayRunOptionsV1 {
             research_summary: true,
-            budget_save_after: Some(std::time::Duration::ZERO),
+            budget_stop_after: Some(std::time::Duration::ZERO),
             ..Default::default()
         },
     )
@@ -2678,19 +2151,7 @@ fn research_zero_duration_exit_keeps_original_terminal_boundary_on_budget_save()
         report["pending_calculation_timing"]["calculation_completed_at_utc_ms"]
     );
     assert!(report["research"]["hours"].as_array().unwrap().is_empty());
-    // 保存点仍是Running；恢复会在原到期毫秒终止，不提前推进任何未到期计算。
-    let resumed = run_historical_days_with_options_v1(
-        &[day],
-        rules.clone(),
-        &factory,
-        1,
-        &HistoricalDayRunOptionsV1 {
-            research_summary: true,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(report, &resumed[0].candidates[0].report);
+    assert!(!tmp.path().join("state").exists());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2795,14 +2256,23 @@ fn actual_day_initialization_statistics_keep_late_candidate_prefixes() {
     late.ledger_root = temp.path().join("late-ledger");
     late.metadata_path = temp.path().join("late-metadata.json");
     late.result_path = temp.path().join("late-result.json");
+    let mut candidates = vec![fast.clone(), late];
+    for index in 2..7 {
+        let mut candidate = fast.clone();
+        candidate.session.run_id = format!("initial-late-{index}");
+        candidate.session.account_id = format!("initial-account-{index}");
+        candidate.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(2000 + index * 10);
+        candidate.sim_log = temp.path().join(format!("sim-{index}"));
+        candidate.noe_root = temp.path().join(format!("noe-{index}"));
+        candidate.ledger_root = temp.path().join(format!("ledger-{index}"));
+        candidate.metadata_path = temp.path().join(format!("metadata-{index}.json"));
+        candidate.result_path = temp.path().join(format!("result-{index}.json"));
+        candidates.push(candidate);
+    }
     let day = HistoricalDayConfigV1 {
         preparation: config.preparation.clone(),
-        candidates: vec![fast, late],
-        checkpoint_root: temp.path().join("day-state"),
-        checkpoint_interval_seconds: 60,
+        candidates,
         progress_interval_seconds: 0,
-        checkpoint_every_applied_inputs: None,
-        checkpoint_every_candidate_events: None,
         producer_lead_groups: Some(1),
     };
     let result = run_historical_days_v1(&[day], rules, &|_| {
@@ -2813,7 +2283,7 @@ fn actual_day_initialization_statistics_keep_late_candidate_prefixes() {
     })
     .unwrap();
     assert_eq!(result.len(), 1);
-    assert_eq!(result[0].candidates.len(), 2);
+    assert_eq!(result[0].candidates.len(), 7);
     for candidate in &result[0].candidates {
         let summary = &candidate.report["delivery_summary"];
         let before = &summary["before_operating_start"];
@@ -2870,11 +2340,7 @@ fn later_candidate_original_failure_survives_earlier_candidate_collateral_stop()
     let day = HistoricalDayConfigV1 {
         preparation: config.preparation.clone(),
         candidates: vec![first, second],
-        checkpoint_root: tmp.path().join("state"),
-        checkpoint_interval_seconds: 60,
         progress_interval_seconds: 0,
-        checkpoint_every_applied_inputs: None,
-        checkpoint_every_candidate_events: None,
         producer_lead_groups: Some(1),
     };
     let error = run_historical_days_v1(&[day], rules.clone(), &|c| {
@@ -2900,7 +2366,6 @@ fn later_candidate_original_failure_survives_earlier_candidate_collateral_stop()
     assert_eq!(candidates.len(), 2);
     assert_eq!(candidates[1].outcome, CandidateOutcomeV1::OriginalFailure);
     assert_eq!(candidates[1].report["end_reason"], "Failure");
-    assert!(!candidates[1].reused);
     assert!(matches!(
         candidates[0].outcome,
         CandidateOutcomeV1::CollateralStop | CandidateOutcomeV1::Complete
@@ -2960,11 +2425,7 @@ fn completed_business_report_survives_result_file_failure_without_completion_reu
     let day = HistoricalDayConfigV1 {
         preparation: config.preparation.clone(),
         candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
-        checkpoint_root: state.clone(),
-        checkpoint_interval_seconds: 60,
         progress_interval_seconds: 0,
-        checkpoint_every_applied_inputs: None,
-        checkpoint_every_candidate_events: None,
         producer_lead_groups: Some(1),
     };
     let error = run_historical_days_with_options_v1(
@@ -2993,7 +2454,6 @@ fn completed_business_report_survives_result_file_failure_without_completion_reu
     );
     let candidate = &failure.days[0].candidates[0];
     assert_eq!(candidate.outcome, CandidateOutcomeV1::OriginalFailure);
-    assert!(!candidate.reused);
     let report = &candidate.report;
     assert_eq!(report["end_reason"], "RangeEnd");
     assert_eq!(report["recording_drained"], true);
