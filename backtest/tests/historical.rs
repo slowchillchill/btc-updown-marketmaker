@@ -1647,6 +1647,49 @@ async fn source_health_finite_overhead_measurement() {
 }
 
 #[test]
+fn day_received_range_does_not_include_late_received_hidden_source_fact() {
+    let mut bucket_times = vec![];
+    for end in [BASE + 2000, BASE + 2500] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, rules) = setup(temp.path());
+        config.preparation.scope.received_end_utc_ms = end;
+        let day = HistoricalDayConfigV1 {
+            preparation: config.preparation.clone(),
+            candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
+            progress_interval_seconds: 0,
+            producer_lead_groups: Some(1),
+        };
+        let result = run_historical_days_v1(&[day], rules, &|_| {
+            Ok(Probe {
+                no_trade_only: true,
+                ..Default::default()
+            })
+        })
+        .unwrap();
+        assert_eq!(result[0].candidates[0].report["end_reason"], "RangeEnd");
+        let mut times = vec![];
+        for frame in sim_log_values(&config.sim_log) {
+            if let Some(inputs) = frame
+                .as_array()
+                .and_then(|frame| frame.first())
+                .and_then(|inputs| inputs.as_array())
+            {
+                for input in inputs {
+                    // 日布局原隐藏桶帧：[4, 原前缀位置, 源时间, 原索引范围, 封口依据]。
+                    if input[0] == 4 {
+                        times.push(input[2].as_i64().unwrap());
+                    }
+                }
+            }
+        }
+        bucket_times.push(times);
+    }
+    // 原夹具该行的平台源时间为1701，接收时间为2200；不是两种范围共享的隐藏前缀。
+    assert!(!bucket_times[0].contains(&(BASE + 1701)));
+    assert!(bucket_times[1].contains(&(BASE + 1701)));
+}
+
+#[test]
 fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
     let tmp = tempfile::tempdir().unwrap();
     let (config, rules) = setup(tmp.path());

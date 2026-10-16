@@ -578,9 +578,15 @@ impl SimEventLogV2 {
             );
             if let Err(error) = result {
                 #[cfg(feature = "measurement")]
-                self.flush_day_buffer(MeasurementContext::CommitGroup)?;
+                let flushed = self.flush_day_buffer(MeasurementContext::CommitGroup);
                 #[cfg(not(feature = "measurement"))]
-                self.flush_day_buffer()?;
+                let flushed = self.flush_day_buffer();
+                if let Err(flush_error) = flushed {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "SIM 帧编码失败后的缓冲补写也失败：{flush_error}；原错误：{error}"
+                    );
+                }
                 return Err(error);
             }
             if self.day_buffer.as_ref().unwrap().len() >= 256 << 10 {
@@ -1393,6 +1399,105 @@ mod tests {
     }
 
     #[test]
+    fn buffered_day_encode_error_survives_real_prefix_flush_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("encode-and-flush-failure.sim");
+        let mut log = SimEventLogV2::create_historical_day(
+            &path,
+            &opened(RunDurabilityRoleV2::FiniteHistorical),
+            MAX_GROUP_BYTES,
+            day_binding(),
+        )
+        .unwrap();
+        log = log
+            .append_group_with_sync(&[input("confirmed")], true, &[])
+            .unwrap()
+            .0;
+        let confirmed = std::fs::read(&path).unwrap();
+        let limit = encode_day_frame(
+            &(
+                vec![DayInputRefV1(&input("a"))],
+                Vec::<CancelScenarioHitV1>::new(),
+            ),
+            MAX_GROUP_BYTES,
+        )
+        .unwrap()
+        .len();
+        log.max_group_bytes = limit;
+        log.day_buffer = Some(Vec::new());
+        log = log.append_group(&[input("a")]).unwrap().0;
+        assert!(!log.day_buffer.as_ref().unwrap().is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), confirmed);
+        // 超大帧编码会截掉自身尾部；此前有效缓冲通过真实只读描述符补写失败。
+        log.file = OpenOptions::new().read(true).open(&path).unwrap();
+        let error = match log.append_group(&[input("oversized-frame")]) {
+            Err(error) => error,
+            Ok(_) => panic!("超大帧不得成功追加"),
+        };
+        assert_eq!(
+            error,
+            SimEventLogErrorV2::GroupTooLarge { limit_bytes: limit }
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), confirmed);
+        let (_, reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+        let (reader, groups) = read_all_groups(reader).unwrap();
+        assert_eq!(
+            groups,
+            vec![vec![LoggedBusinessInputV2::ActivateSession {
+                activation_id: "activation-confirmed".into(),
+            }]]
+        );
+        assert!(matches!(
+            reader.finish_sealed_clean_run(),
+            Err(SimEventLogErrorV2::UnsealedCleanRun)
+        ));
+    }
+
+    #[test]
+    fn background_normalization_error_survives_real_day_buffer_write_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("double-failure.sim");
+        let mut log = SimEventLogV2::create_historical_day(
+            &path,
+            &opened(RunDurabilityRoleV2::FiniteHistorical),
+            MAX_GROUP_BYTES,
+            day_binding(),
+        )
+        .unwrap();
+        // 先稳定一个已确认组；后续补写通过真实只读描述符失败。
+        log = log.append_group(&[input("confirmed")]).unwrap().0;
+        let confirmed = std::fs::read(&path).unwrap();
+        log.file = OpenOptions::new().read(true).open(&path).unwrap();
+        let original = crate::run_v2::MemoryNoeErrorV1::InvalidProjection("原归一化失败");
+        let mut background = BackgroundEventLogV1::start(log, 2);
+        background
+            .enqueue_with_noe(
+                vec![input("unconfirmed")],
+                vec![],
+                Some(original.clone()),
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(
+            background.stop_and_drain(),
+            Err(SimEventLogErrorV2::NoeNormalization(original))
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), confirmed);
+        let (_, reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+        let (reader, groups) = read_all_groups(reader).unwrap();
+        assert_eq!(
+            groups,
+            vec![vec![LoggedBusinessInputV2::ActivateSession {
+                activation_id: "activation-confirmed".into(),
+            }]]
+        );
+        assert!(matches!(
+            reader.finish_sealed_clean_run(),
+            Err(SimEventLogErrorV2::UnsealedCleanRun)
+        ));
+    }
+
+    #[test]
     fn buffered_day_checkpoint_flushes_small_tail_and_propagates_write_failure() {
         for fail in [false, true] {
             let directory = tempfile::tempdir().unwrap();
@@ -2079,9 +2184,16 @@ impl BackgroundEventLogV1 {
                             })();
                             if let Err(error) = result {
                                 #[cfg(feature = "measurement")]
-                                log.flush_day_buffer(MeasurementContext::CommitGroup)?;
+                                let flushed = log.flush_day_buffer(MeasurementContext::CommitGroup);
                                 #[cfg(not(feature = "measurement"))]
-                                log.flush_day_buffer()?;
+                                let flushed = log.flush_day_buffer();
+                                if let Err(flush_error) = flushed {
+                                    // 补写只保留原有限前缀；它的失败不能覆盖首个业务/耐久错误。
+                                    let _ = writeln!(
+                                        std::io::stderr().lock(),
+                                        "SIM 后台失败后的缓冲补写也失败：{flush_error}；原错误：{error}"
+                                    );
+                                }
                                 return Err(error);
                             }
                         }

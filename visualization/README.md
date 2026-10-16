@@ -4,6 +4,8 @@
 
 报告通过 JSON 浏览：`backtest::HistoricalRunReportV1` 当前只有 `Serialize`，本包不另建完整领域模式，也不修改生产报告类型。已知 `account_economics_v2`、`account_economics_v3` 与原结束原因可以显示已有终态和有限时序；未知版本保留原 JSON 并停止对应语义解释。JSON 语法读取成功不代表领域完整性或研究验收。
 
+当前日作业的段式 NOE 引用继续交给 `execution-normalization` 原版本化读取器；浏览器不解析物理段或恢复运行。`AutoRedeemApplied.resolution_public_consumed_at_utc_ms` 映射为“判定公开消费（模拟依据）”，与原 `resolution_source_event_at_utc_ms` 的“判定源事件”分别展示。空平台源时间保持空值，公开消费时间不证明真实到账。底层检查点不表示 backtest 日入口可续跑。工程样本可由 `noe_clock_evidence` 生成，其中 WS 与 Gamma 记录用于核对原路径、原值和两种时钟含义；技术测试通过不代替新增展示的人工视觉验收。
+
 ## 启动
 
 在仓库根目录运行：

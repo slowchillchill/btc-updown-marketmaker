@@ -22,6 +22,111 @@ fn load(reader: &mut NoeResults, index: usize) -> Value {
     serde_json::from_slice(&reader.load(index).unwrap()).unwrap()
 }
 #[test]
+fn batched_day_references_read_each_logical_batch_from_one_physical_segment() {
+    use execution_normalization::{
+        NormalizationBatchInput, NormalizationCore, PendingScopeV1, SourceNeutralEvidence,
+        SourceNeutralEvidenceKind, SourceNeutralLogicalKeyV1, StagedNormalizationWriter,
+        read_noe_result_v4,
+    };
+    type Trade = SourceNeutralTradeLifecycleResultV2;
+    type Control = SourceNeutralControlResultV3;
+    let root = tempfile::tempdir().unwrap();
+    let seed = generator::sample::<Trade, Control>(
+        &root.path().join("seed"),
+        "v4",
+        Control::Submission {
+            outcome: SourceNeutralSubmissionOutcomeV2::RejectedNoEffect,
+        },
+        Control::Submission {
+            outcome: SourceNeutralSubmissionOutcomeV2::EvidenceUnknownNoEffect,
+        },
+    );
+    let context = read_noe_result_v4(&seed[0]).unwrap().context;
+    let mut core = NormalizationCore::<Trade, Control>::new(context.clone());
+    let mut writer = StagedNormalizationWriter::<Trade, Control>::create_batched(
+        &root.path().join("day"),
+        context.clone(),
+    )
+    .unwrap();
+    for sequence in 0..2 {
+        let batch = core
+            .normalize_and_accept(NormalizationBatchInput {
+                source_watermark: SimV2SourceWatermarkV1 {
+                    run_id: context.source.account_instance_key.run_id.clone(),
+                    projection_batch_sequence: sequence,
+                },
+                evidence: vec![SourceNeutralEvidence {
+                    source_record: SimV2SourceRecordReferenceV1::AccountOpening,
+                    source_ordinal: 0,
+                    logical_key: SourceNeutralLogicalKeyV1::AuditEvidence {
+                        evidence_identity: format!("batch-{sequence}"),
+                    },
+                    kind: SourceNeutralEvidenceKind::Pending {
+                        scope: PendingScopeV1::EvidenceGap {
+                            scope_identity: format!("gap-{sequence}"),
+                        },
+                    },
+                }],
+            })
+            .unwrap();
+        writer.stage(&batch).unwrap();
+    }
+    let mut references = vec![];
+    writer
+        .stabilize(
+            || 1788840000002,
+            |published| references.extend(published.result_references()),
+        )
+        .unwrap();
+    assert_eq!(references.len(), 2);
+    assert_ne!(
+        references[0].commit_container,
+        references[1].commit_container
+    );
+    let manifests: Vec<Value> = references
+        .iter()
+        .map(|r| {
+            serde_json::from_slice(
+                &std::fs::read(
+                    std::path::Path::new(&r.commit_container.location)
+                        .with_extension("manifest.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    assert!(manifests[0]["segment"]["file_name"].is_string());
+    assert_eq!(
+        manifests[0]["segment"]["file_name"],
+        manifests[1]["segment"]["file_name"]
+    );
+    let configs = references
+        .iter()
+        .enumerate()
+        .map(|(i, r)| NoeSourceConfig {
+            version: "v4".into(),
+            ..config(root.path(), &format!("segment-{i}"), r)
+        })
+        .collect();
+    let mut reader = NoeResults::new(configs);
+    for (index, reference) in references.iter().enumerate() {
+        let native = read_noe_result_v4(reference).unwrap();
+        let data = load(&mut reader, index);
+        assert_eq!(data["status"], "ready");
+        assert_eq!(
+            data["exact"],
+            visualization::dto::exact_json(serde_json::json!({
+                "context": native.context, "boundary": native.boundary, "record": native.record,
+            }))
+        );
+        assert_eq!(
+            data["exact"]["boundary"]["source_watermark"]["projection_batch_sequence"],
+            index.to_string()
+        );
+    }
+}
+#[test]
 fn explicit_versions_preserve_variants_exact_identity_and_retry_without_consuming() {
     let root = tempfile::tempdir().unwrap();
     let mut configs = vec![];

@@ -199,6 +199,8 @@ D-0311/D-0312 下的 `run_historical_days_v1` 接收 `HistoricalDayConfigV1` 日
 
 日入口每次创建新账户并从原输入开始，不再写入或读取恢复检查点，不再复用完成引用，也不把来源顺序索引写成 `source-order.cbor`。来源排序索引仍在本次进程内服务实际回放。配置不再包含 `checkpoint_root`、`checkpoint_interval_seconds` 或两个 `checkpoint_every_*` 字段；旧配置须移除这些字段。运行使用新的输出路径，已有 SIM、NOE 和账本记录不能作为续跑入口。
 
+有限范围按 `timestamp_received` 筛选研究材料，隐藏路径再按这些材料的平台源时间归约。例如一条事实的源时间为 00:59:59、接收时间为 01:00:01，日初一小时范围不含它，完整日包含它；两次运行的一小时处不天然具有相同隐藏状态。初始化材料也按其真实可见性接入，不提前放行。短范围可以检查给定材料与政策下的机制，不能默认作为整日精确业务前缀、日化收益或全天风险证据。范围内账户保持连续；另起中午会话是新账户，范围结束保留未决义务，不补未来结算或强平。
+
 `progress_interval_seconds` 控制已处理公共输入及耗时输出，总量不能可靠确定时写 `unknown`。`producer_lead_groups` 保留原队列领先软目标及必要隐藏桶供料；公共组和隐藏桶仅保留活动消费者仍需的范围。
 
 日入口在全部候选声明观察需求后，按其并集配置唯一公共 Core。`StrategyV1::observation_requirements` 默认要求完整 Binance 深度；complementary_pair 的两个 Binance 权重都为零时不要求数量。仍有完整消费者时保留完整数量。省略的数量明确表示为 `BinanceDepthObservationV1::NotMaterialized`，原未知仍是 `None`；来源、质量、直接锚点、依赖前沿、组位置和时间不变。日交付的深度事实保留原 `PublicFactBindingV1` 引用，隐藏输入仍沿原完整归约材料建立参考桶。PM 的逐档 bids/asks 不省略，active repair 继续读取真实 asks。

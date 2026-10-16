@@ -801,7 +801,7 @@ impl shared_run::StrategyV1 for HistoricalBuy {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn historical_v4_host_applies_original_auto_feedback_in_loop_and_range_tail() {
+async fn historical_v4_and_day_hosts_apply_original_auto_feedback_and_gamma() {
     use data_collect::polymarket_market_metadata_layout::PolymarketMarketMetadataV5Row;
     use data_collect::polymarket_orderbook_v3::*;
     let base = historical_common::BASE;
@@ -813,11 +813,11 @@ async fn historical_v4_host_applies_original_auto_feedback_in_loop_and_range_tai
             end_at_utc_ms: base + 10000,
         },
     };
-    for delay in [0, 100] {
-        // 同一真实类型/原夹具，两个宿主交付档；终态、订单与平台反馈时序不变。
+    for (delay, gamma) in [(0, false), (100, false), (100, true)] {
+        // 两个原 WS 交付档，加一个当前日入口的 Gamma 经济链。
         let temp = tempfile::tempdir().unwrap().keep();
         eprintln!("historical auto delay={delay} fixture={}", temp.display());
-        let pm = PolymarketOrderbookV3Message {
+        let mut pm = PolymarketOrderbookV3Message {
             envelope: PolymarketOrderbookV3Envelope {
                 timestamp_received: base + 11001,
                 timestamp: Some(base + 11000),
@@ -877,8 +877,55 @@ async fn historical_v4_host_applies_original_auto_feedback_in_loop_and_range_tai
         })).unwrap();
         metadata.collector_admission_sequence = 41;
         metadata.collector_admission_time_utc_ms = base + 11003;
-        let metadata =
-            PolymarketMarketMetadataV5Row::from_common(metadata, Some("epoch-a".into()), Some(50));
+        if gamma {
+            // 正式 collector 行与 Gamma 载荷入口；只替换此工程终态来源，避免同时由 WS 结算。
+            let scheduled = metadata.market_end_utc + 3 * 60000;
+            let payload = serde_json::json!({
+                "id":"3195576", "conditionId": CONDITION_ID, "slug":"btc-updown-5m-engineering",
+                "clobTokenIds": serde_json::to_string(&[UP_TOKEN_ID, DOWN_TOKEN_ID]).unwrap(),
+                "outcomes":"[\"UP\",\"DOWN\"]", "outcomePrices":"[\"1\",\"0\"]",
+                "closed":true, "closedTime":"2026-08-24 00:00:11+00", "umaResolutionStatus":"resolved",
+                "active":true, "acceptingOrders":false, "orderPriceMinTickSize":"0.01"
+            }).to_string();
+            let mut wire = serde_json::to_value(&metadata).unwrap();
+            wire.as_object_mut().unwrap().extend(serde_json::json!({
+                "metadata_row_kind":"resolution_poll_attempt", "metadata_origin":"gamma_by_slug",
+                "source_endpoint":"https://gamma-api.polymarket.com/markets/slug/btc-updown-5m-engineering",
+                "source_evidence_origin":"gamma_by_slug", "source_evidence_event_type":"gamma_market_by_slug_response",
+                "source_evidence_channel":null, "source_evidence_payload_json":payload,
+                "source_evidence_raw_sha256":format!("{:x}",sha2::Sha256::digest(payload.as_bytes())),
+                "timestamp_received":scheduled+1, "source_evidence_received_at_utc":scheduled+1,
+                "row_evidence_validation_completed_at_utc":scheduled+2,
+                "lifecycle_applied_at_utc":scheduled+3, "runtime_role_applied_at_utc":scheduled+3,
+                "metadata_fetch_start_utc":scheduled, "closed":true,
+                "closed_time_raw":"2026-08-24 00:00:11+00", "closed_time_utc":base+11000,
+                "uma_resolution_status":"resolved", "outcomes_raw":"[\"UP\",\"DOWN\"]", "outcome_prices_raw":"[\"1\",\"0\"]",
+                "active":true, "active_unavailable_reason":null, "accepting_orders":false,
+                "ws_platform_timestamp_raw":null, "ws_platform_timestamp_utc":null,
+                "resolution_evidence_source":"gamma_by_slug", "terminal_claim_owner":"gamma_by_slug",
+                "resolution_poll_attempt_ordinal":1, "resolution_poll_scheduled_utc":scheduled,
+                "resolution_poll_result":"terminal", "resolution_followup_status":"terminal_gamma_fallback"
+            }).as_object().unwrap().clone());
+            metadata = serde_json::from_value(wire).unwrap();
+            // collector 的第1槽为原市场 E+3分钟，不按测试便利改成任意整分钟。
+            // 准入坐标不参与普通 serde；通过原显式字段交给正式 V5 行构造。
+            metadata.collector_admission_sequence = 41;
+            metadata.collector_admission_time_utc_ms = scheduled + 3;
+            pm.envelope.timestamp = Some(scheduled);
+            pm.envelope.timestamp_received = scheduled + 1;
+            pm.envelope.collector_admission_time_utc_ms = scheduled + 3;
+            pm.event = PolymarketOrderbookV3Event::Book(PolymarketBookV3 {
+                asset_id: UP_TOKEN_ID.into(),
+                bids: vec![],
+                asks: vec![],
+                last_trade_price: None,
+            });
+        }
+        let metadata = PolymarketMarketMetadataV5Row::from_common(
+            metadata,
+            (!gamma).then(|| "epoch-a".into()),
+            (!gamma).then_some(50),
+        );
         let validation = metadata.validate();
         assert!(
             validation.is_complete(),
@@ -886,6 +933,78 @@ async fn historical_v4_host_applies_original_auto_feedback_in_loop_and_range_tai
         );
         let (mut config, rules) = historical_common::setup_with_terminal(&temp, metadata, pm);
         config.timing.public_delivery_delay_ms = backtest::DelayScheduleV1::Fixed(delay);
+        if gamma {
+            config.preparation.scope.received_end_utc_ms = base + 192000;
+            config.gamma_resolution_policy = GammaResolutionPolicyV1::QualifiedPublicConsumption;
+            let day = backtest::HistoricalDayConfigV1 {
+                preparation: config.preparation.clone(),
+                candidates: vec![backtest::HistoricalPreparedRunConfigV1::from(&config)],
+                progress_interval_seconds: 0,
+                producer_lead_groups: Some(1),
+            };
+            let result = backtest::run_historical_days_v1(&[day], rules.clone(), &|_| {
+                Ok(HistoricalBuy {
+                    rules: Some(rules.clone()),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+            let report = &result[0].candidates[0].report;
+            assert_eq!(report["end_reason"], "RangeEnd");
+            assert_eq!(report["recording_drained"], true);
+            assert_eq!(report["pending_noe_records"], 0);
+            assert_eq!(
+                report["account_economics_memory"]["cash"]["actual_available_pusd"],
+                "2004.825"
+            );
+            let stored: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&config.result_path).unwrap()).unwrap();
+            assert_eq!(&stored, report, "实际日入口持久报告保持原事实");
+            let reopened = LedgerWriterV1::open_durable(&config.ledger_root).unwrap();
+            assert_eq!(
+                reopened
+                    .economic_read()
+                    .unwrap()
+                    .cash()
+                    .actual_available_pusd
+                    .0,
+                "2004.825"
+            );
+            // 通过所属模块枚举已发布逻辑引用，再用原 V4 读取器核对 Gamma 时间依据。
+            let mut redemptions = 0;
+            for entry in std::fs::read_dir(&config.noe_root).unwrap() {
+                let directory = entry.unwrap().path();
+                if !directory.is_dir() {
+                    continue;
+                }
+                let references =
+                    ::execution_normalization::StagedNormalizationWriter::<
+                        ::contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+                        ::contracts::execution_normalization::SourceNeutralControlResultV3,
+                    >::published_result_references(&directory, u64::MAX)
+                    .unwrap();
+                for reference in references {
+                    let original =
+                        ::execution_normalization::read_noe_result_v4(&reference).unwrap();
+                    let record = serde_json::to_value(original.record).unwrap();
+                    if let Some(applied) = record
+                        .pointer("/Evidence/evidence/SettlementLifecycle/result/AutoRedeemApplied")
+                    {
+                        redemptions += 1;
+                        assert!(applied["resolution_source_event_at_utc_ms"].is_null());
+                        assert!(
+                            applied["resolution_public_consumed_at_utc_ms"]
+                                .as_i64()
+                                .unwrap()
+                                >= base + 190003 + i64::try_from(delay).unwrap()
+                        );
+                    }
+                }
+            }
+            assert_eq!(redemptions, 1, "Gamma 回款来自原 NOE，且不重复支付");
+            std::fs::remove_dir_all(temp).unwrap();
+            continue;
+        }
         let mut strategy = HistoricalBuy {
             rules: Some(rules.clone()),
             ..Default::default()

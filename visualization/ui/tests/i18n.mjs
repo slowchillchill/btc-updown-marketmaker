@@ -43,6 +43,7 @@ try {
     displayFact,
   } = await import(pathToFileURL(path.join(temp, "i18n.mjs")));
   const labels = [
+    ["NOE Evidence · 判定公开消费（模拟依据）", "NOE Evidence · Resolution public consumption (simulation basis)"],
     ["NOE Evidence · 有效处理", "NOE Evidence · Effective processing"],
     ["NOE Evidence · 原成交时刻", "NOE Evidence · Original fill time"],
     [
