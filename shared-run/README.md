@@ -166,7 +166,7 @@ SIM的`prepare_business_request_v1`只选择请求身份模式。新模式的订
 
 LIVE Bridge的`prepare`返回原签名正文和基础Order hash；配对两腿都准备成功后才允许`execute_prepared`消费原正文。哈希不加入平台POST JSON，salt、时间和签名正文不在发送阶段重造。普通V1/V2直接复用既有签名摘要。Poly1271依据[D-0351](https://github.com/slowchillchill/btc-updown-marketmaker/issues/301#issuecomment-6161579473)，只在需要提前基础订单身份时复用原结构／域中间值并增加一次66字节Keccak；原`sign`不增加哈希计算，不逐帧计算或做运行时哈希校验，不承诺具体耗时。该能力不是已交付LIVE宿主，也不证明真实平台已经受理。
 
-当前完整日运行使用backtest的v3检查点边界，拒绝旧完整运行续接；底层旧事件和旧身份仍可按原含义解释，没有通用旧研究迁移。B已按[D-0349](https://github.com/slowchillchill/btc-updown-marketmaker/issues/301#issuecomment-6160221232)停止，后续重新基于A的公共接口设计；公共Rust验证不能替代B或真实LIVE验收。
+当前 backtest 日入口每次从原输入创建新账户，不读取或保存恢复检查点，也不复用完成引用；底层组件的检查点与旧事件解码不构成整日续跑能力，没有通用旧研究迁移。B 已按[D-0349](https://github.com/slowchillchill/btc-updown-marketmaker/issues/301#issuecomment-6160221232)停止，后续重新基于 A 的公共接口设计；主线保留的旧 B 适配器不代表已兼容经济 V3，公共 Rust 验证不能替代 B 或真实 LIVE 验收。
 
 ## 必要经济读取与共享保存
 

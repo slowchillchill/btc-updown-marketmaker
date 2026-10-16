@@ -692,6 +692,8 @@
   "成交时钟": "Fill clock",
   " · 判定源事件": " · Resolution source event",
   "判定源事件": "Resolution source event",
+  "判定公开消费（模拟依据）": "Resolution public consumption (simulation basis)",
+  "判定公开消费": "Public consumption",
   "NOE Pending · 待决证据": "NOE Pending · Pending evidence",
   "NOE Conflict · 冲突证据": "NOE Conflict · Conflict evidence",
   "NOE Duplicate · 本次引用": "NOE Duplicate · Current reference",

@@ -32,7 +32,7 @@ fn main() {
     let mut writer = StagedNormalizationWriter::<
         SourceNeutralTradeLifecycleResultV2,
         SourceNeutralControlResultV3,
-    >::create(&root.join("clocks"), context.clone())
+    >::create_batched(&root.join("clocks"), context.clone())
     .unwrap();
     let condition = ConditionId(format!("0x{}", "3".repeat(64)));
     let order = StableLogicalIdentityV1("clock-order".into());
@@ -135,6 +135,14 @@ fn main() {
                 resolution_public_consumed_at_utc_ms: None,
             },
         },
+        SourceNeutralEvidenceKind::SettlementLifecycle {
+            result: SourceNeutralSettlementLifecycleResultV1::AutoRedeemApplied {
+                condition_id: condition.clone(),
+                resolution_identity: StableLogicalIdentityV1("clock-gamma-resolution".into()),
+                resolution_source_event_at_utc_ms: None,
+                resolution_public_consumed_at_utc_ms: Some(1788840000000),
+            },
+        },
     ];
     let batch = core
         .normalize_and_accept(NormalizationBatchInput {
@@ -157,7 +165,7 @@ fn main() {
                             platform_event_at_utc_ms: 1788840000000,
                             feedback_received_at_utc_ms: 1788840000000,
                         },
-                        5 => SimV2SourceRecordReferenceV1::SettlementLifecycle {
+                        5 | 6 => SimV2SourceRecordReferenceV1::SettlementLifecycle {
                             private_feedback_sequence: i as u64 + 1,
                             platform_event_at_utc_ms: 1788840000000,
                             feedback_received_at_utc_ms: 1788840000000,
@@ -190,9 +198,19 @@ fn main() {
         )
         .unwrap();
     let mut decoded = vec![];
+    let mut sources = vec![];
     for (i, reference) in refs.into_iter().enumerate() {
         let path = root.join(format!("clock-{i}.json"));
         std::fs::write(&path, serde_json::to_vec(&reference).unwrap()).unwrap();
+        sources.push(visualization::dto::NoeSourceConfig {
+            label: match i {
+                5 => "WS 判定源时间工程样本".into(),
+                6 => "Gamma 公开消费时间工程样本（模拟依据）".into(),
+                _ => format!("时钟工程样本 {i}"),
+            },
+            version: "v4".into(),
+            reference_file: path.clone(),
+        });
         let mut reader = visualization::sources::noe::NoeResults::new(vec![
             visualization::dto::NoeSourceConfig {
                 label: "时钟工程引用".into(),
@@ -206,6 +224,14 @@ fn main() {
     std::fs::write(
         root.join("decoded.json"),
         serde_json::to_vec_pretty(&decoded).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("sources.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "runs": [{"label":"NOE 时钟工程样本 · 非策略结果", "noe_results": sources}]
+        }))
+        .unwrap(),
     )
     .unwrap();
 }

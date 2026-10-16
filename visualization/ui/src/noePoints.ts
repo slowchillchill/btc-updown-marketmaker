@@ -300,6 +300,14 @@ export function noePoints(loaded: LoadedNoe | null): Point[] {
       "判定源事件",
       condition,
     );
+    add(
+      at(value, "SettlementLifecycle", "result", "AutoRedeemApplied"),
+      path + "/SettlementLifecycle/result/AutoRedeemApplied",
+      "resolution_public_consumed_at_utc_ms",
+      label + " · 判定公开消费（模拟依据）",
+      "判定公开消费",
+      condition,
+    );
     // v2 Settlement.Resolved 不含活动UTC；返佣归属日/保留边界/编码到期不当事件点。
   };
   switch (variant) {

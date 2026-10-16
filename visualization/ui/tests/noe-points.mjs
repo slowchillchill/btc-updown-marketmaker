@@ -6,9 +6,9 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 const ui = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const [clockPath, browserPath] = process.argv.slice(2);
-if (!browserPath)
+if (!clockPath)
   throw Error(
-    "noe-points.mjs <noe_clock_evidence/decoded.json> <execution-browser-results.json>",
+    "noe-points.mjs <noe_clock_evidence/decoded.json> [execution-browser-results.json]",
   );
 const cache = path.join(ui, "node_modules/.cache");
 await mkdir(cache, { recursive: true });
@@ -43,11 +43,13 @@ try {
     "/economic_effective_at_utc_ms",
     "/economic_effective_at_utc_ms",
     "/resolution_source_event_at_utc_ms",
+    "/resolution_public_consumed_at_utc_ms",
   ];
   const expected = [
     "9007199254740993",
     "-3",
     "-3",
+    "1788840000000",
     "1788840000000",
     "1788840000000",
     "1788840000000",
@@ -62,6 +64,7 @@ try {
       "OrderLifecycle",
       "OrderLifecycle",
       "SettlementLifecycle",
+      "SettlementLifecycle",
     ][i];
     assert.equal(
       points.filter((p) =>
@@ -73,6 +76,11 @@ try {
     const payload = points.find((p) => p.path.endsWith(suffixes[i]));
     assert.equal(payload.utcMs, expected[i]);
     assert.equal(payload.condition, "0x" + "3".repeat(64));
+    if (i === 6) {
+      assert.equal(payload.clock, "判定公开消费");
+      assert.ok(!points.some((p) => p.path.endsWith("/resolution_source_event_at_utc_ms")));
+      assert.equal(clocks[i].exact.record.Evidence.evidence.SettlementLifecycle.result.AutoRedeemApplied.resolution_source_event_at_utc_ms, null);
+    }
     assert.equal(points[0].condition, undefined);
     assert.equal(new Set(points.map((p) => p.path)).size, 4); // 同ms字段不能合并
     assert.equal(
@@ -96,9 +104,9 @@ try {
       ),
     );
   }
-  const responses = JSON.parse(await readFile(browserPath)).responses.map(
+  const responses = browserPath ? JSON.parse(await readFile(browserPath)).responses.map(
     (r) => r.data,
-  );
+  ) : [];
   for (const [index, n] of [
     [0, 1],
     [1, 1],
@@ -109,7 +117,7 @@ try {
     [6, 1],
     [12, 1],
     [18, 1],
-  ]) {
+  ].filter(() => browserPath)) {
     const loaded = responses.find(
       (r) => r.index === String(index) && r.status === "ready",
     );
@@ -132,7 +140,7 @@ try {
   assert.deepEqual(noePoints({ ...clocks[0], status: "read_error" }), []);
   assert.deepEqual(noePoints({ ...clocks[0], version: "v999" }), []);
   console.log(
-    "NOE 原typed时钟材料6条；实际v1-v4/7变体；同ms/负/逆序/大整数/原路径/无时钟/失败/未知：通过",
+    `NOE 原 typed 时钟材料 ${clocks.length} 条（含 Gamma/WS 区分）：通过；${browserPath ? "实际 v1-v4/7变体：通过" : "未提供浏览器变体材料"}`,
   );
 } finally {
   await rm(temp, { recursive: true, force: true });
