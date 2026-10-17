@@ -1,17 +1,26 @@
 //! 同步按需数值读取；完整冻结仅在消费者显式请求时生成。
 use crate::*;
+use ::execution_normalization::MemoryLogicalIdentityV1 as Identity;
 use contracts::{economics::EconomicRational as R, *};
 use ledger::*;
 use rust_decimal::Decimal;
-use std::sync::OnceLock;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::OnceLock,
+};
 
 #[derive(Clone)]
 pub struct OwnedActionAccountV2 {
     pub(crate) ledger: LedgerProjectionV2,
     pub(crate) economics: AccountEconomicsReadV3,
+    pub(crate) request_trades: BTreeMap<String, Vec<Option<FrozenTradeEconomicsV1>>>,
 }
 pub trait ActionAccountReadV2 {
     fn full(&self) -> &OwnedActionAccountV2;
+    fn request_trade_economics(
+        &self,
+        request: &str,
+    ) -> ExecutionReadValueV1<Vec<TradeEconomicReadV1<'_>>>;
     fn cash_available(&self) -> Decimal;
     fn profit_and_equity(&self) -> (R, ExecutionReadValueV1<R>);
     fn market(&self, condition: &ConditionId) -> Option<MarketEconomicNumbersV1>;
@@ -23,7 +32,93 @@ fn amount(v: &ExactDecimal) -> Decimal {
 fn rational(v: &ExactRationalV1) -> R {
     R::try_from(v).expect("原精确有理数")
 }
+// 稳态只收集未闭合owner成交所在订单与活动订单相关身份；恢复后的首次owner索引
+// 可从原trades重建身份集合一次，不复制完整历史载荷。
+pub(crate) fn request_trade_identities<R: Clone + std::fmt::Debug + Eq>(
+    ledger: &LedgerWriterV1,
+    registry: &SharedExecutionRegistry<R>,
+) -> BTreeMap<String, Vec<Identity>> {
+    let read = ledger.necessary_read_v2().expect("原已开户");
+    let mut ids: BTreeSet<_> = read.unclosed_trade_identities().cloned().collect();
+    let unclosed_orders: BTreeSet<_> = ids
+        .iter()
+        .filter_map(|id| {
+            read.trade_economics(id)
+                .map(|t| t.fact.order_identity.clone())
+        })
+        .collect();
+    // 订单可已被registry判为终局，但某笔经济引用仍未应用；同订单已成功
+    // 的成交量仍是未决配对容量的依据，不能只保留那一笔未闭合成交。
+    ids.extend(
+        unclosed_orders
+            .iter()
+            .flat_map(|order| registry.order_trade_identities(order))
+            .cloned(),
+    );
+    ids.extend(
+        registry
+            .unfinished_orders()
+            .flat_map(|o| registry.order_trade_identities(o.order_identity))
+            .cloned(),
+    );
+    let mut requests: BTreeMap<String, Vec<Identity>> = BTreeMap::new();
+    for id in ids {
+        let order = read
+            .trade_economics(&id)
+            .map(|t| t.fact.order_identity.clone())
+            .or_else(|| {
+                registry
+                    .unfinished_orders()
+                    .find(|o| {
+                        registry
+                            .order_trade_identities(o.order_identity)
+                            .any(|t| t == &id)
+                    })
+                    .map(|o| o.order_identity.clone())
+            });
+        if let Some(origin) = order
+            .as_ref()
+            .and_then(|o| registry.order(o))
+            .and_then(|o| o.origin)
+        {
+            requests
+                .entry(origin.intent.global_request_id().to_owned())
+                .or_default()
+                .push(id);
+        }
+    }
+    requests
+}
+pub(crate) fn freeze_request_trades(
+    ledger: &LedgerWriterV1,
+    ids: &BTreeMap<String, Vec<Identity>>,
+) -> BTreeMap<String, Vec<Option<FrozenTradeEconomicsV1>>> {
+    let read = ledger.necessary_read_v2().expect("原已开户");
+    ids.iter()
+        .map(|(request, ids)| {
+            (
+                request.clone(),
+                ids.iter()
+                    .map(|id| read.trade_economics(id).map(FrozenTradeEconomicsV1::from))
+                    .collect(),
+            )
+        })
+        .collect()
+}
 impl ActionAccountReadV2 for OwnedActionAccountV2 {
+    fn request_trade_economics(
+        &self,
+        request: &str,
+    ) -> ExecutionReadValueV1<Vec<TradeEconomicReadV1<'_>>> {
+        self.request_trades
+            .get(request)
+            .into_iter()
+            .flatten()
+            .map(|t| t.as_ref().map(FrozenTradeEconomicsV1::as_read))
+            .collect::<Option<Vec<_>>>()
+            .map(ExecutionReadValueV1::Known)
+            .unwrap_or(ExecutionReadValueV1::Unavailable)
+    }
     fn full(&self) -> &Self {
         self
     }
@@ -98,10 +193,12 @@ pub struct BorrowedActionAccountV2<'a> {
     observations: Vec<&'a MarketBusinessObservationV1>,
     equity: ExecutionReadValueV1<R>,
     full: OnceLock<OwnedActionAccountV2>,
+    request_trade_ids: BTreeMap<String, Vec<Identity>>,
 }
 impl<'a> BorrowedActionAccountV2<'a> {
     pub(crate) fn new(
         ledger: &'a LedgerWriterV1,
+        request_trade_ids: BTreeMap<String, Vec<Identity>>,
         frames: &[sim_system::public_consumption::PublicObservationFrameV1<'a>],
         driver: Option<&'a sim_system::execution::PublicConsumptionStateV1>,
     ) -> Option<Self> {
@@ -130,6 +227,7 @@ impl<'a> BorrowedActionAccountV2<'a> {
         };
         Some(Self {
             ledger,
+            request_trade_ids,
             driver,
             observations: if driver.is_some() {
                 Vec::new()
@@ -142,6 +240,20 @@ impl<'a> BorrowedActionAccountV2<'a> {
     }
 }
 impl ActionAccountReadV2 for BorrowedActionAccountV2<'_> {
+    fn request_trade_economics(
+        &self,
+        request: &str,
+    ) -> ExecutionReadValueV1<Vec<TradeEconomicReadV1<'_>>> {
+        let read = self.ledger.necessary_read_v2().expect("原已开户");
+        self.request_trade_ids
+            .get(request)
+            .into_iter()
+            .flatten()
+            .map(|id| read.trade_economics(id))
+            .collect::<Option<Vec<_>>>()
+            .map(ExecutionReadValueV1::Known)
+            .unwrap_or(ExecutionReadValueV1::Unavailable)
+    }
     fn full(&self) -> &OwnedActionAccountV2 {
         self.full.get_or_init(|| {
             let read = self.ledger.economic_read().expect("原已开户前缀");
@@ -157,6 +269,7 @@ impl ActionAccountReadV2 for BorrowedActionAccountV2<'_> {
                 )
             };
             OwnedActionAccountV2 {
+                request_trades: freeze_request_trades(self.ledger, &self.request_trade_ids),
                 ledger: read.into_base(),
                 economics,
             }

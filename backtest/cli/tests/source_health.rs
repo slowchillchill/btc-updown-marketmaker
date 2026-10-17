@@ -243,7 +243,7 @@ impl Drop for Trace {
 fn run_day_trace(
     config: &HistoricalRunConfigV1,
     rules: Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
-    c: ComplementaryPairConfigV1,
+    c: ComplementaryPairConfigV2,
     root: &Path,
 ) -> (serde_json::Value, TraceSummary) {
     run_day_trace_with_research(config, rules, c, root, false)
@@ -251,7 +251,7 @@ fn run_day_trace(
 fn run_day_trace_with_research(
     config: &HistoricalRunConfigV1,
     rules: Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
-    c: ComplementaryPairConfigV1,
+    c: ComplementaryPairConfigV2,
     _root: &Path,
     research: bool,
 ) -> (serde_json::Value, TraceSummary) {
@@ -271,7 +271,7 @@ fn run_day_trace_with_research(
                 c.clone(),
                 rules.clone(),
                 "health-history".into(),
-                StrategyContinuityV1::new_account(),
+                StrategyContinuityV2::new_account(),
             )?,
             decisions: vec![],
             sent: vec![],
@@ -315,8 +315,8 @@ fn run_day_trace_with_research(
     );
     (report, trace)
 }
-fn strategy_config() -> ComplementaryPairConfigV1 {
-    let mut c = ComplementaryPairConfigV1::parse_toml(include_str!(
+fn strategy_config() -> ComplementaryPairConfigV2 {
+    let mut c = ComplementaryPairConfigV2::parse_toml(include_str!(
         "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering.toml"
     ))
     .unwrap();
@@ -474,7 +474,7 @@ fn fixture_with_reference(
 async fn run(
     config: &HistoricalRunConfigV1,
     rules: Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
-    c: ComplementaryPairConfigV1,
+    c: ComplementaryPairConfigV2,
 ) -> (HistoricalRunReportV1, Trace) {
     let mut config = config.clone();
     config.strategy.effective_parameters = serde_json::to_value(&c).unwrap();
@@ -483,7 +483,7 @@ async fn run(
             c,
             rules.clone(),
             "health-history".into(),
-            StrategyContinuityV1::new_account(),
+            StrategyContinuityV2::new_account(),
         )
         .unwrap(),
         decisions: vec![],
@@ -610,8 +610,6 @@ async fn real_strategy_auxiliary_degradation_keeps_independent_repair_but_bad_bo
         let mut c = strategy_config();
         c.health.chainlink_silence_ms = 1500;
         c.repair.residual_risk_weight = Decimal::from(10);
-        c.repair.maximum_overfill_pusd = Decimal::from(1_000_000_000u64);
-        c.repair.maximum_overfill_shares = Decimal::from(1_000_000_000u64);
         c.risk.per_market_orphan_limit_pusd = Decimal::from(1_000_000_000u64);
         c.risk.account_orphan_limit_pusd = Decimal::from(1_000_000_000u64);
         if bad_books {
@@ -902,8 +900,6 @@ fn real_strategy_finite_health_callback_measurement() {
     let mut c = strategy_config();
     c.health.chainlink_silence_ms = 1500;
     c.repair.residual_risk_weight = Decimal::from(10);
-    c.repair.maximum_overfill_pusd = Decimal::from(1_000_000_000u64);
-    c.repair.maximum_overfill_shares = Decimal::from(1_000_000_000u64);
     c.risk.per_market_orphan_limit_pusd = Decimal::from(1_000_000_000u64);
     c.risk.account_orphan_limit_pusd = Decimal::from(1_000_000_000u64);
     config.strategy.effective_parameters = serde_json::to_value(&c).unwrap();

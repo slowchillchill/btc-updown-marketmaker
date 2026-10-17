@@ -9,6 +9,8 @@ pub(super) struct EconomicReadIndex {
     pub markets: BTreeMap<String, TradeTotals>,
     pub estimates: BTreeMap<(RebateKindV1, i64), BTreeMap<String, Estimate>>,
     pub contributed: BTreeSet<Identity>,
+    #[serde(skip)]
+    pub unclosed_trade_ids: std::sync::OnceLock<BTreeSet<Identity>>,
 }
 #[derive(Default, Serialize, Deserialize)]
 pub(super) struct TradeTotals {
@@ -21,6 +23,14 @@ pub(super) struct TradeTotals {
 pub(super) struct Estimate {
     pub amount: R,
     pub unknown: u64,
+}
+pub(super) fn trade_is_unclosed(t: &Trade) -> bool {
+    match t.fact.economic_disposition {
+        SourceNeutralTradeEconomicDispositionV1::FinalSuccess => !t.success_applied,
+        SourceNeutralTradeEconomicDispositionV1::FinalFailureUnapplied
+        | SourceNeutralTradeEconomicDispositionV1::FinalFailureCompensated => t.economic_applied,
+        _ => true,
+    }
 }
 fn estimate(trade: &Trade) -> Option<Option<R>> {
     if matches!(
@@ -85,14 +95,14 @@ impl EconomicReadIndex {
                 .entry(t.fact.token_id.0.clone())
                 .or_default() += decimal(&t.fact.base_quantity_shares).expect("原份额") * sign;
         }
-        let unclosed = match t.fact.economic_disposition {
-            SourceNeutralTradeEconomicDispositionV1::FinalSuccess => !t.success_applied,
-            SourceNeutralTradeEconomicDispositionV1::FinalFailureUnapplied
-            | SourceNeutralTradeEconomicDispositionV1::FinalFailureCompensated => {
-                t.economic_applied
+        let unclosed = trade_is_unclosed(t);
+        if let Some(ids) = self.unclosed_trade_ids.get_mut() {
+            if unclosed && !remove {
+                ids.insert(id.clone());
+            } else {
+                ids.remove(id);
             }
-            _ => true,
-        };
+        }
         if unclosed {
             if remove {
                 totals.unclosed -= 1;

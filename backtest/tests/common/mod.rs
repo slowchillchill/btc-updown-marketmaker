@@ -39,7 +39,7 @@ pub(crate) fn metadata(
     row.collector_admission_time_utc_ms = at + 1;
     PolymarketMarketMetadataV5Row::from_common(row, None, None)
 }
-fn book(
+pub(crate) fn book(
     condition: &str,
     token: &str,
     source: i64,

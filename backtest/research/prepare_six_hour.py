@@ -12,6 +12,18 @@ END = START + 6 * 3600000
 
 
 def prepare(template, business, dataset_root, output_root, implementation, rules_path, finality_path):
+    # 只复制明确匹配当前规则的材料；历史candidate_v1包不能无提示交给新程序。
+    for day in template['days']:
+        for candidate in day['candidates']:
+            if candidate['run']['strategy']['strategy_rule_version'] != 'candidate_v2':
+                raise ValueError('当前入口需要candidate_v2；历史candidate_v1模板须独立迁移，原包保留')
+    if business.get('strategy_type') != 'ComplementaryPairConfigV2':
+        raise ValueError('当前复制入口需要ComplementaryPairConfigV2候选；旧研究包保持原版本')
+    for fold in business['folds']:
+        for candidate in fold['candidates']:
+            repair = candidate['strategy']['repair']
+            if 'maximum_overfill_shares' in repair or 'maximum_overfill_pusd' in repair:
+                raise ValueError('旧过补字段不能进入candidate_v2；请提供独立迁移后的候选材料')
     document = copy.deepcopy(template)
     day = document['days'][0]
     document['days'] = [day]

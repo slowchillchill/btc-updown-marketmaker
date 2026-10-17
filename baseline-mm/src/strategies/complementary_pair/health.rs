@@ -472,7 +472,7 @@ impl ComplementaryPairV1 {
                 let mut occupied = R::zero();
                 for allocation in self.profit_pending.values() {
                     occupied = occupied.add(
-                        &Self::profit_bound_read(&input.action_before, allocation)?
+                        &Self::profit_occupancy_read(&input.action_before, allocation)?
                             .unwrap_or_else(R::zero),
                     );
                 }
@@ -483,7 +483,7 @@ impl ComplementaryPairV1 {
                     {
                         continue;
                     }
-                    let bound = Self::profit_bound_read(&input.action_before, allocation)?;
+                    let bound = Self::profit_occupancy_read(&input.action_before, allocation)?;
                     let known_completed = input.action_before.request_funds().any(|f| {
                         f.request_identity == &allocation.reserve_identity
                             && matches!(

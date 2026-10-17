@@ -15,6 +15,30 @@ pub struct FrozenTradeEconomicsV1 {
     pub actual_net_fee_pusd: ExactDecimal,
     pub unpaired_contribution_shares: ExecutionReadValueV1<ExactRationalV1>,
 }
+impl From<TradeEconomicReadV1<'_>> for FrozenTradeEconomicsV1 {
+    fn from(t: TradeEconomicReadV1<'_>) -> Self {
+        Self {
+            trade_identity: t.trade_identity.clone(),
+            fact: t.fact.clone(),
+            economic_applied: t.economic_applied,
+            success_applied: t.success_applied,
+            actual_net_fee_pusd: t.actual_net_fee_pusd,
+            unpaired_contribution_shares: t.unpaired_contribution_shares,
+        }
+    }
+}
+impl FrozenTradeEconomicsV1 {
+    pub(crate) fn as_read(&self) -> TradeEconomicReadV1<'_> {
+        TradeEconomicReadV1 {
+            trade_identity: &self.trade_identity,
+            fact: &self.fact,
+            economic_applied: self.economic_applied,
+            success_applied: self.success_applied,
+            actual_net_fee_pusd: self.actual_net_fee_pusd.clone(),
+            unpaired_contribution_shares: self.unpaired_contribution_shares.clone(),
+        }
+    }
+}
 #[derive(Clone)]
 pub struct FrozenMarketReadV1 {
     pub observation: MarketBusinessObservationV1,
@@ -332,6 +356,19 @@ pub struct BatchExecutionErrorV1 {
     pub failed_request_effect: Option<RequestEffectV1>,
     pub release_errors: Vec<LedgerErrorV1>,
 }
+impl BatchExecutionErrorV1 {
+    /// 整批零发送且释放成功的本地真实现金不足；其他拒绝或未知效果仍是错误。
+    pub fn is_local_funds_rejection(&self) -> bool {
+        self.sent.is_empty()
+            && self.attempted_intent_index.is_none()
+            && self.failed_request_effect.is_none()
+            && self.release_errors.is_empty()
+            && matches!(&self.error, SharedActionErrorV1::Reservation(outcomes)
+                if outcomes.iter().any(|o| matches!(o, LedgerReservationOutcomeV1::InsufficientGlobalAvailableFunds))
+                && outcomes.iter().all(|o| matches!(o, LedgerReservationOutcomeV1::Reserved { .. }
+                    | LedgerReservationOutcomeV1::InsufficientGlobalAvailableFunds)))
+    }
+}
 /// 错误路径移动交回原计算，正常分派不复制整批意图。
 pub struct StrategyDispatchFailureV1<D, E> {
     pub calculation: CompletedStrategyCalculationV1<D>,
@@ -567,14 +604,7 @@ impl SharedExecutionV2 {
             .economic_read()
             .expect("同截止已开户")
             .trades()
-            .map(|t| FrozenTradeEconomicsV1 {
-                trade_identity: t.trade_identity.clone(),
-                fact: t.fact.clone(),
-                economic_applied: t.economic_applied,
-                success_applied: t.success_applied,
-                actual_net_fee_pusd: t.actual_net_fee_pusd,
-                unpaired_contribution_shares: t.unpaired_contribution_shares,
-            })
+            .map(FrozenTradeEconomicsV1::from)
             .collect()
     }
     fn input_from_frames(

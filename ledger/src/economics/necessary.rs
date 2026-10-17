@@ -154,6 +154,21 @@ impl LedgerWriterV1 {
     }
 }
 impl LedgerNecessaryReadV2<'_> {
+    /// 原owner身份索引；恢复后的首次读取只重建派生身份集合，不复制成交载荷。
+    pub fn unclosed_trade_identities(&self) -> impl Iterator<Item = &Identity> {
+        self.index()
+            .unclosed_trade_ids
+            .get_or_init(|| {
+                self.writer
+                    .economics
+                    .trades
+                    .iter()
+                    .filter(|(_, t)| super::read_index::trade_is_unclosed(t))
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            })
+            .iter()
+    }
     fn index(&self) -> &EconomicReadIndex {
         self.writer
             .economics
@@ -271,5 +286,17 @@ impl LedgerNecessaryReadV2<'_> {
             }),
             actual_fees: m.executed_fees,
         })
+    }
+}
+
+impl<'a> LedgerNecessaryReadV2<'a> {
+    /// 按原成交身份借读，不构造全账户投影或另一份经济状态。
+    pub fn trade_economics(&self, id: &Identity) -> Option<TradeEconomicReadV1<'a>> {
+        let (id, trade) = self.writer.economics.trades.get_key_value(id)?;
+        Some(super::trade_economic_read(
+            &self.writer.economics,
+            id,
+            trade,
+        ))
     }
 }

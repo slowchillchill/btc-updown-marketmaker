@@ -9,7 +9,6 @@ impl ComplementaryPairV1 {
             impl StrategyMarketReadV1,
             impl ActionAccountReadV2,
         >,
-        reads: &DecisionReads<'_>,
         f: &PairMarketRead<'_>,
         now: i64,
         s: &MarketState,
@@ -19,7 +18,7 @@ impl ComplementaryPairV1 {
         profit: &mut R,
         intents: &mut Vec<ReservedIntentV1>,
         diag: &mut MarketDecisionDiagnosticV1,
-        allocations: &mut Vec<ProfitAllocationV1>,
+        allocations: &mut Vec<ProfitAllocationV2>,
     ) -> Result<(), StrategyErrorV1> {
         let o = &f.observation;
         let Some(held) = s.orphan.iter().position(|q| *q > Decimal::ZERO) else {
@@ -66,7 +65,7 @@ impl ComplementaryPairV1 {
             })
             .try_fold(R::zero(), |sum, allocation| {
                 Ok::<_, StrategyErrorV1>(
-                    sum.add(&Self::profit_bound(input, reads, allocation)?.unwrap_or_else(R::zero)),
+                    sum.add(&Self::profit_occupancy(input, allocation)?.unwrap_or_else(R::zero)),
                 )
             })?;
         let existing_quantity = s
@@ -125,7 +124,6 @@ impl ComplementaryPairV1 {
             .filter(|mp| {
                 (q * Decimal::from(100)).floor() / Decimal::from(100) >= min
                     || (!existing_missing.is_empty()
-                        && existing_quantity <= r(qold)
                         && existing_missing
                             .iter()
                             .all(|p| p.price <= *mp && p.price <= old_cap_price))
@@ -172,64 +170,98 @@ impl ComplementaryPairV1 {
         let mut active = None;
         let mut active_fee = R::zero();
         let mut active_spend = Decimal::ZERO;
-        let mut maximum_active_q = R::zero();
+        let mut estimated_active_q = R::zero();
         if self.config.repair.enable_active_repair {
             if remaining <= i64::try_from(self.config.repair.active_path_ms).unwrap_or(i64::MAX) {
                 diag.unavailable
                     .push(ActionUnavailableV1::ActionPathEndsAfterWindow);
             } else if let Some(asks) = value(&a.asks) {
-                let mut total = Decimal::ZERO;
+                // 只使用同一公开截止的有效卖档，从便宜到贵形成名义目标场景。
+                let mut levels = asks
+                    .iter()
+                    .map(|l| {
+                        Ok((
+                            decimal(&l.price_pusd_per_share)?,
+                            decimal(&l.quantity_shares)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, StrategyErrorV1>>()?;
+                levels.sort_by_key(|(price, _)| *price);
+                let mut left = q;
+                let mut fills = Vec::new();
+                let mut principal = R::zero();
                 let mut worst = Decimal::ZERO;
-                for l in asks {
-                    let price = decimal(&l.price_pusd_per_share)?;
-                    let qty = decimal(&l.quantity_shares)?;
-                    if price <= new_cap_price && price > Decimal::ZERO {
-                        total += qty;
-                        worst = worst.max(price);
+                let mut target = Decimal::ZERO;
+                for (price, quantity) in levels {
+                    if price <= Decimal::ZERO
+                        || price >= Decimal::ONE
+                        || quantity <= Decimal::ZERO
+                        || price > new_cap_price
+                    {
+                        continue;
+                    }
+                    let take = (left.min(quantity) * Decimal::from(1_000_000)).floor()
+                        / Decimal::from(1_000_000);
+                    if take <= Decimal::ZERO {
+                        continue;
+                    }
+                    let units = (take * Decimal::from(1_000_000))
+                        .to_u128()
+                        .ok_or(StrategyErrorV1::Arithmetic("场景微份不能编码"))?;
+                    fills.push((units, price));
+                    principal = principal.add(&r(take).mul(&r(price)));
+                    target += take;
+                    left -= take;
+                    worst = price;
+                    if left <= Decimal::ZERO {
+                        break;
                     }
                 }
-                if total > Decimal::ZERO && worst > Decimal::ZERO {
-                    let target = q.min(total);
-                    let spend = (target * worst * Decimal::from(1_000_000)).floor()
-                        / Decimal::from(1_000_000);
-                    if spend >= decimal(&f.rule_context.market_buy_min_spend_pusd)? {
-                        let b = self
-                            .rules
-                            .sim_market_buy_bounds_v1(spend)
-                            .map_err(|e| StrategyErrorV1::Cost(e.to_string()))?;
-                        let maxq = fraction_units(&b.maximum_base_micro, 6);
-                        let fee = fraction_units(&b.maximum_fee_1e5_units, 5);
-                        // 全域数量界不能由当前盘口收紧。常见风险参数下FAK会不可证明。
-                        let over = maxq.sub(&r(qold)).max(R::zero());
-                        let reverse = over.mul(&r(worst)).add(&fee);
-                        let cost = r(spend).add(&fee);
-                        // 每个可达正微份片段：整笔最大费用除最小微份是保守逐档界。
-                        let per_share = r(worst).add(&fee.divided_by(&r(Decimal::new(1, 6))));
-                        if over > r(self.config.repair.maximum_overfill_shares)
-                            || reverse > r(self.config.repair.maximum_overfill_pusd)
-                            || reverse
-                                > s.exposure[side]
-                                    .clone()
-                                    .max(r(self.config.risk.per_market_orphan_limit_pusd))
-                            || account_exposure.add(&reverse.sub(&s.exposure[side]).max(R::zero()))
-                                > r(self.config.risk.account_orphan_limit_pusd)
-                                    .max(account_exposure.clone())
-                        {
-                            diag.unavailable
-                                .push(ActionUnavailableV1::AmountOverfillBound);
-                        } else if old_all.add(&per_share)
-                            > r(Decimal::ONE + allowance).add(&profit.divided_by(&r(q)))
-                        {
-                            diag.unavailable.push(ActionUnavailableV1::CostLine);
-                        } else if !self.limit_budget(*cash, s, &cost) {
-                            diag.unavailable
-                                .push(ActionUnavailableV1::InsufficientCashOrInvestment);
-                        } else {
-                            active = Some((worst, basis - float(&floor_decimal(&per_share, 16)?)?));
-                            active_spend = spend;
-                            active_fee = fee;
-                            maximum_active_q = maxq;
-                        }
+                let spend = floor_decimal(&principal, 6)?;
+                if target > Decimal::ZERO
+                    && spend >= decimal(&f.rule_context.market_buy_min_spend_pusd)?
+                {
+                    let estimate = self
+                        .rules
+                        .market_buy_scenario_fee_estimate_v1(&fills)
+                        .map_err(|e| StrategyErrorV1::Cost(e.to_string()))?;
+                    let fee = fraction_units(&estimate.fee_1e5_units, 5);
+                    let cost = r(spend).add(&fee);
+                    let supported_line =
+                        r(Decimal::ONE + allowance).add(&profit.divided_by(&r(target)));
+                    let line_ok = fills.iter().zip(&estimate.segment_fee_1e5_units).all(
+                        |((units, price), fee)| {
+                            let quantity = fraction_units(&BigUint::from(*units), 6);
+                            old_all
+                                .add(&r(*price))
+                                .add(&fraction_units(fee, 5).divided_by(&quantity))
+                                <= supported_line
+                        },
+                    );
+                    let reverse = r(target).sub(&r(qold)).max(R::zero()).mul(&r(worst));
+                    let delta = reverse.sub(&s.exposure[side]).max(R::zero());
+                    if reverse
+                        > r(self.config.risk.per_market_orphan_limit_pusd)
+                            .max(s.exposure[side].clone())
+                        || account_exposure.add(&delta)
+                            > r(self.config.risk.account_orphan_limit_pusd)
+                                .max(account_exposure.clone())
+                    {
+                        diag.unavailable
+                            .push(ActionUnavailableV1::InventoryCapacity);
+                    } else if !line_ok {
+                        diag.unavailable.push(ActionUnavailableV1::CostLine);
+                    } else if !self.limit_budget(*cash, s, &cost) {
+                        diag.unavailable
+                            .push(ActionUnavailableV1::InsufficientCashOrInvestment);
+                    } else {
+                        active = Some((
+                            worst,
+                            basis - float(&floor_decimal(&cost.divided_by(&r(target)), 16)?)?,
+                        ));
+                        active_spend = spend;
+                        active_fee = fee;
+                        estimated_active_q = r(target);
                     }
                 }
             }
@@ -284,27 +316,34 @@ impl ComplementaryPairV1 {
                     active_fee.clone(),
                 )],
             )?;
-            let increment = r(active_spend).add(&active_fee);
+            // 只占预计新增配平亏损；历史费用已在公共P中，不能再扣整笔本金。
+            let increment = old_principal
+                .mul(&estimated_active_q)
+                .add(&r(active_spend))
+                .add(&active_fee)
+                .sub(&estimated_active_q)
+                .max(R::zero());
             let used = profit.clone().min(increment.clone());
-            let allocation = ProfitAllocationV1 {
+            let allocation = ProfitAllocationV2 {
                 global_request_id: item.context.global_request_id.clone(),
                 reserve_identity: item.reserves[0].reserve.request_identity.clone(),
                 condition_id: o.market.condition_id.clone(),
                 token_id: a.asset.token_id.clone(),
-                principal_bound_pusd: r(active_spend).public(),
-                fee_bound_pusd: active_fee.clone().public(),
-                original_shares: None,
-                incremental_loss_per_share: R::zero().public(),
+                estimated_principal_pusd: r(active_spend).public(),
+                estimated_fee_pusd: active_fee.clone().public(),
+                estimated_shares: estimated_active_q.clone().public(),
+                original_orphan_shares: r(qold).public(),
+                original_orphan_principal_per_share: old_principal.clone().public(),
+                estimate_cutoff: input.action_before.cutoff().clone(),
                 allocated_profit_pusd: used.clone().public(),
             };
             *profit = profit.sub(&used);
             *cash -= floor_decimal(&r(active_spend).add(&active_fee), 6)?;
             *account_exposure = account_exposure.add(
-                &maximum_active_q
+                &estimated_active_q
                     .sub(&r(qold))
                     .max(R::zero())
                     .mul(&r(worst))
-                    .add(&active_fee)
                     .sub(&s.exposure[side])
                     .max(R::zero()),
             );
@@ -334,13 +373,12 @@ impl ComplementaryPairV1 {
             .fold(R::zero(), |a, p| a.add(&p.quantity));
         let invalid: Vec<_> = existing_missing
             .iter()
-            .filter(|p| p.price > mp || p.price > old_cap_price || p.quantity > r(qold))
+            .filter(|p| p.price > mp || p.price > old_cap_price)
             .filter_map(|p| p.order_id.clone())
             .collect();
         let valid_existing = existing_missing
             .iter()
-            .all(|p| p.price <= mp && p.price <= old_cap_price)
-            && existing_q <= r(qold);
+            .all(|p| p.price <= mp && p.price <= old_cap_price);
         if valid_existing && !existing_missing.is_empty() {
             diag.choice = MarketChoiceV1::Maintain;
             return Ok(());
@@ -362,8 +400,8 @@ impl ComplementaryPairV1 {
                 Some(weight * (basis - float(&mp)?) + (1.0 - weight) * retain);
         }
         // 普通Maker撤换允许重叠，但过补、总投入、现金仍合并旧承诺计算。
-        let reverse_capacity = r(self.config.repair.maximum_overfill_pusd)
-            .min(r(self.config.risk.per_market_orphan_limit_pusd).max(s.exposure[side].clone()))
+        let reverse_capacity = r(self.config.risk.per_market_orphan_limit_pusd)
+            .max(s.exposure[side].clone())
             .min(
                 r(self.config.risk.account_orphan_limit_pusd)
                     .max(account_exposure.clone())
@@ -377,12 +415,10 @@ impl ComplementaryPairV1 {
         let pending_fee = existing_missing.iter().fold(R::zero(), |sum, p| {
             sum.add(&p.cost.sub(&p.quantity.mul(&r(p.price))).max(R::zero()))
         });
-        let over_capacity = r(self.config.repair.maximum_overfill_shares).min(
-            reverse_capacity
-                .sub(&pending_fee)
-                .max(R::zero())
-                .divided_by(&r(reverse_price)),
-        );
+        let over_capacity = reverse_capacity
+            .sub(&pending_fee)
+            .max(R::zero())
+            .divided_by(&r(reverse_price));
         q = q.min(floor_decimal(
             &r(qold).add(&over_capacity).sub(&existing_q).max(R::zero()),
             2,
@@ -394,10 +430,8 @@ impl ComplementaryPairV1 {
             R::zero()
         });
         let delta_risk = reverse.sub(&s.exposure[side]).max(R::zero());
-        let buy_risk_ok = over <= r(self.config.repair.maximum_overfill_shares)
-            && reverse <= r(self.config.repair.maximum_overfill_pusd)
-            && reverse
-                <= r(self.config.risk.per_market_orphan_limit_pusd).max(s.exposure[side].clone())
+        let buy_risk_ok = reverse
+            <= r(self.config.risk.per_market_orphan_limit_pusd).max(s.exposure[side].clone())
             && account_exposure.add(&delta_risk)
                 <= r(self.config.risk.account_orphan_limit_pusd).max(account_exposure.clone());
         let remaining_budget =
@@ -422,15 +456,17 @@ impl ComplementaryPairV1 {
                     &o.market.condition_id,
                     vec![(self.maker_leg(a, q, mp), cost.clone(), R::zero())],
                 )?;
-                allocations.push(ProfitAllocationV1 {
+                allocations.push(ProfitAllocationV2 {
                     global_request_id: item.context.global_request_id.clone(),
                     reserve_identity: item.reserves[0].reserve.request_identity.clone(),
                     condition_id: o.market.condition_id.clone(),
                     token_id: a.asset.token_id.clone(),
-                    principal_bound_pusd: cost.clone().public(),
-                    fee_bound_pusd: R::zero().public(),
-                    original_shares: Some(exact(q)),
-                    incremental_loss_per_share: increment_per_share.public(),
+                    estimated_principal_pusd: cost.clone().public(),
+                    estimated_fee_pusd: R::zero().public(),
+                    estimated_shares: r(q).public(),
+                    original_orphan_shares: r(qold).public(),
+                    original_orphan_principal_per_share: old_principal.clone().public(),
+                    estimate_cutoff: input.action_before.cutoff().clone(),
                     allocated_profit_pusd: used.clone().public(),
                 });
                 *profit = profit.sub(&used);

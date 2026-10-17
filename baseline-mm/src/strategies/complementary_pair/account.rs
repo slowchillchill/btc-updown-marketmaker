@@ -7,7 +7,6 @@ pub(super) struct DecisionReads<'a> {
     pub(super) orders_by_id:
         BTreeMap<&'a ::execution_normalization::MemoryLogicalIdentityV1, usize>,
     pub(super) orders_by_market: BTreeMap<&'a str, Vec<usize>>,
-    pub(super) request_commitments: BTreeMap<&'a str, (R, bool)>,
     pub(super) order_fees:
         BTreeMap<&'a ::execution_normalization::MemoryLogicalIdentityV1, Option<R>>,
     pub(super) commitments: BTreeMap<&'a str, Vec<IntentCommitmentReadV1<'a>>>,
@@ -38,18 +37,6 @@ impl<'a> DecisionReads<'a> {
                 commitments.entry(id.0.as_str()).or_default().push(c);
             }
         }
-        let mut request_commitments: BTreeMap<_, (R, bool)> = BTreeMap::new();
-        for c in commitments.values().flatten() {
-            let (sum, unknown) = request_commitments
-                .entry(c.origin.intent.global_request_id())
-                .or_default();
-            match &c.remaining_target_shares {
-                ExecutionReadValueV1::Known(q) => {
-                    *sum = sum.add(&r(Decimal::from_str_exact(&q.0).expect("原份额")))
-                }
-                _ => *unknown = true,
-            }
-        }
         let order_fees = read
             .order_funds()
             .map(|f| {
@@ -65,7 +52,6 @@ impl<'a> DecisionReads<'a> {
             orders_by_id,
             orders_by_market,
             commitments,
-            request_commitments,
             order_fees,
         }
     }
@@ -174,16 +160,26 @@ impl ComplementaryPairV1 {
                     spend_pusd,
                     worst_price_pusd_per_share,
                 } => {
-                    let b = self
-                        .rules
-                        .sim_market_buy_bounds_v1(*spend_pusd)
-                        .map_err(|e| StrategyErrorV1::Cost(e.to_string()))?;
-                    (
-                        fraction_units(&b.maximum_base_micro, 6),
-                        fraction_units(&b.principal_micro, 6)
-                            .add(&fraction_units(&b.maximum_fee_1e5_units, 5)),
-                        *worst_price_pusd_per_share,
-                    )
+                    let estimate = self
+                        .profit_pending
+                        .get(c.origin.intent.global_request_id())
+                        .map(|a| Self::remaining_estimate(&input.action_before, a))
+                        .transpose()?
+                        .flatten();
+                    match estimate {
+                        Some(e) => {
+                            is_unknown |= e.unknown;
+                            (
+                                e.shares,
+                                e.principal.add(&e.fee),
+                                *worst_price_pusd_per_share,
+                            )
+                        }
+                        None => {
+                            is_unknown = true;
+                            (R::zero(), r(*spend_pusd), *worst_price_pusd_per_share)
+                        }
+                    }
                 }
             };
             let ord = c
@@ -206,11 +202,8 @@ impl ComplementaryPairV1 {
         let projection = input.action_before.market_funds(condition);
         let funds = projection.total();
         investment = investment.add(&pending_bound.clone().max(funds.clone()));
-        unknown |= (pending.is_empty()
-            && (projection.local_principal > Decimal::ZERO
-                || projection.local_fee > Decimal::ZERO))
-            || projection.platform_pending_principal > Decimal::ZERO
-            || projection.platform_pending_fee > Decimal::ZERO;
+        unknown |= pending.is_empty()
+            && (projection.local_principal > Decimal::ZERO || projection.local_fee > Decimal::ZERO);
 
         // 公共资金可能仍保留原最大费等已知保守余量；大小差异不是信息缺失。
         // 余量仍计入投入，并按两侧潜在暴露计入，不能据此释放资金。

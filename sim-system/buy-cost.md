@@ -1,11 +1,13 @@
-# SIM 金额买入的保守成本界
+# SIM 买入成本与公开场景估费
 
-`SealedProcessRuleSnapshotV3::sim_market_buy_bounds_v1(spend_pusd)` 是不读取盘口、不修改金额的纯计算。输入沿原 Decimal 非负金额域，输出 `SimMarketBuyBoundsV1`：`principal_micro` 为原本金向下取整的微 pUSD，`maximum_base_micro` 为微份额上界，`maximum_fee_1e5_units` 为每单位 10^-5 pUSD 的费用上界。所有结果使用 BigUint，不因合法大本金／费率而缩窄域或溢出。零金额返回零；负金额沿原核返回错误。
+`SealedProcessRuleSnapshotV3::market_buy_scenario_fee_estimate_v1(fills)` 接受同一场景的 `(微份数量, 价格)` 片段。它不读取盘口、账户、隐藏行情或运行时，也不执行撮合。策略负责选择公开卖档，实际执行仍由 SIM 决定。
 
-证明沿 [matching.rs](src/matching.rs) 的原外部段与部分消费核。每段微份额 B、价格 0<p<1，段本金 Q=floor(B*p)，可成交段 Q>=1，因此 B/Q<2/p。累计消费 b0 到 b1 的本金差 dQ=floor(b1*Q/B)-floor(b0*Q/B)>=1，故 dB<(dQ+1)*B/Q<=4*dQ/p。原 Decimal 最小正价格为 10^-28；对本金预算 S_micro 汇总得到微份额上界 `4*S_micro*10^28`。简单 `spend/minprice` 会被段本金 floor 和部分消费取整突破，当前盘口或订单 tick 不能充当跨发送的最低外部成交价格保证。
+实现直接复用 [matching.rs](src/matching.rs) 的 `allocate_taker_fee_micro_units_by_key`：每段按封存费表计算 `q*r*[p*(1-p)]^e`，先累加精确贡献，再按原五位金额规则对总额舍入一次；各段费用沿原余数分配核归属。返回 `MarketScenarioFeeEstimateV1` 的 `fee_1e5_units` 与 `segment_fee_1e5_units`，单位均为 `10^-5 pUSD`。逐档成本线使用各段归属，不能用便宜档的均价掩盖已知贵档。
 
-原封存规则及原费用核要求整数指数 e>=1，费率 r 非负；每笔原未舍入费用 q*r*[p*(1-p)]^e <=4*dQuote*r*p^(e-1)*(1-p)^e <=4*dQuote*r。汇总未舍入费用不超过 `4*S*r`，再调用原 `rounded_fee_units_v1`，复用统一总额半入舍入和低于最小费归零语义，避免逐笔舍入或不同小数精度。该舍入函数单调，所以得到可靠费用界。指数零不是封存规则的合法域；本接口不新增该限制。
+例如4份在0.3、6份在0.4、费率0.07和指数1时，总费用为0.1596。两个各143微份、价格0.5的片段总费用为0.000005005，舍入一次得到0.00001；分别舍入会错误得到0。此纯接口沿原撮合费用核的数量／金额表示和错误，不增加交易资格。
 
-代表测试通过真实初始外部深度构造与原计算／消费入口，覆盖价格改善、段取整超出简单相除、后续部分成交和最小费用半单位；共享执行的真实 90 pUSD／最坏价0.9／实际0.1案例费用5.67高于旧单价估费0.63，而在新界25.2内。大金额与大费率使用合法封存快照验证 BigUint 保真。
+场景估费不是最大费用、实际成交或资金保证。90 pUSD、目标100份、决策价格0.9的估费为0.63；到达价格0.1时可以实际成交900份、费用5.67。SIM仍以订单接纳本金预算加本次实际匹配产生的即时费用检查现金，FAK未使用本金随后释放。预留不足、平台拒绝、部分成交和后续FAILED沿原公共链处理。
 
-这仅是声明 SIM 原域的保守数学保证，不保证业务 FAK 候选可行。份额界可能远大于允许过补；消费者应据其批准风险口径选择不执行、部分修复或留孤腿，不能在公共核添加最低价格、份额上限、拒绝合法盘口或暗改预留。更紧的可保证边界与 LIVE 平台语义仍须在所属工程核实。旧 `market_buy_fee_estimate_v1` 继续是模型单价参考估计，旧模型本金／数量／预留行为不变。
+`market_buy_fee_estimate_v1` 保留单价情景用途，`limit_buy_cost_v1` 保留原 LIMIT 最大即时成本及 post_only 语义。实际费用、匹配、取整与失败补偿不因增加纯场景入口而改变。
+
+依 [D-0360](https://github.com/slowchillchill/btc-updown-marketmaker/issues/315#issuecomment-6217387315) 和 [#318](https://github.com/slowchillchill/btc-updown-marketmaker/issues/318)，当前代码删除 `SimMarketBuyBoundsV1`／`sim_market_buy_bounds_v1` 及仅服务全域界的证明测试。旧全域界与 `candidate_v1` 结果保留在原提交和历史材料中，不是本次性能优化引入的回归。新策略不使用当前最低卖价、tick或SDK份额构造去保证未来成交量。

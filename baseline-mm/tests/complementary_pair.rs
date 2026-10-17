@@ -13,8 +13,8 @@ use sim_system::{
 use std::{path::Path, sync::Arc};
 
 type Driver = FinitePublicConsumptionV1<RecordedPublicGroupSourceV1<MemoryRecordedTimes>>;
-fn config() -> ComplementaryPairConfigV1 {
-    let mut c = ComplementaryPairConfigV1::parse_toml(include_str!(
+fn config() -> ComplementaryPairConfigV2 {
+    let mut c = ComplementaryPairConfigV2::parse_toml(include_str!(
         "../configs/strategies/complementary_pair/synthetic-engineering.toml"
     ))
     .unwrap();
@@ -68,14 +68,14 @@ fn setup(root: &Path, cash: &str) -> (SharedExecutionV2, Driver, Arc<SealedProce
     (shared, driver, rules)
 }
 fn strategy(
-    c: ComplementaryPairConfigV1,
+    c: ComplementaryPairConfigV2,
     rules: Arc<SealedProcessRuleSnapshotV3>,
 ) -> ComplementaryPairV1 {
     ComplementaryPairV1::new(
         c,
         rules,
         "candidate".into(),
-        StrategyContinuityV1::new_account(),
+        StrategyContinuityV2::new_account(),
     )
     .unwrap()
 }
@@ -299,7 +299,7 @@ async fn construction_config_and_frozen_pair_diagnostics_use_public_dispatch() {
     );
     let calculation = input.calculate(&mut s, 22_000).unwrap();
     let frozen = diagnostic(&calculation.output).clone();
-    assert_eq!(frozen.rule_version, "candidate_v1");
+    assert_eq!(frozen.rule_version, "candidate_v2");
     assert!(
         matches!(intents(&calculation.output)[0].intent.as_ref(),ModelIntentV1::SubmitPairedBuy{orders,..} if matches!((&orders[0].order,&orders[1].order),(BuyOrderIntentV1::GtcLimit{size_shares:a,post_only:true,..},BuyOrderIntentV1::GtcLimit{size_shares:b,post_only:true,..}) if a==b))
     );
@@ -342,7 +342,7 @@ async fn construction_config_and_frozen_pair_diagnostics_use_public_dispatch() {
         "后一轮估计不能污染旧冻结诊断"
     );
     assert!(
-        ComplementaryPairConfigV1::parse_toml("[repair]\nenable_active_repair=false").is_err(),
+        ComplementaryPairConfigV2::parse_toml("[repair]\nenable_active_repair=false").is_err(),
         "缺失完整风险配置不能伪装为正式默认"
     );
 }
@@ -415,7 +415,7 @@ async fn temporary_reference_missing_inputs_zero_variance_and_nav_are_distinct()
     assert!(intents(&out).is_empty());
 }
 #[tokio::test(flavor = "current_thread")]
-async fn actual_orphan_cost_and_fak_bound_do_not_require_profit_or_a_premium_gate() {
+async fn actual_orphan_cost_and_fak_estimate_do_not_require_profit_or_a_premium_gate() {
     let temp = tempfile::tempdir().unwrap();
     let (mut shared, mut driver, rules) = setup(temp.path(), "2000");
     let input = fill_up(&mut shared, &mut driver, &rules).await;
@@ -448,28 +448,21 @@ async fn actual_orphan_cost_and_fak_bound_do_not_require_profit_or_a_premium_gat
         contracts::economics::EconomicRational::try_from(&d.qualified_net_pnl_pusd).unwrap()
             <= contracts::economics::EconomicRational::zero()
     );
-    assert!(
-        d.markets[0]
-            .unavailable
-            .contains(&ActionUnavailableV1::AmountOverfillBound),
-        "不能用盘口创造FAK最低价保证: {d:?}"
+    assert_eq!(
+        d.markets[0].choice,
+        MarketChoiceV1::ActiveRepair,
+        "同一公开场景可形成FAK，估计不要求未来结果保证: {d:?}"
     );
-    assert!(
-        intents(&out).iter().any(|i| matches!(
-            i.intent.as_ref(),
-            ModelIntentV1::SubmitSingleBuy {
-                order: BuyLegIntentV1 {
-                    order: BuyOrderIntentV1::GtcLimit {
-                        post_only: true,
-                        ..
-                    },
-                    ..
-                },
+    assert!(intents(&out).iter().any(|i| matches!(
+        i.intent.as_ref(),
+        ModelIntentV1::SubmitSingleBuy {
+            order: BuyLegIntentV1 {
+                order: BuyOrderIntentV1::FakMarket { .. },
                 ..
-            }
-        )),
-        "零利润仍可在独立小亏容忍内Maker修复"
-    );
+            },
+            ..
+        }
+    )));
     let cost = input
         .trade_economics
         .iter()
@@ -496,7 +489,7 @@ async fn high_water_window_exit_is_immediate_and_no_opportunity_keeps_evaluating
         .cutoff()
         .decision_time()
         .logical_time_utc_ms();
-    let mut continuity = StrategyContinuityV1::new_account();
+    let mut continuity = StrategyContinuityV2::new_account();
     continuity.confirmed_high_water_pusd =
         contracts::economics::EconomicRational::from_decimal(Decimal::from(3000)).public();
     let mut s =
@@ -802,11 +795,6 @@ async fn active_repair_cancels_same_side_then_recalculates_and_does_not_resend_u
     };
     let input = adjust(input);
     let mut c = config();
-    // 全域界巨大：仅以显式极宽合成参数验证可达分支，不是经营风险默认。
-    c.risk.per_market_orphan_limit_pusd = Decimal::MAX;
-    c.risk.account_orphan_limit_pusd = Decimal::MAX;
-    c.repair.maximum_overfill_pusd = Decimal::MAX;
-    c.repair.maximum_overfill_shares = Decimal::MAX;
     c.repair.residual_risk_weight = Decimal::from(10);
     c.repair.base_loss_allowance_per_share = Decimal::new(2, 1);
     let mut s = strategy(c, rules);
@@ -1148,7 +1136,7 @@ async fn unknown_public_nav_stops_new_pairs_but_independent_repair_remains_possi
     assert!(intents(&out).iter().any(|i|matches!(i.intent.as_ref(),ModelIntentV1::SubmitSingleBuy{condition_id,..} if condition_id.0==OTHER_CONDITION_ID)),"NAV未知不是所有已有缺口修复的统一否决门: {:?}",diagnostic(&out));
 }
 #[tokio::test(flavor = "current_thread")]
-async fn maker_overlap_bounds_use_expensive_old_order_price_not_cheap_replacement() {
+async fn maker_overlap_risk_uses_expensive_old_order_price_not_cheap_replacement() {
     let temp = tempfile::tempdir().unwrap();
     let (mut shared, mut driver, rules, _) = profitable_pool(temp.path()).await;
     shared
@@ -1183,7 +1171,7 @@ async fn maker_overlap_bounds_use_expensive_old_order_price_not_cheap_replacemen
     let mut c = config();
     c.repair.enable_active_repair = false;
     c.repair.residual_risk_weight = Decimal::from(100);
-    c.repair.maximum_overfill_pusd = Decimal::from(2);
+    c.risk.per_market_orphan_limit_pusd = Decimal::from(2);
     let mut s = strategy(c, rules);
     let out = s.decide(&input, at).unwrap();
     let new_q = intents(&out)
@@ -1202,8 +1190,8 @@ async fn maker_overlap_bounds_use_expensive_old_order_price_not_cheap_replacemen
         .unwrap();
     assert!(
         (Decimal::from(5) + new_q - Decimal::from(10)).max(Decimal::ZERO) * Decimal::new(7, 1)
-            <= Decimal::from(2),
-        "旧高价单与低价新单任意先成交的反向孤腿都要受限"
+            <= Decimal::new(35, 1),
+        "旧高价承诺3.5已高于2额度，允许不增加既有暴露，不恢复额外2pUSD过补门"
     );
     assert!(new_q >= Decimal::from(5), "有限小批修复仍可行");
     assert!(
@@ -1293,13 +1281,9 @@ async fn fak_minimum_principal_is_independent_of_maker_minimum_shares() {
         let mut c = config();
         c.quote.base_pair_shares = Decimal::from(target);
         // 与原FAK分支夹具相同的显式合成额度，不是经营配置。
-        c.risk.per_market_orphan_limit_pusd = Decimal::MAX;
-        c.risk.account_orphan_limit_pusd = Decimal::MAX;
-        c.repair.maximum_overfill_pusd = Decimal::MAX;
-        c.repair.maximum_overfill_shares = Decimal::MAX;
         c.repair.residual_risk_weight = Decimal::from(10);
         c.repair.base_loss_allowance_per_share = Decimal::new(2, 1);
-        let mut continuity = StrategyContinuityV1::new_account();
+        let mut continuity = StrategyContinuityV2::new_account();
         continuity.terminating = true;
         let mut s =
             ComplementaryPairV1::new(c, rules, "amount-minimum".into(), continuity).unwrap();
@@ -2068,4 +2052,226 @@ async fn actual_health_calculation_borrows_required_scope_among_unrelated_histor
             diagnostic(&reference.output).markets
         );
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn active_repair_uses_public_level_principals_and_one_total_fee() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver, rules) = setup(temp.path(), "2000");
+    let input = fill_up(&mut shared, &mut driver, &rules).await;
+    let now = input
+        .action_before
+        .cutoff()
+        .decision_time()
+        .logical_time_utc_ms();
+    let mut input = estimated(input, "100000");
+    let asset = input.markets[0]
+        .observation
+        .assets
+        .iter_mut()
+        .find(|a| a.asset.token_id.0 == DOWN_TOKEN_ID)
+        .unwrap();
+    // 故意乱序；真实策略必须先吃便宜档，不能以10*.4生成4本金。
+    asset.asks = fact(vec![
+        PriceLevelV1 {
+            price_pusd_per_share: ExactDecimal("0.4".into()),
+            quantity_shares: ExactDecimal("6".into()),
+        },
+        PriceLevelV1 {
+            price_pusd_per_share: ExactDecimal("0.3".into()),
+            quantity_shares: ExactDecimal("4".into()),
+        },
+    ])
+    .into();
+    let mut c = config();
+    c.repair.base_loss_allowance_per_share = Decimal::new(2, 1);
+    c.repair.residual_risk_weight = Decimal::from(100);
+    let mut s = strategy(c, rules);
+    let calculation = input.calculate(&mut s, now).unwrap();
+    assert_eq!(
+        diagnostic(&calculation.output).markets[0].choice,
+        MarketChoiceV1::ActiveRepair
+    );
+    let item = &intents(&calculation.output)[0];
+    assert!(
+        matches!(item.intent.as_ref(),ModelIntentV1::SubmitSingleBuy {order:BuyLegIntentV1 {order:BuyOrderIntentV1::FakMarket {spend_pusd,worst_price_pusd_per_share},..},..} if *spend_pusd==Decimal::new(36,1) && *worst_price_pusd_per_share==Decimal::new(4,1))
+    );
+    assert_eq!(
+        item.reserves[0].reserve.immediate_fee_reserve_pusd,
+        ExactDecimal("0.1596".into())
+    );
+    assert_eq!(
+        diagnostic(&calculation.output).profit_allocations[0].estimate_cutoff,
+        *input.action_before.cutoff()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn amount_pending_keeps_original_estimate_and_only_incremental_loss_until_real_feedback() {
+    use contracts::economics::EconomicRational as R;
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver, rules, input) = profitable_pool(temp.path()).await;
+    let mut input = estimated(input, "100000");
+    let now = input
+        .action_before
+        .cutoff()
+        .decision_time()
+        .logical_time_utc_ms();
+    let asset = input.markets[0]
+        .observation
+        .assets
+        .iter_mut()
+        .find(|a| a.asset.token_id.0 == DOWN_TOKEN_ID)
+        .unwrap();
+    asset.asks = fact(vec![
+        PriceLevelV1 {
+            price_pusd_per_share: ExactDecimal("0.6".into()),
+            quantity_shares: ExactDecimal("4".into()),
+        },
+        PriceLevelV1 {
+            price_pusd_per_share: ExactDecimal("0.7".into()),
+            quantity_shares: ExactDecimal("6".into()),
+        },
+    ])
+    .into();
+    let mut c = config();
+    c.repair.base_loss_allowance_per_share = Decimal::new(5, 1);
+    c.repair.residual_risk_weight = Decimal::from(100);
+    let mut s = strategy(c, rules);
+    let calculation = input.calculate(&mut s, now).unwrap();
+    assert_eq!(
+        diagnostic(&calculation.output).markets[0].choice,
+        MarketChoiceV1::ActiveRepair
+    );
+    let original = diagnostic(&calculation.output).profit_allocations[0].clone();
+    assert_eq!(
+        original.estimated_principal_pusd,
+        R::from_decimal(Decimal::new(66, 1)).public()
+    );
+    assert_eq!(
+        original.allocated_profit_pusd,
+        R::from_decimal(Decimal::new(16, 1)).public(),
+        "原本金5+新本金6.6-配对10=新增亏损1.6，不是占6.6"
+    );
+    shared
+        .dispatch_strategy(
+            &mut driver.decision().unwrap(),
+            &mut s,
+            calculation.complete(now),
+        )
+        .await
+        .unwrap();
+    for asks in [
+        vec![],
+        vec![PriceLevelV1 {
+            price_pusd_per_share: ExactDecimal("0.1".into()),
+            quantity_shares: ExactDecimal("100".into()),
+        }],
+    ] {
+        let action = shared
+            .strategy_input(&mut driver)
+            .unwrap()
+            .unwrap()
+            .action_before;
+        let mut next = StrategyInputV1 {
+            action_before: action,
+            markets: input.markets.clone(),
+            trade_economics: input.trade_economics.clone(),
+        };
+        next.markets[0]
+            .observation
+            .assets
+            .iter_mut()
+            .find(|a| a.asset.token_id.0 == DOWN_TOKEN_ID)
+            .unwrap()
+            .asks = fact(asks).into();
+        let out = s.decide(&next, now).unwrap();
+        assert_eq!(
+            s.continuity().unresolved_profit_allocations[&original.global_request_id],
+            original,
+            "盘口消失/变便宜不释放旧场景"
+        );
+        assert_eq!(
+            diagnostic(&out).available_profit_pusd,
+            R::from_decimal(Decimal::new(14, 1)).public()
+        );
+        assert!(
+            next.action_before
+                .request_funds()
+                .any(|f| f.request_identity == &original.reserve_identity
+                    && f.principal_pusd == ExactDecimal("6.6".into()))
+        );
+    }
+    driver.stop_and_drain().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn v2_existing_maker_quantity_beyond_gap_can_be_maintained_with_real_old_commitment() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver, rules, _) = profitable_pool(temp.path()).await;
+    shared
+        .execute_batch_reserved(
+            &mut driver.decision().unwrap(),
+            &[buy(
+                &rules,
+                "old-beyond-gap",
+                DOWN_TOKEN_ID,
+                Decimal::from(18),
+                Decimal::new(4, 1),
+                true,
+            )],
+        )
+        .await
+        .unwrap();
+    let input = estimated(
+        shared.strategy_input(&mut driver).unwrap().unwrap(),
+        "100000",
+    );
+    let now = input
+        .action_before
+        .cutoff()
+        .decision_time()
+        .logical_time_utc_ms();
+    assert!(
+        input
+            .action_before
+            .commitments()
+            .any(|c| c.origin.intent.global_request_id() == "old-beyond-gap")
+    );
+    let mut c = config();
+    c.repair.enable_active_repair = false;
+    c.repair.residual_risk_weight = Decimal::from(100);
+    let mut s = strategy(c, rules);
+    let out = s.decide(&input, now).unwrap();
+    assert_eq!(
+        diagnostic(&out).markets[0].choice,
+        MarketChoiceV1::Maintain,
+        "18份旧承诺超过10份缺口，但不能用隐含零过补门否决: {:?}",
+        diagnostic(&out)
+    );
+    assert!(intents(&out).is_empty());
+    assert!(
+        input
+            .action_before
+            .market_funds(&ConditionId(CONDITION_ID.into()))
+            .total()
+            >= contracts::economics::EconomicRational::from_decimal(Decimal::new(72, 1)),
+        "旧承诺沿公共本地/平台资金归属保持，不要求仍在本地预留表"
+    );
+    driver.stop_and_drain().unwrap();
+}
+#[tokio::test(flavor = "current_thread")]
+async fn v2_continuity_rejects_missing_or_explicit_old_rule_without_resetting_it() {
+    let mut old = serde_json::to_value(StrategyContinuityV2::new_account()).unwrap();
+    old.as_object_mut().unwrap().remove("rule_version");
+    assert!(serde_json::from_value::<StrategyContinuityV2>(old).is_err());
+    let temp = tempfile::tempdir().unwrap();
+    let (_, driver, rules) = setup(temp.path(), "2000");
+    let mut old = StrategyContinuityV2::new_account();
+    old.rule_version = "candidate_v1".into();
+    let result = ComplementaryPairV1::new(config(), rules, "no-silent-upgrade".into(), old);
+    assert!(
+        matches!(result,Err(StrategyErrorV1::Configuration(message)) if message.contains("candidate_v1") && message.contains("candidate_v2"))
+    );
+    driver.stop_and_drain().unwrap();
 }

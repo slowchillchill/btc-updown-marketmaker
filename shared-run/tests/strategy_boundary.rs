@@ -290,6 +290,10 @@ async fn batch_insufficiency_sends_nothing_and_never_releases_prior_unknown() {
         )
         .await
         .unwrap_err();
+    assert!(
+        error.is_local_funds_rejection(),
+        "真实整批资金不足是正常停批"
+    );
     assert!(matches!(error.error, SharedActionErrorV1::Reservation(_)));
     assert!(error.sent.is_empty());
     assert!(error.release_errors.is_empty());
@@ -346,6 +350,10 @@ async fn pre_registration_error_releases_current_and_unsent_tail() {
         .execute_batch_reserved(&mut driver.decision().unwrap(), &[first, bad, last])
         .await
         .unwrap_err();
+    assert!(
+        !error.is_local_funds_rejection(),
+        "已发前缀或真实错误不能吞为资金拒绝"
+    );
     assert_eq!(error.sent.len(), 1);
     assert_eq!(error.sent[0].context.global_request_id, "first");
     assert_eq!(error.attempted_intent_index, Some(1));
@@ -399,6 +407,10 @@ async fn bridge_construction_error_releases_current_and_unsent_tail() {
         )
         .await
         .unwrap_err();
+    assert!(
+        !error.is_local_funds_rejection(),
+        "已发前缀或真实错误不能吞为资金拒绝"
+    );
     assert_eq!(error.sent.len(), 1);
     assert_eq!(error.sent[0].context.global_request_id, "first");
     assert_eq!(error.attempted_intent_index, Some(1));
@@ -506,6 +518,10 @@ async fn duplicate_global_id_cannot_substitute_old_intent_or_release_old_obligat
         )
         .await
         .unwrap_err();
+    assert!(
+        !error.is_local_funds_rejection(),
+        "已发前缀或真实错误不能吞为资金拒绝"
+    );
     assert_eq!(error.sent.len(), 1);
     assert!(matches!(
         error.error,
@@ -868,4 +884,40 @@ async fn qualification_stops_suffix_preserves_sent_unknown_and_releases_only_uns
             .reservation_state,
         ReservationStatusV1::SubmittedUnknown
     );
+}
+
+#[test]
+fn local_funds_classification_keeps_mixed_fault_unknown_and_release_failure_fatal() {
+    let mut error = BatchExecutionErrorV1 {
+        error: SharedActionErrorV1::Reservation(vec![
+            LedgerReservationOutcomeV1::Reserved {
+                ledger_entry_seq: 1,
+            },
+            LedgerReservationOutcomeV1::InsufficientGlobalAvailableFunds,
+        ]),
+        sent: vec![],
+        attempted_intent_index: None,
+        failed_request_effect: None,
+        release_errors: vec![],
+    };
+    assert!(error.is_local_funds_rejection());
+    error
+        .release_errors
+        .push(LedgerErrorV1::ReservationRequestNotFound {
+            request_identity: LedgerRequestIdentityV1("real-release-failure".into()),
+        });
+    assert!(!error.is_local_funds_rejection());
+    error.release_errors.clear();
+    error.failed_request_effect = Some(RequestEffectV1::MayHaveRequestEffect);
+    assert!(!error.is_local_funds_rejection());
+    error.failed_request_effect = None;
+    error.attempted_intent_index = Some(0);
+    assert!(!error.is_local_funds_rejection());
+    error.attempted_intent_index = None;
+    if let SharedActionErrorV1::Reservation(outcomes) = &mut error.error {
+        outcomes.push(LedgerReservationOutcomeV1::PerMarketLimitExceeded);
+    }
+    assert!(!error.is_local_funds_rejection());
+    error.error = SharedActionErrorV1::Ledger(LedgerErrorV1::AccountNotOpened);
+    assert!(!error.is_local_funds_rejection());
 }
