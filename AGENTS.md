@@ -69,6 +69,14 @@ live-trade/               # LIVE 上层运行入口与真实账户装配（规�
   记录来源路径与 SHA-256 证据。
 - `wallets/` 仅保存被 Git 忽略的钱包密钥、环境变量文件和钱包公共地址派生配置材料。
 
+### 本地证据归档
+
+- 本仓库各本地工作树的备份位置统一读取全局入口所定位的本机配置；以
+  `git rev-parse --path-format=absolute --git-common-dir` 的结果唯一匹配 `[[evidence_archives]]` 的
+  `git_common_dir`，使用该项的 `root` 与 `mount_point`。实际路径只维护在本机绑定中，
+  不从旧工作树、历史日志或默认目录推断，避免继续使用过时的备份位置。
+- 挂载核对、必要证据保留和产物清理遵守通用工程准则第六节“构建产物与证据生命周期”。
+
 ### AutoDL 训练环境
 
 - 服务器登录方法：ssh -p 35354 root@connect.bjb2.seetacloud.com
