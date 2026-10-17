@@ -1,0 +1,438 @@
+{
+  "rules": {
+    "snapshot_path": "inputs/platform-rule-snapshot-v3.json",
+    "expected_file_sha256": "70e592f369d3e58f0ab4bc7cdfb8d1e2ae48ceae54321c66f908bdf63c500f85",
+    "replay_causal_start_utc_ms": 1790293800070
+  },
+  "days": [
+    {
+      "preparation": {
+        "canonical": {
+          "canonical_rule_version": "canonical-reduction-v1",
+          "decode_batch_rows": 1024,
+          "max_decode_batch_bytes": 67108864,
+          "max_epoch_count_per_source": 1024,
+          "max_pending_ws_terminals": 1024,
+          "max_retained_reducer_entries": 1000000,
+          "max_temporary_row_bytes": 16777216,
+          "sort": {
+            "batch_rows": 1024,
+            "max_open_files": 216,
+            "max_run_bytes": 67108864,
+            "max_run_rows": 32768,
+            "max_temp_bytes": 17179869184,
+            "max_temp_run_files": 16384,
+            "merge_fan_in": 8,
+            "merge_workers": 24
+          }
+        },
+        "header": {
+          "canonical_rule_version": "canonical-reduction-v1",
+          "initial_state": "Empty",
+          "input_scope": "UTC/2026-09-25T00:00:00Z--2026-09-25T01:00:00Z/fold4-center-v2-on-off",
+          "input_stream_id": "issue315-v2-sep25-on-off-public-2026-09-25",
+          "max_pending_ws_terminals": 1024,
+          "observation_version": "market_business_observation_v2",
+          "ordering_version": "historical-source-head-v2"
+        },
+        "hidden_stream_id": "issue315-v2-sep25-on-off-hidden-2026-09-25",
+        "max_read_batch_bytes": 67108864,
+        "metadata_initialization": {
+          "files": [
+            {
+              "manifest_path": "datasets/2026-09-24/typed_raw/utc_day=2026-09-24/manifest.json",
+              "relative_paths": [
+                "source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet"
+              ]
+            }
+          ],
+          "markets": [
+            {
+              "condition_id": "0x28ebbeb19cd419de8e91bd79a497dd521fc3a4766ce3823ac09a5a6b1bb5314e",
+              "snapshot_source_message_id": "19b4d2b501315a1c38454a3d37e7baee81485046307276783a19659cbcd2badc"
+            },
+            {
+              "condition_id": "0x437a4a04e76e120eb99232f38906ab037d8ee717b33ffa9a38f659ade8a6e66c",
+              "snapshot_source_message_id": "c79fba8da1a8418ce03f770925018499a8f33f0e46789ad0a055562491b7406f"
+            }
+          ],
+          "received_start_utc_ms": 1790294400000,
+          "received_end_utc_ms": 1790298000000,
+          "purpose": "原正式选择器的午夜相邻两市场元数据初始化；仅原Snapshot及其后起点前Existing元数据，不带前日账户/策略/价格/盘口或AnchorRule预热。"
+        },
+        "read_page_rows": 256,
+        "recording": {
+          "max_artifact_payload_bytes": 16777216,
+          "max_candidate_directory_bytes": 549755813888,
+          "max_capture_output_bytes": 549755813888,
+          "max_observation_l2_levels": 10000,
+          "sort": {
+            "batch_rows": 1024,
+            "max_open_files": 216,
+            "max_run_bytes": 67108864,
+            "max_run_rows": 32768,
+            "max_temp_bytes": 17179869184,
+            "max_temp_run_files": 16384,
+            "merge_fan_in": 8,
+            "merge_workers": 24
+          }
+        },
+        "scope": {
+          "manifest_paths": [
+            "datasets/2026-09-25/typed_raw/utc_day=2026-09-25/manifest.json"
+          ],
+          "received_start_utc_ms": 1790294400000,
+          "received_end_utc_ms": 1790298000000,
+          "purpose": "Issue #315 candidate_v2第二窗口准备：UTC09/25[00,01)，原fold4 center主动补腿ON/OFF单因素双独立账户；开发用途，运行及整体预算待签发，不日化、不作留出。"
+        },
+        "work_root": "outputs/2026-09-25/preparation"
+      },
+      "candidates": [
+        {
+          "run": {
+            "strategy_request_namespace": "issue315-v2-sep25-on-f4-2026-09-25-center-requests",
+            "timing": {
+              "public_delivery_delay_ms": {
+                "Fixed": 0
+              },
+              "calculation_start_delay_ms": {
+                "Fixed": 0
+              },
+              "calculation_duration_ms": {
+                "Fixed": 15
+              },
+              "dispatch_delay_ms": {
+                "Fixed": 0
+              }
+            },
+            "session": {
+              "run_id": "issue315-v2-sep25-on-f4-2026-09-25-center",
+              "session_id": "issue315-v2-sep25-on-f4-2026-09-25-center-session",
+              "account_id": "issue315-v2-sep25-on-f4-2026-09-25-center-account",
+              "caller_instance_id": "issue315-v2-sep25-on-f4-2026-09-25-center-host",
+              "creation_request_id": "issue315-v2-sep25-on-f4-2026-09-25-center-opening",
+              "response_bridge_binding_id": "issue315-v2-sep25-on-f4-2026-09-25-center-bridge",
+              "initial_account_state": {
+                "available_pusd": "2000"
+              },
+              "session_seed": "6e92d4823607cfd85fae1596d28aac4bdfb58b84e4c94a772753ec7faf1fc66d"
+            },
+            "strategy": {
+              "strategy_id": "complementary_pair",
+              "strategy_rule_version": "candidate_v2",
+              "effective_parameters": {
+                "health": {
+                  "polymarket_silence_normal_ms": 100,
+                  "polymarket_silence_ms": 400,
+                  "polymarket_event_delay_normal_ms": 100,
+                  "polymarket_event_delay_ms": 400,
+                  "chainlink_silence_normal_ms": 1100,
+                  "chainlink_silence_ms": 4400,
+                  "chainlink_event_delay_normal_ms": 2600,
+                  "chainlink_event_delay_ms": 10400,
+                  "binance_trade_silence_normal_ms": 1000,
+                  "binance_trade_silence_ms": 4000,
+                  "binance_trade_event_delay_normal_ms": 1100,
+                  "binance_trade_event_delay_ms": 4400,
+                  "binance_depth_silence_normal_ms": 100,
+                  "binance_depth_silence_ms": 400,
+                  "binance_depth_event_delay_normal_ms": 200,
+                  "binance_depth_event_delay_ms": 800
+                },
+                "probability": {
+                  "volatility_window_ms": 300000,
+                  "initial_sigma_usd_per_sqrt_second": 7.33489262319592,
+                  "estimation_error_usd": 0.0,
+                  "binance_innovation_weight": 0.5,
+                  "binance_pressure_weight_usd": 0.0,
+                  "binance_trade_pressure_weight_usd": 0.0
+                },
+                "quote": {
+                  "base_pair_shares": "50",
+                  "base_half_spread": "0.0050",
+                  "inventory_shift_per_pusd": "0.00005",
+                  "uncertainty_spread_weight": "0.02",
+                  "signal_spread_weight": "0",
+                  "joint_fill_scenario_weights": [
+                    0.25,
+                    0.25,
+                    0.25,
+                    0.25
+                  ],
+                  "minimum_business_result_per_share": "0",
+                  "execution_path_ms": 0
+                },
+                "repair": {
+                  "base_loss_allowance_per_share": "0.0050",
+                  "time_loss_allowance_per_share": "0.0050",
+                  "inventory_loss_allowance_per_share": "0.0050",
+                  "maker_fill_weight": 0.5,
+                  "wait_price_improvement_per_share": "0",
+                  "residual_risk_weight": "1",
+                  "maker_path_ms": 0,
+                  "active_path_ms": 0,
+                  "enable_active_repair": true
+                },
+                "risk": {
+                  "per_market_orphan_limit_pusd": "100",
+                  "account_orphan_limit_pusd": "400"
+                }
+              }
+            },
+            "finality_policy_path": "inputs/trade-finality-policy-v2.json",
+            "sim_log": "outputs/2026-09-25/on/sim.jsonl",
+            "noe_root": "outputs/2026-09-25/on/noe",
+            "ledger_root": "outputs/2026-09-25/on/ledger",
+            "metadata_path": "outputs/2026-09-25/on/run.json",
+            "result_path": "outputs/2026-09-25/on/result.json",
+            "activation_id": "issue315-v2-sep25-on-f4-2026-09-25-center-activate",
+            "consumption_sequence_ref": "issue315-v2-sep25-on-f4-2026-09-25-center-public",
+            "noe_implementation_identity": "normalization_core_v1@c3e500e6252481db24c12a882301a2b0540e6017",
+            "admission_policy": "ActualCashNoMarketLimit",
+            "max_group_bytes": 16777216,
+            "finite_in_flight_groups": 128,
+            "replay_progress_interval_seconds": 60,
+            "gamma_resolution_policy": "qualified_public_consumption",
+            "implementation_identity": {
+              "git_commit": "c3e500e6252481db24c12a882301a2b0540e6017",
+              "source_identity_sha256": "c6f5eee7c8412a44dbe4471ae80a39ec177c14078f739e2e70a786ecba158786",
+              "cargo_lock_sha256": "684470a91e49d4a3ec0066ae1a33666cb635b2f90d1902fc0fa62ecf3a7be4ed"
+            }
+          },
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1100,
+              "chainlink_silence_ms": 4400,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 10400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.33489262319592,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": true
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          },
+          "request_namespace": "issue315-v2-sep25-on-f4-2026-09-25-center-requests"
+        },
+        {
+          "run": {
+            "strategy_request_namespace": "issue315-v2-sep25-off-f4-2026-09-25-center-requests",
+            "timing": {
+              "public_delivery_delay_ms": {
+                "Fixed": 0
+              },
+              "calculation_start_delay_ms": {
+                "Fixed": 0
+              },
+              "calculation_duration_ms": {
+                "Fixed": 15
+              },
+              "dispatch_delay_ms": {
+                "Fixed": 0
+              }
+            },
+            "session": {
+              "run_id": "issue315-v2-sep25-off-f4-2026-09-25-center",
+              "session_id": "issue315-v2-sep25-off-f4-2026-09-25-center-session",
+              "account_id": "issue315-v2-sep25-off-f4-2026-09-25-center-account",
+              "caller_instance_id": "issue315-v2-sep25-off-f4-2026-09-25-center-host",
+              "creation_request_id": "issue315-v2-sep25-off-f4-2026-09-25-center-opening",
+              "response_bridge_binding_id": "issue315-v2-sep25-off-f4-2026-09-25-center-bridge",
+              "initial_account_state": {
+                "available_pusd": "2000"
+              },
+              "session_seed": "6e92d4823607cfd85fae1596d28aac4bdfb58b84e4c94a772753ec7faf1fc66d"
+            },
+            "strategy": {
+              "strategy_id": "complementary_pair",
+              "strategy_rule_version": "candidate_v2",
+              "effective_parameters": {
+                "health": {
+                  "polymarket_silence_normal_ms": 100,
+                  "polymarket_silence_ms": 400,
+                  "polymarket_event_delay_normal_ms": 100,
+                  "polymarket_event_delay_ms": 400,
+                  "chainlink_silence_normal_ms": 1100,
+                  "chainlink_silence_ms": 4400,
+                  "chainlink_event_delay_normal_ms": 2600,
+                  "chainlink_event_delay_ms": 10400,
+                  "binance_trade_silence_normal_ms": 1000,
+                  "binance_trade_silence_ms": 4000,
+                  "binance_trade_event_delay_normal_ms": 1100,
+                  "binance_trade_event_delay_ms": 4400,
+                  "binance_depth_silence_normal_ms": 100,
+                  "binance_depth_silence_ms": 400,
+                  "binance_depth_event_delay_normal_ms": 200,
+                  "binance_depth_event_delay_ms": 800
+                },
+                "probability": {
+                  "volatility_window_ms": 300000,
+                  "initial_sigma_usd_per_sqrt_second": 7.33489262319592,
+                  "estimation_error_usd": 0.0,
+                  "binance_innovation_weight": 0.5,
+                  "binance_pressure_weight_usd": 0.0,
+                  "binance_trade_pressure_weight_usd": 0.0
+                },
+                "quote": {
+                  "base_pair_shares": "50",
+                  "base_half_spread": "0.0050",
+                  "inventory_shift_per_pusd": "0.00005",
+                  "uncertainty_spread_weight": "0.02",
+                  "signal_spread_weight": "0",
+                  "joint_fill_scenario_weights": [
+                    0.25,
+                    0.25,
+                    0.25,
+                    0.25
+                  ],
+                  "minimum_business_result_per_share": "0",
+                  "execution_path_ms": 0
+                },
+                "repair": {
+                  "base_loss_allowance_per_share": "0.0050",
+                  "time_loss_allowance_per_share": "0.0050",
+                  "inventory_loss_allowance_per_share": "0.0050",
+                  "maker_fill_weight": 0.5,
+                  "wait_price_improvement_per_share": "0",
+                  "residual_risk_weight": "1",
+                  "maker_path_ms": 0,
+                  "active_path_ms": 0,
+                  "enable_active_repair": false
+                },
+                "risk": {
+                  "per_market_orphan_limit_pusd": "100",
+                  "account_orphan_limit_pusd": "400"
+                }
+              }
+            },
+            "finality_policy_path": "inputs/trade-finality-policy-v2.json",
+            "sim_log": "outputs/2026-09-25/off/sim.jsonl",
+            "noe_root": "outputs/2026-09-25/off/noe",
+            "ledger_root": "outputs/2026-09-25/off/ledger",
+            "metadata_path": "outputs/2026-09-25/off/run.json",
+            "result_path": "outputs/2026-09-25/off/result.json",
+            "activation_id": "issue315-v2-sep25-off-f4-2026-09-25-center-activate",
+            "consumption_sequence_ref": "issue315-v2-sep25-off-f4-2026-09-25-center-public",
+            "noe_implementation_identity": "normalization_core_v1@c3e500e6252481db24c12a882301a2b0540e6017",
+            "admission_policy": "ActualCashNoMarketLimit",
+            "max_group_bytes": 16777216,
+            "finite_in_flight_groups": 128,
+            "replay_progress_interval_seconds": 60,
+            "gamma_resolution_policy": "qualified_public_consumption",
+            "implementation_identity": {
+              "git_commit": "c3e500e6252481db24c12a882301a2b0540e6017",
+              "source_identity_sha256": "c6f5eee7c8412a44dbe4471ae80a39ec177c14078f739e2e70a786ecba158786",
+              "cargo_lock_sha256": "684470a91e49d4a3ec0066ae1a33666cb635b2f90d1902fc0fa62ecf3a7be4ed"
+            }
+          },
+          "strategy": {
+            "health": {
+              "polymarket_silence_normal_ms": 100,
+              "polymarket_silence_ms": 400,
+              "polymarket_event_delay_normal_ms": 100,
+              "polymarket_event_delay_ms": 400,
+              "chainlink_silence_normal_ms": 1100,
+              "chainlink_silence_ms": 4400,
+              "chainlink_event_delay_normal_ms": 2600,
+              "chainlink_event_delay_ms": 10400,
+              "binance_trade_silence_normal_ms": 1000,
+              "binance_trade_silence_ms": 4000,
+              "binance_trade_event_delay_normal_ms": 1100,
+              "binance_trade_event_delay_ms": 4400,
+              "binance_depth_silence_normal_ms": 100,
+              "binance_depth_silence_ms": 400,
+              "binance_depth_event_delay_normal_ms": 200,
+              "binance_depth_event_delay_ms": 800
+            },
+            "probability": {
+              "volatility_window_ms": 300000,
+              "initial_sigma_usd_per_sqrt_second": 7.33489262319592,
+              "estimation_error_usd": 0.0,
+              "binance_innovation_weight": 0.5,
+              "binance_pressure_weight_usd": 0.0,
+              "binance_trade_pressure_weight_usd": 0.0
+            },
+            "quote": {
+              "base_pair_shares": "50",
+              "base_half_spread": "0.0050",
+              "inventory_shift_per_pusd": "0.00005",
+              "uncertainty_spread_weight": "0.02",
+              "signal_spread_weight": "0",
+              "joint_fill_scenario_weights": [
+                0.25,
+                0.25,
+                0.25,
+                0.25
+              ],
+              "minimum_business_result_per_share": "0",
+              "execution_path_ms": 0
+            },
+            "repair": {
+              "base_loss_allowance_per_share": "0.0050",
+              "time_loss_allowance_per_share": "0.0050",
+              "inventory_loss_allowance_per_share": "0.0050",
+              "maker_fill_weight": 0.5,
+              "wait_price_improvement_per_share": "0",
+              "residual_risk_weight": "1",
+              "maker_path_ms": 0,
+              "active_path_ms": 0,
+              "enable_active_repair": false
+            },
+            "risk": {
+              "per_market_orphan_limit_pusd": "100",
+              "account_orphan_limit_pusd": "400"
+            }
+          },
+          "request_namespace": "issue315-v2-sep25-off-f4-2026-09-25-center-requests"
+        }
+      ],
+      "producer_lead_groups": 8192
+    }
+  ],
+  "parallel_dates": 1
+}
