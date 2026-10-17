@@ -1,6 +1,12 @@
 //! 复用 backtest 的合法工程夹具；不复制领域 fixture，不启动策略研究。
-#[path = "../../backtest/tests/common/mod.rs"]
-mod common;
+#[path = "../../backtest/tests/common/default.rs"]
+mod fixture_default;
+#[path = "../../backtest/tests/common/fixture_material.rs"]
+mod fixture_material;
+mod common {
+    pub(crate) use super::fixture_default::*;
+}
+
 use shared_run::{StrategyInputV1, StrategyOutputV1, StrategyV1};
 use std::path::PathBuf;
 struct EngineeringObserver;

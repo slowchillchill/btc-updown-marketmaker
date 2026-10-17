@@ -1,7 +1,19 @@
 //! #185 有限宿主计算测量；构造和成交装配不进入计时，不分派计时决定。
-#[allow(dead_code)]
-#[path = "../../shared-run/tests/common/mod.rs"]
-mod common;
+#[path = "../../shared-run/tests/common/fixture_clock.rs"]
+mod fixture_clock;
+#[path = "../../shared-run/tests/common/fixture_input.rs"]
+mod fixture_input;
+#[path = "../../shared-run/tests/common/fixture_recording.rs"]
+mod fixture_recording;
+#[path = "../../shared-run/tests/common/fixture_reference.rs"]
+mod fixture_reference;
+mod common {
+    pub use super::fixture_clock::*;
+    pub use super::fixture_input::*;
+    pub use super::fixture_recording::*;
+    pub use super::fixture_reference::*;
+}
+
 use baseline_mm::*;
 use common::{TradingTimes, core, meta, pm, record};
 use contracts::*;

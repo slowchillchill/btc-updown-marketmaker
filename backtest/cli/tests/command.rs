@@ -1,6 +1,12 @@
-#[allow(dead_code)]
-#[path = "../../tests/common/mod.rs"]
-mod common;
+#[path = "../../tests/common/default.rs"]
+mod fixture_default;
+#[path = "../../tests/common/fixture_material.rs"]
+mod fixture_material;
+mod common {
+    pub(crate) use super::fixture_default::*;
+    pub(crate) use super::fixture_material::*;
+}
+
 use baseline_mm::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};

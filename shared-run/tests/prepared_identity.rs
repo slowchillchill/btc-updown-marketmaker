@@ -1,4 +1,35 @@
-mod common;
+#[path = "common/fixture_clock.rs"]
+mod fixture_clock;
+#[path = "common/fixture_execution.rs"]
+mod fixture_execution;
+#[path = "common/fixture_execution_v4.rs"]
+mod fixture_execution_v4;
+#[path = "support/historical.rs"]
+mod fixture_historical;
+#[path = "common/fixture_input.rs"]
+mod fixture_input;
+#[path = "common/fixture_pair.rs"]
+mod fixture_pair;
+#[path = "common/fixture_policy.rs"]
+mod fixture_policy;
+#[path = "common/fixture_recording.rs"]
+mod fixture_recording;
+#[path = "common/fixture_reference.rs"]
+mod fixture_reference;
+#[path = "common/fixture_terminal.rs"]
+mod fixture_terminal;
+#[path = "common/fixture_trading.rs"]
+mod fixture_trading;
+mod common {
+    pub use super::fixture_execution_v4::*;
+    pub use super::fixture_historical::*;
+    pub use super::fixture_input::*;
+    pub use super::fixture_pair::*;
+    pub use super::fixture_policy::*;
+    pub use super::fixture_recording::*;
+    pub use super::fixture_trading::*;
+}
+
 use common::*;
 use contracts::*;
 use ledger::*;

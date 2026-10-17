@@ -1501,7 +1501,7 @@ async fn continuous_late_rebates_keep_due_but_use_actual_processing_time_and_rea
         let mut due_times = Vec::new();
         for item in &feedback {
             if let SimV2SourceRecordReferenceV1::SettlementLifecycle {
-                private_feedback_sequence,
+                private_feedback_sequence: _,
                 platform_event_at_utc_ms,
                 feedback_received_at_utc_ms,
             } = item.record().source_reference().record

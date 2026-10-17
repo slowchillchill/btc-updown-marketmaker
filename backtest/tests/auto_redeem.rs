@@ -1,6 +1,35 @@
 // 复用现有正式 DPT/SIM 夹具；没有请求式结算脚本或第二份账户归约。
-#[path = "../../shared-run/tests/common/mod.rs"]
-mod common;
+#[path = "../../shared-run/tests/common/fixture_clock.rs"]
+mod fixture_clock;
+#[path = "../../shared-run/tests/common/fixture_execution.rs"]
+mod fixture_execution;
+#[path = "../../shared-run/tests/common/fixture_execution_v3.rs"]
+mod fixture_execution_v3;
+#[path = "../../shared-run/tests/common/fixture_execution_v4.rs"]
+mod fixture_execution_v4;
+#[path = "../../shared-run/tests/common/fixture_input.rs"]
+mod fixture_input;
+#[path = "../../shared-run/tests/common/fixture_policy.rs"]
+mod fixture_policy;
+#[path = "../../shared-run/tests/common/fixture_recording.rs"]
+mod fixture_recording;
+#[path = "../../shared-run/tests/common/fixture_reference.rs"]
+mod fixture_reference;
+#[path = "../../shared-run/tests/common/fixture_terminal.rs"]
+mod fixture_terminal;
+#[path = "../../shared-run/tests/common/fixture_trading.rs"]
+mod fixture_trading;
+mod common {
+    pub use super::fixture_clock::*;
+    pub use super::fixture_execution_v3::*;
+    pub use super::fixture_execution_v4::*;
+    pub use super::fixture_input::*;
+    pub use super::fixture_policy::*;
+    pub use super::fixture_recording::*;
+    pub use super::fixture_reference::*;
+    pub use super::fixture_trading::*;
+}
+
 use common::*;
 use contracts::{economics::*, *};
 use ledger::*;
@@ -722,7 +751,7 @@ async fn v4_auto_waits_for_real_resolution_and_restores_original_pending_without
     std::fs::remove_dir_all(&temp).unwrap();
 }
 
-#[path = "common/mod.rs"]
+#[path = "common/terminal.rs"]
 mod historical_common;
 
 #[derive(Default)]

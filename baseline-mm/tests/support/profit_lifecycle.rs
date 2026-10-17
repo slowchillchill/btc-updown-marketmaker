@@ -1,7 +1,24 @@
 use super::*;
-#[allow(dead_code)]
-#[path = "../../../shared-run/tests/common/mod.rs"]
-mod common;
+#[path = "../../../shared-run/tests/common/fixture_clock.rs"]
+mod fixture_clock;
+#[path = "../../../shared-run/tests/common/fixture_execution.rs"]
+mod fixture_execution;
+#[path = "../../../shared-run/tests/common/fixture_input.rs"]
+mod fixture_input;
+#[path = "../../../shared-run/tests/common/fixture_policy.rs"]
+mod fixture_policy;
+#[path = "../../../shared-run/tests/common/fixture_recording.rs"]
+mod fixture_recording;
+#[path = "repair_fixture.rs"]
+mod fixture_repair;
+#[path = "../../../shared-run/tests/common/fixture_terminal.rs"]
+mod fixture_terminal;
+mod common {
+    pub use super::fixture_input::*;
+    pub use super::fixture_policy::*;
+    pub use super::fixture_repair::*;
+}
+
 use common::*;
 use sim_system::{execution::*, public_consumption::*};
 

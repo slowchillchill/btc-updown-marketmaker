@@ -533,9 +533,21 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../shared-run/tests/common/mod.rs"]
-mod common;
+#[path = "../../shared-run/tests/common/fixture_input.rs"]
+mod fixture_input;
+#[cfg(test)]
+#[path = "../../shared-run/tests/common/fixture_recording.rs"]
+mod fixture_recording;
+#[cfg(test)]
+#[path = "../../shared-run/tests/common/fixture_reference.rs"]
+mod fixture_reference;
+#[cfg(test)]
+mod common {
+    pub use super::fixture_input::*;
+    pub use super::fixture_recording::*;
+    pub use super::fixture_reference::*;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
