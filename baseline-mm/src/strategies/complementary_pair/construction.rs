@@ -2,10 +2,10 @@ use super::*;
 
 impl ComplementaryPairV1 {
     pub fn new(
-        config: ComplementaryPairConfigV1,
+        config: ComplementaryPairConfigV2,
         rules: Arc<SealedProcessRuleSnapshotV3>,
         request_namespace: String,
-        continuity: StrategyContinuityV1,
+        continuity: StrategyContinuityV2,
     ) -> Result<Self, StrategyErrorV1> {
         // 类型/算法的定义域检查，不把研究候选数值升级为额外交易资格。
         if request_namespace.is_empty() || request_namespace.trim() != request_namespace {
@@ -27,8 +27,6 @@ impl ComplementaryPairV1 {
             config.repair.base_loss_allowance_per_share,
             config.repair.time_loss_allowance_per_share,
             config.repair.inventory_loss_allowance_per_share,
-            config.repair.maximum_overfill_shares,
-            config.repair.maximum_overfill_pusd,
             config.repair.wait_price_improvement_per_share,
             config.repair.residual_risk_weight,
             config.risk.per_market_orphan_limit_pusd,
@@ -70,6 +68,12 @@ impl ComplementaryPairV1 {
                 "统计系数不在其数学定义域".into(),
             ));
         }
+        if continuity.rule_version != RULE_VERSION {
+            return Err(StrategyErrorV1::Configuration(format!(
+                "接续规则{}不能用于{RULE_VERSION}；旧材料须独立迁移",
+                continuity.rule_version
+            )));
+        }
         rational(&continuity.confirmed_high_water_pusd)?;
         Ok(Self {
             config,
@@ -81,26 +85,26 @@ impl ComplementaryPairV1 {
             signals: BTreeMap::new(),
         })
     }
-    pub fn checkpoint(&self) -> ComplementaryPairCheckpointV1 {
-        ComplementaryPairCheckpointV1 {
+    pub fn checkpoint(&self) -> ComplementaryPairCheckpointV2 {
+        ComplementaryPairCheckpointV2 {
             namespace: self.namespace.clone(),
             continuity: self.continuity(),
             signals: self.signals.clone(),
         }
     }
     pub fn restore(
-        config: ComplementaryPairConfigV1,
+        config: ComplementaryPairConfigV2,
         rules: Arc<SealedProcessRuleSnapshotV3>,
-        saved: ComplementaryPairCheckpointV1,
+        saved: ComplementaryPairCheckpointV2,
     ) -> Result<Self, StrategyErrorV1> {
         let mut strategy = Self::new(config, rules, saved.namespace, saved.continuity)?;
         strategy.signals = saved.signals;
         Ok(strategy)
     }
-    pub fn config(&self) -> &ComplementaryPairConfigV1 {
+    pub fn config(&self) -> &ComplementaryPairConfigV2 {
         &self.config
     }
-    pub fn continuity(&self) -> StrategyContinuityV1 {
+    pub fn continuity(&self) -> StrategyContinuityV2 {
         let mut state = self.continuity.clone();
         state.next_request_sequence = self.next_request;
         state.unresolved_profit_allocations = self.profit_pending.clone();

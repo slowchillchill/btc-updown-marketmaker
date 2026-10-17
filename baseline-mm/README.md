@@ -10,10 +10,10 @@
 
 公共行情、模拟时序与撮合、订单提交、NOE、Ledger、NAV 和结算由原模块维护。策略只派生其决策与诊断，不复制现金、持仓或订单账本。公共缺口由所属模块补齐，公共回测负责历史装配与通用结果，模型开发竞赛和独立留出评价仍由其所属模块负责。
 
-入口为 `baseline_mm::ComplementaryPairV1`，业务身份 `complementary_pair`、规则版本 `candidate_v1`。宿主提供完整 `ComplementaryPairConfigV1`、封存公共规则、独立请求命名空间与 `StrategyContinuityV1`；新账户用 `new_account()`，原账户接续用原高水位／终止相关窗口／请求序号／未决利润占用，不能当新账户重置。配置解析 `parse_toml` 只读完整策略文件，不实现另一层 CLI 合并；当前没有正式风险默认值。
+入口为 `baseline_mm::ComplementaryPairV1`，业务身份 `complementary_pair`、规则版本 `candidate_v2`。宿主提供完整 `ComplementaryPairConfigV2`、封存公共规则、独立请求命名空间与 `StrategyContinuityV2`；新账户用 `new_account()`，原账户接续用原高水位／终止相关窗口／请求序号／未决利润占用，不能当新账户重置。配置解析 `parse_toml` 只读完整策略文件，不实现另一层 CLI 合并；当前没有正式风险默认值。
 
 ```rust,ignore
-let config = ComplementaryPairConfigV1::parse_toml(&configuration_text)?;
+let config = ComplementaryPairConfigV2::parse_toml(&configuration_text)?;
 let mut strategy = ComplementaryPairV1::new(config, sealed_rules, namespace, continuity)?;
 let input = shared.strategy_input(&mut driver)?.expect("原公共可决策组");
 let calculation = input.calculate(&mut strategy, measured_start)?;
@@ -41,9 +41,9 @@ let dispatch = shared.dispatch_strategy_qualified(&mut decision, &mut strategy, 
 
 Chainlink 与两个资产盘口是新增配对的依赖。Binance 只按实际非零算法系数启用；成交压力使用深度分母，所以 `binance_trade_pressure_weight_usd != 0` 时成交与深度都参与，即使独立深度系数为零。被禁用的修正不读取其来源。固定市场锚点不是持续行情流，不使用这些静默期限。
 
-辅助来源退化时停止新增风险并撤掉不再合格的风险挂单；真实缺口仍可按原成本、已有承诺和资金边界独立修复。概率不可用时，独立比较依赖持有腿的公共标记及必要盘口；有效空买盘 `Some(None)` 按公共零标记语义处理，标记不可用不会伪装为零。Maker/FAK 的原含费成本与过补边界保持，不能以当前盘口收紧 FAK 的全域数量界。
+辅助来源退化时停止新增风险并撤掉不再合格的风险挂单；真实缺口仍可按原成本、已有承诺和资金边界独立修复。概率不可用时，独立比较依赖持有腿的公共标记及必要盘口；有效空买盘 `Some(None)` 按公共零标记语义处理，标记不可用不会伪装为零。Maker/FAK继续使用当前成本、真实承诺及配置残余风险。FAK按同截止公开卖档估计本金、数量与费用，实际成交由SIM返回，不要求全域未来量保证。
 
-`uses_source_health` 显式选择事实投影；`next_health_evaluation_at` 同时覆盖当前经营与待发动作冻结的必要流，返回下一正常或最大边界时刻，全部静默仍能唤醒重评。当前估计从 TWAP 切换到现价也不会遮蔽原待发动作的 TWAP 期限；没有待发决定时继续按当前依赖重评。计算期间、待发期间以及每项提交前均通过 `qualify_intent` 复核冻结的动作依赖。诊断保存请求关联的来源范围、独立修复持有腿及支撑价量/成本/容量的市场标量与已有承诺；不保存另一份盘口或复制账本。孤腿含费成本在决定与资格中共用原逐交易费用及未配平贡献计算；当前读取由 `shared-run` 沿同一已应用 Ledger/受信截止复用原 `FrozenTradeEconomicsV1` 映射，不在策略构造第二事实来源。正利润支持复核复用原利润池与未决占用读取。相关事实发生变化时明确失效、停下未尝试后缀并重新计算，不改冻结价格、数量或原诊断；本批已发请求不会被误当作外部新增承诺。现金准入仍由原整批预留及请求身份校验承担。
+`uses_source_health` 显式选择事实投影；`next_health_evaluation_at` 同时覆盖当前经营与待发动作冻结的必要流，返回下一正常或最大边界时刻，全部静默仍能唤醒重评。当前估计从 TWAP 切换到现价也不会遮蔽原待发动作的 TWAP 期限；没有待发决定时继续按当前依赖重评。计算期间、待发期间以及每项提交前均通过 `qualify_intent` 复核冻结的动作依赖。诊断保存请求关联的来源范围、独立修复持有腿及支撑价量/成本/容量的市场标量与已有承诺；不保存另一份盘口或复制账本。孤腿含费成本在决定与资格中共用原owner市场成本池；未闭合修复通过 `ActionBeforeReadV2::request_trade_economics` 读取同截止原成交，区分经济应用与成功配平，不开启全历史逐笔投影，也不在策略构造第二事实来源。正利润支持复核复用原利润池与未决占用读取。相关事实发生变化时明确失效、停下未尝试后缀并重新计算，不改冻结价格、数量或原诊断；本批已发请求不会被误当作外部新增承诺。现金准入仍由原整批预留及请求身份校验承担。
 
 `invalidated` 只登记实际已发前缀的利润占用，未尝试项没有占用；原结果未知、撤单竞速、反馈等待、高水位与 Exit 继续沿原合同。撤单来自策略已知的原目标；之后目标进入终态不会阻止同批其他目标的撤单。直接低层消费者需选用等价的公共资格路径并通知原实例，不能省略这些回调。
 
@@ -86,3 +86,5 @@ Chainlink 与两个资产盘口是新增配对的依赖。Binance 只按实际�
 ### 当前直接概率与跨来源研究
 
 `research/research_probability_direct.py` 按原始 Parquet 必要列准备紧凑目标采样，复用公共参考、终局及深度数量状态，再按四折和最后开发窗做75次顺序拟合、冻结评价。准确查询、公式、候选、资源与一次运行命令见[方法及配置](docs/research/complementary-pair-probability-direct.md)。三次实际十八日prepare均已失败：身份前态、TWAP跨单元SQL和公共深度拼接状态分别保留独立记录；study均未启动。[第三次失败及窄范围公共修复](docs/research/complementary-pair-probability-run-20261007-repair2.md)保存准确运行身份、目录分母、深度边界及验证。修复不恢复所有未持久化reset；正式参数与完整经营比较仍未完成。
+
+依[#318](https://github.com/slowchillchill/btc-updown-marketmaker/issues/318)，当前V2删除两个额外overfill字段；旧字段、旧接续与明确candidate_v1材料须独立迁移，旧历史材料保留。未决金额单的原时点估计随已发送或效果未知请求登记，不随更乐观盘口释放；利润只占预计新增配平亏损。此修复不提供新盈利证据，也不授权重跑旧研究。

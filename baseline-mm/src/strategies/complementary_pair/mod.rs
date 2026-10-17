@@ -31,7 +31,7 @@ use sim_system::{
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
 pub const STRATEGY_ID: &str = "complementary_pair";
-pub const RULE_VERSION: &str = "candidate_v1";
+pub const RULE_VERSION: &str = "candidate_v2";
 
 #[derive(Debug)]
 pub enum StrategyErrorV1 {
@@ -115,15 +115,23 @@ fn platform_id<C>(o: &ExecutionOrderRead<'_, C>) -> String {
     }
 }
 
+struct RemainingRepairEstimate {
+    shares: R,
+    principal: R,
+    fee: R,
+    loss: R,
+    unknown: bool,
+}
+
 /// 只保存信号、高水位、终止与未决增量占用；库存/费用/订单每轮重新读取公共事实。
 pub struct ComplementaryPairV1 {
-    config: ComplementaryPairConfigV1,
+    config: ComplementaryPairConfigV2,
     rules: Arc<SealedProcessRuleSnapshotV3>,
     namespace: String,
     next_request: u64,
-    continuity: StrategyContinuityV1,
+    continuity: StrategyContinuityV2,
     signals: BTreeMap<String, SignalMemory>,
-    profit_pending: BTreeMap<String, ProfitAllocationV1>,
+    profit_pending: BTreeMap<String, ProfitAllocationV2>,
 }
 
 #[derive(Clone)]
@@ -369,7 +377,7 @@ impl ComplementaryPairV1 {
     ) -> Result<StrategyOutputV1<ComplementaryPairDiagnosticV1>, StrategyErrorV1> {
         let (pnl, equity) = Self::profit_and_equity(input)?;
         let reads = DecisionReads::new(&input.action_before);
-        let occupied = self.reconcile_profit(input, &reads)?;
+        let occupied = self.reconcile_profit(input)?;
         let mut profit = pnl.clone().max(R::zero()).sub(&occupied).max(R::zero());
         let mut high =
             rational(&self.continuity.confirmed_high_water_pusd)?.max(r(Decimal::from(2000)));
@@ -537,7 +545,6 @@ impl ComplementaryPairV1 {
                 if repair_healthy {
                     self.repair(
                         input,
-                        &reads,
                         f,
                         now,
                         s,
@@ -607,9 +614,6 @@ impl ComplementaryPairV1 {
                 || !matches!(equity, ExecutionReadValueV1::Known(_))
                 || p.up().is_none()
                 || !trading;
-            let mut repair_remaining = missing
-                .map(|held_side| r(s.orphan[1 - held_side]))
-                .unwrap_or_else(R::zero);
             let cap = d.maximum_repair_price.as_ref().map(decimal).transpose()?;
             let targets = self.quotes(o, &p, s)?;
             let mut cancel = Vec::new();
@@ -619,11 +623,7 @@ impl ComplementaryPairV1 {
                         .get(side)
                         .is_some_and(|a| a.asset.token_id == pending.token)
                 }) && cap.is_some_and(|cap| pending.price <= cap)
-                    && !s.unknown
-                    && pending.quantity <= repair_remaining;
-                if qualified {
-                    repair_remaining = repair_remaining.sub(&pending.quantity);
-                }
+                    && !s.unknown;
                 let price_invalid = targets.is_some_and(|targets| {
                     o.assets
                         .iter()

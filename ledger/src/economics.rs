@@ -1241,6 +1241,38 @@ impl LedgerWriterV1 {
         })
     }
 }
+fn trade_economic_read<'a>(
+    state: &'a EconomicsState,
+    identity: &'a Identity,
+    trade: &'a Trade,
+) -> TradeEconomicReadV1<'a> {
+    let contribution = if !trade.success_applied {
+        ExecutionReadValueV1::NotApplicable
+    } else {
+        state
+            .markets
+            .get(&trade.fact.condition_id.0)
+            .and_then(|m| m.pool_contribution_shares.as_ref())
+            .map(|pools| {
+                pools
+                    .iter()
+                    .find_map(|pool| pool.get(identity))
+                    .cloned()
+                    .unwrap_or_else(R::zero)
+            })
+            .map(|q| ExecutionReadValueV1::Known(q.public()))
+            .unwrap_or(ExecutionReadValueV1::Unavailable)
+    };
+    TradeEconomicReadV1 {
+        trade_identity: identity,
+        fact: &trade.fact,
+        economic_applied: trade.economic_applied,
+        success_applied: trade.success_applied,
+        actual_net_fee_pusd: exact(trade.net_fee),
+        unpaired_contribution_shares: contribution,
+    }
+}
+
 impl LedgerEconomicReadV2<'_> {
     /// 原经济已应用但尚未归还的本金；不含预留，不生成现金或费用分录。
     pub fn committed_principal_pusd(&self) -> ExactRationalV1 {
@@ -1321,33 +1353,10 @@ impl LedgerEconomicReadV2<'_> {
         })
     }
     pub fn trades(&self) -> impl Iterator<Item = TradeEconomicReadV1<'_>> {
-        self.state.trades.iter().map(|(identity, trade)| {
-            let contribution = if !trade.success_applied {
-                ExecutionReadValueV1::NotApplicable
-            } else {
-                self.state
-                    .markets
-                    .get(&trade.fact.condition_id.0)
-                    .and_then(|m| m.pool_contribution_shares.as_ref())
-                    .map(|pools| {
-                        pools
-                            .iter()
-                            .find_map(|pool| pool.get(identity))
-                            .cloned()
-                            .unwrap_or_else(R::zero)
-                    })
-                    .map(|q| ExecutionReadValueV1::Known(q.public()))
-                    .unwrap_or(ExecutionReadValueV1::Unavailable)
-            };
-            TradeEconomicReadV1 {
-                trade_identity: identity,
-                fact: &trade.fact,
-                economic_applied: trade.economic_applied,
-                success_applied: trade.success_applied,
-                actual_net_fee_pusd: exact(trade.net_fee),
-                unpaired_contribution_shares: contribution,
-            }
-        })
+        self.state
+            .trades
+            .iter()
+            .map(|(identity, trade)| trade_economic_read(self.state, identity, trade))
     }
     pub fn successful_trades(&self) -> impl Iterator<Item = SuccessfulTradeReadV1<'_>> {
         self.state

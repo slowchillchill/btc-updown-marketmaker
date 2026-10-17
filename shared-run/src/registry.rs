@@ -558,6 +558,12 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             .iter()
             .map(|(id, state)| self.order_from(id, state))
     }
+    pub(crate) fn order_trade_identities(&self, id: &Identity) -> impl Iterator<Item = &Identity> {
+        self.orders
+            .get(id)
+            .into_iter()
+            .flat_map(|o| o.trades.keys())
+    }
     pub fn order_trades(&self, id: &Identity) -> impl Iterator<Item = &Ref<R>> {
         self.orders
             .get(id)

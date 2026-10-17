@@ -32,6 +32,7 @@ struct Probe {
     first_economics: Option<AccountEconomicsReadV3>,
     dispatched: usize,
     failed_callback_sent: Option<usize>,
+    first_next_evaluation: Option<i64>,
     calculation_budget: Option<usize>,
 }
 // 小夹具读取所选真实布局，保留帧/接纳组边界；不把省略材料伪装为旧完整日志。
@@ -200,6 +201,7 @@ impl StrategyV1 for Probe {
                     .all(|a| a.asks.value.is_some())
             );
             self.bought_first = true;
+            next_evaluation_at_utc_ms = self.first_next_evaluation;
             intents.push(buy(
                 self.rules.as_ref().unwrap(),
                 FIRST,
@@ -642,12 +644,13 @@ async fn exit_returns_without_drain_result_write_or_future_public_observation() 
 }
 #[tokio::test(flavor = "current_thread")]
 async fn strategy_and_batch_failures_preserve_original_errors_and_stop_without_retry() {
-    for bad_batch in [false, true] {
+    for (bad_batch, source_health) in [(false, false), (true, false), (true, true)] {
         let temp = tempfile::tempdir().unwrap();
         let (config, rules) = setup(temp.path());
         let mut probe = Probe {
             fail: !bad_batch,
             bad_batch,
+            source_health,
             ..Default::default()
         };
         let failure = run_historical_v1(&config, rules, &mut probe)
@@ -2417,45 +2420,45 @@ fn later_candidate_original_failure_survives_earlier_candidate_collateral_stop()
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn zero_send_cash_refusal_keeps_original_batch_and_unsent_timing() {
-    let temp = tempfile::tempdir().unwrap();
-    let (mut config, rules) = setup(temp.path());
-    config.session.initial_account_state.available_pusd = ExactDecimal("0".into());
-    let mut probe = Probe {
-        rules: Some(rules.clone()),
-        ..Default::default()
-    };
-    let failure = run_historical_v1(&config, rules, &mut probe)
-        .await
-        .unwrap_err();
-    let HistoricalFailureCauseV1::Dispatch(error) = &failure.cause else {
-        panic!("{:?}", failure.cause)
-    };
-    assert!(error.sent.is_empty());
-    assert_eq!(error.attempted_intent_index, None);
-    assert_eq!(error.failed_request_effect, None);
-    let report = failure.report.unwrap();
-    let batch = report.failed_batch.unwrap();
-    assert_eq!(batch.intents.len(), 2);
-    assert_eq!(batch.intents[0].context.global_request_id, "first-buy");
-    assert_eq!(
-        batch.calculation_cash.unwrap().actual_available_pusd,
-        ExactDecimal("0".into())
-    );
-    assert_eq!(
-        batch.admission_cash.unwrap().actual_available_pusd,
-        ExactDecimal("0".into())
-    );
-    assert!(batch.dispatch_effects.unwrap().sent.is_empty());
-    assert_eq!(
-        report
-            .pending_calculation_timing
-            .unwrap()
-            .actual_sent_at_utc_ms,
-        None
-    );
-    assert!(!report.recording_drained);
-    assert!(!config.result_path.exists());
+async fn zero_send_cash_refusal_keeps_unsent_timing_and_continues_on_later_observations() {
+    for source_health in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, rules) = setup(temp.path());
+        config.session.initial_account_state.available_pusd = ExactDecimal("0".into());
+        // 首组拒绝后先到未来重评，不让新公开输入形成另一决定替换旧调度。
+        config.timing.calculation_duration_ms = DelayScheduleV1::Fixed(0);
+        config.timing.dispatch_delay_ms = DelayScheduleV1::Fixed(0);
+        let mut probe = Probe {
+            rules: Some(rules.clone()),
+            source_health,
+            // 本探针只验证第一批资金拒绝，不假定第二市场已存在成功成交。
+            bought_second: true,
+            first_next_evaluation: Some(BASE + 1250),
+            calculation_budget: Some(40),
+            ..Default::default()
+        };
+        let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
+        assert_eq!(report.end_reason, HistoricalEndReasonV1::RangeEnd);
+        assert_eq!(report.local_funds_rejected_batches, 1);
+        assert_eq!(
+            probe.failed_callback_sent,
+            Some(0),
+            "原dispatched通知保留零发送结果"
+        );
+        assert!(probe.observed.len() > 2);
+        assert!(
+            probe.observed.iter().any(|(at, ..)| *at == BASE + 1250),
+            "无新公开行情时仍执行原严格未来重评，不重发已拒绝意图"
+        );
+        assert!(report.failed_batch.is_none());
+        assert_eq!(report.unclosed_commitments, 0);
+        assert!(report.recording_drained);
+        assert!(
+            report
+                .last_dispatched_calculation_timing
+                .is_some_and(|t| t.actual_sent_at_utc_ms.is_none())
+        );
+    }
 }
 
 #[test]

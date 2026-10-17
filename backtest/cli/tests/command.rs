@@ -6,11 +6,22 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{path::Path, process::Command};
 
+fn current_setup(
+    root: &Path,
+) -> (
+    backtest::HistoricalRunConfigV1,
+    std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
+) {
+    let (mut config, rules) = common::setup(root);
+    config.strategy.strategy_id = STRATEGY_ID.into();
+    config.strategy.strategy_rule_version = RULE_VERSION.into();
+    (config, rules)
+}
 #[test]
 fn actual_baseline_command_applies_explicit_values_and_false_then_records_effective_config() {
     let temp = tempfile::tempdir().unwrap();
-    let (config, _) = common::setup(temp.path());
-    let strategy = ComplementaryPairConfigV1::parse_toml(include_str!(
+    let (config, _) = current_setup(temp.path());
+    let strategy = ComplementaryPairConfigV2::parse_toml(include_str!(
         "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering.toml"
     ))
     .unwrap();
@@ -68,7 +79,7 @@ fn actual_baseline_command_applies_explicit_values_and_false_then_records_effect
         serde_json::from_slice(&std::fs::read(&config.metadata_path).unwrap()).unwrap();
     let descriptor = &metadata["config"]["strategy"];
     assert_eq!(descriptor["strategy_id"], "complementary_pair");
-    assert_eq!(descriptor["strategy_rule_version"], "candidate_v1");
+    assert_eq!(descriptor["strategy_rule_version"], "candidate_v2");
     assert_eq!(
         descriptor["effective_parameters"]["repair"]["enable_active_repair"],
         false
@@ -99,7 +110,7 @@ fn actual_baseline_command_applies_explicit_values_and_false_then_records_effect
 #[test]
 fn prepare_mode_publishes_without_strategy_or_account_and_reuse_mode_uses_only_the_descriptor() {
     let temp = tempfile::tempdir().unwrap();
-    let (config, _) = common::setup(temp.path());
+    let (config, _) = current_setup(temp.path());
     let prepare_path = temp.path().join("preparation.json");
     std::fs::write(
         &prepare_path,
@@ -136,7 +147,7 @@ fn prepare_mode_publishes_without_strategy_or_account_and_reuse_mode_uses_only_t
         .unwrap();
     let rule_path =
         workspace.join("sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
-    let strategy = ComplementaryPairConfigV1::parse_toml(include_str!(
+    let strategy = ComplementaryPairConfigV2::parse_toml(include_str!(
         "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering.toml"
     ))
     .unwrap();
@@ -204,8 +215,8 @@ fn prepare_mode_publishes_without_strategy_or_account_and_reuse_mode_uses_only_t
 #[test]
 fn day_command_uses_full_candidate_configuration_and_has_no_resume_outputs() {
     let temp = tempfile::tempdir().unwrap();
-    let (config, _) = common::setup(temp.path());
-    let strategy = ComplementaryPairConfigV1::parse_toml(include_str!(
+    let (config, _) = current_setup(temp.path());
+    let strategy = ComplementaryPairConfigV2::parse_toml(include_str!(
         "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering.toml"
     ))
     .unwrap();
@@ -278,8 +289,8 @@ fn day_command_uses_full_candidate_configuration_and_has_no_resume_outputs() {
 #[test]
 fn day_session_failure_outputs_one_partial_json_and_nonzero_status() {
     let temp = tempfile::tempdir().unwrap();
-    let (config, _) = common::setup(temp.path());
-    let strategy = ComplementaryPairConfigV1::parse_toml(include_str!(
+    let (config, _) = current_setup(temp.path());
+    let strategy = ComplementaryPairConfigV2::parse_toml(include_str!(
         "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering.toml"
     ))
     .unwrap();
@@ -363,9 +374,9 @@ fn research_script_summarizes_missing_reports_and_preserves_original_exit_code()
 #[test]
 fn day_result_output_failure_preserves_completed_business_json_and_nonzero_status() {
     let temp = tempfile::tempdir().unwrap();
-    let (config, _) = common::setup(temp.path());
+    let (config, _) = current_setup(temp.path());
     std::fs::create_dir(&config.result_path).unwrap();
-    let strategy = ComplementaryPairConfigV1::parse_toml(include_str!(
+    let strategy = ComplementaryPairConfigV2::parse_toml(include_str!(
         "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering.toml"
     ))
     .unwrap();
@@ -401,4 +412,46 @@ fn day_result_output_failure_preserves_completed_business_json_and_nonzero_statu
     assert!(candidate["report"]["account_economics_memory"].is_object());
     assert!(candidate["report"]["research"]["final_snapshot"].is_object());
     assert!(result["error"].as_str().unwrap().contains("IsADirectory"));
+}
+
+#[test]
+fn explicit_old_rule_is_rejected_before_any_run_in_both_command_loaders() {
+    for day in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("old.json");
+        let run = json!({"strategy":{"strategy_rule_version":"candidate_v1"}});
+        let value = if day {
+            json!({"days":[{"candidates":[{"run":run}]}]})
+        } else {
+            json!({"run":run})
+        };
+        std::fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_backtest-cli"));
+        if day {
+            command.args(["--mode", "day"]);
+        }
+        let output = command
+            .args(["--config", config.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("candidate_v1") && error.contains("candidate_v2"),
+            "{error}"
+        );
+    }
+}
+#[test]
+fn removed_overfill_field_requires_explicit_migration() {
+    let mut config = serde_json::to_value(
+        ComplementaryPairConfigV2::parse_toml(include_str!(
+            "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering.toml"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    config["repair"]["maximum_overfill_shares"] = json!("5");
+    let error = serde_json::from_value::<ComplementaryPairConfigV2>(config).unwrap_err();
+    assert!(error.to_string().contains("maximum_overfill_shares"));
 }

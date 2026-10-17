@@ -6000,7 +6000,7 @@ pub(crate) fn taker_fee_pusd_v1(
     rounded_fee_decimal(total)
 }
 
-fn allocate_taker_fee_micro_units_by_key<K: Ord>(
+pub(crate) fn allocate_taker_fee_micro_units_by_key<K: Ord>(
     fills: &[(K, u128, Decimal)],
     rate: Decimal,
     exponent: u32,
@@ -6385,15 +6385,13 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn market_amount_bounds_cover_real_segment_floor_partial_and_fee_half_unit() {
-        use crate::platform_rules::tests::snapshot_v3_with_fee_for_cost_tests;
+    #[test]
+    fn market_amount_real_segment_floor_partial_and_fee_half_unit() {
         for (rate, expected_units) in [
             ("0.07", None),
             ("0.000008333", Some(0u32)),
             ("0.000008334", Some(1u32)),
         ] {
-            let rules = snapshot_v3_with_fee_for_cost_tests(rate, 1).await;
             // 真实初始深度及原计算/消费入口；没有手改段的已消耗位置。
             let mut queue =
                 AssetQueueV2::from_initial_levels(&[], &[(decimal("0.4"), 5_000_003)]).unwrap();
@@ -6413,8 +6411,6 @@ mod tests {
                         "第三次合法1pUSD金额目标只有部分流动性"
                     );
                 }
-                let bounds = rules.sim_market_buy_bounds_v1(decimal("1")).unwrap();
-                assert!(BigUint::from(plan.matched_base_units) <= bounds.maximum_base_micro);
                 let fee = taker_fee_pusd_v1(
                     &plan
                         .fills
@@ -6426,7 +6422,6 @@ mod tests {
                 )
                 .unwrap();
                 let actual_units = BigUint::from(micro_units_v1(fee).unwrap() / 10);
-                assert!(actual_units <= bounds.maximum_fee_1e5_units);
                 if ordinal == 0
                     && let Some(expected) = expected_units
                 {

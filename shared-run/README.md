@@ -51,6 +51,10 @@ Ledger 经济更新按 #107 F1b 使用 `EconomicsPatch.day_updates`：追加新�
 
 `ActionBeforeReadV2` 默认仍使用完整拥有式账户数据。`ActionAccountReadV2` 区分完整数据与同步借用表示；借用表示直接读取 Ledger 的精确数值，资金和经济事实来自相同已应用前缀。`cash_available`、`profit_and_equity`、`market_economics` 和 `market_funds` 不先构造全市场投影。`economics`、`ledger` 和 `to_owned_read` 是显式完整读取；借用期间首次请求完整数据才生成独立冻结，其后沿同一借用范围复用。
 
+`request_trade_economics`按原请求读取相关成交身份、经济应用、成功应用与实际净费。先由Ledger未闭合成交定位原订单，再合并这些订单及Registry活动订单关联的全部成交身份并去重；即使订单已终局，只要同订单仍有经济未闭合成交，其先前成功量仍可用于核对剩余场景。拥有式只冻结这些原成交，借用式按身份点读Ledger；缺必要owner事实返回`Unavailable`。当前修复消费者是每个独立请求的一张单腿买单，不由此承诺任意多订单请求的完整历史。无需打开全历史`StrategyInputV1::trade_economics`投影，公共层不依赖baseline策略。
+
+Ledger的未闭合身份集合属于原`EconomicReadIndex`派生缓存，唯一事实来源仍是原`EconomicsState.trades`。首次读取或恢复后重建身份集合，随后原trade替换事务沿同一未闭合判定增删；成功应用完成、未应用失败或补偿完成时删除，经济前驱未到或补偿未完成时保留。集合不序列化、不复制成交载荷、不自行推进状态。Registry可能已观察终局而Ledger经济前驱尚未齐备，仅用活动订单会漏掉该窗口；这个并集不新建账户或成交归约。
+
 策略可通过 `selects_relevant_markets` 显式选择 `strategy_selected_observation_input` 与当前观察入口。公共层合并已公开且尚未结束市场、Ledger 的实际资金义务和孤腿估值市场、原 Registry 的订单与承诺，以及策略提供的必要历史身份。`historical_market_requirements` 携带策略私有修复和利润责任；`calculation_market_requirements` 携带冻结动作依赖。包装器须委托这些选择方法。当前资格读取继续使用本次实际账户和报价，冻结动作参数保持原值。
 
 Ledger 原经济读取索引维护账户已确认净损益、未支付返佣和固定净值部分。已提交经济事件更新受影响贡献，返佣日期支付也更新该日市场；资金义务按原账户、预留和生命周期提交更新。索引从恢复事实重建，不依赖默认零。孤腿估值每次读取当前公开报价，可用空买盘为已知零，缺失或质量不可用仍为未知。B 与通用消费者默认完整读取路径保持；此接口不承担 B 的目标环境验收。
@@ -129,7 +133,7 @@ DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完�
 
 依据 [D-0271](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5933940873)，同批每意图全局请求 ID 独立；不同意图不能借旧冻结 ID 或已发送预留请求身份冒称正确发送。发送错误返回 `BatchExecutionErrorV1` 的原错误、真实已发送前缀、进入 Bridge 的错误项、`failed_request_effect` 和本地释放错误。进入公共函数不等于已产生平台效果：Bridge 构造失败与原注册归约明确未接纳时，返回 `NoRequestEffect`，当前项及后项本批新建占用按原 Ledger 本地释放事务解除；原注册归约已接纳而后续提交返回错误时，返回 `MayHaveRequestEffect`，当前项占用保留。效果信息在原事务接纳点产生，不增加预判校验或错误黑名单；旧单意图和原请求入口只剥离新增错误信息，复用同一实现路径。任何旧义务和已发送／未知义务继续保留，不按传入身份列表无条件释放。无自动重试、缩量、改价、NoTrade、平台原子保证或整程序终止。主动 FAK 的先撤／反馈／重算跨观察执行，不能用一批旧快照动作跳过。
 
-逐成交剩余贡献只是成本解释：原成功 BUY 进入原平均成本池，配平按该侧剩余比例扣减贡献，实际净费仍读原事实；策略若研究费用归属可据此计算，公共接口不批准或强加某种分摊。旧持久市场状态没有该可选索引时读 `Unavailable`，未成功应用读 `NotApplicable`，已全部配平读已知零；贡献不等于赎回后可售持仓。本金配平、净损益、费用返佣政策不变。SIM 全域成本界的单位、证明和限制见 [SIM 买入成本](../sim-system/buy-cost.md)。
+逐成交剩余贡献只是成本解释：原成功 BUY 进入原平均成本池，配平按该侧剩余比例扣减贡献，实际净费仍读原事实；策略若研究费用归属可据此计算，公共接口不批准或强加某种分摊。旧持久市场状态没有该可选索引时读 `Unavailable`，未成功应用读 `NotApplicable`，已全部配平读已知零；贡献不等于赎回后可售持仓。本金配平、净损益、费用返佣政策不变。LIMIT成本与公开场景估费的单位和限制见 [SIM 买入成本](../sim-system/buy-cost.md)。
 
 ## 可选来源健康复核
 
@@ -173,3 +177,7 @@ LIVE Bridge的`prepare`返回原签名正文和基础Order hash；配对两腿�
 `conservative_nav` 复用 `LedgerNecessaryReadV2` 的原账户贡献及未决市场份额，并读取消费者当前公开组的估值买价。它保持完整 `AccountEconomicsReadV3` 的 NAV 与未知语义；策略 equity 仍减去已确认未付返佣，两者不能混用。日统计调用此数值读取；完整报告和显式冻结继续走原完整接口。修复订单健康复核只取目标市场，不为该条件生成所有市场的账户报告。
 
 `shared_execution_v2` 检查点用 execution-normalization 的 `NoeCheckpointBatchPoolV1` 一次保存 registry 与 pending 引用的原批，另存批内 ordinal 和每个引用自身的可见性。它复用 NOE 有序反馈队列的原批捕获与恢复逻辑，保留发布容器引用；不按内容合并不同原批，不生成内容哈希。旧无格式字段的 SharedRun 保存仍可在读取边界导入一次；这一底层兼容不允许旧完整研究跨资金政策或源码身份续跑。
+
+### 本地整批资金拒绝
+
+`BatchExecutionErrorV1::is_local_funds_rejection()` 只接受至少一个 `InsufficientGlobalAvailableFunds` 且其余仅为 `Reserved` 或同类不足的预留结果，同时要求零发送、没有尝试发送项、没有失败请求效果及释放错误。宿主可据此正常停止本批并等待新观察；`strategy.dispatched`仍先收到原结果。混合拒绝、真实账本错误、释放失败、已发或未知效果继续沿原错误路径，不靠字符串匹配。只释放本批新建且明确未发送的预留，旧义务保持，不自动改价、缩单或重试。

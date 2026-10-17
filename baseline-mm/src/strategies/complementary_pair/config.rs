@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 /// 全部数值显式指定；没有未经校准的正式风险默认值或溢价否决开关。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ComplementaryPairConfigV1 {
+pub struct ComplementaryPairConfigV2 {
     pub health: SourceHealthConfigV1,
     pub probability: ProbabilityConfigV1,
     pub quote: QuoteConfigV1,
-    pub repair: RepairConfigV1,
+    pub repair: RepairConfigV2,
     pub risk: InventoryRiskConfigV1,
 }
 /// 毫秒阈值全部显式指定；工程示例不是正式交易默认。
@@ -59,12 +59,10 @@ pub struct QuoteConfigV1 {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RepairConfigV1 {
+pub struct RepairConfigV2 {
     pub base_loss_allowance_per_share: Decimal,
     pub time_loss_allowance_per_share: Decimal,
     pub inventory_loss_allowance_per_share: Decimal,
-    pub maximum_overfill_shares: Decimal,
-    pub maximum_overfill_pusd: Decimal,
     /// 比较等待/Maker/FAK/留孤腿的候选系数，没有独立溢价门。
     pub maker_fill_weight: f64,
     pub wait_price_improvement_per_share: Decimal,
@@ -79,7 +77,7 @@ pub struct InventoryRiskConfigV1 {
     pub per_market_orphan_limit_pusd: Decimal,
     pub account_orphan_limit_pusd: Decimal,
 }
-impl ComplementaryPairConfigV1 {
+impl ComplementaryPairConfigV2 {
     /// 只解析一份完整策略配置；CLI 与文件覆盖由上层宿主负责。
     pub fn parse_toml(text: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(text)

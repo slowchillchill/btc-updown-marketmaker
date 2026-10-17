@@ -43,7 +43,7 @@ async fn market_estimate_does_not_cap_arrival_fee_and_original_cash_recovers_onc
             }]);
         }
         let policy = serde_json::to_vec(&policy).unwrap();
-        let (mut execution, observation) = execution_with_seed_and_cash(
+        let (mut execution, observation, _) = execution_with_rules_v4(
             &temp.path().join("sim.jsonl"),
             &core,
             &policy,
@@ -77,8 +77,6 @@ async fn market_estimate_does_not_cap_arrival_fee_and_original_cash_recovers_onc
                 &ExactDecimal("0.01".into()),
             )
             .unwrap();
-        let bounds = rules.sim_market_buy_bounds_v1(Decimal::from(90)).unwrap();
-        assert_eq!(bounds.maximum_fee_1e5_units, BigUint::from(2_520_000_u32));
         // 100*.07*.9*.1=.63；到达后90/.1=900，900*.07*.1*.9=5.67。
         assert_eq!(estimate.fee_1e5_units, BigUint::from(63_000_u32));
         let context_reference = observation
@@ -94,26 +92,7 @@ async fn market_estimate_does_not_cap_arrival_fee_and_original_cash_recovers_onc
         execution
             .bind_ledger_recording_v2(&mut ledger, &ledger_root)
             .unwrap();
-        ledger
-            .apply_noe_memory_v1(&observation.opening_record().unwrap())
-            .unwrap();
-        assert!(matches!(
-            ledger
-                .try_reserve_action_v2(&[reserve("principal-only", "90")])
-                .unwrap()[0],
-            LedgerReservationOutcomeV1::Reserved { .. }
-        ));
-        ledger
-            .record_submission_started(
-                &LedgerLocalEventIdentityV1("send".into()),
-                &LedgerRequestIdentityV1("principal-only".into()),
-                &LedgerSubmissionItemIdentityV1 {
-                    global_request_id: "market".into(),
-                    batch_item_ordinal: 0,
-                },
-            )
-            .unwrap();
-        let mut shared = SharedExecutionV1::from_opening(ledger, observation)
+        let mut shared = SharedExecutionV2::from_opening(ledger, observation)
             .unwrap()
             .unwrap();
         let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
@@ -156,28 +135,31 @@ async fn market_estimate_does_not_cap_arrival_fee_and_original_cash_recovers_onc
             global_request_id: "market".into(),
             caller_correlation_id: None,
         };
+        let item = ReservedIntentV1 {
+            context,
+            intent: intent.clone(),
+            reserves: vec![IntentReserveV1 {
+                batch_item_ordinal: 0,
+                reserve: ReserveIntentV1 {
+                    request_identity: LedgerRequestIdentityV1("estimated-fee".into()),
+                    condition_id: ConditionId(CONDITION_ID.into()),
+                    requested_principal_pusd: ExactDecimal("90".into()),
+                    immediate_fee_reserve_pusd: ExactDecimal("0.63".into()),
+                },
+            }],
+        };
         let receipt = shared
-            .execute(
-                &mut driver.decision().unwrap(),
-                context.clone(),
-                Some(intent.clone()),
-            )
+            .execute_batch_reserved(&mut driver.decision().unwrap(), &[item.clone()])
             .await
-            .unwrap()
             .unwrap();
-        assert!(receipt.platform_arrived_at_utc_ms() > 22_002);
-        // 原请求重放必须保持同一登记结果，不再下第二张订单。
+        assert!(receipt[0].receipt.platform_arrived_at_utc_ms() > 22_002);
+        let replay = shared
+            .execute_batch_reserved(&mut driver.decision().unwrap(), &[item])
+            .await
+            .unwrap();
         assert_eq!(
-            shared
-                .execute(
-                    &mut driver.decision().unwrap(),
-                    context,
-                    Some(intent.clone())
-                )
-                .await
-                .unwrap()
-                .unwrap(),
-            receipt
+            replay[0].receipt, receipt[0].receipt,
+            "重读同一已发请求，不下第二张单"
         );
         let frozen_before = before.economics().clone();
         assert!(
@@ -209,15 +191,6 @@ async fn market_estimate_does_not_cap_arrival_fee_and_original_cash_recovers_onc
         );
         let read = shared.ledger().economic_read().unwrap();
         for trade in read.trades() {
-            let fee: Decimal = trade.actual_net_fee_pusd.0.parse().unwrap();
-            assert!(
-                fee * Decimal::from(100_000)
-                    <= bounds
-                        .maximum_fee_1e5_units
-                        .to_string()
-                        .parse::<Decimal>()
-                        .unwrap()
-            );
             if trade.success_applied {
                 assert!(trade.economic_applied);
                 assert!(matches!(
@@ -322,7 +295,7 @@ async fn market_estimate_does_not_cap_arrival_fee_and_original_cash_recovers_onc
         }
         // 未请求赎回，保留真实应收，仅稳定记录材料，不声明业务终止。
         driver.stop_and_drain().unwrap();
-        let noe = ::execution_normalization::DurableContextStoreV3::open(
+        let noe = ::execution_normalization::DurableContextStoreV4::open(
             temp.path().join("noe"),
             &context_reference,
         )
@@ -330,7 +303,7 @@ async fn market_estimate_does_not_cap_arrival_fee_and_original_cash_recovers_onc
         let rejected = noe.commits().iter().flat_map(|commit| &commit.records).filter(|record| matches!(record,
             ::execution_normalization::NormalizationRecord::Evidence {
                 evidence: ::execution_normalization::SourceNeutralEvidenceKind::Control {
-                    result: contracts::execution_normalization::SourceNeutralControlResult::Submission {
+                    result: contracts::execution_normalization::SourceNeutralControlResultV3::Submission {
                         outcome: contracts::execution_normalization::SourceNeutralSubmissionOutcomeV2::RejectedNoEffect,
                     },
                 }, ..

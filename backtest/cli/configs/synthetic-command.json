@@ -133,8 +133,6 @@
       "base_loss_allowance_per_share": "0.03",
       "time_loss_allowance_per_share": "0.02",
       "inventory_loss_allowance_per_share": "0.02",
-      "maximum_overfill_shares": "10",
-      "maximum_overfill_pusd": "10",
       "maker_fill_weight": 0.5,
       "wait_price_improvement_per_share": "0",
       "residual_risk_weight": "1",

@@ -228,6 +228,7 @@ pub struct HistoricalRunReportV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_batch: Option<FailedBatchContextV1>,
     pub calculation_count: usize,
+    pub local_funds_rejected_batches: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_health: Option<SourceHealthRunSummaryV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -497,6 +498,7 @@ fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         pending_calculation_timing: pending_timing,
         failed_batch: None,
         calculation_count: count,
+        local_funds_rejected_batches: 0,
         source_health: None,
         delivery_summary: None,
         day_economics: crate::day_economics::DayEconomicsStateV1::default().summary(),
@@ -766,6 +768,7 @@ where
         );
         research = Some(crate::research_summary::ResearchStateV1::new(baseline));
     }
+    let mut local_funds_rejected_batches = 0;
     let mut initialization_classifier =
         crate::preparation::InitializationDependencyClassifier::default();
     let mut failed_timing = None;
@@ -1122,6 +1125,12 @@ where
                         .send_decision_at(p.calculation.calculation.input_cutoff.clone(), at)
                         .map_err(HistoricalFailureCauseV1::Sim)?;
                     let p = pending.take().expect("发送入口前计算保持存在");
+                    // 正常停批不重发旧意图，但仍保留原冻结决定要求的严格未来重评。
+                    let future_evaluation = match &p.calculation.calculation.output {
+                        StrategyOutputV1::Continue { next_evaluation_at_utc_ms, .. } =>
+                            next_evaluation_at_utc_ms.filter(|next| *next > at),
+                        StrategyOutputV1::Exit { .. } => None,
+                    };
                     failed_timing = Some(p.record.clone());
                     failed_calculation_cash = p.calculation_cash;
                     admission_cash = if matches!(&p.calculation.calculation.output, StrategyOutputV1::Continue {intents,..} if !intents.is_empty()) {action_cash(&shared)} else {None};
@@ -1162,9 +1171,16 @@ where
                                 None
                             }
                             Err(StrategyDispatchFailureV1 {calculation,error:QualifiedBatchErrorV1::Execution(error)}) => {
-                                failed_calculation = Some(calculation);
-                                if !error.sent.is_empty() {failed_timing.as_mut().unwrap().actual_sent_at_utc_ms=Some(at);}
-                                return Err(HistoricalFailureCauseV1::Dispatch(error));
+                                if error.is_local_funds_rejection() {
+                                    local_funds_rejected_batches += 1;
+                                    evaluation_at = future_evaluation;
+                                    timing = Some(p.record.clone());
+                                    None
+                                } else {
+                                    failed_calculation = Some(calculation);
+                                    if !error.sent.is_empty() {failed_timing.as_mut().unwrap().actual_sent_at_utc_ms=Some(at);}
+                                    return Err(HistoricalFailureCauseV1::Dispatch(error));
+                                }
                             }
                             Err(StrategyDispatchFailureV1 {calculation, error:QualifiedBatchErrorV1::Qualification {
                                 error,
@@ -1181,16 +1197,22 @@ where
                             }
                         }
                     } else {
-                        Some(
-                            measure_stage!(
-                                stages,
-                                DispatchIncludingReserveBridgeSim,
-                                shared
-                                    .dispatch_strategy(&mut decision, strategy, p.calculation)
-                                    .await
-                            )
-                            .map_err(|failure| {failed_calculation=Some(failure.calculation); if !failure.error.sent.is_empty() {failed_timing.as_mut().unwrap().actual_sent_at_utc_ms=Some(at);} HistoricalFailureCauseV1::Dispatch(failure.error)})?,
-                        )
+                        match measure_stage!(stages, DispatchIncludingReserveBridgeSim,
+                            shared.dispatch_strategy(&mut decision, strategy, p.calculation).await) {
+                            Ok(dispatch) => Some(dispatch),
+                            Err(failure) if failure.error.is_local_funds_rejection() => {
+                                local_funds_rejected_batches += 1;
+                                evaluation_at = future_evaluation;
+                                timing = Some(p.record.clone());
+                                None
+                            }
+                            Err(failure) => {
+                                failed_calculation = Some(failure.calculation);
+                                if !failure.error.sent.is_empty() { failed_timing.as_mut().unwrap().actual_sent_at_utc_ms=Some(at); }
+                                return Err(HistoricalFailureCauseV1::Dispatch(failure.error));
+                            }
+                        }
+
                     };
                     failed_timing = None;
                     failed_calculation_cash = None;
@@ -1532,6 +1554,7 @@ where
                 pending.as_ref().map(|p| p.record.clone()),
                 calculation_index,
             );
+            result.local_funds_rejected_batches = local_funds_rejected_batches;
             result.delivery_summary = operating_start.map(|_| delivery_summary.clone());
             result.day_economics = day_economics.summary();
             result.research = research.as_ref().map(|summary| {
@@ -1638,6 +1661,7 @@ where
                     &day_economics,
                 )))
             });
+            failure_report.local_funds_rejected_batches = local_funds_rejected_batches;
             failure_report.source_health = health_enabled.then_some(health_summary);
             Err(HistoricalRunFailureV1 {
                 cause,

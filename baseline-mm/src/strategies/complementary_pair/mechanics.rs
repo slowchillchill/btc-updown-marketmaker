@@ -25,81 +25,218 @@ impl ComplementaryPairV1 {
             },
         ))
     }
-    pub(super) fn profit_bound(
+    /// 未使用本金沿原场景；成交按原owner生命周期读取，扣款不等于成功配平。
+    pub(super) fn remaining_estimate(
+        read: &ActionBeforeReadV2<
+            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
+            impl ActionAccountReadV2,
+        >,
+        a: &ProfitAllocationV2,
+    ) -> Result<Option<RemainingRepairEstimate>, StrategyErrorV1> {
+        use contracts::execution_normalization::SourceNeutralTradeEconomicDispositionV1 as D;
+        let original_q = rational(&a.estimated_shares)?;
+        let original_p = rational(&a.estimated_principal_pusd)?;
+        let original_f = rational(&a.estimated_fee_pusd)?;
+        let held_q = rational(&a.original_orphan_shares)?;
+        let held_unit = rational(&a.original_orphan_principal_per_share)?;
+        let loss = |q: &R, principal: &R, fees: &R, success: &R| {
+            let paired = q.clone().min(held_q.sub(success).max(R::zero()));
+            let paired_principal = if q.is_positive() {
+                principal.mul(&paired).divided_by(q)
+            } else {
+                R::zero()
+            };
+            held_unit
+                .mul(&paired)
+                .add(&paired_principal)
+                .sub(&paired)
+                .add(fees)
+                .max(R::zero())
+        };
+        let ExecutionReadValueV1::Known(trades) =
+            read.request_trade_economics(&a.global_request_id)
+        else {
+            return Ok(Some(RemainingRepairEstimate {
+                shares: original_q.clone(),
+                principal: original_p.clone(),
+                fee: original_f.clone(),
+                loss: loss(&original_q, &original_p, &original_f, &R::zero()),
+                unknown: true,
+            }));
+        };
+        let active_local = read.request_funds().any(|f| {
+            f.request_identity == &a.reserve_identity
+                && !matches!(
+                    f.reservation_state,
+                    ReservationStatusV1::Converted | ReservationStatusV1::Released
+                )
+        });
+        let commitments: Vec<_> = read
+            .commitments()
+            .filter(|c| c.origin.intent.global_request_id() == a.global_request_id)
+            .collect();
+        let mut success = R::zero();
+        let mut pending_q = R::zero();
+        let mut pending_p = R::zero();
+        let mut pending_fee = R::zero();
+        let mut pairing_q = R::zero();
+        let mut pairing_p = R::zero();
+        let mut unapplied_fee = R::zero();
+        for t in &trades {
+            let q = r(decimal(&t.fact.base_quantity_shares)?);
+            let p = r(decimal(&t.fact.quote_amount_pusd)?);
+            if t.success_applied {
+                success = success.add(&q);
+                continue;
+            }
+            let failed = matches!(
+                t.fact.economic_disposition,
+                D::FinalFailureUnapplied | D::FinalFailureCompensated
+            );
+            if failed && !t.economic_applied {
+                continue;
+            }
+            let fee = r(decimal(if t.economic_applied {
+                &t.actual_net_fee_pusd
+            } else {
+                &t.fact.immediate_taker_fee_pusd
+            })?);
+            pending_q = pending_q.add(&q);
+            pending_p = pending_p.add(&p);
+            pending_fee = pending_fee.add(&fee);
+            if !failed {
+                pairing_q = pairing_q.add(&q);
+                pairing_p = pairing_p.add(&p);
+                if !t.economic_applied {
+                    unapplied_fee = unapplied_fee.add(&fee);
+                }
+            }
+        }
+        let mut unused_ratio = R::zero();
+        let mut unknown = false;
+        if active_local {
+            let matched = trades.iter().try_fold(R::zero(), |sum, t| {
+                Ok::<_, StrategyErrorV1>(sum.add(&r(decimal(&t.fact.quote_amount_pusd)?)))
+            })?;
+            unused_ratio = original_p
+                .sub(&matched)
+                .max(R::zero())
+                .divided_by(&original_p);
+        } else {
+            for c in commitments {
+                let amount = limit_leg(c.origin.intent.intent(), c.origin.batch_item_ordinal)
+                    .is_some_and(|(_, l)| {
+                        matches!(
+                            l.order,
+                            BuyOrderIntentV1::FakMarket { .. } | BuyOrderIntentV1::FokMarket { .. }
+                        )
+                    });
+                let related: Vec<_> = trades
+                    .iter()
+                    .filter(|t| Some(t.fact.order_identity.clone()).as_ref() == c.order_identity)
+                    .collect();
+                let nonterminal = |t: &&TradeEconomicReadV1<'_>| {
+                    !matches!(
+                        t.fact.economic_disposition,
+                        D::FinalSuccess | D::FinalFailureUnapplied | D::FinalFailureCompensated
+                    )
+                };
+                let ratio = if amount {
+                    let matched_unapplied = related
+                        .iter()
+                        .copied()
+                        .filter(nonterminal)
+                        .filter(|t| !t.economic_applied)
+                        .try_fold(R::zero(), |s, t| {
+                            Ok::<_, StrategyErrorV1>(s.add(&r(decimal(&t.fact.quote_amount_pusd)?)))
+                        })?;
+                    match c
+                        .order_identity
+                        .and_then(|id| read.order_funds().find(|f| f.order_identity == id))
+                        .and_then(|f| known(&f.principal_encumbrance_pusd).cloned())
+                    {
+                        Some(p) => r(decimal(&p)?)
+                            .sub(&matched_unapplied)
+                            .max(R::zero())
+                            .divided_by(&original_p),
+                        None => {
+                            unknown = true;
+                            r(Decimal::ONE)
+                        }
+                    }
+                } else {
+                    let pending = related.iter().copied().filter(nonterminal).try_fold(
+                        R::zero(),
+                        |s, t| {
+                            Ok::<_, StrategyErrorV1>(
+                                s.add(&r(decimal(&t.fact.base_quantity_shares)?)),
+                            )
+                        },
+                    )?;
+                    match known(&c.remaining_target_shares) {
+                        Some(q) => r(decimal(q)?)
+                            .sub(&pending)
+                            .max(R::zero())
+                            .divided_by(&original_q),
+                        None => {
+                            unknown = true;
+                            r(Decimal::ONE)
+                        }
+                    }
+                };
+                unused_ratio = unused_ratio.add(&ratio);
+            }
+        }
+        let unused_ratio = unused_ratio.min(r(Decimal::ONE)).max(R::zero());
+        let unused_q = original_q.mul(&unused_ratio);
+        let unused_p = original_p.mul(&unused_ratio);
+        let unused_f = original_f.mul(&unused_ratio);
+        let shares = unused_q.add(&pending_q);
+        let principal = unused_p.add(&pending_p);
+        let fee = unused_f.add(&pending_fee);
+        if !active_local && shares.is_zero() && principal.is_zero() && fee.is_zero() {
+            return Ok(None);
+        }
+        Ok(Some(RemainingRepairEstimate {
+            shares,
+            principal,
+            fee,
+            unknown,
+            loss: loss(
+                &unused_q.add(&pairing_q),
+                &unused_p.add(&pairing_p),
+                &unused_f.add(&unapplied_fee),
+                &success,
+            ),
+        }))
+    }
+    pub(super) fn profit_occupancy(
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
             impl ActionAccountReadV2,
         >,
-        reads: &DecisionReads<'_>,
-        a: &ProfitAllocationV1,
+        a: &ProfitAllocationV2,
     ) -> Result<Option<R>, StrategyErrorV1> {
-        Self::profit_bound_with_remaining(
-            &input.action_before,
-            a,
-            reads.request_commitments.get(a.global_request_id.as_str()),
-        )
+        Self::profit_occupancy_read(&input.action_before, a)
     }
-    pub(super) fn profit_bound_read(
+    pub(super) fn profit_occupancy_read(
         read: &ActionBeforeReadV2<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl ActionAccountReadV2,
         >,
-        a: &ProfitAllocationV1,
+        a: &ProfitAllocationV2,
     ) -> Result<Option<R>, StrategyErrorV1> {
-        let mut remaining = R::zero();
-        let mut has_commitment = false;
-        let mut unknown = false;
-        for c in read
-            .commitments()
-            .filter(|c| c.origin.intent.global_request_id() == a.global_request_id)
-        {
-            has_commitment = true;
-            if a.original_shares.is_some() {
-                if let Some(q) = known(&c.remaining_target_shares) {
-                    remaining = remaining.add(&r(decimal(q)?));
-                } else {
-                    unknown = true;
-                }
-            } else {
-                unknown = true;
-            }
-        }
-        Self::profit_bound_with_remaining(read, a, has_commitment.then_some(&(remaining, unknown)))
-    }
-    fn profit_bound_with_remaining(
-        read: &ActionBeforeReadV2<
-            impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-            impl ActionAccountReadV2,
-        >,
-        a: &ProfitAllocationV1,
-        commitment: Option<&(R, bool)>,
-    ) -> Result<Option<R>, StrategyErrorV1> {
-        let has_commitment = commitment.is_some();
-        let (remaining, unknown) = commitment
-            .map(|(q, u)| (q.clone(), *u || a.original_shares.is_none()))
-            .unwrap_or_default();
-        let active_request = read.request_funds().any(|r| {
-            r.request_identity == &a.reserve_identity
-                && !matches!(
-                    r.reservation_state,
-                    ReservationStatusV1::Converted | ReservationStatusV1::Released
-                )
-        });
-        if !has_commitment && !active_request && read.pending_noe_record_count() == 0 {
+        let Some(remaining) = Self::remaining_estimate(read, a)? else {
             return Ok(None);
-        }
-        let original = rational(&a.allocated_profit_pusd)?;
-        let bound = if unknown || active_request || read.pending_noe_record_count() > 0 {
-            original.clone()
-        } else {
-            // 已应用本金配平亏损已在公共P中；只保留剩余份额的未决增量。
-            remaining
-                .mul(&rational(&a.incremental_loss_per_share)?)
-                .add(&rational(&a.fee_bound_pusd)?)
         };
-        Ok(Some(original.min(bound)))
+        // 本金配平损益到success_applied才进入P；已应用费用只留公共P一次。
+        // 原分配是利润资源上限，不是预计亏损或实际风险的上界。
+        Ok(Some(
+            rational(&a.allocated_profit_pusd)?.min(remaining.loss),
+        ))
     }
+
     pub(super) fn reconcile_profit(
         &mut self,
         input: &StrategyInputV1<
@@ -107,13 +244,12 @@ impl ComplementaryPairV1 {
             impl StrategyMarketReadV1,
             impl ActionAccountReadV2,
         >,
-        reads: &DecisionReads<'_>,
     ) -> Result<R, StrategyErrorV1> {
         let mut total = R::zero();
         let mut remove = Vec::new();
         for (id, a) in &self.profit_pending {
-            if let Some(bound) = Self::profit_bound(input, reads, a)? {
-                total = total.add(&bound);
+            if let Some(occupied) = Self::profit_occupancy(input, a)? {
+                total = total.add(&occupied);
             } else {
                 remove.push(id.clone());
             }
@@ -343,3 +479,7 @@ impl ComplementaryPairV1 {
         cost <= &r(cash) && s.investment.add(cost) <= r(Decimal::from(1000))
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/support/profit_lifecycle.rs"]
+mod tests;

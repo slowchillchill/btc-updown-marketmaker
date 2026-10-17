@@ -9,7 +9,7 @@ use data_pipeline_core::{public_input::*, public_observation_core::*, typed_raw:
 use data_pipeline_training::public_recording::*;
 use ledger::*;
 use rust_decimal::Decimal;
-use serde_json::{Value, json};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use shared_run::*;
 use sim_system::{
@@ -17,6 +17,22 @@ use sim_system::{
     scenario::*,
 };
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Instant};
+
+// 当前探针使用V2合成工程配置；历史V1候选与旧测量结果保持原身份。
+fn timing_engineering_config() -> ComplementaryPairConfigV2 {
+    ComplementaryPairConfigV2::parse_toml(include_str!(
+        "../configs/strategies/complementary_pair/synthetic-engineering.toml"
+    ))
+    .unwrap()
+}
+#[test]
+fn timing_entry_configuration_is_current_v2_engineering_material() {
+    let config = timing_engineering_config();
+    assert_eq!(RULE_VERSION, "candidate_v2");
+    let value = serde_json::to_value(config).unwrap();
+    assert!(value["repair"].get("maximum_overfill_shares").is_none());
+    assert!(value["repair"].get("maximum_overfill_pusd").is_none());
+}
 
 const BASE: i64 = 1_787_614_800_000;
 const CURRENT: usize = 865;
@@ -447,19 +463,15 @@ async fn representative_host_calculation_timing() {
     })
     .unwrap();
     let finality = Arc::new(TradeFinalityPolicyV2::decode_and_seal(&finality_bytes).unwrap());
-    let candidates_bytes = include_bytes!(
-        "../configs/strategies/complementary_pair/business-candidates-20261008.json"
-    );
-    let package: Value = serde_json::from_slice(candidates_bytes).unwrap();
-    let candidates = package["folds"][0]["candidates"].as_array().unwrap();
-    assert_eq!(candidates.len(), 7);
+    let candidates =
+        [json!({"identifier":"engineering-v2", "strategy":timing_engineering_config()})];
     let temp = tempfile::tempdir().unwrap();
     let dpt = temp.path().join("dpt");
     println!("setup: 866 markets, original rules and finality");
     let material = material(&dpt);
     let mut cells = Vec::new();
     for state in ["empty", "resting", "single_leg"] {
-        for candidate in candidates.iter().filter(|c| c["identifier"] == "center") {
+        for candidate in &candidates {
             let id = candidate["identifier"].as_str().unwrap();
             println!("setup/mature: {state}/{id}, 301 source points");
             let root = temp.path().join(format!("{state}-{id}"));
@@ -499,13 +511,13 @@ async fn representative_host_calculation_timing() {
                 )
                 .await
                 .unwrap();
-            let config: ComplementaryPairConfigV1 =
+            let config: ComplementaryPairConfigV2 =
                 serde_json::from_value(candidate["strategy"].clone()).unwrap();
             let mut strategy = ComplementaryPairV1::new(
                 config,
                 rules.clone(),
                 format!("{state}-{id}"),
-                StrategyContinuityV1::new_account(),
+                StrategyContinuityV2::new_account(),
             )
             .unwrap();
             for (n, &g) in material.history.iter().enumerate() {
@@ -781,7 +793,7 @@ async fn representative_host_calculation_timing() {
         }
     }
     assert_eq!(cells.len() * 32, 96);
-    let output = json!({"format":"issue185-host-economics-composition-diagnostic-v1","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rules_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"candidates_sha256":hash(candidates_bytes),"markets":866,"history_points":301,"history_span_ms":300000,"warmup_per_cell":1,"samples_per_cell":32,"sample_count":96,"timed_path":"separate complete assembly and pure decide; eight independent same-state public diagnostics, not additive decomposition","cells":cells});
+    let output = json!({"format":"issue185-host-economics-composition-diagnostic-v1","strategy_rule_version":RULE_VERSION,"configuration_source":"synthetic-engineering.toml","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rules_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"configuration_sha256":hash(include_bytes!("../configs/strategies/complementary_pair/synthetic-engineering.toml")),"markets":866,"history_points":301,"history_span_ms":300000,"warmup_per_cell":1,"samples_per_cell":32,"sample_count":96,"timed_path":"separate complete assembly and pure decide; eight independent same-state public diagnostics, not additive decomposition","cells":cells});
     std::fs::write(
         std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(),
         serde_json::to_vec_pretty(&output).unwrap(),
@@ -804,20 +816,7 @@ async fn representative_notrade_host_calculation_timing() {
         replay_causal_start_utc_ms: BASE,
     })
     .unwrap();
-    let package: Value = serde_json::from_slice(include_bytes!(
-        "../configs/strategies/complementary_pair/business-candidates-20261008.json"
-    ))
-    .unwrap();
-    let config: ComplementaryPairConfigV1 = serde_json::from_value(
-        package["folds"][0]["candidates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|c| c["identifier"] == "center")
-            .unwrap()["strategy"]
-            .clone(),
-    )
-    .unwrap();
+    let config = timing_engineering_config();
     let mut cells = Vec::new();
     for state in ["maintain", "missing_price_wait"] {
         let state_root = root.join(state);
@@ -865,7 +864,7 @@ async fn representative_notrade_host_calculation_timing() {
             config.clone(),
             rules.clone(),
             format!("notrade-{state}"),
-            StrategyContinuityV1::new_account(),
+            StrategyContinuityV2::new_account(),
         )
         .unwrap();
         for &group in &material.history {
@@ -1077,7 +1076,7 @@ async fn representative_notrade_host_calculation_timing() {
         cells.push(json!({"state":state,"prefix":prefix,"samples":samples,"setup_history_points":material.history.len(),"setup_extra_fresh_prefix":material.follow_up.is_some(),"warmup":1,"sample_count":32,"classification_counts":{"NoTrade":32,"Actions":0}}));
         driver.stop_and_drain().unwrap();
     }
-    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(), serde_json::to_vec_pretty(&json!({"format":"issue185-notrade-timing-v1","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"helper_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rule_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"cells":cells,"sample_count":64,"limits":"fixed real NoTrade prefixes; setup/restore/serialization/comparison outside timing; combined assembly+calculate excludes feed/qualification/send and is not online end-to-end latency"})).unwrap()).unwrap();
+    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(), serde_json::to_vec_pretty(&json!({"format":"issue185-notrade-timing-v1","strategy_rule_version":RULE_VERSION,"configuration_source":"synthetic-engineering.toml","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"helper_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rule_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"cells":cells,"sample_count":64,"limits":"fixed real NoTrade prefixes; setup/restore/serialization/comparison outside timing; combined assembly+calculate excludes feed/qualification/send and is not online end-to-end latency"})).unwrap()).unwrap();
 }
 
 /// 正常零目标撤单形成历史；保持866市场和当前两笔策略挂单，比较同版本两种表示。
@@ -1093,20 +1092,7 @@ async fn completed_cancel_history_owned_and_borrowed_strategy_inputs() {
     })
     .unwrap();
     let finality = Arc::new(TradeFinalityPolicyV2::decode_and_seal(&finality_bytes).unwrap());
-    let package: Value = serde_json::from_slice(include_bytes!(
-        "../configs/strategies/complementary_pair/business-candidates-20261008.json"
-    ))
-    .unwrap();
-    let config: ComplementaryPairConfigV1 = serde_json::from_value(
-        package["folds"][0]["candidates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|c| c["identifier"] == "center")
-            .unwrap()["strategy"]
-            .clone(),
-    )
-    .unwrap();
+    let config = timing_engineering_config();
     let temp = tempfile::tempdir().unwrap();
     let mut cells = Vec::new();
     for history in [1, 128, 512] {
@@ -1170,7 +1156,7 @@ async fn completed_cancel_history_owned_and_borrowed_strategy_inputs() {
             config.clone(),
             rules.clone(),
             "cancel-history-strategy".into(),
-            StrategyContinuityV1::new_account(),
+            StrategyContinuityV2::new_account(),
         )
         .unwrap();
         for &group in &material.history {
@@ -1334,7 +1320,7 @@ async fn completed_cancel_history_owned_and_borrowed_strategy_inputs() {
         );
         cells.push(json!({"zero_target_completed_cancels":history,"completed_cancellation_requests":totals.completed_receipted_cancellation_requests,"active_current_orders":2,"market_count":before.markets.len(),"source_points":material.history.len(),"extra_fresh_prefix":true,"warmup":1,"samples":samples,"actions_equivalence_checked":true,"NoTrade_samples":32}));
     }
-    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(),serde_json::to_vec_pretty(&json!({"format":"issue185-cancel-history-borrowed-v1","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"helper_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"cells":cells,"limits":"同候选版本owning/borrowed路径对照；owning也复用投影，不是原main实测；准备/恢复/比较在计时外，不分派计时输出，无性能门槛"})).unwrap()).unwrap();
+    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(),serde_json::to_vec_pretty(&json!({"format":"issue185-cancel-history-borrowed-v1","strategy_rule_version":RULE_VERSION,"configuration_source":"synthetic-engineering.toml","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"helper_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"cells":cells,"limits":"同候选版本owning/borrowed路径对照；owning也复用投影，不是原main实测；准备/恢复/比较在计时外，不分派计时输出，无性能门槛"})).unwrap()).unwrap();
 }
 
 /// 固定当前市场与两处真实旧义务，仅增加已结束、无义务历史。
@@ -1352,20 +1338,7 @@ async fn relevant_market_history_growth_timing() {
         replay_causal_start_utc_ms: BASE,
     })
     .unwrap();
-    let package: Value = serde_json::from_slice(include_bytes!(
-        "../configs/strategies/complementary_pair/business-candidates-20261008.json"
-    ))
-    .unwrap();
-    let config: ComplementaryPairConfigV1 = serde_json::from_value(
-        package["folds"][0]["candidates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|c| c["identifier"] == "center")
-            .unwrap()["strategy"]
-            .clone(),
-    )
-    .unwrap();
+    let config = timing_engineering_config();
     let mut cells = Vec::new();
     for completed in [0, 48, 863] {
         let cell_root = root.join(completed.to_string());
@@ -1437,7 +1410,7 @@ async fn relevant_market_history_growth_timing() {
             config.clone(),
             rules.clone(),
             "history-growth".into(),
-            StrategyContinuityV1::new_account(),
+            StrategyContinuityV2::new_account(),
         )
         .unwrap();
         for &group in &material.history {
@@ -1590,7 +1563,7 @@ async fn relevant_market_history_growth_timing() {
         cells.push(json!({"completed_without_obligation":completed,"all_markets":owned.markets.len(),"selected_markets":selected_count,"samples":samples}));
         driver.stop_and_drain().unwrap();
     }
-    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(), serde_json::to_vec_pretty(&json!({"format":"issue185-relevant-history-timing-v1","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rule_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"cells":cells,"limits":"same fixed consumed prefixes; setup, serialization, assertions, qualification and feed outside assembly/calculation timers; full owned control uses current strategy diagnostic contract; no four-hour or online-capacity claim"})).unwrap()).unwrap();
+    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(), serde_json::to_vec_pretty(&json!({"format":"issue185-relevant-history-timing-v1","strategy_rule_version":RULE_VERSION,"configuration_source":"synthetic-engineering.toml","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rule_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"cells":cells,"limits":"same fixed consumed prefixes; setup, serialization, assertions, qualification and feed outside assembly/calculation timers; full owned control uses current strategy diagnostic contract; no four-hour or online-capacity claim"})).unwrap()).unwrap();
 }
 
 struct NecessaryReadProbe {

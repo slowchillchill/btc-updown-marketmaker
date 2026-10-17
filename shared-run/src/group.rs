@@ -55,6 +55,13 @@ impl<R: Clone + std::fmt::Debug + Eq, G: Borrow<SharedExecutionRegistry<R>>, A: 
     ) {
         self.account.profit_and_equity()
     }
+    /// 同截止按原请求读取相关原owner成交；缺失事实保持Unavailable。
+    pub fn request_trade_economics(
+        &self,
+        request: &str,
+    ) -> ExecutionReadValueV1<Vec<TradeEconomicReadV1<'_>>> {
+        self.account.request_trade_economics(request)
+    }
     pub fn market_economics(&self, condition: &ConditionId) -> Option<MarketEconomicNumbersV1> {
         self.account.market(condition)
     }
@@ -323,10 +330,15 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         frames: &[PublicObservationFrameV1<'_>],
     ) -> Option<ActionBeforeRead<P::Completion, G>> {
         let economic = self.ledger.economic_read()?;
+        let request_trades = crate::necessary::freeze_request_trades(
+            &self.ledger,
+            &crate::necessary::request_trade_identities(&self.ledger, &self.registry),
+        );
         let (requests, orders) = self.read_action_funds(registry.borrow());
         Some(ActionBeforeRead {
             pending_noe_record_count: self.pending.len(),
             account: OwnedActionAccountV2 {
+                request_trades,
                 economics: AccountEconomicsReadV3::from_ledger_and_observations(
                     &economic,
                     frames.iter().map(|f| f.observation),
@@ -355,7 +367,12 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         let registry = &self.registry;
         let (requests, orders) = self.read_action_funds(registry);
         Some(ActionBeforeRead {
-            account: BorrowedActionAccountV2::new(&self.ledger, frames, driver)?,
+            account: BorrowedActionAccountV2::new(
+                &self.ledger,
+                crate::necessary::request_trade_identities(&self.ledger, registry),
+                frames,
+                driver,
+            )?,
             pending_noe_record_count: self.pending.len(),
             cutoff,
             registry,

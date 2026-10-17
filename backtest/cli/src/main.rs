@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 struct CommandConfig<R = HistoricalRunConfigV1> {
     run: R,
     rules: HistoricalProcessSnapshotRequestConfig,
-    strategy: ComplementaryPairConfigV1,
+    strategy: ComplementaryPairConfigV2,
     request_namespace: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -24,7 +24,7 @@ type CommandError = Box<dyn std::error::Error + Send + Sync>;
 #[serde(deny_unknown_fields)]
 struct DayCandidateCommand {
     run: HistoricalPreparedRunConfigV1,
-    strategy: ComplementaryPairConfigV1,
+    strategy: ComplementaryPairConfigV2,
     request_namespace: String,
 }
 #[derive(Deserialize)]
@@ -43,6 +43,17 @@ struct DaysCommand {
     #[serde(default)]
     parallel_dates: Option<usize>,
 }
+fn require_current_rule(run: &serde_json::Value) -> Result<(), CommandError> {
+    if let Some(version) = run
+        .get("strategy")
+        .and_then(|s| s.get("strategy_rule_version"))
+    {
+        if version.as_str() != Some(RULE_VERSION) {
+            return Err(format!("策略版本{version}不能由当前{RULE_VERSION}运行；请生成新版本材料，不能覆盖旧candidate_v1历史包").into());
+        }
+    }
+    Ok(())
+}
 fn load_days_command(mut value: serde_json::Value) -> Result<DaysCommand, CommandError> {
     let overrides = value
         .as_object_mut()
@@ -58,6 +69,7 @@ fn load_days_command(mut value: serde_json::Value) -> Result<DaysCommand, Comman
             .and_then(serde_json::Value::as_array_mut)
             .ok_or("日期缺少candidates")?
         {
+            require_current_rule(candidate.get("run").ok_or("候选缺少run")?)?;
             if let Some(overrides) = &overrides {
                 let strategy = candidate
                     .get_mut("strategy")
@@ -74,7 +86,7 @@ fn load_days_command(mut value: serde_json::Value) -> Result<DaysCommand, Comman
                     }
                 }
             }
-            let strategy: ComplementaryPairConfigV1 = serde_json::from_value(
+            let strategy: ComplementaryPairConfigV2 = serde_json::from_value(
                 candidate
                     .get("strategy")
                     .cloned()
@@ -177,8 +189,6 @@ const PARAMETERS: &[(&str, ParameterType)] = &[
         "repair.inventory_loss_allowance_per_share",
         ParameterType::Decimal,
     ),
-    ("repair.maximum_overfill_shares", ParameterType::Decimal),
-    ("repair.maximum_overfill_pusd", ParameterType::Decimal),
     ("repair.maker_fill_weight", ParameterType::F64),
     (
         "repair.wait_price_improvement_per_share",
@@ -242,7 +252,8 @@ fn load_config<R: serde::de::DeserializeOwned>(
     args: impl IntoIterator<Item = String>,
 ) -> Result<CommandConfig<R>, CommandError> {
     let mut value = load_value(args)?;
-    let strategy: ComplementaryPairConfigV1 =
+    require_current_rule(value.get("run").ok_or("配置缺少run")?)?;
+    let strategy: ComplementaryPairConfigV2 =
         serde_json::from_value(value.get("strategy").cloned().ok_or("配置缺少策略参数")?)?;
     let descriptor = StrategyDescriptorV1 {
         strategy_id: STRATEGY_ID.into(),
@@ -388,7 +399,7 @@ async fn main() {
             let factory=|run:&HistoricalPreparedRunConfigV1|->Result<ComplementaryPairV1,MaterialError> {
                 let strategy=serde_json::from_value(run.strategy.effective_parameters.clone())?;
                 let namespace=run.strategy_request_namespace.as_ref().ok_or("候选请求命名空间缺失")?.clone();
-                Ok(ComplementaryPairV1::new(strategy,rules.clone(),namespace,StrategyContinuityV1::new_account())?)
+                Ok(ComplementaryPairV1::new(strategy,rules.clone(),namespace,StrategyContinuityV2::new_account())?)
             };
             let options=HistoricalDayRunOptionsV1 { research_summary:research.summary, started,
                 budget_stop_after:research.budget_seconds.map(|budget| std::time::Duration::from_secs(budget-research.reserve_seconds.unwrap_or(900))) };
@@ -425,7 +436,7 @@ async fn main() {
             let mut config: CommandConfig<HistoricalPreparedRunConfigV1> = load_config(args)?;
             config.run.replay_progress_interval_seconds = interval;
             let rules = load_rules(config.rules)?;
-            let mut strategy = ComplementaryPairV1::new(config.strategy, rules.clone(), config.request_namespace, StrategyContinuityV1::new_account())?;
+            let mut strategy = ComplementaryPairV1::new(config.strategy, rules.clone(), config.request_namespace, StrategyContinuityV2::new_account())?;
             let path = description.ok_or("reuse模式必须提供--prepared描述路径")?;
             let started = std::time::Instant::now();
             let output_ok = interval != 0 && emit_stage(&serde_json::json!({"stage":"opening_prepared_run", "processed_groups":null, "elapsed_seconds":started.elapsed().as_secs_f64(), "total":null, "eta":null}));
@@ -435,7 +446,7 @@ async fn main() {
         }
         let config: CommandConfig = load_config(args)?;
         let rules = load_rules(config.rules)?;
-        let mut strategy = ComplementaryPairV1::new(config.strategy, rules.clone(), config.request_namespace, StrategyContinuityV1::new_account())?;
+        let mut strategy = ComplementaryPairV1::new(config.strategy, rules.clone(), config.request_namespace, StrategyContinuityV2::new_account())?;
         print_result(run_historical_v1(&config.run, rules, &mut strategy).await)
     }.await;
     if let Err(error) = outcome as Result<(), CommandError> {
@@ -484,7 +495,7 @@ mod tests {
     use super::*;
     #[test]
     fn cli_parameters_cover_actual_strategy_fields() {
-        let config = ComplementaryPairConfigV1::parse_toml(include_str!(
+        let config = ComplementaryPairConfigV2::parse_toml(include_str!(
             "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering.toml"
         ))
         .unwrap();
