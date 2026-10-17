@@ -4,6 +4,8 @@ extern crate self as backtest;
 #[macro_use]
 mod stage_timing;
 mod day;
+mod observation_export;
+pub use observation_export::*;
 mod day_economics;
 mod day_state;
 mod day_summary;
