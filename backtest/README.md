@@ -305,3 +305,56 @@ CLI 日模式失败时仍输出一次 JSON：`status="failed"`、`error`、`fail
 当前人工策略入口按[#318](https://github.com/slowchillchill/btc-updown-marketmaker/issues/318)使用 `ComplementaryPairConfigV2` 和 `candidate_v2`。旧overfill字段和显式candidate_v1运行描述明确失败，不能由CLI静默覆盖；当前工程示例使用新结构，历史研究包／结果保持原绑定。新版本冒烟与研究仍须单独获准，修复验收使用确定性组合夹具。
 
 日入口的来源健康开、关两条分派路径均使用公共 `is_local_funds_rejection()` 分类。明确零发送的本地资金不足只停止本批，后续新公共观察仍可计算；不立即无限重试，也不伪装成来源健康失效。报告 `local_funds_rejected_batches`计数保留该差别，平台拒绝、成交与FAILED沿原SIM／NOE／Ledger和既有结果汇总表达；真实故障仍停止。
+
+## 有限目标公共观察与 BLB 研究量导出
+
+`export_observations` 是只读工程入口，供研究组取得原决策前缀下的事实。它复用原日输入、合法初始化和公共归约，不运行策略、意图提交、SIM 撮合或 Ledger。公共 `backtest` 库负责有限目标观察，`baseline-mm::blb_research` 负责纯研究量，CLI 组合两者。
+
+构建与清单检查：
+
+```bash
+cargo build -p backtest-cli --bin export_observations --locked --offline
+sha256sum target/debug/export_observations
+target/debug/export_observations --check-targets --targets target-cutoffs.jsonl
+```
+
+`--check-targets` 只解析清单并按账户和公共流统计数量，不读取行情、不创建输出。清单沿用研究组冻结的 JSONL：每行的 `condition_id` 指定市场，`cutoff.receipt.group` 使用 `PublicGroupReferenceV1`。输出保留整条原始目标，包括 `account`、`request_id`、`decision_time`、`source`、原提交及原截止信息。相同组下的多个请求分别输出。
+
+正式导出的 JSON 配置只有一个顶层字段 `preparations`，内容为各原公共流的完整 `HistoricalPreparationConfigV1` 数组。研究组应从原运行包提取完整对象，保留原 `header.input_stream_id`、清单、时间范围、初始化配置和读取参数；不用重造公共前缀。不同流身份分别归约。同一日期不同身份仍是不同流；本入口不证明它们可以共享前缀。`effective_header()` 沿现有实际历史排序版本装配，其他原流字段保持原值。
+
+```bash
+target/debug/export_observations \
+  --config observation-export.json \
+  --targets target-cutoffs.jsonl \
+  --output observations.jsonl \
+  --progress-interval-seconds 30 \
+  --stop-file export.stop
+```
+
+输出路径必须尚不存在，避免覆盖既有研究材料。输出的每条 JSONL 按 `record_type` 区分：
+
+- `stream_config`：该流的原准备配置及有效流头，便于核对输入来源和初始化。
+- `target`：`public.target` 保存原目标；`matched_group` 保存实际命中引用；`observation` 复用 `MarketBusinessObservationV1`，包含 Binance 已维护档位、质量、来源时间、接收/依赖前沿、PM 双腿盘口及 tick、正式锚点和有效参考。`blb` 是该观察的研究量。
+- `completion`：`status` 为 `complete` 或 `stopped`，包含完整落盘目标数和总目标数。这里的完成数包括已落盘的未知目标，不能作为成功命中数。写入错误时可能没有此记录；以标准错误中的最后完成数和已完整写入的目标行核对现场。
+
+导出沿原人工策略运行启用来源进展的模式。相同 Binance 快照确认也可能形成只有来源进展的公共组，必须保留该组；FULL 与原数量省略投影在这一相同模式下保持完整组引用。
+
+定位严格比较本次 `DayAppliedV1.applied.applied_prefix` 和关闭组的 `group_position`、`group_id`、`closed_at_input_position`，并核对观察本身的组与前缀。不会按毫秒合并、取邻近快照或从 Core 最新状态补值。无法命中的目标输出具体原因，如 `target_group_missing`、`input_stream_configuration_missing`、`input_stream_mismatch`、`exact_group_prefix_not_found`、`market_not_visible_at_group`、`observation_prefix_mismatch`；研究组应停止依赖这些未知目标的推断。JSON 损坏或正式组引用无法解析时直接返回行号错误。
+
+BLB 定义版本为 `blb-visible-interval-v1`：M 为 Binance 最佳正量 bid/ask 的中间价；K 只取当时可见的 `official_anchor`。K 的 USD 数值沿批准口径投影到 USDT，不作汇率转换。M>K 取 bid 的 K≤p≤M，M<K 取 ask 的 M≤p≤K。`distance` 是 |M−K|；`visible_positive_levels` 保留逐档证据，`visible_level_count` 为真实正量档数 N，`visible_quantity_btc` 为 Q，`visible_notional_usdt` 为逐档 p×q 之和 V。
+
+正式 K 缺失时主量为 `unknown`，不以 `effective_reference` 或临时参考代替。M=K 时状态为 `at_anchor`，N/Q/V 留空，避免混入一般零厚度分组。一般区间只输出可见量，`interval_coverage` 固定为 `unknown_no_coverage_evidence`：现有维护档位不提供交易所区间完整性证明。即使可见 N/Q/V 为零，也不能据此认定交易所区间零量。数值无法表示或计算溢出同样保留具体未知。
+
+进度写入标准错误，报告阶段、当前流的已处理输入数、已落盘目标数、总目标数和耗时；输入总量未经证明时明确为未知。`--progress-interval-seconds 0` 关闭周期输出，保留阶段及最终状态。每条目标先完整序列化、写入换行并执行 `sync_data()`，成功后才增加完成数。
+
+停止命令：
+
+```bash
+touch export.stop
+# 或在另一终端对准确导出进程执行：
+kill -TERM "$EXPORT_PID"
+```
+
+停止标志在输入边界检查；当前读取/归约调用会先返回。预先存在的标志会在读取行情前停止。进程只使用当前进程内的公共读取工作线程，不派生外部行情或策略作业；终止准确 PID 即终止这些线程。SIGINT/SIGTERM 硬中断可能留下末尾未完成行，该行不可使用。停止或失败均保留现场，不承诺续跑；新一轮使用新输出文件。
+
+#328 的工程验收仅执行合成小夹具和冻结清单解析。它不代表已处理两小时真实行情、已重建 797 条观察或取得策略研究结果。工程交付后，由研究组 AGENT 沿 #327 组织准确计算包及研究预算。
