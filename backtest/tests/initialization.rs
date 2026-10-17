@@ -1,4 +1,15 @@
-mod common;
+#[path = "common/default.rs"]
+mod fixture_default;
+#[path = "common/initialization.rs"]
+mod fixture_initialization;
+#[path = "common/fixture_material.rs"]
+mod fixture_material;
+mod common {
+    pub(crate) use super::fixture_default::*;
+    pub(crate) use super::fixture_initialization::*;
+    pub(crate) use super::fixture_material::*;
+}
+
 use backtest::*;
 use common::*;
 use contracts::*;

@@ -1,5 +1,11 @@
-#[path = "../../backtest/tests/common/mod.rs"]
-mod common;
+#[path = "../../backtest/tests/common/default.rs"]
+mod fixture_default;
+#[path = "../../backtest/tests/common/fixture_material.rs"]
+mod fixture_material;
+mod common {
+    pub(crate) use super::fixture_default::*;
+}
+
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},

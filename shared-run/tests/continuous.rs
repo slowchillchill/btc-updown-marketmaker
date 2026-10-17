@@ -1,4 +1,51 @@
-mod common;
+#[path = "common/fixture_clock.rs"]
+mod fixture_clock;
+#[path = "common/fixture_execution.rs"]
+mod fixture_execution;
+#[path = "common/fixture_execution_v3.rs"]
+mod fixture_execution_v3;
+#[path = "common/fixture_execution_v4.rs"]
+mod fixture_execution_v4;
+#[path = "common/fixture_input.rs"]
+mod fixture_input;
+#[path = "common/fixture_market_identity.rs"]
+mod fixture_market_identity;
+#[path = "common/fixture_multi_market.rs"]
+mod fixture_multi_market;
+#[path = "common/fixture_pair.rs"]
+mod fixture_pair;
+#[path = "common/fixture_policy.rs"]
+mod fixture_policy;
+#[path = "common/fixture_recording.rs"]
+mod fixture_recording;
+#[path = "common/fixture_reference.rs"]
+mod fixture_reference;
+#[path = "common/fixture_reference_inputs.rs"]
+mod fixture_reference_inputs;
+#[path = "support/reference_recording.rs"]
+mod fixture_reference_recording;
+#[path = "support/staggered.rs"]
+mod fixture_staggered;
+#[path = "common/fixture_terminal.rs"]
+mod fixture_terminal;
+#[path = "common/fixture_trading.rs"]
+mod fixture_trading;
+mod common {
+    pub use super::fixture_execution_v3::*;
+    pub use super::fixture_execution_v4::*;
+    pub use super::fixture_input::*;
+    pub use super::fixture_market_identity::*;
+    pub use super::fixture_multi_market::*;
+    pub use super::fixture_pair::*;
+    pub use super::fixture_policy::*;
+    pub use super::fixture_recording::*;
+    pub use super::fixture_reference_inputs::*;
+    pub use super::fixture_reference_recording::*;
+    pub use super::fixture_staggered::*;
+    pub use super::fixture_terminal::*;
+    pub use super::fixture_trading::*;
+}
+
 use common::*;
 use contracts::*;
 use ledger::*;
@@ -3492,7 +3539,7 @@ async fn real_closed_market_prefix_stabilizes_zero_activity_before_finish() {
 fn v3_real_opening_stable_ledger_reopen() {
     let temp = tempfile::tempdir().unwrap();
     let core = recorded_memory_complete(&temp.path().join("dpt"));
-    let (mut execution, observation, _) = execution_with_rules(
+    let (mut execution, observation) = execution_with_seed_and_cash(
         &temp.path().join("sim.jsonl"),
         &core,
         SUCCESS_POLICY,

@@ -10,9 +10,20 @@ use serde_json::{Value, json};
 use std::{path::Path, time::Instant};
 
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../tests/common/mod.rs"]
-mod common;
+#[path = "../../tests/common/default.rs"]
+mod fixture_default;
+#[cfg(test)]
+#[path = "../../tests/common/initialization.rs"]
+mod fixture_initialization;
+#[cfg(test)]
+#[path = "../../tests/common/fixture_material.rs"]
+mod fixture_material;
+#[cfg(test)]
+mod common {
+    pub(crate) use super::fixture_default::*;
+    pub(crate) use super::fixture_initialization::*;
+    pub(crate) use super::fixture_material::*;
+}
 
 fn save(path: &Path, v: &Value) -> Result<(), MaterialError> {
     std::fs::write(path, serde_json::to_vec_pretty(v)?)?;

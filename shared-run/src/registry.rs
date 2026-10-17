@@ -472,11 +472,6 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         self.active_order_entries()
             .map(|(id, state)| self.order_from(id, state))
     }
-    pub(crate) fn contains_unfinished_order(&self, id: &Identity) -> bool {
-        self.orders
-            .get(id)
-            .is_some_and(|state| self.unfinished(id, state))
-    }
     pub fn order(&self, id: &Identity) -> Option<ExecutionOrderRead<'_, R>> {
         let (id, state) = self.orders.get_key_value(id)?;
         Some(self.order_from(id, state))

@@ -1,4 +1,49 @@
-mod common;
+#[path = "common/fixture_average_pool.rs"]
+mod fixture_average_pool;
+#[path = "common/fixture_clock.rs"]
+mod fixture_clock;
+#[path = "common/fixture_execution.rs"]
+mod fixture_execution;
+#[path = "common/fixture_execution_v3.rs"]
+mod fixture_execution_v3;
+#[path = "common/fixture_execution_v4.rs"]
+mod fixture_execution_v4;
+#[path = "common/fixture_input.rs"]
+mod fixture_input;
+#[path = "common/fixture_market_identity.rs"]
+mod fixture_market_identity;
+#[path = "common/fixture_multi_market.rs"]
+mod fixture_multi_market;
+#[path = "common/fixture_pair.rs"]
+mod fixture_pair;
+#[path = "common/fixture_policy.rs"]
+mod fixture_policy;
+#[path = "common/fixture_recording.rs"]
+mod fixture_recording;
+#[path = "common/fixture_reference.rs"]
+mod fixture_reference;
+#[path = "common/fixture_settlement.rs"]
+mod fixture_settlement;
+#[path = "support/settlement_loser.rs"]
+mod fixture_settlement_loser;
+#[path = "common/fixture_terminal.rs"]
+mod fixture_terminal;
+#[path = "common/fixture_trading.rs"]
+mod fixture_trading;
+mod common {
+    pub use super::fixture_average_pool::*;
+    pub use super::fixture_clock::*;
+    pub use super::fixture_execution_v3::*;
+    pub use super::fixture_execution_v4::*;
+    pub use super::fixture_input::*;
+    pub use super::fixture_market_identity::*;
+    pub use super::fixture_multi_market::*;
+    pub use super::fixture_pair::*;
+    pub use super::fixture_policy::*;
+    pub use super::fixture_settlement::*;
+    pub use super::fixture_settlement_loser::*;
+}
+
 use common::*;
 use contracts::{economics::*, *};
 use ledger::*;

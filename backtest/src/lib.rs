@@ -21,7 +21,6 @@ pub use research_summary::{
 };
 mod statistics;
 #[cfg(test)]
-#[allow(dead_code)]
 #[path = "../tests/common/mod.rs"]
 mod test_common;
 mod timing;

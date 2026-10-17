@@ -1,4 +1,20 @@
-mod common;
+#[path = "common/fixture_input.rs"]
+mod fixture_input;
+#[path = "common/fixture_policy.rs"]
+mod fixture_policy;
+#[path = "common/fixture_recording.rs"]
+mod fixture_recording;
+#[path = "common/fixture_reference.rs"]
+mod fixture_reference;
+#[path = "common/fixture_reference_inputs.rs"]
+mod fixture_reference_inputs;
+mod common {
+    pub use super::fixture_input::*;
+    pub use super::fixture_policy::*;
+    pub use super::fixture_recording::*;
+    pub use super::fixture_reference_inputs::*;
+}
+
 use common::*;
 use contracts::*;
 use data_collect::handoff::{read_handoff_v2, write_handoff_v2};

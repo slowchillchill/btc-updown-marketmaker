@@ -3230,7 +3230,6 @@ async fn continuous_equal_time_finality_gtd_and_rebate_keep_original_pre_market_
     let deadline = encoded_gtd_expiration_for_lead_for_tests(
         driver.execution.actor.state.as_ref().unwrap(),
         driver.execution.actor._latency_profile.as_ref(),
-        "online-gtd",
         22_000,
         240,
     );

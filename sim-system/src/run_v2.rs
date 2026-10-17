@@ -8533,7 +8533,6 @@ mod tests {
     fn encoded_gtd_expiration_for_lead_for_tests(
         state: &BusinessReducerStateV2,
         latency_profile: &EmpiricalDelayProfile,
-        global_request_id: &str,
         decision_at_utc_ms: i64,
         lead_seconds: i64,
     ) -> i64 {
@@ -8858,16 +8857,14 @@ mod tests {
         let mutation_request_id = "public-visibility-mutation";
         let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
         let session_seed = sha('8');
-        let outbound_delay = |request_id: &str| {
-            i64::try_from(
-                crate::latency_profile::SessionDelaySamplerV2::from_hex(&session_seed.0)
-                    .unwrap()
-                    .sample(&latency_profile, DelaySampleDomainV1::RequestOutbound),
-            )
-            .expect("路径隔离测试出站时延可表示")
-        };
+        let outbound_delay = i64::try_from(
+            crate::latency_profile::SessionDelaySamplerV2::from_hex(&session_seed.0)
+                .unwrap()
+                .sample(&latency_profile, DelaySampleDomainV1::RequestOutbound),
+        )
+        .expect("路径隔离测试出站时延可表示");
         let decision_at = 10_000;
-        let processing_at = decision_at + outbound_delay(request_id);
+        let processing_at = decision_at + outbound_delay;
         let target_at = (processing_at.div_euclid(1_000)
             + i64::from(processing_at.rem_euclid(1_000) != 0)
             + 240)
@@ -9417,16 +9414,14 @@ mod tests {
         let mutation_request_id = "five-way-mutation";
         let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
         let session_seed = sha('8');
-        let outbound_delay = |request_id: &str| {
-            i64::try_from(
-                crate::latency_profile::SessionDelaySamplerV2::from_hex(&session_seed.0)
-                    .unwrap()
-                    .sample(&latency_profile, DelaySampleDomainV1::RequestOutbound),
-            )
-            .expect("同刻测试出站时延可表示")
-        };
+        let outbound_delay = i64::try_from(
+            crate::latency_profile::SessionDelaySamplerV2::from_hex(&session_seed.0)
+                .unwrap()
+                .sample(&latency_profile, DelaySampleDomainV1::RequestOutbound),
+        )
+        .expect("同刻测试出站时延可表示");
         let gtd_decision_at = 10_000;
-        let gtd_processing_at = gtd_decision_at + outbound_delay(gtd_request_id);
+        let gtd_processing_at = gtd_decision_at + outbound_delay;
         let target_at = (gtd_processing_at.div_euclid(1_000)
             + i64::from(gtd_processing_at.rem_euclid(1_000) != 0)
             + 240)
@@ -12470,7 +12465,6 @@ mod tests {
         let encoded_equal_expiration = encoded_gtd_expiration_for_lead_for_tests(
             &state,
             actor._latency_profile.as_ref(),
-            equal_request_id,
             equal_cutoff_at,
             240,
         );
@@ -12603,7 +12597,6 @@ mod tests {
         let too_soon_expiration = encoded_gtd_expiration_for_lead_for_tests(
             &state,
             actor._latency_profile.as_ref(),
-            too_soon_request_id,
             too_soon_cutoff_at,
             239,
         );
@@ -12658,7 +12651,6 @@ mod tests {
         let post_only_expiration = encoded_gtd_expiration_for_lead_for_tests(
             &state,
             actor._latency_profile.as_ref(),
-            post_only_request_id,
             post_only_cutoff_at,
             239,
         );
