@@ -269,6 +269,22 @@ fn run_day_trace_with_research(
     root: &Path,
     research: bool,
 ) -> (serde_json::Value, TraceSummary) {
+    let (report, trace) = run_day_trace_evidence(config, rules, c, root, research);
+    assert!(
+        trace.pure_decide.count > 0
+            && trace.public_qualification.count > 0
+            && trace.full_qualification.count > 0
+            && trace.next_health_evaluation.count > 0
+    );
+    (report, trace)
+}
+fn run_day_trace_evidence(
+    config: &HistoricalRunConfigV1,
+    rules: Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
+    c: ComplementaryPairConfigV2,
+    root: &Path,
+    research: bool,
+) -> (serde_json::Value, TraceSummary) {
     let mut candidate = HistoricalPreparedRunConfigV1::from(config);
     candidate.strategy.effective_parameters = serde_json::to_value(&c).unwrap();
     candidate.strategy_request_namespace = Some("health-history".into());
@@ -331,12 +347,7 @@ fn run_day_trace_with_research(
     assert!(results[0].public_applied_inputs > 0);
     let report = results[0].candidates[0].report.clone();
     let trace = sink.lock().unwrap().take().unwrap();
-    assert!(
-        trace.pure_decide.count > 0
-            && trace.public_qualification.count > 0
-            && trace.full_qualification.count > 0
-            && trace.next_health_evaluation.count > 0
-    );
+
     (report, trace)
 }
 fn strategy_config() -> ComplementaryPairConfigV2 {
@@ -1490,8 +1501,10 @@ impl Trace {
 fn streaming_observation_is_economically_inert_and_decisions_keep_frozen_group() {
     let off = tempfile::tempdir().unwrap();
     let on = tempfile::tempdir().unwrap();
-    let (off_config, off_rules) = same_millisecond_fixture(off.path());
-    let (on_config, on_rules) = same_millisecond_fixture(on.path());
+    let (mut off_config, off_rules) = same_millisecond_fixture(off.path());
+    let (mut on_config, on_rules) = same_millisecond_fixture(on.path());
+    off_config.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(15);
+    on_config.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(15);
     let (off_report, off_trace) =
         run_day_trace_with_research(&off_config, off_rules, strategy_config(), off.path(), false);
     let (on_report, on_trace) =
@@ -1519,20 +1532,64 @@ fn streaming_observation_is_economically_inert_and_decisions_keep_frozen_group()
         calculations.len(),
         on_report["calculation_count"].as_u64().unwrap() as usize
     );
+    let public =
+        std::fs::read_to_string(on.path().join("streaming-evidence/public.jsonl")).unwrap();
+    let public_rows = public
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .collect::<Vec<_>>();
     let mut with_public = 0;
+    let mut without_intents = 0;
+    let mut compact_calculation_bytes = 0;
     for row in calculations {
         let frozen = &row["input_cutoff"]["receipt"]["group"];
         if let Some(markets) = row["public_state"].as_object() {
-            for evidence in markets.values() {
+            for (condition, evidence) in markets {
                 assert_eq!(
                     &evidence["group"], frozen,
                     "不得把下一组公共状态写回冻结计算"
                 );
+                assert!(evidence.get("pm").is_none());
+                assert!(evidence.get("source_progress").is_none());
+                assert!(evidence["blb"].get("visible_positive_levels").is_none());
+                for (field, kind, by_market) in [
+                    ("pm_group", "pm_state", true),
+                    ("blb_group", "blb_state", true),
+                    ("source_progress_group", "source_progress", false),
+                ] {
+                    let linked = &evidence[field];
+                    assert_eq!(linked["input_stream_id"], frozen["input_stream_id"]);
+                    assert!(
+                        linked["group_position"].as_u64().unwrap()
+                            <= frozen["group_position"].as_u64().unwrap()
+                    );
+                    assert!(public_rows.iter().any(|r| r["record_type"] == kind
+                        && &r["group"] == linked
+                        && (!by_market || r["condition_id"] == condition.as_str())));
+                }
+                for link in evidence["pm_side_sources"].as_array().unwrap() {
+                    assert!(
+                        public_rows
+                            .iter()
+                            .any(|r| r["record_type"] == "pm_side_sources"
+                                && r["group"] == link["group"]
+                                && r["token_id"] == link["token_id"]
+                                && r["side"] == link["side"])
+                    );
+                }
                 with_public += 1;
             }
         }
+        if row["intents"].as_array().is_some_and(|v| v.is_empty()) {
+            without_intents += 1;
+            compact_calculation_bytes += serde_json::to_vec(row).unwrap().len();
+        }
     }
     assert!(with_public > 0);
+    assert!(without_intents > 0, "保留没有下单意图的真实计算");
+    println!(
+        "compact_no_intent calculations={without_intents} total_bytes={compact_calculation_bytes}"
+    );
     assert!(
         rows.iter().any(|r| r["record_type"] == "invalidated_public"
             || r["record_type"] == "invalidated_current")
@@ -1540,7 +1597,61 @@ fn streaming_observation_is_economically_inert_and_decisions_keep_frozen_group()
     let public =
         std::fs::read_to_string(on.path().join("streaming-evidence/public.jsonl")).unwrap();
     assert!(public.lines().any(
-        |l| serde_json::from_str::<serde_json::Value>(l).unwrap()["record_type"]
-            == "pm_source_state"
+        |l| serde_json::from_str::<serde_json::Value>(l).unwrap()["record_type"] == "pm_state"
     ));
+}
+
+#[test]
+fn streaming_evidence_preserves_nonzero_fills_and_account_economics() {
+    let off = tempfile::tempdir().unwrap();
+    let on = tempfile::tempdir().unwrap();
+    let prepare = |root: &Path| {
+        let (config, rules) = fixture(root, "100010", &[800]);
+        replace_books(
+            &config,
+            &[
+                book("20", 1100, 1100, 1, "epoch-a", "0.7"),
+                book("3", 1100, 1100, 2, "epoch-a", "0.6"),
+                book("3", 1300, 1300, 3, "epoch-a", "0.4"),
+                up_bid_change(2200, 2200, 4, "100"),
+                up_bid_change(3000, 2400, 5, "95"),
+            ],
+        );
+        (config, rules)
+    };
+    let (off_config, off_rules) = prepare(off.path());
+    let (on_config, on_rules) = prepare(on.path());
+    let mut c = strategy_config();
+    c.health.chainlink_silence_ms = 1500;
+    c.repair.residual_risk_weight = Decimal::from(10);
+    c.risk.per_market_orphan_limit_pusd = Decimal::from(1_000_000_000u64);
+    c.risk.account_orphan_limit_pusd = Decimal::from(1_000_000_000u64);
+    let (off_report, off_trace) =
+        run_day_trace_evidence(&off_config, off_rules, c.clone(), off.path(), false);
+    let (on_report, on_trace) = run_day_trace_evidence(&on_config, on_rules, c, on.path(), true);
+    assert_eq!(off_trace.decisions, on_trace.decisions);
+    assert_eq!(off_trace.sent, on_trace.sent);
+    assert!(!on_trace.sent.is_empty());
+    for key in [
+        "account_economics_memory",
+        "ledger_consumed_memory",
+        "conservative_nav_pusd",
+        "local_funds_rejected_batches",
+    ] {
+        assert_eq!(off_report[key], on_report[key], "{key}");
+    }
+    assert!(
+        on_report["account_economics_memory"]["markets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| {
+                m["success_shares"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|q| q.as_str().unwrap() != "0")
+            }),
+        "必须经过非空实际成交与账本归约"
+    );
 }

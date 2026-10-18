@@ -376,14 +376,38 @@ kill -TERM "$EXPORT_PID"
 显式提供 `--research-evidence-root <尚不存在的目录>` 后，day 入口在同次公共日生产中生成
 `public.jsonl`，并为每日期每候选生成 `candidate-<日期序号>-<候选序号>.jsonl`。
 该选项独立申请完整 Binance 数量，不修改策略的 pressure 权重，也不增加交易门。
-公共文件包含 `blb_state`、独立的 `pm_source_state`、完整 `PublicGroupReferenceV1` 和来源进展。
+公共文件按实际变化保存以下记录，所有 `group` 都使用完整 `PublicGroupReferenceV1`：
+
+- `pm_state`：按市场保存最优价、数量、质量、直接 BBA 与 tick 字段；不含盘口整侧来源数组。
+- `pm_side_sources`：按市场、`token_id` 和 `side`（`bid`／`ask`）独立保存该侧完整
+  `direct_anchors` 与 `dependency_frontier`。仅来源改变也写出；另一侧未变时不复制。
+- `source_progress`：每个 `input_stream_id` 共享一条变化记录。`updates` 保存改变的完整
+  `SourceStreamProgressV1`，`removed` 保存删除的 `SourceStreamScopeV1`；首条记录建立初始集合，
+  空集合仍表示没有该证据。不同市场不重复写同流进展。
+- `blb_state`：保存 BLB 紧凑量、正式 K 和 Binance 深度来源；
+  `original_pair_blb` 保存原始双腿请求使用的逐档证据。
+
+还原某次计算时，先使用其 `public_state[condition_id].group` 确认冻结公共组。
+`pm_group` 与市场连接到准确的 `pm_state`；`pm_side_sources` 中每项按完整 `group`、市场、
+`token_id`、`side` 连接到准确来源记录；`blb_group` 与市场连接到 `blb_state`。
+这些引用指向最后实际写出的版本，可以早于冻结组，不按时间近邻选择记录。
+来源年龄由原来源时间和该次计算时间求得；unknown、质量和前缀保留原含义。
+
+还原来源进展时，只在引用所属 `input_stream_id` 内，按 `public.jsonl` 文件顺序累计
+`source_progress` 的 `updates`／`removed`，到完整身份等于 `source_progress_group` 的记录后停止。
+连接键必须保留流身份，即使两流市场和组序号相同也不能混合。可在分析时按需缓存已还原版本。
+历史记录保留在文件中，运行写出器仅保留当前必要状态。
+这是对旧 `pm_source_state` 和候选内嵌 `pm`／`source_progress` 格式的替换，旧分析脚本须显式适配；
+新旧输出不能按同一结构静默读取。旧运行产物保留原格式。
+
 BLB 复用 `blb-visible-interval-v1`，仅在正式 K 或 Binance 深度依赖改变时计算。
 缺失正式 K、`at_anchor`、空可见区间和覆盖未知保持各自含义；临时参考不代替正式 K。
 
 候选文件记录真实计算、调度、公开／当前／派发时失效、本地资金整批零提交及派发结果。
 `pair_entry.evaluated=false` 表示新配对分支未执行；其余可选检查为 `null` 时表示未评估。
-诊断的目标价、复用价、gate 和容量直接来自策略实际分支。公共紧凑标量随原组交付，
+诊断的目标价、复用价、gate 和容量直接来自策略实际分支。公共冻结引用和必要 BLB 标量随原组交付，
 计算记录冻结自身已消费组的状态；等待计算期间的新行情不覆盖它。
+无意图计算同样保留真实诊断和冻结引用，不内嵌公共 PM 来源或完整来源进展。
 `original_pair_evidence` 引用公共文件的 `original_pair_blb`，按完整冻结前缀和市场去重保存逐档证据。
 逐档数值由同次公共 BLB 计算共享，候选不重算或读取已领先的生产者。
 原意图、请求和腿序号保存在同一计算记录。接纳、拒绝、成交、撮合与确认时间继续从
