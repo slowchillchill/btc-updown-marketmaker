@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+serde_json = "=1.0.150"
 contracts = { path = "../contracts" }
 shared-run = { path = "../shared-run" }
 ledger = { path = "../ledger" }
@@ -22,7 +23,6 @@ ciborium = "=0.2.2"
 data-pipeline-core = { path = "../data-pipeline/core" }
 data-pipeline-training = { path = "../data-pipeline/training" }
 data-collect = { path = "../data-collect" }
-serde_json = "=1.0.150"
 sha2 = "=0.10.9"
 tempfile = "=3.27.0"
 tokio = { version = "=1.52.3", default-features = false, features = ["macros", "rt"] }

@@ -177,6 +177,14 @@ pub enum QualifiedBatchResultV1 {
 pub trait StrategyV1 {
     type Error;
     type Diagnostics;
+    /// 只序列化真实诊断；默认消费者没有研究诊断。
+    fn research_diagnostics(&self, _diagnostics: &Self::Diagnostics) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+    /// 只标识真实新双腿请求涉及的市场，不计算影子动作。
+    fn research_request_markets(&self, _diagnostics: &Self::Diagnostics) -> Vec<ConditionId> {
+        Vec::new()
+    }
     /// 仅选择同步读取表示；默认仍构造原完整拥有式输入。
     fn uses_borrowed_input(&self) -> bool {
         false

@@ -92,6 +92,7 @@ pub struct HistoricalDayResultV1 {
 #[derive(Clone, Debug)]
 pub struct HistoricalDayRunOptionsV1 {
     pub research_summary: bool,
+    pub public_observer: Option<Arc<dyn HistoricalPublicObserverV1>>,
     /// 正式预算从输入准备之前开始；候选在完整事件边界返回已有成绩。
     pub started: Instant,
     pub budget_stop_after: Option<Duration>,
@@ -100,6 +101,7 @@ impl Default for HistoricalDayRunOptionsV1 {
     fn default() -> Self {
         Self {
             research_summary: false,
+            public_observer: None,
             started: Instant::now(),
             budget_stop_after: None,
         }
@@ -218,6 +220,20 @@ where
     S::Error: std::fmt::Debug + Send + Sync + 'static,
     F: Fn(&HistoricalPreparedRunConfigV1) -> Result<S, MaterialError> + Sync,
 {
+    let mut effective_day = day.clone();
+    for candidate in &mut effective_day.candidates {
+        candidate.effective_entry_market_scope = candidate
+            .entry_market_scope
+            .as_ref()
+            .map(|p| {
+                p.expand(
+                    day.preparation.scope.received_start_utc_ms,
+                    day.preparation.scope.received_end_utc_ms,
+                )
+            })
+            .transpose()?;
+    }
+    let day = &effective_day;
     let config = &day.preparation;
     let inputs =
         data_pipeline_training::freeze_public_source_input_set_v1(&config.scope.manifest_paths)?;
@@ -308,6 +324,7 @@ where
         let mut workers = Vec::new();
         for (index, candidate) in day.candidates.iter().enumerate() {
             let context = HistoricalRuntimeContextV1 {
+                public_observer: options.public_observer.clone(),
                 start: config.scope.received_start_utc_ms,
                 source_identity: source_identity.clone(),
                 day_log_binding: Some(sim_system::public_consumption::HistoricalDayLogBindingV1 {
@@ -418,13 +435,17 @@ where
                         eprintln!("日作业: phase={}, inputs={count}, active_candidates={}, retained_public_groups={}, retained_hidden_buckets={}, elapsed_seconds={}, total_inputs=unknown",if ended {"consuming"} else {"producing"},buffer.candidates.iter().filter(|c|c.active).count(),buffer.public.len(),buffer.hidden.len(),started.elapsed().as_secs());progress=Instant::now();
                     }
                     if buffer.candidates.iter().any(|c|c.active&&(!c.runtime_started||c.source_health.is_none()||c.requirements.is_none())) {let _=measure_stage!(stages, ProducerWaitStartupOrCompletion, hub.0.1.control.wait_timeout(buffer,Duration::from_millis(20))).unwrap();continue;}
-                    if buffer.candidates.iter().any(|c|c.source_health==Some(true)) {producer.core.enable_source_progress();}
+                    if options.public_observer.is_some() || buffer.candidates.iter().any(|c|c.source_health==Some(true)) {producer.core.enable_source_progress();}
                     if count == 0 {
                         producer.core.set_observation_requirements(contracts::PublicObservationRequirementsV1 {
-                            binance_depth_quantities: buffer.candidates.iter().filter(|c|c.active).any(|c|c.requirements.is_some_and(|r| r.binance_depth_quantities)),
+                            binance_depth_quantities: options.public_observer.as_ref().is_some_and(|o| o.requirements().binance_depth_quantities) || buffer.candidates.iter().filter(|c|c.active).any(|c|c.requirements.is_some_and(|r| r.binance_depth_quantities)),
                         });
                     }
-                    if buffer.candidates.iter().all(|c| !c.active) { return Ok(()); }
+                    if buffer.candidates.iter().all(|c| !c.active) {
+                        drop(buffer);
+                        if !ended { if let Some(observer)=&options.public_observer {observer.finish()?;} }
+                        return Ok(());
+                    }
                     if !hub.0.1.budget_stop_requested.load(std::sync::atomic::Ordering::Acquire) && options.budget_stop_after.is_some_and(|after| options.started.elapsed() >= after) {
                         hub.0.1.budget_stop_requested.store(true, std::sync::atomic::Ordering::Release);
                         hub.0.1.notify_all();
@@ -435,12 +456,25 @@ where
                         let _=measure_stage!(stages, ProducerBackpressureWait, hub.0.1.control.wait_timeout(buffer,Duration::from_millis(10))).unwrap();continue;
                     }
                 }
-                let Some(mut next)=measure_stage!(stages, NextAppliedIncludingDecodeCoreHidden, producer.next_applied())? else {ended=true;let mut buffer=hub.0.0.lock().unwrap();buffer.production=ProductionV1::Ended;hub.0.1.notify_all();continue;};
+                let Some(mut next)=measure_stage!(stages, NextAppliedIncludingDecodeCoreHidden, producer.next_applied())? else {if let Some(observer) = &options.public_observer { observer.finish()?; } ended=true;let mut buffer=hub.0.0.lock().unwrap();buffer.production=ProductionV1::Ended;hub.0.1.notify_all();continue;};
                 #[cfg(feature = "stage-timing")]
                 let publish_started = Instant::now();
                 #[cfg(feature = "stage-timing")]
                 let diagnostic_sample = stages.next_diagnostic_sample();
                 count+=1;
+                let mut research_public = Vec::new();
+                if let Some(observer) = &options.public_observer {
+                    for group in &next.applied.closed_groups {
+                        let reference = PublicGroupReferenceV1 {
+                            input_stream_id: next.applied.applied_prefix.input_stream_id.clone(),
+                            applied_prefix: next.applied.applied_prefix.clone(),
+                            group_position: group.group_position,
+                            group_id: group.group_id.clone(),
+                            closed_at_input_position: group.closed_at_input_position,
+                        };
+                        research_public.push(observer.observe(&reference, group)?);
+                    }
+                }
                 let new_markets = next.applied.closed_groups.iter().flat_map(|g|g.records.iter()).filter_map(|fact| {
                     if let contracts::PublicBusinessPayloadV1::MarketFact { market, payload: contracts::CanonicalMarketFactPayloadV1::FixedIdentity { assets } } = &fact.payload {
                         Some((market, assets))
@@ -474,7 +508,7 @@ where
                 stages.finish(crate::stage_timing::Stage::ProducerInitializationClassification, classification_started);
                 #[cfg(feature="stage-timing")]
                 let construction_started = diagnostic_sample.then(Instant::now);
-                let groups=PreparedPublicGroupV1::from_day(&mut next).into_iter().zip(classifications).map(|(delivery, classification)| DayPublicDeliveryV1 {delivery, initialization: config.metadata_initialization.as_ref().map(|_|classification)}).collect::<Vec<_>>();
+                let groups=PreparedPublicGroupV1::from_day(&mut next).into_iter().zip(classifications).enumerate().map(|(index,(delivery, classification))| DayPublicDeliveryV1 {delivery, initialization: config.metadata_initialization.as_ref().map(|_|classification), research_public: research_public.get(index).cloned()}).collect::<Vec<_>>();
                 let hidden=next.hidden.into_iter().map(AcceptedHiddenStepBucketV1::from_day);
                 #[cfg(feature = "stage-timing")]
                 if let Some(started) = construction_started { stages.record(crate::stage_timing::Stage::ProducerDeliveryConstruction, started.elapsed()); }
@@ -609,9 +643,66 @@ fn comparison_identity(candidate: &HistoricalPreparedRunConfigV1, rules: &Sha256
                 &candidate.timing,
                 &candidate.admission_policy,
                 &candidate.implementation_identity,
-                rules
+                rules,
+                &candidate.entry_market_scope,
+                candidate.effective_entry_market_scope.as_ref().map(|e| (
+                    i128::from(e.input_end_utc_ms) - i128::from(e.input_start_utc_ms),
+                    e.input_start_utc_ms.rem_euclid(86_400_000)
+                ))
             ))
             .expect("已构造候选的可序列化比较配置")
         )
     ))
+}
+
+#[cfg(test)]
+mod entry_identity_tests {
+    use super::*;
+    #[test]
+    fn identity_distinguishes_policy_and_shape_but_aggregates_dates() {
+        let temp = tempfile::tempdir().unwrap();
+        let (run, rules) = crate::test_common::setup(temp.path());
+        let mut candidate = HistoricalPreparedRunConfigV1::from(&run);
+        let old = comparison_identity(&candidate, rules.file_sha256());
+        candidate.entry_market_scope = Some(EntryMarketScopeV1::default());
+        candidate.effective_entry_market_scope = Some(
+            candidate
+                .entry_market_scope
+                .as_ref()
+                .unwrap()
+                .expand(1000, 2000)
+                .unwrap(),
+        );
+        let zero = comparison_identity(&candidate, rules.file_sha256());
+        assert_ne!(old, zero);
+        candidate.effective_entry_market_scope = Some(
+            candidate
+                .entry_market_scope
+                .as_ref()
+                .unwrap()
+                .expand(86_401_000, 86_402_000)
+                .unwrap(),
+        );
+        assert_eq!(zero, comparison_identity(&candidate, rules.file_sha256()));
+        candidate
+            .entry_market_scope
+            .as_mut()
+            .unwrap()
+            .start_offset_ms = 5;
+        assert_ne!(zero, comparison_identity(&candidate, rules.file_sha256()));
+        candidate
+            .entry_market_scope
+            .as_mut()
+            .unwrap()
+            .start_offset_ms = 0;
+        candidate.effective_entry_market_scope = Some(
+            candidate
+                .entry_market_scope
+                .as_ref()
+                .unwrap()
+                .expand(1000, 3000)
+                .unwrap(),
+        );
+        assert_ne!(zero, comparison_identity(&candidate, rules.file_sha256()));
+    }
 }

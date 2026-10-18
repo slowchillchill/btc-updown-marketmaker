@@ -2439,6 +2439,7 @@ async fn zero_send_cash_refusal_keeps_unsent_timing_and_continues_on_later_obser
         let temp = tempfile::tempdir().unwrap();
         let (mut config, rules) = setup(temp.path());
         config.session.initial_account_state.available_pusd = ExactDecimal("0".into());
+        config.research_evidence_path = Some(temp.path().join("evidence.jsonl"));
         // 首组拒绝后先到未来重评，不让新公开输入形成另一决定替换旧调度。
         config.timing.calculation_duration_ms = DelayScheduleV1::Fixed(0);
         config.timing.dispatch_delay_ms = DelayScheduleV1::Fixed(0);
@@ -2454,6 +2455,25 @@ async fn zero_send_cash_refusal_keeps_unsent_timing_and_continues_on_later_obser
         let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
         assert_eq!(report.end_reason, HistoricalEndReasonV1::RangeEnd);
         assert_eq!(report.local_funds_rejected_batches, 1);
+        let rows = std::fs::read_to_string(config.research_evidence_path.as_ref().unwrap())
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r["record_type"] == "local_funds_zero_submission")
+                .count(),
+            1
+        );
+        let calculation = rows
+            .iter()
+            .find(|r| {
+                r["record_type"] == "calculation"
+                    && r["intents"].as_array().is_some_and(|i| !i.is_empty())
+            })
+            .unwrap();
+        assert!(calculation["intents"][0]["context"]["global_request_id"].is_string());
         assert_eq!(
             probe.failed_callback_sent,
             Some(0),
@@ -2523,4 +2543,151 @@ fn completed_business_report_survives_result_file_failure_without_completion_reu
     assert_eq!(report["research"]["hours"].as_array().unwrap().len(), 1);
     assert!(config.result_path.is_dir());
     assert!(!state.join("checkpoint.json").exists());
+}
+
+#[derive(Debug)]
+struct FailingResearchObserver;
+impl HistoricalPublicObserverV1 for FailingResearchObserver {
+    fn requirements(&self) -> PublicObservationRequirementsV1 {
+        PublicObservationRequirementsV1::FULL
+    }
+    fn observe(
+        &self,
+        _: &PublicGroupReferenceV1,
+        _: &ClosedBusinessGroupV1,
+    ) -> Result<Arc<HistoricalPublicEvidenceV1>, MaterialError> {
+        Err("fixture required public output failure".into())
+    }
+}
+#[test]
+fn required_public_output_failure_returns_day_and_candidate_partial_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, rules) = setup(temp.path());
+    let day = HistoricalDayConfigV1 {
+        preparation: config.preparation.clone(),
+        candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
+        progress_interval_seconds: 0,
+        producer_lead_groups: None,
+    };
+    let result = run_historical_days_with_options_v1(
+        &[day],
+        rules.clone(),
+        &|_| {
+            Ok(Probe {
+                rules: Some(rules.clone()),
+                ..Default::default()
+            })
+        },
+        1,
+        &HistoricalDayRunOptionsV1 {
+            public_observer: Some(Arc::new(FailingResearchObserver)),
+            ..Default::default()
+        },
+    );
+    let failure = result.unwrap_err();
+    let failure = failure.downcast_ref::<HistoricalDaysFailureV1>().unwrap();
+    assert_eq!(failure.source, DayFailureSourceV1::Producer);
+    assert_eq!(failure.days.len(), 1);
+    assert_eq!(
+        failure.days[0].candidates[0].outcome,
+        CandidateOutcomeV1::CollateralStop
+    );
+    assert_eq!(
+        failure.days[0].candidates[0].report["end_reason"],
+        "Failure"
+    );
+    assert!(
+        failure
+            .cause
+            .to_string()
+            .contains("required public output failure")
+    );
+}
+
+#[derive(Debug, Default)]
+struct EarlyExitFinishFailure {
+    finish_calls: std::sync::atomic::AtomicUsize,
+    saw_later_market: std::sync::atomic::AtomicBool,
+}
+impl HistoricalPublicObserverV1 for EarlyExitFinishFailure {
+    fn requirements(&self) -> PublicObservationRequirementsV1 {
+        PublicObservationRequirementsV1::FULL
+    }
+    fn observe(
+        &self,
+        _: &PublicGroupReferenceV1,
+        group: &ClosedBusinessGroupV1,
+    ) -> Result<Arc<HistoricalPublicEvidenceV1>, MaterialError> {
+        if group
+            .observations
+            .iter()
+            .any(|o| o.market.condition_id.0 == SECOND)
+        {
+            self.saw_later_market
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(Arc::new(HistoricalPublicEvidenceV1 {
+            scalars: serde_json::Value::Null,
+            request_evidence: Default::default(),
+        }))
+    }
+    fn finish(&self) -> Result<(), MaterialError> {
+        self.finish_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err("fixture required early-exit public finish failure".into())
+    }
+}
+#[test]
+fn early_strategy_exit_before_eof_propagates_required_public_finish_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, rules) = setup(temp.path());
+    let observer = Arc::new(EarlyExitFinishFailure::default());
+    let day = HistoricalDayConfigV1 {
+        preparation: config.preparation.clone(),
+        candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
+        progress_interval_seconds: 0,
+        producer_lead_groups: Some(0),
+    };
+    let failure = run_historical_days_with_options_v1(
+        &[day],
+        rules.clone(),
+        &|_| {
+            Ok(Probe {
+                exit_immediately: true,
+                rules: Some(rules.clone()),
+                ..Default::default()
+            })
+        },
+        1,
+        &HistoricalDayRunOptionsV1 {
+            public_observer: Some(observer.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    let failure = failure.downcast_ref::<HistoricalDaysFailureV1>().unwrap();
+    assert_eq!(failure.source, DayFailureSourceV1::Producer);
+    assert!(
+        failure
+            .cause
+            .to_string()
+            .contains("early-exit public finish failure")
+    );
+    assert_eq!(
+        observer
+            .finish_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(
+        !observer
+            .saw_later_market
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "不得为flush继续读取后续市场"
+    );
+    // 此夹具包含2条metadata和6条book，后续市场仍未消费，未到EOF。
+    assert!(failure.days[0].public_applied_inputs < 8);
+    let report = &failure.days[0].candidates[0].report;
+    assert_eq!(report["end_reason"], "StrategyExit");
+    assert!(report["last_observed_at_utc_ms"].as_i64().unwrap() < BASE + 6000);
 }

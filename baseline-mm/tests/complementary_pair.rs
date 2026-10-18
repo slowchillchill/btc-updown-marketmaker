@@ -1036,7 +1036,9 @@ async fn ordinary_repricing_counts_old_and_new_investment_and_uses_equal_targets
         .decision_time()
         .logical_time_utc_ms();
     c.quote.base_half_spread = Decimal::new(2, 1);
-    let mut s = ComplementaryPairV1::new(c, rules, "candidate".into(), s.continuity()).unwrap();
+    let mut s =
+        ComplementaryPairV1::new(c.clone(), rules.clone(), "candidate".into(), s.continuity())
+            .unwrap();
     let out = s.decide(&input, at).unwrap();
     let new_cost: Decimal = intents(&out)
         .iter()
@@ -1078,6 +1080,25 @@ async fn ordinary_repricing_counts_old_and_new_investment_and_uses_equal_targets
             .iter()
             .any(|i| matches!(i.intent.as_ref(), ModelIntentV1::CancelOrders { .. })),
         "旧高价单必须申请撤换"
+    );
+    let start = input.markets[0].observation.market.window.start_at_utc_ms;
+    let mut restricted = ComplementaryPairV1::new(c, rules, "excluded".into(), s.continuity())
+        .unwrap()
+        .with_entry_market_range(Some(EntryMarketRangeV1 {
+            start_at_utc_ms: start + 1,
+            end_at_utc_ms: start + 2,
+        }));
+    let excluded = restricted.decide(&input, at).unwrap();
+    assert!(
+        intents(&excluded)
+            .iter()
+            .any(|i| matches!(i.intent.as_ref(), ModelIntentV1::CancelOrders { .. })),
+        "被排除市场的真实旧单仍撤换"
+    );
+    assert!(
+        !intents(&excluded)
+            .iter()
+            .any(|i| matches!(i.intent.as_ref(), ModelIntentV1::SubmitPairedBuy { .. }))
     );
 }
 #[tokio::test(flavor = "current_thread")]
@@ -2313,4 +2334,71 @@ async fn v2_continuity_rejects_missing_or_explicit_old_rule_without_resetting_it
         matches!(result,Err(StrategyErrorV1::Configuration(message)) if message.contains("candidate_v1") && message.contains("candidate_v2"))
     );
     driver.stop_and_drain().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_scope_only_blocks_new_pairs_and_keeps_real_probability_sampling() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver, rules) = setup(temp.path(), "2000");
+    let input = estimated(
+        shared.strategy_input(&mut driver).unwrap().unwrap(),
+        "100000",
+    );
+    let at = input
+        .action_before
+        .cutoff()
+        .decision_time()
+        .logical_time_utc_ms();
+    let start = input.markets[0].observation.market.window.start_at_utc_ms;
+    let mut unrestricted = strategy(config(), rules.clone());
+    let original = unrestricted.decide(&input, at).unwrap();
+    assert!(
+        intents(&original)
+            .iter()
+            .any(|i| matches!(i.intent.as_ref(), ModelIntentV1::SubmitPairedBuy { .. }))
+    );
+    let mut excluded =
+        strategy(config(), rules.clone()).with_entry_market_range(Some(EntryMarketRangeV1 {
+            start_at_utc_ms: start + 1,
+            end_at_utc_ms: start + 9999,
+        }));
+    let blocked = excluded.decide(&input, at).unwrap();
+    assert!(
+        !intents(&blocked)
+            .iter()
+            .any(|i| matches!(i.intent.as_ref(), ModelIntentV1::SubmitPairedBuy { .. }))
+    );
+    let original_diag = diagnostic(&original);
+    let blocked_diag = diagnostic(&blocked);
+    assert_eq!(
+        original_diag.markets[0].probability,
+        blocked_diag.markets[0].probability
+    );
+    assert!(blocked_diag.markets[0].pair_entry.evaluated);
+    assert!(!blocked_diag.markets[0].pair_entry.market_eligible);
+    assert!(
+        blocked_diag.markets[0]
+            .pair_entry
+            .business_result_per_share
+            .is_some()
+    );
+    assert_eq!(
+        excluded.continuity().next_request_sequence,
+        0,
+        "禁止时不先生成请求再过滤"
+    );
+    for (lower, upper, allowed) in [(start, start + 1, true), (start - 1, start, false)] {
+        let mut s =
+            strategy(config(), rules.clone()).with_entry_market_range(Some(EntryMarketRangeV1 {
+                start_at_utc_ms: lower,
+                end_at_utc_ms: upper,
+            }));
+        let out = s.decide(&input, at).unwrap();
+        assert_eq!(
+            intents(&out)
+                .iter()
+                .any(|i| matches!(i.intent.as_ref(), ModelIntentV1::SubmitPairedBuy { .. })),
+            allowed
+        );
+    }
 }

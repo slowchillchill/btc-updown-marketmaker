@@ -71,6 +71,8 @@ pub struct RepairComparisonV1 {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MarketDecisionDiagnosticV1 {
     pub condition_id: ConditionId,
+    #[serde(default)]
+    pub pair_entry: PairEntryEvaluationV1,
     pub probability: ProbabilityEstimateV1,
     pub urgency: UrgencyStateV1,
     pub choice: MarketChoiceV1,
@@ -183,4 +185,35 @@ pub struct ComplementaryPairCheckpointV2 {
     pub(super) namespace: String,
     pub(super) continuity: StrategyContinuityV2,
     pub(super) signals: BTreeMap<String, SignalMemory>,
+}
+
+/// 不改变市场事实的不可变半开开始时间范围。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryMarketRangeV1 {
+    pub start_at_utc_ms: i64,
+    pub end_at_utc_ms: i64,
+}
+impl EntryMarketRangeV1 {
+    pub fn contains(&self, market_start: i64) -> bool {
+        self.start_at_utc_ms <= market_start && market_start < self.end_at_utc_ms
+    }
+}
+/// None 表示该分支未评估，不把未执行的检查写成失败。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PairEntryEvaluationV1 {
+    pub market_eligible: bool,
+    pub evaluated: bool,
+    pub target_prices: Option<[ExactDecimal; 2]>,
+    pub reused_prices: Option<[ExactDecimal; 2]>,
+    pub bid_distance: Option<[Option<ExactDecimal>; 2]>,
+    pub ask_distance: Option<[Option<ExactDecimal>; 2]>,
+    pub business_result_per_share: Option<f64>,
+    pub minimum_business_result_per_share: Option<ExactDecimal>,
+    pub gate_passed: Option<bool>,
+    pub risk_space_pusd: Option<ExactRationalV1>,
+    pub investment_space_pusd: Option<ExactRationalV1>,
+    pub proposed_shares: Option<ExactDecimal>,
+    pub minimum_shares: Option<ExactDecimal>,
+    pub no_new_needed: Option<bool>,
+    pub limit_budget_passed: Option<bool>,
 }

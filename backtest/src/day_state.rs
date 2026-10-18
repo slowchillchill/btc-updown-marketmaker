@@ -155,12 +155,14 @@ const DAY_DELIVERY_BATCH: usize = 64;
 pub(crate) struct DayPublicDeliveryV1 {
     pub delivery: PublicGroupDeliveryV1,
     pub initialization: Option<(bool, bool)>,
+    pub research_public: Option<Arc<HistoricalPublicEvidenceV1>>,
 }
 impl From<PublicGroupDeliveryV1> for DayPublicDeliveryV1 {
     fn from(delivery: PublicGroupDeliveryV1) -> Self {
         Self {
             delivery,
             initialization: None,
+            research_public: None,
         }
     }
 }
@@ -168,6 +170,7 @@ pub(crate) struct DayLocalDeliveryCacheV1 {
     public: VecDeque<DayPublicDeliveryV1>,
     hidden: VecDeque<AcceptedHiddenStepBucketV1>,
     initialization: Option<(u64, bool, bool)>,
+    research_public: Option<(u64, Arc<HistoricalPublicEvidenceV1>)>,
     public_end: usize,
     hidden_end: usize,
     times: crate::timing::DeliveryTimes,
@@ -180,6 +183,7 @@ impl DayLocalDeliveryCacheV1 {
             public: VecDeque::new(),
             hidden: VecDeque::new(),
             initialization: None,
+            research_public: None,
             public_end: cursor.public,
             hidden_end: cursor.hidden,
             times: cursor.times.clone(),
@@ -228,6 +232,9 @@ impl Iterator for DayPublicSourceV1 {
             let group = self.delivery.borrow_mut().public.pop_front();
             if let Some(item) = group {
                 let mut group = item.delivery;
+                self.delivery.borrow_mut().research_public = item
+                    .research_public
+                    .map(|v| (group.prepared.group.group_position, v));
                 self.delivery.borrow_mut().initialization =
                     item.initialization.map(|(initial, dependency)| {
                         (group.prepared.group.group_position, initial, dependency)
@@ -541,6 +548,14 @@ impl DayCandidateControlV1 {
     }
 }
 impl RuntimeControlV1 for DayCandidateControlV1 {
+    fn public_evidence(&self, position: u64) -> Option<Arc<HistoricalPublicEvidenceV1>> {
+        self.delivery
+            .borrow()
+            .research_public
+            .as_ref()
+            .filter(|(p, _)| *p == position)
+            .map(|(_, v)| v.clone())
+    }
     fn initialization_classification(&self, position: u64) -> Option<(bool, bool)> {
         self.delivery
             .borrow()
