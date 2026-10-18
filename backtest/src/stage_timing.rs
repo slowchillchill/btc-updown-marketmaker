@@ -32,6 +32,8 @@ define_stages! {
     HiddenSourceWaitAndAcquisition => "hidden_source_wait_and_acquisition",
     NextAppliedIncludingDecodeCoreHidden => "next_applied_including_decode_core_hidden",
     NextHealthEvaluationIncludingDependencyLookup => "next_health_evaluation_including_dependency_lookup",
+    ResearchPublicObservation => "research_public_observation_including_lock_encoding_write",
+    ResearchCandidateEvidence => "research_candidate_evidence_including_request_wait_encoding_write",
     ProducerBackpressureWait => "producer_backpressure_wait",
     ProducerWaitStartupOrCompletion => "producer_wait_startup_or_completion",
     PublicQualification => "public_qualification",

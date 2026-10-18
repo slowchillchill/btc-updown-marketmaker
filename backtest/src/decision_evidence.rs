@@ -8,16 +8,22 @@ use std::{
 pub(crate) struct DecisionEvidenceV1(Option<BufWriter<std::fs::File>>);
 impl DecisionEvidenceV1 {
     pub fn open(path: Option<&Path>) -> Result<Self, MaterialError> {
-        Ok(Self(
+        let mut output = Self(
             path.map(|p| {
                 OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .open(p)
-                    .map(BufWriter::new)
+                    .map(|f| BufWriter::with_capacity(1024 * 1024, f))
             })
             .transpose()?,
-        ))
+        );
+        if output.enabled() {
+            output.record(
+                &serde_json::json!({"record_type":"format","format":"minimal-research-v1"}),
+            )?;
+        }
+        Ok(output)
     }
     pub fn enabled(&self) -> bool {
         self.0.is_some()

@@ -1,66 +1,118 @@
-//! 同次日生产的只读研究装配。公共 backtest 不识别 BLB 或策略。
-use backtest::{HistoricalPublicEvidenceV1, HistoricalPublicObserverV1, MaterialError};
-use baseline_mm::blb_research::blb_research_v1;
+//! 研究最小证据；公共核心和策略仍读取原完整合同。
+use backtest::{
+    HistoricalOriginalRequestV1, HistoricalPublicEvidenceV1, HistoricalPublicObserverV1,
+    HistoricalRequestEvidenceV1, MaterialError,
+};
+use baseline_mm::blb_research::PreparedBlbDepthV1;
 use contracts::*;
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
     io::{BufWriter, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
+pub(super) const FORMAT: &str = "minimal-research-v1";
+#[derive(Debug)]
+struct FrozenBlb {
+    depth: Arc<PreparedBlbDepthV1>,
+    anchor: ObservedFactV1<MarketPriceAnchorV1>,
+    recorded: std::sync::atomic::AtomicBool,
+    value: std::sync::OnceLock<Value>,
+}
+impl HistoricalRequestEvidenceV1 for FrozenBlb {
+    fn value(&self) -> Result<Value, MaterialError> {
+        Ok(self
+            .value
+            .get_or_init(|| {
+                serde_json::to_value(self.depth.evaluate(&self.anchor, true)).expect("BLB可序列化")
+            })
+            .clone())
+    }
+    fn recorded(&self) -> &std::sync::atomic::AtomicBool {
+        &self.recorded
+    }
+}
 #[derive(Debug)]
 struct MarketCache {
+    snapshot: Option<Arc<MarketObservationSnapshotV1>>,
     depth: Arc<ObservedFactV1<BinanceDepthObservationV1>>,
     anchor: ObservedFactV1<MarketPriceAnchorV1>,
-    full_blb: Arc<Value>,
-    scalar: Value,
-    blb_group: PublicGroupReferenceV1,
+    blb: Value,
+    blb_group: u64,
     pm: Value,
-    pm_group: PublicGroupReferenceV1,
-    sides: BTreeMap<(String, &'static str), SideCache>,
-}
-#[derive(Debug)]
-struct SideCache {
-    book: Arc<ObservedFactV1<Vec<PriceLevelV1>>>,
-    group: PublicGroupReferenceV1,
-}
-#[derive(Debug)]
-struct ProgressCache {
-    progress: SharedSourceProgressV1,
-    group: PublicGroupReferenceV1,
+    pm_group: u64,
+    frozen: Arc<FrozenBlb>,
 }
 #[derive(Debug)]
 struct State {
     writer: BufWriter<std::fs::File>,
-    markets: BTreeMap<(String, String), MarketCache>,
-    progress: BTreeMap<String, ProgressCache>,
-    request_prefixes: std::collections::BTreeSet<(String, String)>,
+    markets: BTreeMap<String, MarketCache>,
+    prepared: Option<(
+        Arc<ObservedFactV1<BinanceDepthObservationV1>>,
+        Arc<PreparedBlbDepthV1>,
+    )>,
 }
+/// 根对象只在日期装配时创建流对象，逐组操作永远不获取根锁。
 #[derive(Debug)]
-pub(super) struct StreamingResearchV1(Mutex<State>);
+pub(super) struct StreamingResearchV1 {
+    root: PathBuf,
+    state: Mutex<Option<State>>,
+    next: std::sync::atomic::AtomicUsize,
+}
 impl StreamingResearchV1 {
     pub fn open(root: &Path) -> Result<Self, MaterialError> {
         std::fs::create_dir(root)?;
+        Ok(Self {
+            root: root.to_owned(),
+            state: Mutex::new(None),
+            next: Default::default(),
+        })
+    }
+    fn stream(&self, stream: &str) -> Result<Self, MaterialError> {
+        // 流身份保留于文件首行；装配时分配文件序号，避免用外部身份构造路径。
+        let name = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(root.join("public.jsonl"))?;
-        Ok(Self(Mutex::new(State {
-            writer: BufWriter::with_capacity(1024 * 1024, file),
-            markets: BTreeMap::new(),
-            progress: BTreeMap::new(),
-            request_prefixes: Default::default(),
-        })))
+            .open(self.root.join(format!("public-{name}.jsonl")))?;
+        let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+        line(
+            &mut writer,
+            &json!({"record_type":"format","format":FORMAT,"input_stream_id":stream,
+            "interval_coverage":"unknown_no_coverage_evidence",
+            "source_age":"latest_direct_received_proxy_not_all_dependencies"}),
+        )?;
+        Ok(Self {
+            root: self.root.clone(),
+            state: Mutex::new(Some(State {
+                writer,
+                markets: Default::default(),
+                prepared: None,
+            })),
+            next: Default::default(),
+        })
     }
 }
 fn line(w: &mut impl Write, v: &Value) -> Result<(), MaterialError> {
     serde_json::to_writer(&mut *w, v)?;
     w.write_all(b"\n")?;
     Ok(())
+}
+fn latest(anchors: &[DirectObservationAnchorV1]) -> Option<i64> {
+    anchors.iter().map(|a| a.received_at_utc_ms).max()
+}
+fn event_time(anchors: &[DirectObservationAnchorV1]) -> Option<i64> {
+    anchors
+        .iter()
+        .filter_map(|a| a.source_event_at_utc_ms)
+        .max()
+}
+fn fact<T: serde::Serialize>(f: &ObservedFactV1<T>) -> Value {
+    json!({"value":f.value,"quality":f.quality,"received_ms":latest(&f.direct_anchors),"source_event_ms":event_time(&f.direct_anchors)})
 }
 fn best(levels: &Option<Vec<PriceLevelV1>>, bid: bool) -> Option<&PriceLevelV1> {
     let valid = levels.as_ref()?.iter().filter_map(|l| {
@@ -74,21 +126,18 @@ fn best(levels: &Option<Vec<PriceLevelV1>>, bid: bool) -> Option<&PriceLevelV1> 
         valid.min_by_key(|(p, _)| *p).map(|(_, l)| l)
     }
 }
-fn pm(o: &MarketBusinessObservationV1) -> Value {
-    Value::Array(
-        o.assets
-            .iter()
-            .map(|a| {
-                json!({
-                    "asset":a.asset,"bid":best(&a.bids.value,true),"ask":best(&a.asks.value,false),
-                    "bid_quality":a.bids.quality,"ask_quality":a.asks.quality,
-                    "best_bid_ask":a.best_bid_ask,"tick":a.tick
-                })
-            })
-            .collect(),
-    )
+fn pm(assets: &[AssetBusinessObservationV1]) -> Value {
+    json!(assets.iter().map(|a|json!({"asset":a.asset,"bid":best(&a.bids.value,true),"ask":best(&a.asks.value,false),
+        "bid_quality":a.bids.quality,"ask_quality":a.asks.quality,
+        "best_bid_ask":fact(&a.best_bid_ask),"tick":fact(&a.tick)})).collect::<Vec<_>>())
 }
 impl HistoricalPublicObserverV1 for StreamingResearchV1 {
+    fn for_stream(
+        &self,
+        stream: &str,
+    ) -> Result<Option<Arc<dyn HistoricalPublicObserverV1>>, MaterialError> {
+        Ok(Some(Arc::new(self.stream(stream)?)))
+    }
     fn requirements(&self) -> PublicObservationRequirementsV1 {
         PublicObservationRequirementsV1::FULL
     }
@@ -97,170 +146,210 @@ impl HistoricalPublicObserverV1 for StreamingResearchV1 {
         reference: &PublicGroupReferenceV1,
         group: &ClosedBusinessGroupV1,
     ) -> Result<Arc<HistoricalPublicEvidenceV1>, MaterialError> {
-        let mut state = self.0.lock().unwrap();
-        let mut current = serde_json::Map::new();
+        self.observe_inner(reference, group, None)
+    }
+    fn observe_at(
+        &self,
+        reference: &PublicGroupReferenceV1,
+        group: &ClosedBusinessGroupV1,
+        visible_at_utc_ms: i64,
+    ) -> Result<Arc<HistoricalPublicEvidenceV1>, MaterialError> {
+        self.observe_inner(reference, group, Some(visible_at_utc_ms))
+    }
+    fn record_request_evidence(
+        &self,
+        requests: &[HistoricalOriginalRequestV1],
+    ) -> Result<Value, MaterialError> {
+        if requests.is_empty() {
+            return Ok(json!([]));
+        }
+        let mut guard = self.state.lock().unwrap();
+        let state = guard.as_mut().ok_or("研究观察器尚未绑定输入流")?;
+        let mut links = Vec::new();
+        for request in requests {
+            if !request
+                .blb
+                .recorded()
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                line(
+                    &mut state.writer,
+                    &json!({"record_type":"original_pair_blb","evidence":request.value()?}),
+                )?;
+                request
+                    .blb
+                    .recorded()
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            links.push(json!({"input_stream_id":request.group.input_stream_id,"group_position":request.group.group_position,"condition_id":request.condition_id,"record_type":"original_pair_blb"}));
+        }
+        state.writer.flush()?;
+        Ok(json!(links))
+    }
+    fn production_finished(&self) -> Result<(), MaterialError> {
+        if let Some(state) = self.state.lock().unwrap().as_mut() {
+            line(&mut state.writer, &json!({"record_type":"production_end"}))?;
+        }
+        Ok(())
+    }
+    fn finish(&self) -> Result<(), MaterialError> {
+        if let Some(state) = self.state.lock().unwrap().as_mut() {
+            state.writer.flush()?;
+        }
+        Ok(())
+    }
+}
+
+impl StreamingResearchV1 {
+    fn observe_inner(
+        &self,
+        reference: &PublicGroupReferenceV1,
+        group: &ClosedBusinessGroupV1,
+        visible_at_utc_ms: Option<i64>,
+    ) -> Result<Arc<HistoricalPublicEvidenceV1>, MaterialError> {
+        let mut guard = self.state.lock().unwrap();
+        let state = guard.as_mut().ok_or("研究观察器尚未绑定输入流")?;
+        line(
+            &mut state.writer,
+            &json!({"record_type":"group","group":reference,
+            "visible_at_utc_ms":visible_at_utc_ms,
+            "source_event_at_utc_ms":group.records.iter().filter_map(|r|r.direct_time.source_event_at_utc_ms).max()}),
+        )?;
+        let mut links = serde_json::Map::new();
         let mut request_evidence = BTreeMap::new();
-        for o in group.observations.iter() {
-            let key = (
-                reference.input_stream_id.clone(),
-                o.market.condition_id.0.clone(),
-            );
-            // 同组市场共享来源进展；按流独立写出一次，避免随市场重复。
-            let progress = state.progress.get(&reference.input_stream_id);
-            let progress_group = if progress.is_none_or(|c| c.progress != o.source_progress) {
-                let updates = o
-                    .source_progress
-                    .iter()
-                    .filter(|p| progress.and_then(|c| c.progress.get_scope(&p.scope)) != Some(*p))
-                    .collect::<Vec<_>>();
-                let removed = progress
-                    .map(|c| {
-                        c.progress
-                            .iter()
-                            .filter(|p| o.source_progress.get_scope(&p.scope).is_none())
-                            .map(|p| &p.scope)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                let row = json!({
-                    "record_type":"source_progress", "group":reference,
-                    "updates":updates, "removed":removed
-                });
-                line(&mut state.writer, &row)?;
-                state.progress.insert(
-                    reference.input_stream_id.clone(),
-                    ProgressCache {
-                        progress: o.source_progress.clone(),
-                        group: reference.clone(),
-                    },
-                );
-                reference.clone()
+        let mut present = BTreeSet::new();
+        let shared = group.observations.shared_parts();
+        let ids = if let Some((markets, _)) = shared {
+            markets.keys().cloned().collect::<Vec<_>>()
+        } else {
+            group
+                .observations
+                .iter()
+                .map(|o| o.market.condition_id.0.clone())
+                .collect()
+        };
+        for id in ids {
+            present.insert(id.clone());
+            let snapshot = shared.and_then(|(m, _)| m.get(&id));
+            let common = shared.map(|(_, g)| g);
+            let full = if shared.is_none() {
+                group.observations.get_market(&id)
             } else {
-                progress.unwrap().group.clone()
+                None
             };
-            let old = state.markets.get(&key);
-            let changed = old.is_none_or(|c| {
-                !Arc::ptr_eq(&c.depth, &o.binance_depth) || c.anchor != o.official_anchor
+            let (depth, anchor, assets) = if let (Some(m), Some(g)) = (snapshot, common) {
+                (&g.binance_depth, &m.official_anchor, &m.assets)
+            } else {
+                let o = full.unwrap();
+                (&o.binance_depth, &o.official_anchor, &o.assets)
+            };
+            let old = state.markets.get(&id);
+            if old.is_none() {
+                let market = if let Some(m) = snapshot {
+                    &m.market
+                } else {
+                    &full.unwrap().market
+                };
+                line(
+                    &mut state.writer,
+                    &json!({"record_type":"market","market":market}),
+                )?;
+            }
+            let depth_changed = old.is_none_or(|c| !Arc::ptr_eq(&c.depth, depth));
+            let anchor_changed = old.is_none_or(|c| c.anchor != *anchor);
+            let snapshot_changed = old.is_none_or(|c| {
+                snapshot.is_none_or(|m| c.snapshot.as_ref().is_none_or(|p| !Arc::ptr_eq(p, m)))
             });
-            let (full_blb, scalar, blb_group) = if changed {
-                let full_blb = Arc::new(serde_json::to_value(blb_research_v1(o))?);
-                let mut scalar = (*full_blb).clone();
+            let (blb, blb_group, frozen) = if depth_changed || anchor_changed {
+                let prepared = match &state.prepared {
+                    Some((prior, p)) if Arc::ptr_eq(prior, depth) => p.clone(),
+                    _ => {
+                        let p = Arc::new(PreparedBlbDepthV1::new(depth.clone()));
+                        state.prepared = Some((depth.clone(), p.clone()));
+                        p
+                    }
+                };
+                let mut scalar = serde_json::to_value(prepared.evaluate(anchor, false))?;
                 scalar
                     .as_object_mut()
                     .unwrap()
                     .remove("visible_positive_levels");
-                (full_blb, scalar, reference.clone())
+                let value = json!({"blb":scalar,"official_anchor":fact(anchor),"depth_quality":depth.quality,
+                    "depth_received_ms":latest(&depth.direct_anchors),"depth_source_event_ms":event_time(&depth.direct_anchors)});
+                let changed = old.is_none_or(|c| c.blb != value);
+                let version = if changed {
+                    reference.group_position
+                } else {
+                    old.unwrap().blb_group
+                };
+                if changed {
+                    line(
+                        &mut state.writer,
+                        &json!({"record_type":"blb_state","group_position":version,"condition_id":id,"state":value}),
+                    )?;
+                }
+                (
+                    value,
+                    version,
+                    Arc::new(FrozenBlb {
+                        depth: prepared,
+                        anchor: anchor.clone(),
+                        recorded: Default::default(),
+                        value: Default::default(),
+                    }),
+                )
             } else {
                 let c = old.unwrap();
-                (c.full_blb.clone(), c.scalar.clone(), c.blb_group.clone())
+                (c.blb.clone(), c.blb_group, c.frozen.clone())
             };
-            let pm = pm(o);
-            let pm_changed = old.is_none_or(|c| c.pm != pm);
-            let pm_group = if pm_changed {
-                reference.clone()
-            } else {
-                old.unwrap().pm_group.clone()
-            };
-            let mut sides = BTreeMap::new();
-            let mut side_links = Vec::new();
-            let mut changed_sides = Vec::new();
-            for asset in &o.assets {
-                for (side, book) in [("bid", &asset.bids), ("ask", &asset.asks)] {
-                    let side_key = (asset.asset.token_id.0.clone(), side);
-                    let prior = old.and_then(|c| c.sides.get(&side_key));
-                    let changed = prior.is_none_or(|c| {
-                        !Arc::ptr_eq(&c.book, book)
-                            && (c.book.direct_anchors != book.direct_anchors
-                                || c.book.dependency_frontier != book.dependency_frontier)
-                    });
-                    let source_group = if changed {
-                        reference.clone()
-                    } else {
-                        prior.unwrap().group.clone()
-                    };
-                    if changed {
-                        changed_sides.push(json!({
-                            "record_type":"pm_side_sources", "group":reference,
-                            "condition_id":o.market.condition_id, "token_id":asset.asset.token_id,
-                            "side":side, "direct_anchors":book.direct_anchors,
-                            "dependency_frontier":book.dependency_frontier
-                        }));
-                    }
-                    side_links.push(
-                        json!({"token_id":asset.asset.token_id,"side":side,"group":source_group}),
-                    );
-                    sides.insert(
-                        side_key,
-                        SideCache {
-                            book: book.clone(),
-                            group: source_group,
-                        },
-                    );
+            let (pm, pm_group) = if snapshot_changed {
+                let value = pm(assets);
+                let changed = old.is_none_or(|c| c.pm != value);
+                let version = if changed {
+                    reference.group_position
+                } else {
+                    old.unwrap().pm_group
+                };
+                if changed {
+                    line(
+                        &mut state.writer,
+                        &json!({"record_type":"pm_state","group_position":version,"condition_id":id,"state":value}),
+                    )?;
                 }
-            }
-            if changed {
-                line(
-                    &mut state.writer,
-                    &json!({"record_type":"blb_state","group":reference,"condition_id":o.market.condition_id,"blb":scalar,"official_anchor":o.official_anchor,
-                    "depth_quality":o.binance_depth.quality,"depth_anchors":o.binance_depth.direct_anchors,"depth_frontier":o.binance_depth.dependency_frontier}),
-                )?;
-            }
-            for row in changed_sides {
-                line(&mut state.writer, &row)?;
-            }
-            if pm_changed {
-                line(
-                    &mut state.writer,
-                    &json!({"record_type":"pm_state","group":reference,"condition_id":o.market.condition_id,"pm":pm}),
-                )?;
-            }
-            current.insert(o.market.condition_id.0.clone(),json!({"group":reference,"blb_group":blb_group,"blb":scalar,"pm_group":pm_group,"pm_side_sources":side_links,"source_progress_group":progress_group}));
-            request_evidence.insert(o.market.condition_id.0.clone(), full_blb.clone());
+                (value, version)
+            } else {
+                let c = old.unwrap();
+                (c.pm.clone(), c.pm_group)
+            };
+            links.insert(id.clone(),json!({"input_stream_id":reference.input_stream_id,"blb_group":blb_group,"pm_group":pm_group}));
+            request_evidence.insert(
+                id.clone(),
+                Arc::new(FrozenBlb {
+                    depth: frozen.depth.clone(),
+                    anchor: frozen.anchor.clone(),
+                    recorded: Default::default(),
+                    value: Default::default(),
+                }) as Arc<dyn HistoricalRequestEvidenceV1>,
+            );
             state.markets.insert(
-                key,
+                id,
                 MarketCache {
-                    depth: o.binance_depth.clone(),
-                    anchor: o.official_anchor.clone(),
-                    full_blb,
-                    scalar,
+                    snapshot: snapshot.cloned(),
+                    depth: depth.clone(),
+                    anchor: anchor.clone(),
+                    blb,
                     blb_group,
                     pm,
                     pm_group,
-                    sides,
+                    frozen,
                 },
             );
         }
+        state.markets.retain(|id, _| present.contains(id));
         Ok(Arc::new(HistoricalPublicEvidenceV1 {
-            scalars: Value::Object(current),
+            scalars: Value::Object(links),
             request_evidence,
         }))
-    }
-    fn record_request_evidence(&self, evidence: &Value) -> Result<Value, MaterialError> {
-        let mut state = self.0.lock().unwrap();
-        let mut links = Vec::new();
-        if let Some(rows) = evidence.as_array() {
-            for row in rows {
-                let key = (
-                    serde_json::to_string(&row["group"])?,
-                    serde_json::to_string(&row["condition_id"])?,
-                );
-                if !state.request_prefixes.contains(&key) {
-                    line(
-                        &mut state.writer,
-                        &json!({"record_type":"original_pair_blb","evidence":row}),
-                    )?;
-                    state.request_prefixes.insert(key);
-                }
-                links.push(json!({"group":row["group"],"condition_id":row["condition_id"],"record_type":"original_pair_blb"}));
-            }
-        }
-        // 请求证据可能晚于producer到达EOF；在消费者返回前传播该次写入失败。
-        state.writer.flush()?;
-        Ok(Value::Array(links))
-    }
-    fn finish(&self) -> Result<(), MaterialError> {
-        self.0.lock().unwrap().writer.flush()?;
-        Ok(())
     }
 }
 
@@ -330,52 +419,6 @@ mod tests {
         }
     }
 
-    fn deliver(
-        sink: &StreamingResearchV1,
-        o: MarketBusinessObservationV1,
-        position: u64,
-    ) -> Arc<Value> {
-        deliver_many(sink, "test", vec![o], position)
-    }
-    fn deliver_many(
-        sink: &StreamingResearchV1,
-        stream: &str,
-        mut observations: Vec<MarketBusinessObservationV1>,
-        position: u64,
-    ) -> Arc<Value> {
-        let group_id = Sha256Hex(format!("{position:064x}"));
-        let reference = PublicGroupReferenceV1 {
-            input_stream_id: stream.into(),
-            applied_prefix: AppliedIngressPrefixV1 {
-                input_stream_id: stream.into(),
-                next_input_position: position + 1,
-            },
-            group_position: position,
-            group_id: group_id.clone(),
-            closed_at_input_position: position,
-        };
-        for o in &mut observations {
-            o.group_position = position;
-            o.group_id = group_id.clone();
-            o.visible_prefix = reference.applied_prefix.clone();
-        }
-        let group = ClosedBusinessGroupV1 {
-            group_id,
-            group_position: position,
-            member_input_positions: vec![position],
-            closed_at_input_position: position,
-            records: Arc::from([]),
-            observations: observations.into(),
-        };
-        Arc::new(sink.observe(&reference, &group).unwrap().scalars.clone())
-    }
-    fn records(root: &Path) -> Vec<Value> {
-        std::fs::read_to_string(root.join("public.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect()
-    }
     fn asset() -> AssetBusinessObservationV1 {
         let mut book = observed(vec![PriceLevelV1 {
             price_pusd_per_share: ExactDecimal("0.4".into()),
@@ -416,318 +459,365 @@ mod tests {
             public_trade: Default::default(),
         }
     }
-    fn progress(symbol: &str, id: u64) -> SourceStreamProgressV1 {
-        SourceStreamProgressV1 {
-            scope: SourceStreamScopeV1 {
-                source: SourceStreamKindV1::BinanceAggregateTrade,
-                condition_id: None,
-                asset_or_symbol: symbol.into(),
+
+    fn deliver(
+        sink: &StreamingResearchV1,
+        mut o: MarketBusinessObservationV1,
+        position: u64,
+    ) -> Arc<HistoricalPublicEvidenceV1> {
+        let stream = o.visible_prefix.input_stream_id.clone();
+        let reference = PublicGroupReferenceV1 {
+            input_stream_id: stream.clone(),
+            applied_prefix: AppliedIngressPrefixV1 {
+                input_stream_id: stream,
+                next_input_position: position + 1,
             },
-            last_valid_business_message: None,
-            last_observed_message: SourceEvidenceRefV3 {
-                source_kind: CanonicalSourceKindV2::BinanceAggtrade,
-                source_message_id: Sha256Hex(format!("{id:064x}")),
-                source_native_identity: None,
-                source_event_at_utc_ms: Some(1000),
-                received_at_utc_ms: 1001,
-                collector_admission: None,
-            },
-            connection_generation: None,
-            synchronization: SourceSynchronizationV1::Unknown,
-            quality: EventQualityV2 {
-                availability: MarketDataQuality::Fresh,
-                resync: ResyncQuality::NotRequired,
-            },
-        }
+            group_position: position,
+            group_id: Sha256Hex(format!("{position:064x}")),
+            closed_at_input_position: position,
+        };
+        o.group_id = reference.group_id.clone();
+        o.group_position = position;
+        o.visible_prefix = reference.applied_prefix.clone();
+        let group = ClosedBusinessGroupV1 {
+            group_id: reference.group_id.clone(),
+            group_position: position,
+            member_input_positions: vec![position],
+            closed_at_input_position: position,
+            records: Arc::from([]),
+            observations: vec![o].into(),
+        };
+        sink.observe(&reference, &group).unwrap()
     }
-    // 只读消费者：按流累计增量，终点必须是引用的完整公共组身份。
-    fn restore_progress(rows: &[Value], group: &Value) -> Vec<SourceStreamProgressV1> {
-        let mut values = BTreeMap::new();
-        for r in rows.iter().filter(|r| {
-            r["record_type"] == "source_progress"
-                && r["group"]["input_stream_id"] == group["input_stream_id"]
-        }) {
-            for scope in r["removed"].as_array().unwrap() {
-                values
-                    .remove(&serde_json::from_value::<SourceStreamScopeV1>(scope.clone()).unwrap());
-            }
-            for update in r["updates"].as_array().unwrap() {
-                let p: SourceStreamProgressV1 = serde_json::from_value(update.clone()).unwrap();
-                values.insert(p.scope.clone(), p);
-            }
-            if &r["group"] == group {
-                return values.into_values().collect();
-            }
-        }
-        panic!("没有找到准确来源进展终点");
-    }
-    fn resolve<'a>(rows: &'a [Value], kind: &str, group: &Value, condition: &str) -> &'a Value {
-        rows.iter()
-            .find(|r| {
-                r["record_type"] == kind && &r["group"] == group && r["condition_id"] == condition
-            })
+    fn rows(root: &Path, n: u64) -> Vec<Value> {
+        std::fs::read_to_string(root.join(format!("public-{n}.jsonl")))
             .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
     }
     #[test]
-    fn actual_changes_share_sources_and_frozen_links_restore_exactly() {
+    fn consumer_changes_unknowns_and_exact_request_prefixes() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("research");
-        let sink = StreamingResearchV1::open(&root).unwrap();
+        let root = temp.path().join("e");
+        let factory = StreamingResearchV1::open(&root).unwrap();
+        let sink = factory.stream("test").unwrap();
         let mut o = observation(Some("98"));
         o.assets.push(asset());
-        let condition = o.market.condition_id.0.clone();
-        o.source_progress = vec![progress("BTCUSDT", 1), progress("ETHUSDT", 2)].into();
-        let mut other = o.clone();
-        other.market.condition_id = ConditionId(format!("0x{}", "2".repeat(64)));
-        let initial = deliver_many(&sink, "test", vec![o.clone(), other.clone()], 0);
-        sink.finish().unwrap();
-        let initial_bytes = std::fs::metadata(root.join("public.jsonl")).unwrap().len();
-        // 20次全局进展只改变一个scope；两市场的全部PM来源保持原样。
-        for position in 1..=20 {
-            o.source_progress =
-                vec![progress("BTCUSDT", position + 2), progress("ETHUSDT", 2)].into();
-            other.source_progress = o.source_progress.clone();
-            let current = deliver_many(&sink, "test", vec![o.clone(), other.clone()], position);
-            assert_eq!(
-                current[&condition]["pm_group"],
-                initial[&condition]["pm_group"]
-            );
-            assert_eq!(
-                current[&condition]["pm_side_sources"],
-                initial[&condition]["pm_side_sources"]
-            );
-        }
-        sink.finish().unwrap();
-        let progress_only_bytes =
-            std::fs::metadata(root.join("public.jsonl")).unwrap().len() - initial_bytes;
-        let before_values = deliver(&sink, o.clone(), 21);
-        // 仅价变而来源不变。
-        Arc::make_mut(&mut o.assets[0].bids).value.as_mut().unwrap()[0].price_pusd_per_share =
-            ExactDecimal("0.5".into());
-        let value_changed = deliver(&sink, o.clone(), 22);
-        assert_eq!(
-            before_values[&condition]["pm_side_sources"],
-            value_changed[&condition]["pm_side_sources"]
-        );
+        let id = o.market.condition_id.0.clone();
+        let first = deliver(&sink, o.clone(), 0);
+        // 非消费的整侧来源变化不增加 PM 正文。
+        Arc::make_mut(&mut o.assets[0].bids).direct_anchors[0].received_at_utc_ms = 5000;
+        let unchanged = deliver(&sink, o.clone(), 1);
+        assert_eq!(first.scalars, unchanged.scalars);
+        // 深度来源接收时刻独立变化；数值与质量不变也需记录。
+        Arc::make_mut(&mut o.binance_depth).direct_anchors =
+            o.assets[0].bids.direct_anchors.clone();
+        let source = deliver(&sink, o.clone(), 2);
         assert_ne!(
-            before_values[&condition]["pm_group"],
-            value_changed[&condition]["pm_group"]
+            unchanged.scalars[&id]["blb_group"],
+            source.scalars[&id]["blb_group"]
         );
-        // 仅买侧来源变而最优价不变，不复制未变卖侧数组。
-        let bid = Arc::make_mut(&mut o.assets[0].bids);
-        bid.direct_anchors[0].received_at_utc_ms = 1010;
-        bid.dependency_frontier
+        // PM来源必须从直接BBA读取，不能取整侧来源。
+        o.assets[0].best_bid_ask.direct_anchors = o.assets[0].bids.direct_anchors.clone();
+        let bbo = deliver(&sink, o.clone(), 3);
+        assert_ne!(
+            source.scalars[&id]["pm_group"],
+            bbo.scalars[&id]["pm_group"]
+        );
+        o.official_anchor = Default::default();
+        let missing = deliver(&sink, o.clone(), 4);
+        assert_ne!(
+            bbo.scalars[&id]["blb_group"],
+            missing.scalars[&id]["blb_group"]
+        );
+        sink.finish().unwrap(); // 模拟 producer EOF；更早冻结的真实请求随后到达。
+        let group = PublicGroupReferenceV1 {
+            input_stream_id: "test".into(),
+            applied_prefix: AppliedIngressPrefixV1 {
+                input_stream_id: "test".into(),
+                next_input_position: 1,
+            },
+            group_position: 0,
+            group_id: Sha256Hex(format!("{:064x}", 0)),
+            closed_at_input_position: 0,
+        };
+        let request = HistoricalOriginalRequestV1 {
+            group,
+            condition_id: ConditionId(id.clone()),
+            blb: first.request_evidence[&id].clone(),
+        };
+        sink.record_request_evidence(std::slice::from_ref(&request))
+            .unwrap();
+        sink.record_request_evidence(&[request]).unwrap();
+        sink.finish().unwrap();
+        let out = rows(&root, 0);
+        assert_eq!(
+            out.iter()
+                .filter(|r| r["record_type"] == "original_pair_blb")
+                .count(),
+            1
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|r| r["record_type"] == "pm_state")
+                .count(),
+            2
+        );
+        assert!(
+            !serde_json::to_string(&out)
+                .unwrap()
+                .contains("dependency_frontier")
+        );
+        let unknown = out
+            .iter()
+            .find(|r| r["record_type"] == "blb_state" && r["group_position"] == 4)
+            .unwrap();
+        assert_eq!(unknown["state"]["blb"]["status"], "unknown");
+        let original = out
+            .iter()
+            .find(|r| r["record_type"] == "original_pair_blb")
+            .unwrap();
+        assert_eq!(original["evidence"]["blb"]["visible_quantity_btc"], "5");
+    }
+    #[test]
+    fn shared_market_transitions_restore_changed_states_and_old_frozen_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("e");
+        let factory = StreamingResearchV1::open(&root).unwrap();
+        let sink = factory.stream("test").unwrap();
+        let mut o = observation(Some("98"));
+        o.official_anchor.quality = MarketDataQuality::Fresh;
+        Arc::make_mut(&mut o.binance_depth).quality = MarketDataQuality::Fresh;
+        let id = o.market.condition_id.0.clone();
+        let mut up = asset();
+        // 有效的非交叉盘口；只在后面的步骤改变质量或删除正量档。
+        Arc::make_mut(&mut up.asks).value.as_mut().unwrap()[0].price_pusd_per_share =
+            ExactDecimal("0.6".into());
+        let mut down = up.clone();
+        down.asset = AssetIdentityV1 {
+            token_id: TokenId("12".into()),
+            outcome: OutcomeIdentityV1 {
+                index: 1,
+                label: "Down".into(),
+            },
+        };
+        let mut market = Arc::new(MarketObservationSnapshotV1 {
+            market: o.market.clone(),
+            assets: vec![up, down],
+            lifecycle: o.lifecycle.clone(),
+            active: o.active.clone(),
+            closed: o.closed.clone(),
+            accepting_orders: o.accepting_orders.clone(),
+            terminal: o.terminal.clone(),
+            official_anchor: o.official_anchor.clone(),
+            settlement_reference: o.settlement_reference.clone(),
+            temporary_reference: o.temporary_reference.clone(),
+            effective_reference: o.effective_reference.clone(),
+        });
+        let emit = |market: &Arc<MarketObservationSnapshotV1>, position: u64| {
+            let reference = PublicGroupReferenceV1 {
+                input_stream_id: "test".into(),
+                applied_prefix: AppliedIngressPrefixV1 {
+                    input_stream_id: "test".into(),
+                    next_input_position: position + 1,
+                },
+                group_position: position,
+                group_id: Sha256Hex(format!("{position:064x}")),
+                closed_at_input_position: position,
+            };
+            let group = ClosedBusinessGroupV1 {
+                group_id: reference.group_id.clone(),
+                group_position: position,
+                member_input_positions: vec![position],
+                closed_at_input_position: position,
+                records: Arc::from([]),
+                observations: MarketObservationSetV1::shared(
+                    [(id.clone(), market.clone())].into_iter().collect(),
+                    MarketObservationGroupV1 {
+                        schema_version: o.schema_version.clone(),
+                        group_id: reference.group_id.clone(),
+                        group_position: position,
+                        visible_prefix: reference.applied_prefix.clone(),
+                        chainlink_spot: Default::default(),
+                        chainlink_twap_thirty: Default::default(),
+                        chainlink_twap_sixty: Default::default(),
+                        binance_depth: o.binance_depth.clone(),
+                        binance_trade: Default::default(),
+                        group_events: Arc::from([]),
+                        source_progress: Default::default(),
+                    },
+                ),
+            };
+            let evidence = sink.observe_at(&reference, &group, 1000).unwrap();
+            (reference, evidence)
+        };
+        let mut frozen = vec![emit(&market, 0)];
+        // 同一个深度 M=100；仅把正式 K 从98修订为102，方向从bid改为ask。
+        Arc::make_mut(&mut market)
+            .official_anchor
+            .value
             .as_mut()
             .unwrap()
-            .next_input_position = 24;
-        let source_changed = deliver(&sink, o.clone(), 23);
-        assert_eq!(
-            value_changed[&condition]["pm_group"],
-            source_changed[&condition]["pm_group"]
-        );
-        assert_ne!(
-            value_changed[&condition]["pm_side_sources"][0],
-            source_changed[&condition]["pm_side_sources"][0]
-        );
-        assert_eq!(
-            value_changed[&condition]["pm_side_sources"][1],
-            source_changed[&condition]["pm_side_sources"][1]
-        );
-        // 删除scope同样可恢复；另一流相同市场/组序号必须使用独立身份。
-        o.source_progress = vec![progress("BTCUSDT", 22)].into();
-        let removed = deliver(&sink, o.clone(), 24);
-        let second = deliver_many(&sink, "another-day", vec![o.clone()], 0);
-        assert_ne!(
-            initial[&condition]["pm_group"],
-            second[&condition]["pm_group"]
-        );
+            .price_usd_per_btc = ExactDecimal("102".into());
+        frozen.push(emit(&market, 1));
+        // 价量与来源时刻完全不变，只改变PM质量，BLB必须继续引用版本1。
+        Arc::make_mut(&mut Arc::make_mut(&mut market).assets[0].bids).quality =
+            MarketDataQuality::Stale;
+        frozen.push(emit(&market, 2));
+        // 删光原正量bid，随后变为未知；空和未知不能继续保留0.4/7。
+        Arc::make_mut(&mut Arc::make_mut(&mut market).assets[0].bids).value = Some(vec![]);
+        frozen.push(emit(&market, 3));
+        let bid = Arc::make_mut(&mut Arc::make_mut(&mut market).assets[0].bids);
+        bid.value = None;
+        bid.quality = MarketDataQuality::UnknownNotObserved;
+        frozen.push(emit(&market, 4));
+        Arc::make_mut(&mut market).official_anchor = Default::default();
+        frozen.push(emit(&market, 5));
+        // 同一不可变市场Arc再次交付，走真实共享缓存的未变分支。
+        frozen.push(emit(&market, 6));
         sink.finish().unwrap();
-        let rows = records(&root);
-        let pm = resolve(
-            &rows,
-            "pm_state",
-            &source_changed[&condition]["pm_group"],
-            &condition,
-        );
-        assert_eq!(pm["pm"][0]["bid"]["price_pusd_per_share"], "0.5");
-        for link in source_changed[&condition]["pm_side_sources"]
-            .as_array()
-            .unwrap()
-        {
-            let r = rows
+        // 旧请求从未预先求值；在全部状态改变后才生成逐档正文。
+        let requests = frozen[..2]
+            .iter()
+            .map(|(group, evidence)| HistoricalOriginalRequestV1 {
+                group: group.clone(),
+                condition_id: ConditionId(id.clone()),
+                blb: evidence.request_evidence[&id].clone(),
+            })
+            .collect::<Vec<_>>();
+        let request_links = sink.record_request_evidence(&requests).unwrap();
+        sink.finish().unwrap();
+        let out = rows(&root, 0);
+        for ((group, evidence), (blb_version, pm_version)) in
+            frozen
                 .iter()
-                .find(|r| {
-                    r["record_type"] == "pm_side_sources"
-                        && r["group"] == link["group"]
-                        && r["condition_id"] == condition
-                        && r["token_id"] == link["token_id"]
-                        && r["side"] == link["side"]
+                .zip([(0, 0), (1, 0), (1, 2), (1, 3), (1, 4), (5, 4), (5, 4)])
+        {
+            assert!(
+                out.iter()
+                    .any(|r| r["record_type"] == "group" && r["group"] == json!(group))
+            );
+            assert_eq!(
+                evidence.scalars[&id],
+                json!({
+                    "input_stream_id":"test","blb_group":blb_version,"pm_group":pm_version
                 })
-                .unwrap();
-            let expected = if link["side"] == "bid" {
-                &o.assets[0].bids
-            } else {
-                &o.assets[0].asks
-            };
-            assert_eq!(
-                r["direct_anchors"],
-                serde_json::to_value(&expected.direct_anchors).unwrap()
             );
-            assert_eq!(
-                r["dependency_frontier"],
-                serde_json::to_value(&expected.dependency_frontier).unwrap()
-            );
+            for (kind, position) in [("blb_state", blb_version), ("pm_state", pm_version)] {
+                assert!(out.iter().any(|r| r["record_type"] == kind
+                    && r["condition_id"] == id
+                    && r["group_position"] == position));
+            }
+        }
+        let resolve = |kind: &str, position: u64| {
+            &out.iter()
+                .find(|r| {
+                    r["record_type"] == kind
+                        && r["condition_id"] == id
+                        && r["group_position"] == position
+                })
+                .unwrap()["state"]
+        };
+        for (position, k, side, notional) in [(0, "98", "bid", "492"), (1, "102", "ask", "508")] {
+            let blb = &resolve("blb_state", position)["blb"];
+            assert_eq!(blb["official_k_usd_per_btc"], k);
+            assert_eq!(blb["midpoint_usdt_per_btc"], "100");
+            assert_eq!(blb["side"], side);
+            assert_eq!(blb["visible_level_count"], 2);
+            assert_eq!(blb["visible_quantity_btc"], "5");
+            assert_eq!(blb["visible_notional_usdt"], notional);
         }
         assert_eq!(
-            restore_progress(&rows, &initial[&condition]["source_progress_group"]),
-            vec![progress("BTCUSDT", 1), progress("ETHUSDT", 2)]
+            resolve("pm_state", 0)[0]["bid_quality"],
+            json!(MarketDataQuality::Fresh)
         );
         assert_eq!(
-            restore_progress(&rows, &removed[&condition]["source_progress_group"]),
-            vec![progress("BTCUSDT", 22)]
+            resolve("pm_state", 2)[0]["bid_quality"],
+            json!(MarketDataQuality::Stale)
         );
         assert_eq!(
-            restore_progress(&rows, &second[&condition]["source_progress_group"]),
-            vec![progress("BTCUSDT", 22)]
+            resolve("pm_state", 0)[0]["bid"],
+            resolve("pm_state", 2)[0]["bid"]
         );
+        assert!(resolve("pm_state", 3)[0]["bid"].is_null());
         assert_eq!(
-            rows.iter()
-                .filter(|r| r["record_type"] == "source_progress")
+            resolve("pm_state", 3)[0]["bid_quality"],
+            json!(MarketDataQuality::Stale)
+        );
+        assert!(resolve("pm_state", 4)[0]["bid"].is_null());
+        assert_eq!(
+            resolve("pm_state", 4)[0]["bid_quality"],
+            json!(MarketDataQuality::UnknownNotObserved)
+        );
+        assert_eq!(resolve("blb_state", 5)["blb"]["status"], "unknown");
+        assert!(resolve("blb_state", 5)["blb"]["visible_quantity_btc"].is_null());
+        for (index, (k, side, prices)) in
+            [("98", "bid", ["99", "98"]), ("102", "ask", ["101", "102"])]
+                .into_iter()
+                .enumerate()
+        {
+            let row = out
+                .iter()
+                .find(|r| {
+                    r["record_type"] == "original_pair_blb"
+                        && r["evidence"]["group"] == json!(frozen[index].0)
+                })
+                .unwrap();
+            assert_eq!(row["evidence"]["condition_id"], id);
+            let blb = &row["evidence"]["blb"];
+            assert_eq!(blb["official_k_usd_per_btc"], k);
+            assert_eq!(blb["side"], side);
+            assert_eq!(
+                blb["visible_positive_levels"],
+                json!([
+                    {"price_usdt_per_btc":prices[0],"quantity_btc":"2"},
+                    {"price_usdt_per_btc":prices[1],"quantity_btc":"3"}
+                ])
+            );
+            assert_eq!(request_links[index]["group_position"], index);
+            assert_eq!(request_links[index]["input_stream_id"], "test");
+        }
+        assert_eq!(
+            out.iter()
+                .filter(|r| r["record_type"] == "blb_state")
                 .count(),
-            23
+            3
         );
         assert_eq!(
-            rows.iter()
-                .filter(|r| r["record_type"] == "pm_side_sources")
-                .count(),
-            7
-        );
-        assert_eq!(
-            rows.iter()
+            out.iter()
                 .filter(|r| r["record_type"] == "pm_state")
                 .count(),
             4
         );
-        assert_eq!(
-            rows.iter()
-                .filter(|r| r["record_type"] == "source_progress"
-                    && r["group"]["group_position"].as_u64().unwrap() > 0
-                    && r["group"]["group_position"].as_u64().unwrap() <= 20)
-                .map(|r| r["updates"].as_array().unwrap().len())
-                .sum::<usize>(),
-            20
-        );
-        let public_bytes = std::fs::metadata(root.join("public.jsonl")).unwrap().len();
-        let compact_bytes = serde_json::to_vec(initial.as_ref()).unwrap().len();
-        println!(
-            "finite_growth initial_public_bytes={initial_bytes} progress_only_20_groups_bytes={progress_only_bytes} total_public_bytes={public_bytes} compact_two_market_bytes={compact_bytes} pm_side_writes=7 pm_value_writes=4 progress_writes=23"
-        );
-        assert!(initial[&condition].get("pm").is_none());
-        assert!(initial[&condition].get("source_progress").is_none());
-        assert!(
-            initial[&condition]["blb"]
-                .get("visible_positive_levels")
-                .is_none()
-        );
     }
     #[test]
-    fn same_prefix_function_unknown_k_revision_and_pm_independence() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("research");
-        let sink = StreamingResearchV1::open(&root).unwrap();
-        let unknown = deliver(&sink, observation(None), 0);
-        let condition = format!("0x{}", "1".repeat(64));
-        assert_eq!(
-            unknown[&condition]["blb"]["unknown_reason"],
-            "official_anchor_not_observed"
-        );
-        let mut o = observation(Some("98"));
-        let early = deliver(&sink, o.clone(), 1);
-        let mut expected = serde_json::to_value(blb_research_v1(&o)).unwrap();
-        expected
-            .as_object_mut()
-            .unwrap()
-            .remove("visible_positive_levels");
-        assert_eq!(early[&condition]["blb"], expected);
-        assert_eq!(early[&condition]["blb"]["visible_quantity_btc"], "5");
-        o.assets.push(AssetBusinessObservationV1 {
-            asset: AssetIdentityV1 {
-                token_id: TokenId("11".into()),
-                outcome: OutcomeIdentityV1 {
-                    index: 0,
-                    label: "Up".into(),
-                },
-            },
-            bids: Arc::new(observed(vec![PriceLevelV1 {
-                price_pusd_per_share: ExactDecimal("0.4".into()),
-                quantity_shares: ExactDecimal("7".into()),
-            }])),
-            asks: Default::default(),
-            best_bid_ask: Default::default(),
-            valuation_best_bid: Default::default(),
-            tick: Default::default(),
-            public_trade: Default::default(),
+    fn independent_stream_progress_and_empty_requests_never_take_writer_lock() {
+        let t = tempfile::tempdir().unwrap();
+        let factory = StreamingResearchV1::open(&t.path().join("e")).unwrap();
+        let a = factory.stream("test").unwrap();
+        let b = factory.stream("other").unwrap();
+        // 确定性持有 A 的写出锁。空请求与 B 的观察必须都不等待该锁。
+        let lock = a.state.lock().unwrap();
+        assert_eq!(a.record_request_evidence(&[]).unwrap(), json!([]));
+        std::thread::scope(|s| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            s.spawn(move || {
+                deliver(&b, observation(Some("98")), 0);
+                tx.send(()).unwrap();
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
         });
-        let pm = deliver(&sink, o.clone(), 2);
-        assert_eq!(pm[&condition]["blb_group"]["group_position"], 1);
-        assert_ne!(pm[&condition]["pm_group"], early[&condition]["pm_group"]);
-        o.official_anchor.value.as_mut().unwrap().price_usd_per_btc = ExactDecimal("100".into());
-        let revised = deliver(&sink, o, 3);
-        assert_eq!(revised[&condition]["blb"]["status"], "at_anchor");
-        assert!(revised[&condition]["blb"]["visible_quantity_btc"].is_null());
-        assert_eq!(early[&condition]["blb"]["official_k_usd_per_btc"], "98");
-        assert_eq!(early[&condition]["group"]["closed_at_input_position"], 1);
-        let request = json!([{"condition_id":condition,"group":early[&condition]["group"],"blb":blb_research_v1(&observation(Some("98")))}]);
-        let links = sink.record_request_evidence(&request).unwrap();
-        assert_eq!(links, sink.record_request_evidence(&request).unwrap());
-        assert!(links[0].get("blb").is_none(), "候选只持有共享逐档证据引用");
-        sink.finish().unwrap();
-        let records = std::fs::read_to_string(root.join("public.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str::<Value>(l).unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            records
-                .iter()
-                .filter(|r| r["record_type"] == "original_pair_blb")
-                .count(),
-            1,
-            "同原前缀与市场只输出一份逐档证据"
-        );
-        assert_eq!(
-            records
-                .iter()
-                .find(|r| r["record_type"] == "original_pair_blb")
-                .unwrap()["evidence"]["blb"]["visible_positive_levels"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(
-            records
-                .iter()
-                .filter(|r| r["record_type"] == "blb_state")
-                .count(),
-            3,
-            "PM独立变化不重算BLB"
-        );
-        assert!(
-            records
-                .iter()
-                .any(|r| r["record_type"] == "pm_state" && r["group"]["group_position"] == 2)
-        );
+        drop(lock);
     }
     #[test]
-    fn required_public_flush_failure_is_returned() {
-        let sink = StreamingResearchV1(Mutex::new(State {
-            writer: BufWriter::new(OpenOptions::new().write(true).open("/dev/full").unwrap()),
-            markets: Default::default(),
-            progress: Default::default(),
-            request_prefixes: Default::default(),
-        }));
-        let _ = deliver(&sink, observation(None), 0);
+    fn final_buffer_failure_is_reported() {
+        let t = tempfile::tempdir().unwrap();
+        let f = StreamingResearchV1::open(&t.path().join("e")).unwrap();
+        let sink = f.stream("test").unwrap();
+        sink.state.lock().unwrap().as_mut().unwrap().writer =
+            BufWriter::new(OpenOptions::new().write(true).open("/dev/full").unwrap());
+        deliver(&sink, observation(Some("98")), 0);
         assert!(sink.finish().is_err());
     }
 }

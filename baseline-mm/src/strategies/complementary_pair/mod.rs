@@ -133,6 +133,8 @@ pub struct ComplementaryPairV1 {
     continuity: StrategyContinuityV2,
     signals: BTreeMap<String, SignalMemory>,
     profit_pending: BTreeMap<String, ProfitAllocationV2>,
+    // 仅研究编码缓存，不参与决策或接续状态；最多保存上一份真实诊断。
+    research_diagnostic_cache: std::cell::RefCell<Option<(ComplementaryPairDiagnosticV1, u64)>>,
 }
 
 #[derive(Clone)]
@@ -223,6 +225,60 @@ impl StrategyV1 for ComplementaryPairV1 {
     type Diagnostics = ComplementaryPairDiagnosticV1;
     fn research_diagnostics(&self, diagnostics: &Self::Diagnostics) -> serde_json::Value {
         serde_json::to_value(diagnostics).expect("真实策略诊断可序列化")
+    }
+    fn research_evaluated_markets(&self, diagnostics: &Self::Diagnostics) -> Vec<ConditionId> {
+        diagnostics
+            .markets
+            .iter()
+            .map(|m| m.condition_id.clone())
+            .collect()
+    }
+    fn research_compact_diagnostics(&self, diagnostics: &Self::Diagnostics) -> serde_json::Value {
+        let mut stable = diagnostics.clone();
+        let dynamic = diagnostics
+            .markets
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "condition_id":m.condition_id,"probability":m.probability,"urgency":m.urgency
+                })
+            })
+            .collect::<Vec<_>>();
+        for m in &mut stable.markets {
+            m.probability =
+                ProbabilityEstimateV1::Unavailable(EstimateUnavailableV1::MissingReference);
+            m.urgency = UrgencyStateV1 {
+                trading_remaining_ms: 0,
+                window_remaining_ms: 0,
+                settlement_window_start_utc_ms: None,
+                standardized_distance: None,
+                uncertainty_usd: None,
+                information_age_ms: None,
+                binance_innovation_usd: None,
+                orphan_cost_pusd: r(Decimal::ZERO).public(),
+                free_cash_pusd: ExactDecimal("0".into()),
+                unresolved_commitment_count: 0,
+                repair_ask_depth_shares: None,
+                maker_path_ms: 0,
+                active_path_ms: 0,
+            };
+        }
+        let mut cache = self.research_diagnostic_cache.borrow_mut();
+        let changed = cache.as_ref().is_none_or(|(old, _)| old != &stable);
+        let version = cache.as_ref().map_or(0, |(_, v)| *v + u64::from(changed));
+        let definition = changed.then(|| {
+            let mut value = serde_json::to_value(&stable).expect("真实诊断可序列化");
+            for market in value["markets"].as_array_mut().unwrap() {
+                market.as_object_mut().unwrap().remove("probability");
+                market.as_object_mut().unwrap().remove("urgency");
+            }
+            value
+        });
+        if changed {
+            *cache = Some((stable, version));
+        }
+        serde_json::json!({"format":"stable-diagnostics-v1","version":version,
+            "definition":definition,"dynamic":dynamic})
     }
     fn research_request_markets(&self, diagnostics: &Self::Diagnostics) -> Vec<ConditionId> {
         diagnostics

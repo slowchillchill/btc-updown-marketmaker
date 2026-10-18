@@ -181,6 +181,13 @@ pub trait StrategyV1 {
     fn research_diagnostics(&self, _diagnostics: &Self::Diagnostics) -> serde_json::Value {
         serde_json::Value::Null
     }
+    /// 研究记录的稳定诊断与逐次标量；默认保持原完整诊断。
+    fn research_compact_diagnostics(&self, diagnostics: &Self::Diagnostics) -> serde_json::Value {
+        self.research_diagnostics(diagnostics)
+    }
+    fn research_evaluated_markets(&self, _diagnostics: &Self::Diagnostics) -> Vec<ConditionId> {
+        Vec::new()
+    }
     /// 只标识真实新双腿请求涉及的市场，不计算影子动作。
     fn research_request_markets(&self, _diagnostics: &Self::Diagnostics) -> Vec<ConditionId> {
         Vec::new()

@@ -84,6 +84,7 @@ impl ComplementaryPairV1 {
             profit_pending: continuity.unresolved_profit_allocations.clone(),
             continuity,
             signals: BTreeMap::new(),
+            research_diagnostic_cache: Default::default(),
         })
     }
     pub fn checkpoint(&self) -> ComplementaryPairCheckpointV2 {

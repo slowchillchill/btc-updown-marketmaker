@@ -1450,27 +1450,32 @@ where
                 };
                 if let Some(calculation) = calculation {
                     if evidence.enabled() {
+                        #[cfg(feature="stage-timing")]
+                        let research_started=stages.start(crate::stage_timing::Stage::ResearchCandidateEvidence);
                         let (intents, diagnostics, outcome) = match &calculation.output {
                             StrategyOutputV1::Continue { intents, diagnostics, .. } => (Some(intents), diagnostics, "continue"),
                             StrategyOutputV1::Exit { diagnostics } => (None, diagnostics, "exit"),
                         };
                         let request_markets = strategy.research_request_markets(diagnostics);
-                        let request_evidence = serde_json::Value::Array(request_markets.iter().filter_map(|id| {
-                            frozen_public_evidence.as_ref().and_then(|e: &Arc<HistoricalPublicEvidenceV1>| e.request_evidence.get(&id.0)).map(|value| serde_json::json!({"condition_id":id,"group":calculation.input_cutoff.receipt().group(),"blb":value}))
-                        }).collect());
+                        let requests = request_markets.iter().filter_map(|id| {
+                            frozen_public_evidence.as_ref().and_then(|e|e.request_evidence.get(&id.0))
+                                .map(|blb| crate::HistoricalOriginalRequestV1 {condition_id:id.clone(),group:calculation.input_cutoff.receipt().group().clone(),blb:blb.clone()})
+                        }).collect::<Vec<_>>();
                         let request_evidence = if let Some(observer) = &context.public_observer {
-                            observer.record_request_evidence(&request_evidence).map_err(HistoricalFailureCauseV1::Material)?
-                        } else { request_evidence };
+                            observer.record_request_evidence(&requests).map_err(HistoricalFailureCauseV1::Material)?
+                        } else { serde_json::Value::Array(requests.iter().map(|r|r.value()).collect::<Result<Vec<_>,_>>().map_err(HistoricalFailureCauseV1::Material)?) };
                         evidence.record(&serde_json::json!({
                             "record_type":"calculation", "run_id": config.session.run_id,
                             "calculation_index": calculation_index,
                             "input_cutoff": calculation.input_cutoff,
                             "started_at_utc_ms": calculation.calculation_started_at_utc_ms,
                             "outcome": outcome, "intents": intents,
-                            "diagnostics": strategy.research_diagnostics(diagnostics),
-                            "public_state": frozen_public_evidence.as_ref().map(|e|&e.scalars),
+                            "diagnostics": strategy.research_compact_diagnostics(diagnostics),
+                            "public_state": frozen_public_evidence.as_ref().map(|e| strategy.research_evaluated_markets(diagnostics).iter().filter_map(|id| e.scalars.get(&id.0).map(|v| (id.0.clone(),v.clone()))).collect::<serde_json::Map<_,_>>()),
                             "original_pair_evidence": request_evidence
                         })).map_err(HistoricalFailureCauseV1::Material)?;
+                        #[cfg(feature="stage-timing")]
+                        stages.finish(crate::stage_timing::Stage::ResearchCandidateEvidence,research_started);
                     }
                     if let Some(counts) = research.as_mut().and_then(|s| s.decisions.as_mut()) {
                         counts.record(&calculation.output);
@@ -1538,7 +1543,6 @@ where
                     });
                     if evidence.enabled() {
                         evidence.record(&serde_json::json!({"record_type":"scheduled", "calculation_index":calculation_index, "timing":pending.as_ref().map(|p| &p.record)})).map_err(HistoricalFailureCauseV1::Material)?;
-                        evidence.flush().map_err(HistoricalFailureCauseV1::Material)?;
                     }
                     calculation_index += 1;
                     dirty = false;
@@ -1633,6 +1637,10 @@ where
         Ok((HistoricalEndReasonV1::RangeEnd, end))
     }
     .await;
+    let running = match (running, evidence.flush()) {
+        (Ok(_), Err(error)) => Err(HistoricalFailureCauseV1::Material(error)),
+        (result, _) => result,
+    };
     match running {
         Ok((reason, ended_at)) => {
             let normal = reason == HistoricalEndReasonV1::RangeEnd;
@@ -1820,6 +1828,32 @@ impl RuntimeControlV1 for NoRuntimeControlV1 {}
 #[cfg(test)]
 mod failure_preservation_tests {
     use super::*;
+    struct ExitProbe;
+    impl StrategyV1 for ExitProbe {
+        type Error = &'static str;
+        type Diagnostics = ();
+        fn decide(&mut self, _: &StrategyInputV1, _: i64) -> Result<StrategyOutputV1, Self::Error> {
+            Ok(StrategyOutputV1::Exit { diagnostics: () })
+        }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn candidate_final_flush_failure_prevents_successful_strategy_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, rules) = crate::test_common::setup(temp.path());
+        config.research_evidence_path = Some(temp.path().join("evidence.jsonl"));
+        let _failure = crate::decision_evidence::flush_failure_fixture::after_record("scheduled");
+        let failure = run_historical_v1(&config, rules, &mut ExitProbe)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&failure.cause,HistoricalFailureCauseV1::Material(e) if e.to_string().contains("post-dispatch flush failure"))
+        );
+        assert_eq!(
+            failure.report.unwrap().end_reason,
+            HistoricalEndReasonV1::Failure
+        );
+        assert!(!config.result_path.exists());
+    }
     #[derive(Default)]
     struct SentProbe {
         decided: bool,
