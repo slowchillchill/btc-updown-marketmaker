@@ -2,6 +2,8 @@
 mod fixture_default;
 #[path = "../../tests/common/fixture_material.rs"]
 mod fixture_material;
+#[path = "../src/streaming_research.rs"]
+mod streaming_research;
 mod common {
     pub(crate) use super::fixture_default::*;
     pub(crate) use super::fixture_material::*;
@@ -78,6 +80,12 @@ struct Trace {
 impl StrategyV1 for Trace {
     type Error = StrategyErrorV1;
     type Diagnostics = ComplementaryPairDiagnosticV1;
+    fn research_diagnostics(&self, d: &Self::Diagnostics) -> serde_json::Value {
+        self.strategy.research_diagnostics(d)
+    }
+    fn research_request_markets(&self, d: &Self::Diagnostics) -> Vec<ConditionId> {
+        self.strategy.research_request_markets(d)
+    }
     fn requires_trade_economics_details(&self) -> bool {
         self.strategy.requires_trade_economics_details()
     }
@@ -258,12 +266,21 @@ fn run_day_trace_with_research(
     config: &HistoricalRunConfigV1,
     rules: Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
     c: ComplementaryPairConfigV2,
-    _root: &Path,
+    root: &Path,
     research: bool,
 ) -> (serde_json::Value, TraceSummary) {
     let mut candidate = HistoricalPreparedRunConfigV1::from(config);
     candidate.strategy.effective_parameters = serde_json::to_value(&c).unwrap();
     candidate.strategy_request_namespace = Some("health-history".into());
+    let observer = research.then(|| {
+        Arc::new(
+            streaming_research::StreamingResearchV1::open(&root.join("streaming-evidence"))
+                .unwrap(),
+        ) as Arc<dyn HistoricalPublicObserverV1>
+    });
+    if research {
+        candidate.research_evidence_path = Some(root.join("decisions.jsonl"));
+    }
     let day = HistoricalDayConfigV1 {
         preparation: config.preparation.clone(),
         candidates: vec![candidate],
@@ -306,6 +323,7 @@ fn run_day_trace_with_research(
         1,
         &HistoricalDayRunOptionsV1 {
             research_summary: research,
+            public_observer: observer,
             ..Default::default()
         },
     )
@@ -1466,4 +1484,63 @@ impl Trace {
         }
         Ok(result)
     }
+}
+
+#[test]
+fn streaming_observation_is_economically_inert_and_decisions_keep_frozen_group() {
+    let off = tempfile::tempdir().unwrap();
+    let on = tempfile::tempdir().unwrap();
+    let (off_config, off_rules) = same_millisecond_fixture(off.path());
+    let (on_config, on_rules) = same_millisecond_fixture(on.path());
+    let (off_report, off_trace) =
+        run_day_trace_with_research(&off_config, off_rules, strategy_config(), off.path(), false);
+    let (on_report, on_trace) =
+        run_day_trace_with_research(&on_config, on_rules, strategy_config(), on.path(), true);
+    assert_eq!(off_trace.decisions, on_trace.decisions);
+    assert_eq!(off_trace.sent, on_trace.sent);
+    for key in [
+        "account_economics_memory",
+        "ledger_consumed_memory",
+        "conservative_nav_pusd",
+        "local_funds_rejected_batches",
+    ] {
+        assert_eq!(off_report[key], on_report[key], "{key}");
+    }
+    let rows = std::fs::read_to_string(on.path().join("decisions.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .collect::<Vec<_>>();
+    let calculations = rows
+        .iter()
+        .filter(|v| v["record_type"] == "calculation")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calculations.len(),
+        on_report["calculation_count"].as_u64().unwrap() as usize
+    );
+    let mut with_public = 0;
+    for row in calculations {
+        let frozen = &row["input_cutoff"]["receipt"]["group"];
+        if let Some(markets) = row["public_state"].as_object() {
+            for evidence in markets.values() {
+                assert_eq!(
+                    &evidence["group"], frozen,
+                    "不得把下一组公共状态写回冻结计算"
+                );
+                with_public += 1;
+            }
+        }
+    }
+    assert!(with_public > 0);
+    assert!(
+        rows.iter().any(|r| r["record_type"] == "invalidated_public"
+            || r["record_type"] == "invalidated_current")
+    );
+    let public =
+        std::fs::read_to_string(on.path().join("streaming-evidence/public.jsonl")).unwrap();
+    assert!(public.lines().any(
+        |l| serde_json::from_str::<serde_json::Value>(l).unwrap()["record_type"]
+            == "pm_source_state"
+    ));
 }

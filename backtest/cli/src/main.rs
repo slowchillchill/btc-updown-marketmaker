@@ -1,3 +1,4 @@
+mod streaming_research;
 use backtest::*;
 use baseline_mm::strategies::complementary_pair::*;
 use serde::{Deserialize, Serialize};
@@ -205,9 +206,21 @@ fn load_value(args: impl IntoIterator<Item = String>) -> Result<serde_json::Valu
     let mut args = args.into_iter();
     let mut config_file = None;
     let mut overrides = BTreeMap::new();
+    let mut entry_overrides = BTreeMap::<String, u64>::new();
     while let Some(option) = args.next() {
         if option == "--config" {
             config_file = Some(args.next().ok_or("--config 缺少文件路径")?);
+            continue;
+        }
+        if let Some(field) = match option.as_str() {
+            "--entry-market-start-offset-ms" => Some("start_offset_ms"),
+            "--entry-market-end-margin-ms" => Some("end_margin_ms"),
+            _ => None,
+        } {
+            entry_overrides.insert(
+                field.into(),
+                args.next().ok_or("开仓范围缺少毫秒值")?.parse()?,
+            );
             continue;
         }
         let name = option
@@ -230,6 +243,9 @@ fn load_value(args: impl IntoIterator<Item = String>) -> Result<serde_json::Valu
     } else {
         serde_json::to_value(toml::from_str::<toml::Value>(&content)?)?
     };
+    if !entry_overrides.is_empty() {
+        apply_entry_overrides(&mut value, &entry_overrides)?;
+    }
     for (name, (kind, raw)) in overrides {
         let (section, field) = name.split_once('.').expect("固定参数路径");
         let strategy = value
@@ -247,6 +263,45 @@ fn load_value(args: impl IntoIterator<Item = String>) -> Result<serde_json::Valu
         section.insert(field.into(), kind.parse(&raw)?);
     }
     Ok(value)
+}
+fn apply_entry_overrides(
+    value: &mut serde_json::Value,
+    overrides: &BTreeMap<String, u64>,
+) -> Result<(), CommandError> {
+    fn merge(
+        run: &mut serde_json::Value,
+        values: &BTreeMap<String, u64>,
+    ) -> Result<(), CommandError> {
+        let run = run.as_object_mut().ok_or("候选run不是对象")?;
+        let scope = run
+            .entry("entry_market_scope")
+            .or_insert_with(|| serde_json::json!({}));
+        if scope.is_null() {
+            *scope = serde_json::json!({});
+        }
+        let scope = scope.as_object_mut().ok_or("开仓范围不是对象")?;
+        for (name, value) in values {
+            scope.insert(name.clone(), (*value).into());
+        }
+        Ok(())
+    }
+    if let Some(days) = value.get_mut("days").and_then(|v| v.as_array_mut()) {
+        for day in days {
+            for candidate in day
+                .get_mut("candidates")
+                .and_then(|v| v.as_array_mut())
+                .ok_or("日期缺少候选")?
+            {
+                merge(candidate.get_mut("run").ok_or("候选缺少run")?, overrides)?;
+            }
+        }
+    } else {
+        merge(
+            value.get_mut("run").ok_or("开仓范围只适用于运行配置")?,
+            overrides,
+        )?;
+    }
+    Ok(())
 }
 fn load_config<R: serde::de::DeserializeOwned>(
     args: impl IntoIterator<Item = String>,
@@ -307,6 +362,7 @@ fn mode_args(
 }
 #[derive(Default)]
 struct ResearchOptions {
+    evidence_root: Option<PathBuf>,
     summary: bool,
     budget_seconds: Option<u64>,
     reserve_seconds: Option<u64>,
@@ -320,6 +376,9 @@ fn research_args(
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--research-summary" => result.summary = true,
+            "--research-evidence-root" => {
+                result.evidence_root = Some(args.next().ok_or("研究证据缺少输出目录")?.into())
+            }
             "--wall-budget-seconds" => {
                 result.budget_seconds = Some(args.next().ok_or("墙钟预算缺值")?.parse()?)
             }
@@ -348,7 +407,7 @@ fn write_day_failure_json(value: &serde_json::Value) -> std::io::Result<()> {
 async fn main() {
     if std::env::args().any(|arg| arg == "--help") {
         println!(
-            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，每次从头运行，不保存或恢复检查点\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--summary-reserve-seconds <秒>（默认900）\n全部策略字段可覆盖（day对各候选显式覆盖）：\n{}",
+            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，每次从头运行，不保存或恢复检查点\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--summary-reserve-seconds <秒>（默认900）\nday可选--entry-market-start-offset-ms <非负毫秒>、--entry-market-end-margin-ms <非负毫秒>：声明输入[S,E)上的S+a≤market.start<E-b；无配置不限制，显式0/0限制；单端沿文件补值后缺值取0。\nday可选--research-evidence-root <新目录>，同次公共生产输出BLB/PM与真实决策，失败返回部分结果。\n全部策略字段可覆盖（day对各候选显式覆盖）：\n{}",
             PARAMETERS
                 .iter()
                 .map(|(field, _)| *field)
@@ -366,7 +425,7 @@ async fn main() {
         let started = std::time::Instant::now();
         let (research, args) = research_args(std::env::args().skip(1))?;
         let (mode, interval, description, args) = mode_args(args)?;
-        if mode != Mode::Day && (research.summary || research.budget_seconds.is_some() || research.reserve_seconds.is_some()) {
+        if mode != Mode::Day && (research.summary || research.budget_seconds.is_some() || research.reserve_seconds.is_some() || research.evidence_root.is_some()) {
             return Err("研究汇总及预算选项仅适用于day入口".into());
         }
         // 外层硬截止覆盖输入准备、运行及最后输出；汇总预留用于返回已有成绩。
@@ -384,12 +443,17 @@ async fn main() {
         if mode==Mode::Day {
             let command=load_days_command(load_value(args)?)?;
             let rules=load_rules(command.rules)?;
+            let observer = research.evidence_root.as_ref().map(|root| streaming_research::StreamingResearchV1::open(root)).transpose()?;
             let mut days=Vec::new();
             for day in command.days {
                 let mut candidates=Vec::new();
                 for candidate in day.candidates {
                     let mut run=candidate.run;
                     run.strategy=StrategyDescriptorV1 {strategy_id:STRATEGY_ID.into(),strategy_rule_version:RULE_VERSION.into(),effective_parameters:serde_json::to_value(&candidate.strategy)?};
+                    run.effective_entry_market_scope=run.entry_market_scope.as_ref().map(|p| p.expand(day.preparation.scope.received_start_utc_ms,day.preparation.scope.received_end_utc_ms)).transpose()?;
+                    if let Some(root) = &research.evidence_root {
+                        run.research_evidence_path=Some(root.join(format!("candidate-{}-{}.jsonl",days.len(),candidates.len())));
+                    }
                     run.replay_progress_interval_seconds=interval;
                     run.strategy_request_namespace=Some(candidate.request_namespace);
                     candidates.push(run);
@@ -399,11 +463,11 @@ async fn main() {
             let factory=|run:&HistoricalPreparedRunConfigV1|->Result<ComplementaryPairV1,MaterialError> {
                 let strategy=serde_json::from_value(run.strategy.effective_parameters.clone())?;
                 let namespace=run.strategy_request_namespace.as_ref().ok_or("候选请求命名空间缺失")?.clone();
-                Ok(ComplementaryPairV1::new(strategy,rules.clone(),namespace,StrategyContinuityV2::new_account())?)
+                Ok(ComplementaryPairV1::new(strategy,rules.clone(),namespace,StrategyContinuityV2::new_account())?.with_entry_market_range(run.effective_entry_market_scope.as_ref().map(|e| EntryMarketRangeV1 { start_at_utc_ms:e.market_start_inclusive_utc_ms,end_at_utc_ms:e.market_start_exclusive_utc_ms })))
             };
-            let options=HistoricalDayRunOptionsV1 { research_summary:research.summary, started,
+            let options=HistoricalDayRunOptionsV1 { research_summary:research.summary, started, public_observer:observer.map(|o| std::sync::Arc::new(o) as std::sync::Arc<dyn HistoricalPublicObserverV1>),
                 budget_stop_after:research.budget_seconds.map(|budget| std::time::Duration::from_secs(budget-research.reserve_seconds.unwrap_or(900))) };
-            let result=if research.summary || research.budget_seconds.is_some() {
+            let result=if research.summary || research.budget_seconds.is_some() || research.evidence_root.is_some() {
                 run_historical_days_with_options_v1(&days,rules.clone(),&factory,command.parallel_dates.unwrap_or(1),&options)
             } else if let Some(parallel)=command.parallel_dates {run_historical_days_with_parallelism_v1(&days,rules.clone(),&factory,parallel)}
                 else {run_historical_days_v1(&days,rules.clone(),&factory)};
@@ -436,8 +500,10 @@ async fn main() {
             let mut config: CommandConfig<HistoricalPreparedRunConfigV1> = load_config(args)?;
             config.run.replay_progress_interval_seconds = interval;
             let rules = load_rules(config.rules)?;
-            let mut strategy = ComplementaryPairV1::new(config.strategy, rules.clone(), config.request_namespace, StrategyContinuityV2::new_account())?;
             let path = description.ok_or("reuse模式必须提供--prepared描述路径")?;
+            let material = PreparedHistoricalMaterialV1::read(&path)?;
+            config.run.effective_entry_market_scope = config.run.entry_market_scope.as_ref().map(|p| p.expand(material.preparation.scope.received_start_utc_ms,material.preparation.scope.received_end_utc_ms)).transpose()?;
+            let mut strategy = ComplementaryPairV1::new(config.strategy, rules.clone(), config.request_namespace, StrategyContinuityV2::new_account())?.with_entry_market_range(config.run.effective_entry_market_scope.as_ref().map(entry_range));
             let started = std::time::Instant::now();
             let output_ok = interval != 0 && emit_stage(&serde_json::json!({"stage":"opening_prepared_run", "processed_groups":null, "elapsed_seconds":started.elapsed().as_secs_f64(), "total":null, "eta":null}));
             let result = run_prepared_historical_v1(&path, &config.run, rules, &mut strategy).await;
@@ -446,7 +512,8 @@ async fn main() {
         }
         let config: CommandConfig = load_config(args)?;
         let rules = load_rules(config.rules)?;
-        let mut strategy = ComplementaryPairV1::new(config.strategy, rules.clone(), config.request_namespace, StrategyContinuityV2::new_account())?;
+        let scope = config.run.entry_market_scope.as_ref().map(|p| p.expand(config.run.preparation.scope.received_start_utc_ms,config.run.preparation.scope.received_end_utc_ms)).transpose()?;
+        let mut strategy = ComplementaryPairV1::new(config.strategy, rules.clone(), config.request_namespace, StrategyContinuityV2::new_account())?.with_entry_market_range(scope.as_ref().map(entry_range));
         print_result(run_historical_v1(&config.run, rules, &mut strategy).await)
     }.await;
     if let Err(error) = outcome as Result<(), CommandError> {
@@ -466,6 +533,12 @@ fn emit_stage(value: &serde_json::Value) -> bool {
     use std::io::Write;
     let mut output = std::io::stderr().lock();
     serde_json::to_writer(&mut output, value).is_ok() && writeln!(output).is_ok()
+}
+fn entry_range(e: &EffectiveEntryMarketScopeV1) -> EntryMarketRangeV1 {
+    EntryMarketRangeV1 {
+        start_at_utc_ms: e.market_start_inclusive_utc_ms,
+        end_at_utc_ms: e.market_start_exclusive_utc_ms,
+    }
 }
 fn load_rules(
     config: HistoricalProcessSnapshotRequestConfig,
@@ -561,5 +634,38 @@ mod research_option_tests {
         let (r, args) = research_args(["--mode", "day"].map(str::to_owned)).unwrap();
         assert!(!r.summary && r.budget_seconds.is_none());
         assert_eq!(args, ["--mode", "day"]);
+    }
+}
+
+#[cfg(test)]
+mod entry_scope_tests {
+    use super::*;
+    #[test]
+    fn cli_single_end_preserves_file_other_end_and_unconfigured_is_distinct() {
+        let mut v = serde_json::json!({"days":[{"candidates":[{"run":{"entry_market_scope":{"start_offset_ms":13,"end_margin_ms":27}}},{"run":{}}]}]});
+        apply_entry_overrides(&mut v, &BTreeMap::from([("start_offset_ms".into(), 0)])).unwrap();
+        let runs = &v["days"][0]["candidates"];
+        let a: EntryMarketScopeV1 =
+            serde_json::from_value(runs[0]["run"]["entry_market_scope"].clone()).unwrap();
+        let b: EntryMarketScopeV1 =
+            serde_json::from_value(runs[1]["run"]["entry_market_scope"].clone()).unwrap();
+        assert_eq!((a.start_offset_ms, a.end_margin_ms), (0, 27));
+        assert_eq!((b.start_offset_ms, b.end_margin_ms), (0, 0));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), r#"{"days":[{"candidates":[{"run":{}}]}]}"#).unwrap();
+        let absent = load_value(["--config".into(), file.path().display().to_string()]).unwrap();
+        assert!(
+            absent["days"][0]["candidates"][0]["run"]
+                .get("entry_market_scope")
+                .is_none()
+        );
+        let explicit = load_value([
+            "--config".into(),
+            file.path().display().to_string(),
+            "--entry-market-end-margin-ms".into(),
+            "0".into(),
+        ])
+        .unwrap();
+        assert!(explicit["days"][0]["candidates"][0]["run"]["entry_market_scope"].is_object());
     }
 }

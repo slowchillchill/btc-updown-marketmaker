@@ -44,6 +44,10 @@ impl HistoricalSessionV1 {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistoricalRunConfigV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research_evidence_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_market_scope: Option<EntryMarketScopeV1>,
     #[serde(
         default,
         skip_serializing_if = "GammaResolutionPolicyV1::is_source_time_only"
@@ -79,6 +83,12 @@ pub struct HistoricalPreparedRunConfigV1 {
     /// 日作业记录策略的固定请求命名空间；旧入口由原命令提供。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_request_namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_market_scope: Option<EntryMarketScopeV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_entry_market_scope: Option<EffectiveEntryMarketScopeV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research_evidence_path: Option<PathBuf>,
     pub timing: HistoricalTimingV1,
     pub session: HistoricalSessionV1,
     pub strategy: StrategyDescriptorV1,
@@ -104,6 +114,9 @@ impl From<&HistoricalRunConfigV1> for HistoricalPreparedRunConfigV1 {
         Self {
             gamma_resolution_policy: c.gamma_resolution_policy,
             strategy_request_namespace: None,
+            entry_market_scope: c.entry_market_scope.clone(),
+            effective_entry_market_scope: None,
+            research_evidence_path: c.research_evidence_path.clone(),
             timing: c.timing.clone(),
             session: c.session.clone(),
             strategy: c.strategy.clone(),
@@ -627,8 +640,22 @@ where
         Item = Result<sim_system::public_consumption::AcceptedHiddenStepBucketV1, MaterialError>,
     >,
 {
-    let metadata = serde_json::json!({"config": metadata_config, "prepared_material": material, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "source_identity_sha256": prepared.source_identity_sha256, "initialization": prepared.initialization, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "maker_model_version": rules.maker_model_version_for(SimCallerRoleV1::HistoricalBacktest), "caller_role": SimCallerRoleV1::HistoricalBacktest, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
+    let mut effective_config = config.clone();
+    effective_config.effective_entry_market_scope = config
+        .entry_market_scope
+        .as_ref()
+        .map(|p| {
+            p.expand(
+                material.preparation.scope.received_start_utc_ms,
+                material.preparation.scope.received_end_utc_ms,
+            )
+        })
+        .transpose()
+        .map_err(material_failure)?;
+    let config = &effective_config;
+    let metadata = serde_json::json!({"effective_entry_market_scope":config.effective_entry_market_scope,"config": metadata_config, "prepared_material": material, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "source_identity_sha256": prepared.source_identity_sha256, "initialization": prepared.initialization, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "maker_model_version": rules.maker_model_version_for(SimCallerRoleV1::HistoricalBacktest), "caller_role": SimCallerRoleV1::HistoricalBacktest, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
     let context = HistoricalRuntimeContextV1 {
+        public_observer: None,
         start: material.preparation.scope.received_start_utc_ms,
         source_identity: prepared.source_identity_sha256,
         day_log_binding: None,
@@ -651,6 +678,7 @@ pub(crate) struct HistoricalRuntimeCatalogV1 {
     pub initialization: HistoricalInitializationProvenanceV1,
 }
 pub(crate) struct HistoricalRuntimeContextV1 {
+    pub public_observer: Option<Arc<dyn HistoricalPublicObserverV1>>,
     pub start: i64,
     pub source_identity: Sha256Hex,
     pub day_log_binding: Option<HistoricalDayLogBindingV1>,
@@ -704,6 +732,10 @@ where
     let mut stages =
         crate::stage_timing::StageTimings::new(format!("candidate:{}", config.session.run_id));
     let health_enabled = strategy.uses_source_health();
+    let mut evidence = crate::decision_evidence::DecisionEvidenceV1::open(
+        config.research_evidence_path.as_deref(),
+    )
+    .map_err(material_failure)?;
     let start = || -> Result<_, MaterialError> {
         serde_json::to_writer(std::fs::File::create(&config.metadata_path)?, &metadata)?;
         let (execution, shared, observation) = assemble(
@@ -771,6 +803,7 @@ where
     let mut local_funds_rejected_batches = 0;
     let mut initialization_classifier =
         crate::preparation::InitializationDependencyClassifier::default();
+    let mut frozen_public_evidence = None;
     let mut failed_timing = None;
     let mut failed_calculation = None;
     let mut failed_dispatch_effects = None;
@@ -915,6 +948,7 @@ where
                     .next_prepared_group()
                     .map_err(HistoricalFailureCauseV1::Sim)?;
                 if let Some(group) = &prepared_group {
+                    frozen_public_evidence = control.public_evidence(group.group.group_position);
                     if operating_start.is_some() {
                         let (initial, dependency) = if let Some(classification) = control.initialization_classification(group.group.group_position) {
                             classification
@@ -1008,6 +1042,8 @@ where
                                 detected_at_utc_ms: detected_at,
                                 release_errors: vec![],
                             };
+                            evidence.record(&serde_json::json!({"record_type":"invalidated_public", "timing":p.record, "reason_code":result.reason.reason_code,"scopes":result.reason.scopes,"observed_cutoff":result.observed_cutoff,"detected_at_utc_ms":result.detected_at_utc_ms,"invalidated_intent_index":result.invalidated_intent_index})).map_err(HistoricalFailureCauseV1::Material)?;
+                            evidence.flush().map_err(HistoricalFailureCauseV1::Material)?;
                             strategy.invalidated(&p.calculation.calculation, &result);
                             p.health_invalidated = true;
                             p.completed_at = p.completed_at.max(detected_at);
@@ -1071,7 +1107,9 @@ where
                     )
                     .map_err(HistoricalFailureCauseV1::Strategy)?;
                     health_summary.qualification_calls += calls;
-                    if invalidated.is_some() {
+                    if let Some(result) = &invalidated {
+                        evidence.record(&serde_json::json!({"record_type":"invalidated_current", "timing":p.record,"reason_code":result.reason.reason_code,"scopes":result.reason.scopes,"observed_cutoff":result.observed_cutoff,"detected_at_utc_ms":result.detected_at_utc_ms,"invalidated_intent_index":result.invalidated_intent_index})).map_err(HistoricalFailureCauseV1::Material)?;
+                        evidence.flush().map_err(HistoricalFailureCauseV1::Material)?;
                         p.health_invalidated = true;
                         p.completed_at = p.completed_at.max(at);
                         health_summary.invalidated_batches += 1;
@@ -1134,6 +1172,10 @@ where
                     failed_timing = Some(p.record.clone());
                     failed_calculation_cash = p.calculation_cash;
                     admission_cash = if matches!(&p.calculation.calculation.output, StrategyOutputV1::Continue {intents,..} if !intents.is_empty()) {action_cash(&shared)} else {None};
+                    if let Err(error) = evidence.record(&serde_json::json!({"record_type":"dispatch_entered", "timing":p.record,"at_utc_ms":at,"calculation_cash":failed_calculation_cash,"admission_cash":admission_cash})) {
+                        failed_calculation=Some(p.calculation);
+                        return Err(HistoricalFailureCauseV1::Material(error));
+                    }
                     let dispatched = if health_enabled {
                         let result = measure_stage!(
                             stages,
@@ -1161,24 +1203,37 @@ where
                                 health_summary.last_invalidated_calculation_timing =
                                     Some(p.record.clone());
                                 dirty = true;
-                                if !result.release_errors.is_empty() {
-                                    failed_calculation=Some(calculation);
-                                    if !result.sent.is_empty(){failed_timing.as_mut().unwrap().actual_sent_at_utc_ms=Some(at);}
-                                    let (cause, effects) = invalidation_release_failure(result.sent, result.release_errors);
-                                    failed_dispatch_effects = Some(effects);
+                                // 返回事实先进入原失败上下文，再做任何可能失败的证据输出。
+                                failed_calculation=Some(calculation);
+                                if !result.sent.is_empty(){failed_timing.as_mut().unwrap().actual_sent_at_utc_ms=Some(at);}
+                                let release_failure = if result.release_errors.is_empty() {
+                                    failed_dispatch_effects=Some(FailedDispatchEffectsV1 {sent:result.sent,attempted_intent_index:None,failed_request_effect:None,release_errors:vec![]});
+                                    None
+                                } else {
+                                    let (cause,effects)=invalidation_release_failure(result.sent,result.release_errors);
+                                    failed_dispatch_effects=Some(effects);
+                                    Some(cause)
+                                };
+                                let output = evidence.record(&serde_json::json!({"record_type":"invalidated_dispatch", "timing":failed_timing,"sent":failed_dispatch_effects.as_ref().map(|e|&e.sent),"reason_code":result.reason.reason_code,"scopes":result.reason.scopes,"observed_cutoff":result.observed_cutoff,"detected_at_utc_ms":result.detected_at_utc_ms,"invalidated_intent_index":result.invalidated_intent_index})).and_then(|_|evidence.flush());
+                                if let Some(cause)=release_failure {
+                                    if let Err(error)=output {eprintln!("研究证据输出同时失败：{error}；保留原释放失败");}
                                     return Err(HistoricalFailureCauseV1::Ledger(cause));
                                 }
+                                output.map_err(HistoricalFailureCauseV1::Material)?;
                                 None
                             }
                             Err(StrategyDispatchFailureV1 {calculation,error:QualifiedBatchErrorV1::Execution(error)}) => {
                                 if error.is_local_funds_rejection() {
+                                    failed_calculation=Some(calculation);
                                     local_funds_rejected_batches += 1;
+                                    evidence.record(&serde_json::json!({"record_type":"local_funds_zero_submission","timing":p.record,"at_utc_ms":at,"error":format!("{:?}",error)})).and_then(|_|evidence.flush()).map_err(HistoricalFailureCauseV1::Material)?;
                                     evaluation_at = future_evaluation;
                                     timing = Some(p.record.clone());
                                     None
                                 } else {
                                     failed_calculation = Some(calculation);
                                     if !error.sent.is_empty() {failed_timing.as_mut().unwrap().actual_sent_at_utc_ms=Some(at);}
+                                    if let Err(output_error) = evidence.record(&serde_json::json!({"record_type":"dispatch_failed","timing":p.record,"at_utc_ms":at,"sent":error.sent,"attempted_intent_index":error.attempted_intent_index,"failed_request_effect":error.failed_request_effect,"error":format!("{:?}",error.error)})).and_then(|_| evidence.flush()) { eprintln!("研究证据输出同时失败：{output_error}；保留原派发失败"); }
                                     return Err(HistoricalFailureCauseV1::Dispatch(error));
                                 }
                             }
@@ -1189,6 +1244,7 @@ where
                             }}) => {
                                 failed_calculation = Some(calculation);
                                 if !sent.is_empty() {failed_timing.as_mut().unwrap().actual_sent_at_utc_ms=Some(at);}
+                                if let Err(output_error) = evidence.record(&serde_json::json!({"record_type":"qualification_failed","timing":p.record,"at_utc_ms":at,"sent":sent,"cause":"unknown_see_failure_report"})).and_then(|_| evidence.flush()) { eprintln!("研究证据输出同时失败：{output_error}；保留原派发失败"); }
                                 return Err(HistoricalFailureCauseV1::Qualification {
                                     error,
                                     sent,
@@ -1201,7 +1257,9 @@ where
                             shared.dispatch_strategy(&mut decision, strategy, p.calculation).await) {
                             Ok(dispatch) => Some(dispatch),
                             Err(failure) if failure.error.is_local_funds_rejection() => {
+                                failed_calculation=Some(failure.calculation);
                                 local_funds_rejected_batches += 1;
+                                evidence.record(&serde_json::json!({"record_type":"local_funds_zero_submission","timing":p.record,"at_utc_ms":at,"error":format!("{:?}",failure.error)})).and_then(|_|evidence.flush()).map_err(HistoricalFailureCauseV1::Material)?;
                                 evaluation_at = future_evaluation;
                                 timing = Some(p.record.clone());
                                 None
@@ -1209,31 +1267,37 @@ where
                             Err(failure) => {
                                 failed_calculation = Some(failure.calculation);
                                 if !failure.error.sent.is_empty() { failed_timing.as_mut().unwrap().actual_sent_at_utc_ms=Some(at); }
+                                if let Err(output_error) = evidence.record(&serde_json::json!({"record_type":"dispatch_failed","timing":p.record,"at_utc_ms":at,"sent":failure.error.sent,"attempted_intent_index":failure.error.attempted_intent_index,"failed_request_effect":failure.error.failed_request_effect,"error":format!("{:?}",failure.error.error)})).and_then(|_| evidence.flush()) { eprintln!("研究证据输出同时失败：{output_error}；保留原派发失败"); }
                                 return Err(HistoricalFailureCauseV1::Dispatch(failure.error));
                             }
                         }
 
                     };
-                    failed_timing = None;
-                    failed_calculation_cash = None;
-                    admission_cash = None;
                     if let Some(StrategyDispatchV1::Continue {
                         calculation,
                         sent_at_utc_ms,
                         receipts,
                     }) = dispatched
                     {
-                        let mut record = p.record;
-                        record.actual_sent_at_utc_ms = (!receipts.is_empty()).then_some(sent_at_utc_ms);
-                        timing = Some(record);
+                        failed_timing.as_mut().unwrap().actual_sent_at_utc_ms = (!receipts.is_empty()).then_some(sent_at_utc_ms);
+                        failed_dispatch_effects = Some(FailedDispatchEffectsV1 { sent: receipts, attempted_intent_index:None,failed_request_effect:None,release_errors:vec![] });
+                        failed_calculation=Some(calculation);
+                        evidence.record(&serde_json::json!({"record_type":"dispatched", "timing":failed_timing,"sent_at_utc_ms":sent_at_utc_ms,"receipts":failed_dispatch_effects.as_ref().map(|e|&e.sent)})).and_then(|_| evidence.flush()).map_err(HistoricalFailureCauseV1::Material)?;
+                        timing = failed_timing.clone();
                         if let StrategyOutputV1::Continue {
                             next_evaluation_at_utc_ms,
                             ..
-                        } = calculation.calculation.output
+                        } = &failed_calculation.as_ref().expect("已保存原派发计算").calculation.output
                         {
                             evaluation_at = next_evaluation_at_utc_ms.map(|next| next.max(at));
                         }
                     }
+                    // 所有正常返回路径都已在保有原计算时完成必要输出。
+                    failed_timing = None;
+                    failed_calculation = None;
+                    failed_dispatch_effects = None;
+                    failed_calculation_cash = None;
+                    admission_cash = None;
                 }
             }
             if hidden_at == Some(at) {
@@ -1385,6 +1449,29 @@ where
                         .map_err(HistoricalFailureCauseV1::Strategy)?
                 };
                 if let Some(calculation) = calculation {
+                    if evidence.enabled() {
+                        let (intents, diagnostics, outcome) = match &calculation.output {
+                            StrategyOutputV1::Continue { intents, diagnostics, .. } => (Some(intents), diagnostics, "continue"),
+                            StrategyOutputV1::Exit { diagnostics } => (None, diagnostics, "exit"),
+                        };
+                        let request_markets = strategy.research_request_markets(diagnostics);
+                        let request_evidence = serde_json::Value::Array(request_markets.iter().filter_map(|id| {
+                            frozen_public_evidence.as_ref().and_then(|e: &Arc<HistoricalPublicEvidenceV1>| e.request_evidence.get(&id.0)).map(|value| serde_json::json!({"condition_id":id,"group":calculation.input_cutoff.receipt().group(),"blb":value}))
+                        }).collect());
+                        let request_evidence = if let Some(observer) = &context.public_observer {
+                            observer.record_request_evidence(&request_evidence).map_err(HistoricalFailureCauseV1::Material)?
+                        } else { request_evidence };
+                        evidence.record(&serde_json::json!({
+                            "record_type":"calculation", "run_id": config.session.run_id,
+                            "calculation_index": calculation_index,
+                            "input_cutoff": calculation.input_cutoff,
+                            "started_at_utc_ms": calculation.calculation_started_at_utc_ms,
+                            "outcome": outcome, "intents": intents,
+                            "diagnostics": strategy.research_diagnostics(diagnostics),
+                            "public_state": frozen_public_evidence.as_ref().map(|e|&e.scalars),
+                            "original_pair_evidence": request_evidence
+                        })).map_err(HistoricalFailureCauseV1::Material)?;
+                    }
                     if let Some(counts) = research.as_mut().and_then(|s| s.decisions.as_mut()) {
                         counts.record(&calculation.output);
                     }
@@ -1449,6 +1536,10 @@ where
                             actual_sent_at_utc_ms: None,
                         },
                     });
+                    if evidence.enabled() {
+                        evidence.record(&serde_json::json!({"record_type":"scheduled", "calculation_index":calculation_index, "timing":pending.as_ref().map(|p| &p.record)})).map_err(HistoricalFailureCauseV1::Material)?;
+                        evidence.flush().map_err(HistoricalFailureCauseV1::Material)?;
+                    }
                     calculation_index += 1;
                     dirty = false;
                 }
@@ -1709,6 +1800,9 @@ impl<D> Default for RuntimeLoopStateV1<D> {
     }
 }
 pub(crate) trait RuntimeControlV1 {
+    fn public_evidence(&self, _position: u64) -> Option<Arc<HistoricalPublicEvidenceV1>> {
+        None
+    }
     fn initialization_classification(&self, _position: u64) -> Option<(bool, bool)> {
         None
     }
@@ -1730,6 +1824,8 @@ mod failure_preservation_tests {
     struct SentProbe {
         decided: bool,
         sent: Vec<SentIntentReceiptV1>,
+        invalidate_after_prefix: bool,
+        invalidations: usize,
     }
     impl StrategyV1 for SentProbe {
         type Error = &'static str;
@@ -1753,11 +1849,52 @@ mod failure_preservation_tests {
                     reserves: vec![],
                 });
             }
+            if self.invalidate_after_prefix && !intents.is_empty() {
+                intents.push(ReservedIntentV1 {
+                    context: RequestContextV2 {
+                        global_request_id: "unsent-after-prefix".into(),
+                        caller_correlation_id: None,
+                    },
+                    intent: intents[0].intent.clone(),
+                    reserves: vec![],
+                });
+            }
             Ok(StrategyOutputV1::Continue {
                 intents,
                 next_evaluation_at_utc_ms: None,
                 diagnostics: (),
             })
+        }
+        fn uses_source_health(&self) -> bool {
+            self.invalidate_after_prefix
+        }
+        fn qualify_intent(
+            &mut self,
+            input: &StrategyCurrentReadV1<'_>,
+            _: &StrategyCalculationV1<Self::Diagnostics>,
+            index: usize,
+            _: i64,
+        ) -> Result<IntentQualificationV1, Self::Error> {
+            Ok(
+                if index == 1
+                    && matches!(input.action_before.pending_cancellation_count(None),ExecutionReadValueV1::Known(n) if n>0)
+                {
+                    IntentQualificationV1::Invalidated(IntentInvalidationReasonV1 {
+                        reason_code: "fixture after real first receipt".into(),
+                        scopes: vec![],
+                    })
+                } else {
+                    IntentQualificationV1::Qualified
+                },
+            )
+        }
+        fn invalidated(
+            &mut self,
+            _: &StrategyCalculationV1<Self::Diagnostics>,
+            result: &InvalidatedBatchV1,
+        ) {
+            self.invalidations += 1;
+            self.sent.extend(result.sent.iter().cloned());
         }
         fn dispatched(
             &mut self,
@@ -1805,5 +1942,79 @@ mod failure_preservation_tests {
         assert_eq!(effects.release_errors, expected);
         assert_eq!(effects.attempted_intent_index, None);
         assert_eq!(effects.failed_request_effect, None);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_first_flush_after_successful_dispatch_keeps_original_batch_and_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, rules) = crate::test_common::setup(temp.path());
+        config.research_evidence_path = Some(temp.path().join("evidence.jsonl"));
+        let _failure =
+            crate::decision_evidence::flush_failure_fixture::after_record("dispatch_entered");
+        let mut strategy = SentProbe::default();
+        let failure = run_historical_v1(&config, rules, &mut strategy)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&failure.cause,HistoricalFailureCauseV1::Material(e) if e.to_string().contains("post-dispatch flush failure"))
+        );
+        assert_eq!(strategy.sent.len(), 1, "flush失败之前必须已有真实派发回执");
+        let report = failure.report.unwrap();
+        let timing = report.pending_calculation_timing.unwrap();
+        assert_eq!(
+            timing.actual_sent_at_utc_ms,
+            Some(timing.scheduled_send_at_utc_ms)
+        );
+        let batch = report.failed_batch.unwrap();
+        assert_eq!(batch.intents.len(), 1);
+        assert_eq!(batch.intents[0].context.global_request_id, "release-prefix");
+        let effects = batch.dispatch_effects.unwrap();
+        assert_eq!(effects.sent.len(), 1);
+        assert_eq!(
+            effects.sent[0].receipt.input_sequence(),
+            strategy.sent[0].receipt.input_sequence()
+        );
+        assert_eq!(effects.sent[0].context.global_request_id, "release-prefix");
+        assert!(effects.release_errors.is_empty());
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_invalidated_prefix_flush_failure_keeps_sent_and_unsent_original_identities() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, rules) = crate::test_common::setup(temp.path());
+        config.research_evidence_path = Some(temp.path().join("evidence.jsonl"));
+        let _failure =
+            crate::decision_evidence::flush_failure_fixture::after_record("invalidated_dispatch");
+        let mut strategy = SentProbe {
+            invalidate_after_prefix: true,
+            ..Default::default()
+        };
+        let failure = run_historical_v1(&config, rules, &mut strategy)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&failure.cause,HistoricalFailureCauseV1::Material(e) if e.to_string().contains("post-dispatch flush failure"))
+        );
+        assert_eq!(strategy.invalidations, 1);
+        assert_eq!(strategy.sent.len(), 1);
+        let report = failure.report.unwrap();
+        let timing = report.pending_calculation_timing.unwrap();
+        assert_eq!(
+            timing.actual_sent_at_utc_ms,
+            Some(timing.scheduled_send_at_utc_ms)
+        );
+        let batch = report.failed_batch.unwrap();
+        assert_eq!(batch.intents.len(), 2);
+        assert_eq!(batch.intents[0].context.global_request_id, "release-prefix");
+        assert_eq!(
+            batch.intents[1].context.global_request_id,
+            "unsent-after-prefix"
+        );
+        let effects = batch.dispatch_effects.unwrap();
+        assert_eq!(effects.sent.len(), 1);
+        assert_eq!(
+            effects.sent[0].receipt.input_sequence(),
+            strategy.sent[0].receipt.input_sequence()
+        );
+        assert_eq!(effects.sent[0].context.global_request_id, "release-prefix");
+        assert!(effects.release_errors.is_empty());
     }
 }

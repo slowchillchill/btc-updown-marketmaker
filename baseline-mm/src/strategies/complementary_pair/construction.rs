@@ -77,6 +77,7 @@ impl ComplementaryPairV1 {
         rational(&continuity.confirmed_high_water_pusd)?;
         Ok(Self {
             config,
+            entry_market_range: None,
             rules,
             namespace: request_namespace,
             next_request: continuity.next_request_sequence,
@@ -100,6 +101,11 @@ impl ComplementaryPairV1 {
         let mut strategy = Self::new(config, rules, saved.namespace, saved.continuity)?;
         strategy.signals = saved.signals;
         Ok(strategy)
+    }
+    /// 启动时由宿主从声明输入端点展开；只限制新配对生成。
+    pub fn with_entry_market_range(mut self, range: Option<EntryMarketRangeV1>) -> Self {
+        self.entry_market_range = range;
+        self
     }
     pub fn config(&self) -> &ComplementaryPairConfigV2 {
         &self.config
@@ -145,7 +151,8 @@ impl shared_run::CheckpointStrategyV1 for ComplementaryPairV1 {
         reader: &mut dyn std::io::Read,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let saved = ciborium::de::from_reader(reader)?;
-        *self = Self::restore(self.config.clone(), self.rules.clone(), saved)?;
+        *self = Self::restore(self.config.clone(), self.rules.clone(), saved)?
+            .with_entry_market_range(self.entry_market_range);
         Ok(())
     }
 }

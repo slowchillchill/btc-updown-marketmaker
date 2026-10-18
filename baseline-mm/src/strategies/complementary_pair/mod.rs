@@ -126,6 +126,7 @@ struct RemainingRepairEstimate {
 /// 只保存信号、高水位、终止与未决增量占用；库存/费用/订单每轮重新读取公共事实。
 pub struct ComplementaryPairV1 {
     config: ComplementaryPairConfigV2,
+    entry_market_range: Option<EntryMarketRangeV1>,
     rules: Arc<SealedProcessRuleSnapshotV3>,
     namespace: String,
     next_request: u64,
@@ -220,6 +221,17 @@ impl<'a> PairMarketRead<'a> {
 impl StrategyV1 for ComplementaryPairV1 {
     type Error = StrategyErrorV1;
     type Diagnostics = ComplementaryPairDiagnosticV1;
+    fn research_diagnostics(&self, diagnostics: &Self::Diagnostics) -> serde_json::Value {
+        serde_json::to_value(diagnostics).expect("真实策略诊断可序列化")
+    }
+    fn research_request_markets(&self, diagnostics: &Self::Diagnostics) -> Vec<ConditionId> {
+        diagnostics
+            .markets
+            .iter()
+            .filter(|d| d.choice == MarketChoiceV1::NewPair)
+            .map(|d| d.condition_id.clone())
+            .collect()
+    }
     fn requires_trade_economics_details(&self) -> bool {
         false
     }
@@ -518,6 +530,12 @@ impl ComplementaryPairV1 {
             let urgency = self.urgency(o, now, &p, s, cash, missing)?;
             let mut d = MarketDecisionDiagnosticV1 {
                 condition_id: o.market.condition_id.clone(),
+                pair_entry: PairEntryEvaluationV1 {
+                    market_eligible: self
+                        .entry_market_range
+                        .is_none_or(|r| r.contains(o.market.window.start_at_utc_ms)),
+                    ..Default::default()
+                },
                 probability: p.clone(),
                 urgency,
                 choice: MarketChoiceV1::Wait,

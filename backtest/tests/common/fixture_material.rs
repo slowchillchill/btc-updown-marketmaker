@@ -219,6 +219,8 @@ pub(super) fn setup_day_with_terminal(
         max_temp_bytes: 1 << 26,
     };
     let config = HistoricalRunConfigV1 {
+        entry_market_scope: None,
+        research_evidence_path: None,
         gamma_resolution_policy: Default::default(),
         preparation: HistoricalPreparationConfigV1 {
             scope: HistoricalScopeV1 {

@@ -19,6 +19,7 @@ impl ComplementaryPairV1 {
         diag: &mut MarketDecisionDiagnosticV1,
     ) -> Result<(), StrategyErrorV1> {
         let o = &f.observation;
+        diag.pair_entry.evaluated = true;
         let Some(mut prices) = self.quotes(o, p, s)? else {
             diag.unavailable.push(if p.up().is_none() {
                 ActionUnavailableV1::EstimateRequired
@@ -27,6 +28,7 @@ impl ComplementaryPairV1 {
             });
             return Ok(());
         };
+        diag.pair_entry.target_prices = Some(prices.map(|p| ExactDecimal(p.to_string())));
         if s.unknown {
             diag.unavailable
                 .push(ActionUnavailableV1::UnknownCostOrCommitment);
@@ -50,6 +52,27 @@ impl ComplementaryPairV1 {
                 *target = old;
             }
         }
+        diag.pair_entry.reused_prices = Some(prices.map(|p| ExactDecimal(p.to_string())));
+        diag.pair_entry.bid_distance = Some([0, 1].map(|i| {
+            o.assets[i]
+                .bids
+                .value
+                .as_ref()
+                .and_then(|levels| {
+                    levels
+                        .iter()
+                        .filter(|l| decimal(&l.quantity_shares).is_ok_and(|q| q > Decimal::ZERO))
+                        .filter_map(|l| decimal(&l.price_pusd_per_share).ok())
+                        .max()
+                })
+                .map(|b| ExactDecimal((prices[i] - b).to_string()))
+        }));
+        diag.pair_entry.ask_distance = Some([0, 1].map(|i| {
+            o.top_ask(i)
+                .ok()
+                .flatten()
+                .map(|a| ExactDecimal((prices[i] - a).to_string()))
+        }));
         let unit = prices[0] + prices[1];
         let fair = [p.up().unwrap(), 1.0 - p.up().unwrap()];
         let weights = self.config.quote.joint_fill_scenario_weights;
@@ -76,7 +99,16 @@ impl ComplementaryPairV1 {
             }
         }
         let business = (weights[0] * both + weights[1] * single[0] + weights[2] * single[1]) / sum;
-        if business < float(&self.config.quote.minimum_business_result_per_share)? {
+        let gate_passed = business >= float(&self.config.quote.minimum_business_result_per_share)?;
+        diag.pair_entry.business_result_per_share = Some(business);
+        diag.pair_entry.minimum_business_result_per_share = Some(ExactDecimal(
+            self.config
+                .quote
+                .minimum_business_result_per_share
+                .to_string(),
+        ));
+        diag.pair_entry.gate_passed = Some(gate_passed);
+        if !gate_passed {
             diag.choice = MarketChoiceV1::Wait;
             return Ok(());
         }
@@ -123,13 +155,25 @@ impl ComplementaryPairV1 {
                 .any(|leg| leg.token == o.assets[side].asset.token_id && leg.price <= prices[side])
         });
         let no_new_needed = valid_targets.iter().all(|v| *v);
-        if !no_new_needed && q >= min {
+        diag.pair_entry.no_new_needed = Some(no_new_needed);
+        diag.pair_entry.risk_space_pusd = Some(risk_space.public());
+        diag.pair_entry.investment_space_pusd = Some(
+            r(Decimal::from(1000))
+                .sub(&s.investment)
+                .max(R::zero())
+                .public(),
+        );
+        diag.pair_entry.proposed_shares = Some(ExactDecimal(q.to_string()));
+        diag.pair_entry.minimum_shares = Some(ExactDecimal(min.to_string()));
+        if !no_new_needed && q >= min && diag.pair_entry.market_eligible {
             let costs = [
                 self.limit_cost(q, prices[0], o, &o.assets[0].asset.token_id, true)?,
                 self.limit_cost(q, prices[1], o, &o.assets[1].asset.token_id, true)?,
             ];
             let cost = costs[0].add(&costs[1]);
-            if self.limit_budget(*cash, s, &cost) {
+            let budget_passed = self.limit_budget(*cash, s, &cost);
+            diag.pair_entry.limit_budget_passed = Some(budget_passed);
+            if budget_passed {
                 let legs = vec![
                     (
                         self.maker_leg(o.assets[0], q, prices[0]),
@@ -149,7 +193,7 @@ impl ComplementaryPairV1 {
             }
         } else if no_new_needed {
             diag.choice = MarketChoiceV1::Maintain;
-        } else {
+        } else if q < min {
             diag.unavailable
                 .push(ActionUnavailableV1::InventoryCapacity);
         }

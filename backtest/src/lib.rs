@@ -4,11 +4,16 @@ extern crate self as backtest;
 #[macro_use]
 mod stage_timing;
 mod day;
+mod public_observer;
+pub use public_observer::*;
+mod entry_market;
+pub use entry_market::*;
 mod observation_export;
 pub use observation_export::*;
 mod day_economics;
 mod day_state;
 mod day_summary;
+mod decision_evidence;
 mod preparation;
 mod preparation_progress;
 mod prepared_material;
