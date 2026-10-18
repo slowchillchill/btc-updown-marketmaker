@@ -284,6 +284,13 @@ where
     };
     let mut initialization_classifier =
         crate::preparation::InitializationDependencyClassifier::default();
+    let mut bound_options = options.clone();
+    if let Some(observer) = &options.public_observer {
+        if let Some(bound) = observer.for_stream(&config.header.input_stream_id)? {
+            bound_options.public_observer = Some(bound);
+        }
+    }
+    let options = &bound_options;
     let hub = DayHubV1::new(&day.candidates);
     hub.0.0.lock().unwrap().research_summary = options.research_summary;
     let mut count = 0;
@@ -443,7 +450,6 @@ where
                     }
                     if buffer.candidates.iter().all(|c| !c.active) {
                         drop(buffer);
-                        if !ended { if let Some(observer)=&options.public_observer {observer.finish()?;} }
                         return Ok(());
                     }
                     if !hub.0.1.budget_stop_requested.load(std::sync::atomic::Ordering::Acquire) && options.budget_stop_after.is_some_and(|after| options.started.elapsed() >= after) {
@@ -456,7 +462,7 @@ where
                         let _=measure_stage!(stages, ProducerBackpressureWait, hub.0.1.control.wait_timeout(buffer,Duration::from_millis(10))).unwrap();continue;
                     }
                 }
-                let Some(mut next)=measure_stage!(stages, NextAppliedIncludingDecodeCoreHidden, producer.next_applied())? else {if let Some(observer) = &options.public_observer { observer.finish()?; } ended=true;let mut buffer=hub.0.0.lock().unwrap();buffer.production=ProductionV1::Ended;hub.0.1.notify_all();continue;};
+                let Some(mut next)=measure_stage!(stages, NextAppliedIncludingDecodeCoreHidden, producer.next_applied())? else {if let Some(observer)=&options.public_observer {observer.production_finished()?;} ended=true;let mut buffer=hub.0.0.lock().unwrap();buffer.production=ProductionV1::Ended;hub.0.1.notify_all();continue;};
                 #[cfg(feature = "stage-timing")]
                 let publish_started = Instant::now();
                 #[cfg(feature = "stage-timing")]
@@ -472,7 +478,7 @@ where
                             group_id: group.group_id.clone(),
                             closed_at_input_position: group.closed_at_input_position,
                         };
-                        research_public.push(observer.observe(&reference, group)?);
+                        research_public.push(measure_stage!(stages, ResearchPublicObservation, observer.observe_at(&reference, group, original_public_group_visible_at_utc_ms(&next.input, group)))?);
                     }
                 }
                 let new_markets = next.applied.closed_groups.iter().flat_map(|g|g.records.iter()).filter_map(|fact| {
@@ -594,6 +600,12 @@ where
                 }
             }
         }
+        // 所有候选已交回最后的冻结请求；正常、提前结束与错误路径都显式检查尾部。
+        let final_output = options
+            .public_observer
+            .as_ref()
+            .map(|o| o.finish())
+            .transpose();
         let buffer = hub.0.0.lock().unwrap();
         candidates.sort_by_key(|(index, _)| *index);
         let candidates = candidates.into_iter().map(|(_, value)| value).collect();
@@ -631,6 +643,13 @@ where
             }) as MaterialError);
         }
         production?;
+        if let Err(cause) = final_output {
+            return Err(Box::new(HistoricalDaysFailureV1 {
+                source: DayFailureSourceV1::Producer,
+                cause,
+                days: vec![day_result],
+            }) as MaterialError);
+        }
         Ok(day_result)
     })
 }

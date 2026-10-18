@@ -53,6 +53,8 @@ struct DecideSample {
 struct TraceSummary {
     decisions: Vec<(i64, ComplementaryPairDiagnosticV1, Vec<String>)>,
     sent: Vec<(i64, String)>,
+    exact_decisions: Vec<serde_json::Value>,
+    exact_receipts: Vec<serde_json::Value>,
     invalidated: usize,
     invalidated_at: Vec<(i64, i64)>,
     pure_decide: CallbackSamples,
@@ -66,6 +68,8 @@ struct Trace {
     strategy: ComplementaryPairV1,
     decisions: Vec<(i64, ComplementaryPairDiagnosticV1, Vec<String>)>,
     sent: Vec<(i64, String)>,
+    exact_decisions: Vec<serde_json::Value>,
+    exact_receipts: Vec<serde_json::Value>,
     invalidated: usize,
     pure_decide: CallbackSamples,
     decide_samples: Vec<DecideSample>,
@@ -82,6 +86,12 @@ impl StrategyV1 for Trace {
     type Diagnostics = ComplementaryPairDiagnosticV1;
     fn research_diagnostics(&self, d: &Self::Diagnostics) -> serde_json::Value {
         self.strategy.research_diagnostics(d)
+    }
+    fn research_compact_diagnostics(&self, d: &Self::Diagnostics) -> serde_json::Value {
+        self.strategy.research_compact_diagnostics(d)
+    }
+    fn research_evaluated_markets(&self, d: &Self::Diagnostics) -> Vec<ConditionId> {
+        self.strategy.research_evaluated_markets(d)
     }
     fn research_request_markets(&self, d: &Self::Diagnostics) -> Vec<ConditionId> {
         self.strategy.research_request_markets(d)
@@ -190,6 +200,8 @@ impl StrategyV1 for Trace {
             Ok(r) => r,
             Err(e) => &e.sent,
         };
+        self.exact_receipts
+            .push(serde_json::to_value(sent).unwrap());
         for receipt in sent {
             let item = intents
                 .iter()
@@ -242,6 +254,8 @@ impl Drop for Trace {
             *sink.lock().unwrap() = Some(TraceSummary {
                 decisions: std::mem::take(&mut self.decisions),
                 sent: std::mem::take(&mut self.sent),
+                exact_decisions: std::mem::take(&mut self.exact_decisions),
+                exact_receipts: std::mem::take(&mut self.exact_receipts),
                 invalidated: self.invalidated,
                 invalidated_at: std::mem::take(&mut self.invalidated_at),
                 pure_decide: self.pure_decide,
@@ -314,6 +328,8 @@ fn run_day_trace_evidence(
             )?,
             decisions: vec![],
             sent: vec![],
+            exact_decisions: vec![],
+            exact_receipts: vec![],
             invalidated: 0,
             pure_decide: Default::default(),
             decide_samples: Vec::new(),
@@ -523,6 +539,8 @@ async fn run(
         .unwrap(),
         decisions: vec![],
         sent: vec![],
+        exact_decisions: vec![],
+        exact_receipts: vec![],
         invalidated: 0,
         pure_decide: Default::default(),
         decide_samples: Vec::new(),
@@ -1452,6 +1470,7 @@ impl Trace {
             outcome,
         });
         let result = result?;
+        self.exact_decisions.push(json!({"at":at,"output":result}));
         if let StrategyOutputV1::Continue {
             diagnostics,
             intents,
@@ -1533,7 +1552,7 @@ fn streaming_observation_is_economically_inert_and_decisions_keep_frozen_group()
         on_report["calculation_count"].as_u64().unwrap() as usize
     );
     let public =
-        std::fs::read_to_string(on.path().join("streaming-evidence/public.jsonl")).unwrap();
+        std::fs::read_to_string(on.path().join("streaming-evidence/public-0.jsonl")).unwrap();
     let public_rows = public
         .lines()
         .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
@@ -1545,37 +1564,15 @@ fn streaming_observation_is_economically_inert_and_decisions_keep_frozen_group()
         let frozen = &row["input_cutoff"]["receipt"]["group"];
         if let Some(markets) = row["public_state"].as_object() {
             for (condition, evidence) in markets {
-                assert_eq!(
-                    &evidence["group"], frozen,
-                    "不得把下一组公共状态写回冻结计算"
-                );
-                assert!(evidence.get("pm").is_none());
-                assert!(evidence.get("source_progress").is_none());
-                assert!(evidence["blb"].get("visible_positive_levels").is_none());
-                for (field, kind, by_market) in [
-                    ("pm_group", "pm_state", true),
-                    ("blb_group", "blb_state", true),
-                    ("source_progress_group", "source_progress", false),
-                ] {
-                    let linked = &evidence[field];
-                    assert_eq!(linked["input_stream_id"], frozen["input_stream_id"]);
+                assert_eq!(evidence["input_stream_id"], frozen["input_stream_id"]);
+                for (field, kind) in [("pm_group", "pm_state"), ("blb_group", "blb_state")] {
                     assert!(
-                        linked["group_position"].as_u64().unwrap()
+                        evidence[field].as_u64().unwrap()
                             <= frozen["group_position"].as_u64().unwrap()
                     );
                     assert!(public_rows.iter().any(|r| r["record_type"] == kind
-                        && &r["group"] == linked
-                        && (!by_market || r["condition_id"] == condition.as_str())));
-                }
-                for link in evidence["pm_side_sources"].as_array().unwrap() {
-                    assert!(
-                        public_rows
-                            .iter()
-                            .any(|r| r["record_type"] == "pm_side_sources"
-                                && r["group"] == link["group"]
-                                && r["token_id"] == link["token_id"]
-                                && r["side"] == link["side"])
-                    );
+                        && r["group_position"] == evidence[field]
+                        && r["condition_id"] == condition.as_str()));
                 }
                 with_public += 1;
             }
@@ -1595,7 +1592,7 @@ fn streaming_observation_is_economically_inert_and_decisions_keep_frozen_group()
             || r["record_type"] == "invalidated_current")
     );
     let public =
-        std::fs::read_to_string(on.path().join("streaming-evidence/public.jsonl")).unwrap();
+        std::fs::read_to_string(on.path().join("streaming-evidence/public-0.jsonl")).unwrap();
     assert!(public.lines().any(
         |l| serde_json::from_str::<serde_json::Value>(l).unwrap()["record_type"] == "pm_state"
     ));
@@ -1655,3 +1652,9 @@ fn streaming_evidence_preserves_nonzero_fills_and_account_economics() {
         "必须经过非空实际成交与账本归约"
     );
 }
+
+#[path = "support/minimal_export_cost.rs"]
+mod minimal_export_cost;
+
+#[path = "support/final_research_output.rs"]
+mod final_research_output;

@@ -374,47 +374,68 @@ kill -TERM "$EXPORT_PID"
 例如四小时输入设置 `300000/0` 会包含最后五分钟开始的市场；不读取右端点之后的数据。
 
 显式提供 `--research-evidence-root <尚不存在的目录>` 后，day 入口在同次公共日生产中生成
-`public.jsonl`，并为每日期每候选生成 `candidate-<日期序号>-<候选序号>.jsonl`。
-该选项独立申请完整 Binance 数量，不修改策略的 pressure 权重，也不增加交易门。
-公共文件按实际变化保存以下记录，所有 `group` 都使用完整 `PublicGroupReferenceV1`：
+`public-<流序号>.jsonl`，并为每日期每候选生成 `candidate-<日期序号>-<候选序号>.jsonl`。
+调用方须先准备证据根目录的父目录；证据根本身必须尚不存在。该选项独立申请完整 Binance 数量，
+不修改策略 pressure 权重，也不增加交易门。每个日期在装配时绑定自己的观察器、缓存和文件，
+不同日期的计算、编码和写出不竞争同一把锁。文件序号只用于定位；输入流身份以文件首行和完整组为准。
 
-- `pm_state`：按市场保存最优价、数量、质量、直接 BBA 与 tick 字段；不含盘口整侧来源数组。
-- `pm_side_sources`：按市场、`token_id` 和 `side`（`bid`／`ask`）独立保存该侧完整
-  `direct_anchors` 与 `dependency_frontier`。仅来源改变也写出；另一侧未变时不复制。
-- `source_progress`：每个 `input_stream_id` 共享一条变化记录。`updates` 保存改变的完整
-  `SourceStreamProgressV1`，`removed` 保存删除的 `SourceStreamScopeV1`；首条记录建立初始集合，
-  空集合仍表示没有该证据。不同市场不重复写同流进展。
-- `blb_state`：保存 BLB 紧凑量、正式 K 和 Binance 深度来源；
-  `original_pair_blb` 保存原始双腿请求使用的逐档证据。
+当前格式为 `minimal-research-v1`，首行 `format` 声明输入流和覆盖边界。它按 #335 / D-0364
+定向替代 #332 的完整侧来源、完整来源进展和候选全市场重复投影要求。新格式不保存
+`pm_side_sources`、完整 `SourceStreamProgressV1` 或非消费来源历史，不能仅凭这些文件恢复任意档位的
+全部来源历史。公共核心、健康判定、原输入和策略读取继续保留完整语义。旧产物使用原读取器，不能静默混读。
 
-还原某次计算时，先使用其 `public_state[condition_id].group` 确认冻结公共组。
-`pm_group` 与市场连接到准确的 `pm_state`；`pm_side_sources` 中每项按完整 `group`、市场、
-`token_id`、`side` 连接到准确来源记录；`blb_group` 与市场连接到 `blb_state`。
-这些引用指向最后实际写出的版本，可以早于冻结组，不按时间近邻选择记录。
-来源年龄由原来源时间和该次计算时间求得；unknown、质量和前缀保留原含义。
+公共记录的连接规则如下：
 
-还原来源进展时，只在引用所属 `input_stream_id` 内，按 `public.jsonl` 文件顺序累计
-`source_progress` 的 `updates`／`removed`，到完整身份等于 `source_progress_group` 的记录后停止。
-连接键必须保留流身份，即使两流市场和组序号相同也不能混合。可在分析时按需缓存已还原版本。
-历史记录保留在文件中，运行写出器仅保留当前必要状态。
-这是对旧 `pm_source_state` 和候选内嵌 `pm`／`source_progress` 格式的替换，旧分析脚本须显式适配；
-新旧输出不能按同一结构静默读取。旧运行产物保留原格式。
+- `market`：首次出现时保存固定市场身份和窗口；后续状态仅引用市场ID。
+- `group`：每个实际公共组保存完整 `PublicGroupReferenceV1`，包括输入流、应用前缀、组位置、组ID和
+  闭合输入位置；组可见时钟复用原入口 `original_public_group_visible_at_utc_ms`（包括真实准入时间），来源事件时钟单独保存，缺失不伪造。
+- `blb_state`：按市场保存 `state.blb` 的定义、状态、unknown、正式K、M、距离、方向、N/Q/V，
+  以及正式锚点的值/质量/时刻、深度质量、直接来源接收与事件时刻。记录仅在消费值、质量或时刻变化时写出。
+- `pm_state`：按市场保存两资产的最优正量买卖价量、两侧质量、直接 BBA 与 tick 的值/质量/时刻。
+  能由这些事实恢复正量档与 BBO 对齐状态；未知和空值保持原含义，不用整侧来源替代 BBA 来源。
+- `production_end`：原公共生产达到 EOF 的覆盖事实，不能据此宣告候选或整组完成。
+- `original_pair_blb`：真实初始双腿请求才生成逐档 BLB 正文，保存准确冻结组与市场。相同组和市场由
+  相关候选共享一次；它可以在生产 EOF 后写出，不能按文件相邻位置猜测所属公共组。
 
-BLB 复用 `blb-visible-interval-v1`，仅在正式 K 或 Binance 深度依赖改变时计算。
-缺失正式 K、`at_anchor`、空可见区间和覆盖未知保持各自含义；临时参考不代替正式 K。
+`blb_state` 和 `pm_state` 的版本键为 `(文件首行输入流, group_position, condition_id)`。
+候选 `public_state[condition_id]` 只保存真实诊断涉及市场的 `input_stream_id`、`blb_group`、`pm_group`。
+完整冻结组取该次 `input_cutoff.receipt.group`，与公共 `group` 逐字段相等连接。状态版本可以早于冻结组，
+但不得更晚。全时段公共表仍覆盖无订单市场；不能据候选没有下单裁剪 H2。
 
-候选文件记录真实计算、调度、公开／当前／派发时失效、本地资金整批零提交及派发结果。
-`pair_entry.evaluated=false` 表示新配对分支未执行；其余可选检查为 `null` 时表示未评估。
-诊断的目标价、复用价、gate 和容量直接来自策略实际分支。公共冻结引用和必要 BLB 标量随原组交付，
-计算记录冻结自身已消费组的状态；等待计算期间的新行情不覆盖它。
-无意图计算同样保留真实诊断和冻结引用，不内嵌公共 PM 来源或完整来源进展。
-`original_pair_evidence` 引用公共文件的 `original_pair_blb`，按完整冻结前缀和市场去重保存逐档证据。
-逐档数值由同次公共 BLB 计算共享，候选不重算或读取已领先的生产者。
-原意图、请求和腿序号保存在同一计算记录。接纳、拒绝、成交、撮合与确认时间继续从
-SIM 日志、NOE 和 Ledger 按原身份关联；未提供的具体原因保持未知。
+来源年龄映射保持本轮口径：`depth_received_ms` 取 Binance depth 的 `direct_anchors` 中接收毫秒最大值；
+`pm_up_bbo_received_ms` 和 `pm_down_bbo_received_ms` 分别取唯一 Up/Down 资产的
+`best_bid_ask.received_ms`，该值来自 BBA 自身 `direct_anchors` 中接收毫秒最大值。没有值保持 unknown。
+它们是该事实的最新直接来源接收年龄代理，不代表所有档位或全部依赖的信息年龄。
+不能改用 bids/asks、valuation 或全流最新消息时刻。消费时刻减来源接收时刻得到年龄，时间流逝本身不复制状态。
+来源事件时刻单独保留，不能替代可见时钟。
 
-证据使用缓冲写入，不逐行 `sync_data`。正常写入错误进入既有失败与部分结果路径，不能当完整运行。
-正常完成以最终日结果和各账户报告为准；强停可能留下未刷盘内容，末尾不完整 JSON 行不可使用。
+BLB 继续复用 `blb-visible-interval-v1`。同流深度只解析一次，各市场按自身正式K求值；普通状态不构造逐档副本，
+真实请求从原组持有的冻结深度延迟生成逐档证据。缺失K、`at_anchor`、观测到零量和覆盖未知分别保留。
+`interval_coverage=unknown_no_coverage_evidence` 表示维护档位没有区间完整性证明；零量不证明完整区间确实没有挂单。
+临时参考不代替正式K。历史留在文件，仅当前状态和在途冻结引用驻留内存。
+
+候选每次真实计算仍写 `calculation` 和 `scheduled`，无意图、负面和未知评估也保留。
+人工策略诊断采用 `stable-diagnostics-v1`：`version` 是该候选文件内的稳定诊断版本，`definition` 仅变化时出现；
+其中各市场的实际 `probability` 和完整 `urgency` 放在每次 `dynamic` 中。读取时按市场身份覆盖这两项，
+即可恢复该次全部真实诊断。稳定部分先按原类型比较，避免每计算先编码完整 JSON 再去重。
+不能以 choice 相同代替诊断相同。未执行分支的 `pair_entry.evaluated=false`、可选检查的 `null` 保持原意。
+原意图、请求及腿序号继续保存在计算记录；公开/当前/派发失效、本地零提交、接纳/拒绝等记录保留。
+成交、费用、撮合与确认时间继续按原身份连接 SIM、NOE 和 Ledger，研究文件不复制账本。
+
+小型读取样例 `scripts/read_minimal_research.py` 按公共流和候选逐行恢复诊断及必要状态，只保留当前版本，
+不会膨胀重建旧巨型来源对象：
+
+```bash
+python3 backtest/scripts/read_minimal_research.py <public-N.jsonl> <candidate-I-J.jsonl>
+```
+
+写出采用有限缓冲，空请求不访问公共写入器，普通计算不逐次刷新。真实请求与派发保留必要错误传播。
+生产 EOF 不代表导出完成：全部相关候选完成最后请求后，宿主显式刷新公共输出；候选在成功返回前也显式刷新。
+最终刷新失败进入原错误/部分结果路径，不能宣告整组成功；已有真实回执和业务报告仍保留其原事实。
+正常完成以最终日结果和各账户报告为准；没有这些完成事实时，文件存在不代表完整。
+人工强停可能丢失缓冲尾部，不要求 SIGKILL 排空，末尾不完整 JSON 行不可用，也不给中断结果补终局。
 本入口仍不承诺当前 day 优雅排空、断点续跑或五分钟完整报告。
 研究按获批工作量自然完成时，不提供 `--wall-budget-seconds` 或外层超时。
+启用已有 `backtest/stage-timing` 构建特性时，公共观察与候选证据分别累计计算/编码/写出及锁等待的阶段耗时，
+运行结束或已有整点输出；公共观察阶段嵌套于原生产交付阶段，不能重复相加或跨候选相加当墙钟。
 进度由 `--progress-interval-seconds` 控制，工作总量或剩余时间未知时沿原输出标为未知。
