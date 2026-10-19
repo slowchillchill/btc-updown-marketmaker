@@ -91,8 +91,10 @@ pub struct TrustedPublicTimeClosureV1 {
     pub(crate) next_group_position: u64,
     pub(crate) closure: PublicTimeClosureReasonV1,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PublicObservationFrameV1<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statistics: Option<Arc<contracts::PublicMarketStatisticsV1>>,
     pub observation: &'a MarketBusinessObservationV1,
     pub rule_context: Arc<PublicTradingRuleContextV1>,
     pub receipt: PublicGroupAppliedReceiptV1,
@@ -101,6 +103,7 @@ pub struct PublicObservationFrameV1<'a> {
 
 /// 同一次 DPT 应用结果与原来源准备材料；不会在执行热路径重新准备身份。
 pub struct PreparedPublicGroupV1 {
+    pub statistics: data_pipeline_core::public_statistics::PreparedPublicStatisticsV1,
     pub reference: PublicGroupReferenceV1,
     pub group: Arc<ClosedBusinessGroupV1>,
     pub pm_inputs: Vec<(u64, PreparedPmMessageV1)>,
@@ -184,6 +187,7 @@ fn prepare_public_groups(
                 canonical_position += 1;
             }
             Arc::new(PreparedPublicGroupV1 {
+                statistics: Default::default(),
                 reference,
                 group: Arc::clone(group),
                 pm_inputs,
@@ -1086,6 +1090,7 @@ pub mod checkpoint {
             self,
         ) -> Result<Arc<PreparedPublicGroupV1>, data_pipeline_core::ContractError> {
             Ok(Arc::new(PreparedPublicGroupV1 {
+                statistics: Default::default(),
                 reference: self.reference,
                 group: self.group,
                 pm_inputs: self

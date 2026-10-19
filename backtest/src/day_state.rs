@@ -752,6 +752,7 @@ mod tests {
                 hub.0.0.lock().unwrap().public.push_back(
                     PublicGroupDeliveryV1 {
                         prepared: Arc::new(PreparedPublicGroupV1 {
+                            statistics: Default::default(),
                             reference: delivered.prepared.reference.clone(),
                             group: Arc::new(group),
                             pm_inputs: vec![],

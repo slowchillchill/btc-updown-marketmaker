@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-rust_decimal = { version = "=1.42.1", default-features = false, features = ["std"] }
+rust_decimal = { version = "=1.42.1", default-features = false, features = ["std", "serde"] }
 serde = { version = "1", features = ["derive", "rc"] }
 num-bigint = "=0.4.8"
 num-integer = "=0.1.46"

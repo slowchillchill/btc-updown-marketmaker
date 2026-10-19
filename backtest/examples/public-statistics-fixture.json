@@ -1,0 +1,12 @@
+{
+  "groups": 100,
+  "consumers": 2,
+  "progress_every": 1000,
+  "output_every": 1000,
+  "public_delivery_delay_ms": 7,
+  "statistics": {
+    "momentum_windows_ms": [1000],
+    "spot_variance_windows_ms": [1000],
+    "terminal_integral_windows_ms": [10000]
+  }
+}

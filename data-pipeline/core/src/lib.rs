@@ -1,10 +1,13 @@
+pub mod blb;
 pub mod pm_message;
 pub mod pm_reduction;
 pub mod public_input;
 pub mod public_observation_core;
 pub mod public_reduction;
 pub mod public_reference;
+pub mod public_statistics;
 pub mod reduction;
+pub mod spot_statistics;
 pub mod typed_raw;
 
 use std::cmp::Ordering;

@@ -41,6 +41,7 @@ impl FrozenTradeEconomicsV1 {
 }
 #[derive(Clone)]
 pub struct FrozenMarketReadV1 {
+    pub statistics: Option<Arc<PublicMarketStatisticsV1>>,
     pub observation: MarketBusinessObservationV1,
     pub rule_context: Arc<PublicTradingRuleContextV1>,
 }
@@ -338,6 +339,7 @@ impl BorrowedStrategyInputV1<'_> {
                 .unwrap_or_else(|| self.markets.clone())
                 .iter()
                 .map(|f| FrozenMarketReadV1 {
+                    statistics: f.statistics.clone(),
                     observation: f.observation.clone(),
                     rule_context: f.rule_context.clone(),
                 })
@@ -639,6 +641,7 @@ impl SharedExecutionV2 {
             markets: frames
                 .iter()
                 .map(|f| FrozenMarketReadV1 {
+                    statistics: f.statistics.clone(),
                     observation: f.observation.clone(),
                     rule_context: f.rule_context.clone(),
                 })

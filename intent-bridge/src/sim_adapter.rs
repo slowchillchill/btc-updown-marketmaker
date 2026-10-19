@@ -397,7 +397,7 @@ mod tests {
             let prepared = prepare_public_ingress_v1(&core, &recorded, &identities, &[]).unwrap();
             let applied = core.push(&prepared).unwrap();
             let group = Arc::clone(&applied.applied.closed_groups[0]);
-            Ok(PublicGroupDeliveryV1 { delivered_at_utc_ms: time, prepared: Arc::new(PreparedPublicGroupV1 {
+            Ok(PublicGroupDeliveryV1 { delivered_at_utc_ms: time, prepared: Arc::new(PreparedPublicGroupV1 { statistics: Default::default(),
                 reference: contracts::PublicGroupReferenceV1 { input_stream_id: "bridge-input".into(), applied_prefix: applied.applied.applied_prefix.clone(),
                     group_position: group.group_position, group_id: group.group_id.clone(), closed_at_input_position: group.closed_at_input_position },
                 group, pm_inputs: vec![], pm_contexts: vec![],

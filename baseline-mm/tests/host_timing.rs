@@ -1506,6 +1506,7 @@ async fn relevant_market_history_growth_timing() {
             .iter()
             .zip(&missing)
             .map(|(f, o)| PublicObservationFrameV1 {
+                statistics: None,
                 observation: o,
                 rule_context: f.rule_context.clone(),
                 receipt: f.receipt.clone(),

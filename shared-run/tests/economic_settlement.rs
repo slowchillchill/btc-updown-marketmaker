@@ -431,6 +431,8 @@ async fn actual_chain_requested_settlement_s0_to_s4_and_stable_ledger() {
             .unwrap();
         let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
         let mut driver = FinitePublicConsumptionV1::new(execution, source, "economics".into());
+        // 有限夹具等待原记录交接，不把后台调度速度当作经济合同失败。
+        driver.enable_finite_recording_wait().unwrap();
         for _ in 0..4 {
             driver.next_group().unwrap().unwrap();
         }

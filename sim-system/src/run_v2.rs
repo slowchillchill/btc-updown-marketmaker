@@ -20500,6 +20500,9 @@ impl PublicSimExecutionV1 {
 
 /// 有限与持续入口共用的唯一消费状态；不拥有来源或独立业务状态。
 pub struct PublicConsumptionStateV1 {
+    statistics_stream: Option<Arc<data_pipeline_core::public_statistics::PublicStatisticsStreamV1>>,
+    statistics_prefix:
+        Option<Arc<data_pipeline_core::public_statistics::PublicStatisticsHistoryV1>>,
     unfinished_public_markets: BTreeMap<String, i64>,
     execution: PublicSimExecutionV1,
     consumption_sequence_ref: String,
@@ -20538,10 +20541,31 @@ impl PublicConsumptionStateV1 {
             last_cutoff: None,
             last_prepared: None,
             unfinished_public_markets: BTreeMap::new(),
+            statistics_stream: None,
+            statistics_prefix: None,
             rules,
             close_pending: false,
             drive_position: 0,
         }
+    }
+    /// 在开始供料前显式接入共同身份/配置；旧 A/R3 不调用此入口。
+    pub fn enable_public_statistics(
+        &mut self,
+        stream: Arc<data_pipeline_core::public_statistics::PublicStatisticsStreamV1>,
+    ) -> Result<(), SimRunActorErrorV2> {
+        if stream.identity().rules_identity != *self.execution.actor._rule_snapshot.file_sha256() {
+            return Err(SimRunActorErrorV2::InvalidBusinessRequest(
+                "共享统计必须绑定本执行运行的规则快照",
+            ));
+        }
+        self.statistics_stream = Some(stream);
+        Ok(())
+    }
+    /// 只读取本消费状态已成功应用的前缀，不查询共享生产者的最新前沿。
+    pub fn public_statistics_prefix(
+        &self,
+    ) -> Option<&Arc<data_pipeline_core::public_statistics::PublicStatisticsHistoryV1>> {
+        self.statistics_prefix.as_ref()
     }
     /// 查询原成功登记映射，不另存宿主市场集合。
     pub fn has_enrolled_market(&self, condition: &contracts::ConditionId) -> bool {
@@ -20599,6 +20623,17 @@ impl PublicConsumptionStateV1 {
         let receipt = self
             .execution
             .apply_public_group(Arc::clone(&prepared), time)?;
+        if let Some(stream) = &self.statistics_stream {
+            self.statistics_prefix = prepared
+                .statistics
+                .consume(
+                    stream,
+                    receipt.group().clone(),
+                    receipt.execution_time().logical_time_utc_ms(),
+                    &prepared.group,
+                )
+                .map_err(SimRunActorErrorV2::PublicConsumptionSource)?;
+        }
         self.execution
             .actor
             .projection_port
@@ -20879,6 +20914,10 @@ impl PublicConsumptionStateV1 {
             .filter_map(|id| {
                 let observation = observations.get_market(&id)?;
                 Some(PublicObservationFrameV1 {
+                    statistics: self
+                        .statistics_prefix
+                        .as_ref()
+                        .map(|p| p.read(observation, cutoff.decision_time().logical_time_utc_ms())),
                     observation,
                     rule_context: self.rules[&observation.market.condition_id.0].clone(),
                     receipt: self.last_receipt.as_ref().unwrap().clone(),
@@ -20899,6 +20938,10 @@ impl PublicConsumptionStateV1 {
             .observations
             .iter()
             .map(|observation| PublicObservationFrameV1 {
+                statistics: self
+                    .statistics_prefix
+                    .as_ref()
+                    .map(|p| p.read(observation, cutoff.decision_time().logical_time_utc_ms())),
                 observation,
                 rule_context: Arc::clone(
                     self.rules
@@ -21587,6 +21630,9 @@ type StoredDirectResponseV2 = StoredDirectResponse<CancelNotCanceledReasonV2>;
 /// 有限日作业保存原模块当前状态和原持久位置，不重放日志前缀。
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PublicConsumptionCheckpointV1 {
+    #[serde(default)]
+    statistics_prefix:
+        Option<Arc<data_pipeline_core::public_statistics::PublicStatisticsHistoryV1>>,
     opened: RunOpenedV2,
     log_path: PathBuf,
     background: crate::event_log::BackgroundCheckpointV1,
@@ -21618,6 +21664,8 @@ impl PublicConsumptionStateV1 {
         )?;
         #[derive(serde::Serialize)]
         struct Saved<'a> {
+            statistics_prefix:
+                &'a Option<Arc<data_pipeline_core::public_statistics::PublicStatisticsHistoryV1>>,
             opened: &'a RunOpenedV2,
             log_path: &'a PathBuf,
             background: crate::event_log::BackgroundCheckpointV1,
@@ -21643,6 +21691,7 @@ impl PublicConsumptionStateV1 {
             .transpose()?;
         ciborium::ser::into_writer(
             &Saved {
+                statistics_prefix: &self.statistics_prefix,
                 opened: &actor.opened,
                 log_path: &actor.log_path,
                 background,
@@ -21741,6 +21790,12 @@ impl PublicConsumptionStateV1 {
         Ok((
             Self {
                 execution: PublicSimExecutionV1 { actor },
+                statistics_stream: saved.statistics_prefix.as_ref().map(|p| {
+                    data_pipeline_core::public_statistics::PublicStatisticsStreamV1::from_history(
+                        p.clone(),
+                    )
+                }),
+                statistics_prefix: saved.statistics_prefix,
                 consumption_sequence_ref: saved.consumption_sequence_ref,
                 last_receipt,
                 last_cutoff,
