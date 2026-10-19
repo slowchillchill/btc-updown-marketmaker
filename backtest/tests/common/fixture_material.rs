@@ -231,7 +231,7 @@ pub(super) fn setup_day_with_terminal(
     setup_day_material(root, base, utc_day, terminal, false, false, None)
 }
 #[allow(dead_code)] // 部分集成夹具只消费原场景；公共环境示例消费此场景。
-pub(super) fn setup_day_with_embedded_rules(
+pub(crate) fn setup_day_with_embedded_rules(
     root: &Path,
     base: i64,
     utc_day: &str,
