@@ -20,17 +20,15 @@ The video shows an earlier two-hour demo; it is a different backtest from the se
 
 Turn financial strategy research into reproducible engineering: preserve market event order, compare strategies under simulated execution and account constraints, track training, and verify model behavior across runtimes.
 
-Here, **edge AI means local model inference on a trading node**. Training uses GPUs; the inference direction combines ONNX Runtime and Rust to reduce reliance on external inference APIs. Human-designed and learned strategies share data, backtesting and accounting components, giving research a common basis for comparison.
+Here, **edge AI means local model inference on a trading node**. The new model route will build on the shared data, backtesting and accounting components used by human-designed strategies. Its training and inference design remains pending in [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181).
 
 ## Engineering results
 
 | Capability | Evidence |
 | --- | --- |
 | Financial data engineering | Completed a source-health study covering **18 days, approximately 762 million raw rows and 2,864 input files**. Per-file aggregation limits intermediate data volume. [Study (in Chinese)](baseline-mm/docs/research/complementary-pair-source-health-18d-20260909-20260926.md) |
-| GPU training pipeline | Built the training environment and completed limited validation of PPO updates, MLflow experiment tracking and checkpoint recovery. The historical training design used a **100 ms decision interval**; this route is now paused pending redesign on the A/shared implementation. [Training progress (in Chinese)](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181) |
-| Cross-runtime model delivery | An earlier version verified numerical and trading-intent consistency across **PyTorch → ONNX Runtime → Rust**, supporting local inference on trading nodes. [Validation report (in Chinese)](model-train/validation/issue-176/report.md) |
 
-The 100 ms figure is a decision interval, not measured execution latency. The earlier inference validation and historical training validation are separate milestones; the new training-to-deployment path is not yet complete.
+The old model implementation and its validation files have been retired from the current tree. The new B route starts from the shared implementation; model training and deployment remain pending. [Current planning (in Chinese)](model-train/README.md)
 
 ## Rule-based strategy backtest
 
@@ -52,7 +50,7 @@ These results come from the historical version before the shared funds-policy re
 
 ## Modules and decision flow
 
-The animation shows the historical backtest loop for human-designed strategies. `backtest` assembles the run; `shared-run` coordinates observations, decisions, submission and account updates. Model training is a separate research branch, currently paused.
+The animation shows the historical backtest loop for human-designed strategies. `backtest` assembles the run; `shared-run` coordinates observations, decisions, submission and account updates. Model training remains planned under [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181).
 
 ![Module relationships and the market data, decision and execution feedback loop](assets/readme/architecture-flow-en.gif)
 
@@ -81,11 +79,11 @@ Collection and preparation turn market data into public observations. The strate
 | --- | --- | --- |
 | Systems and execution | Rust · Tokio · Polymarket Rust SDK | Async market data, trading interfaces and shared runtime components |
 | Data engineering | Arrow · Parquet · Rayon · DuckDB | Columnar storage, parallel processing and research queries |
-| Models and training | Python · PyTorch · CUDA · PPO · MLflow | Reinforcement learning, GPU training and experiment tracking |
-| Inference and visualization | ONNX Runtime · Rust · React · TypeScript · ECharts | Local inference and research visualization |
+| Model training and inference | Pending design in [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181) | Model development and delivery |
+| Research visualization | Rust · React · TypeScript · ECharts | Read and explore research evidence |
 
 ## Status and collaboration
 
-The project is in strategy research. The historical model-training route is paused pending redesign on the A/shared implementation. Full-length training, integration of the new model’s inference path and complete live deployment remain unfinished. Each result is bounded by the version, sample and validation scope in its linked evidence.
+The project is in strategy research. The old model implementation has been retired; the new B route awaits design on the A/shared implementation. Full-length training, integration of the new model’s inference path and complete live deployment remain unfinished. Each result is bounded by the version, sample and validation scope in its linked evidence.
 
 Open to technical roles and collaboration in financial AI, GPU training pipelines, Rust trading infrastructure and local model inference. [GitHub · slowchillchill](https://github.com/slowchillchill)

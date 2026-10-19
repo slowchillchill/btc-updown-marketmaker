@@ -1,6 +1,0 @@
-.tools/
-.venv/
-artifacts/
-__pycache__/
-
-rust-ort-validation/target/

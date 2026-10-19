@@ -27,7 +27,7 @@ ledger/                   # 账户、持仓、预留及费用返佣等经济事�
 shared-run/               # 跨环境共用的观察、执行、账户读取与结算协调
 baseline-mm/              # 人工盈利策略、参数与业务研究
 backtest/                 # 公共历史回测入口、运行装配与通用结果汇总
-model-train/              # 模型训练、开发竞赛与模型产物交付
+model-train/              # 模型训练、开发竞赛与模型产物交付（规划）
 offline-evaluation/       # 冻结模型的独立留出评价与晋级（规划）
 paper-trade/              # PAPER 上层运行入口与在线模拟装配（规划）
 live-trade/               # LIVE 上层运行入口与真实账户装配（规划）
@@ -44,9 +44,8 @@ live-trade/               # LIVE 上层运行入口与真实账户装配（规�
 
 - 使用代码索引时，以当前任务实际开发或审查的工作树及其源码状态为范围；不能以主工作树索引代替
   任务工作树的当前源码。通用查询、覆盖核对和缺口回退遵守全局工程准则。
-- 本项目包含根 Cargo workspace、`model-train/native-inputs`、`model-train/rust-ort-validation`
-  的独立 Rust 工作区及 `model-train` 的 Python 代码。按任务涉及模块和实际调用链检查相关范围，
-  不能以根 workspace 的结果推断其他范围已经覆盖，也不要求为每个 Cargo 包单独建立索引。
+- 当前 Rust 代码位于根 Cargo workspace；`model-train` 仅保留新 B 路线的规划入口。
+  按任务涉及模块和实际调用链检查相关范围，不要求为每个 Cargo 包单独建立索引。
 - 当前 Issue 与适用合同决定业务语义、批准范围和验收。跨模块或 Rust/Python 边界的关键关系回读
   实际源码；模块存在或图中有关联不代表对应能力已经实现或验收。
 
