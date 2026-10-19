@@ -1410,6 +1410,7 @@ fn health_read<'a>(
             .markets
             .iter()
             .map(|f| PublicObservationFrameV1 {
+                statistics: None,
                 observation: &f.observation,
                 rule_context: f.rule_context.clone(),
                 receipt: cutoff.receipt().clone(),

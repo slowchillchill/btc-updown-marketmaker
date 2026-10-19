@@ -1883,6 +1883,7 @@ dependencies = [
  "base64",
  "ciborium",
  "contracts",
+ "imbl",
  "rayon",
  "rust_decimal",
  "serde",

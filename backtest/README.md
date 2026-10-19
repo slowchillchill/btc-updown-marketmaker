@@ -308,7 +308,7 @@ CLI 日模式失败时仍输出一次 JSON：`status="failed"`、`error`、`fail
 
 ## 有限目标公共观察与 BLB 研究量导出
 
-`export_observations` 是只读工程入口，供研究组取得原决策前缀下的事实。它复用原日输入、合法初始化和公共归约，不运行策略、意图提交、SIM 撮合或 Ledger。公共 `backtest` 库负责有限目标观察，`baseline-mm::blb_research` 负责纯研究量，CLI 组合两者。
+`export_observations` 是只读工程入口，供研究组取得原决策前缀下的事实。它复用原日输入、合法初始化和公共归约，不运行策略、意图提交、SIM 撮合或 Ledger。公共 `backtest` 库负责有限目标观察，`data-pipeline-core::blb` 负责共同 BLB 纯计算，`baseline-mm::blb_research` 保留旧 API 的薄适配与重导出，CLI 继续组合原接口。旧导出数值、JSON 与结果身份保持；后继组应用时钟的公共统计及显式接入见[公共统计说明](../data-pipeline/public-statistics.md)。
 
 构建与清单检查：
 

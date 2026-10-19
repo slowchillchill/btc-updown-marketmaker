@@ -35,55 +35,8 @@ pub fn spot_sample_acceptance_v1(time: i64, now: i64, last: Option<i64>) -> Spot
         SpotSampleAcceptanceV1::Accepted
     }
 }
-/// 两端来自已接纳现价；按右端纳入，保留跨左界的完整价对。
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-pub struct SpotVariancePairV1 {
-    pub squared_change_usd: f64,
-    pub elapsed_seconds: f64,
-}
-pub fn spot_variance_pair_v1(
-    left: (i64, f64),
-    right: (i64, f64),
-    from: i64,
-) -> Option<SpotVariancePairV1> {
-    (right.0 >= from && right.0 > left.0).then(|| SpotVariancePairV1 {
-        squared_change_usd: (right.1 - left.1).powi(2),
-        elapsed_seconds: (right.0 - left.0) as f64 / 1000.0,
-    })
-}
-#[derive(Clone, Copy, Default, Debug, PartialEq, Serialize)]
-pub struct SpotVarianceStatisticsV1 {
-    pub positive_pair_count: u64,
-    pub squared_change_sum_usd_squared: f64,
-    pub elapsed_seconds: f64,
-}
-impl SpotVarianceStatisticsV1 {
-    pub fn include(&mut self, pair: SpotVariancePairV1) {
-        self.positive_pair_count += 1;
-        self.squared_change_sum_usd_squared += pair.squared_change_usd;
-        self.elapsed_seconds += pair.elapsed_seconds;
-    }
-    pub fn sigma_usd_per_sqrt_second(&self) -> Option<f64> {
-        (self.elapsed_seconds > 0.0)
-            .then(|| (self.squared_change_sum_usd_squared / self.elapsed_seconds).sqrt())
-    }
-}
-pub fn spot_variance_statistics_v1(
-    points: impl IntoIterator<Item = (i64, f64)>,
-    from: i64,
-) -> SpotVarianceStatisticsV1 {
-    let mut result = SpotVarianceStatisticsV1::default();
-    let mut previous = None;
-    for point in points {
-        if let Some(left) = previous
-            && let Some(pair) = spot_variance_pair_v1(left, point, from)
-        {
-            result.include(pair);
-        }
-        previous = Some(point);
-    }
-    result
-}
+pub use contracts::{SpotVariancePairV1, SpotVarianceStatisticsV1};
+pub use data_pipeline_core::spot_statistics::{spot_variance_pair_v1, spot_variance_statistics_v1};
 
 #[cfg(test)]
 mod tests {
