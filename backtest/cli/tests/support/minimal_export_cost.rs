@@ -37,7 +37,7 @@ fn candidate(
     root: &Path,
     stream: usize,
     index: usize,
-    c: &ComplementaryPairConfigV2,
+    c: &ComplementaryPairConfigV3,
     export: bool,
 ) -> HistoricalPreparedRunConfigV1 {
     std::fs::create_dir_all(root).unwrap();
@@ -190,6 +190,9 @@ fn bounded_dual_stream_dual_candidate_cost() {
     };
     let sinks = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
     let mut c = strategy_config();
+    if let Ok(reference) = std::env::var("INITIAL_PAIR_COST_REFERENCE") {
+        c.quote.initial_pair_price_reference = serde_json::from_value(json!(reference)).unwrap();
+    }
     c.health.chainlink_silence_ms = 1500;
     c.repair.enable_active_repair = false;
     c.repair.residual_risk_weight = Decimal::from(10);
@@ -279,20 +282,21 @@ fn bounded_dual_stream_dual_candidate_cost() {
     )
     .unwrap();
     assert!(
-        results.iter().flat_map(|d| &d.candidates).any(|c| {
-            c.report["account_economics_memory"]["markets"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|m| {
-                    m["success_shares"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|q| q.as_str().unwrap() != "0")
-                })
-        }),
-        "场景必须存在可独立核对的实际成交"
+        c.quote.initial_pair_price_reference == InitialPairPriceReferenceV1::BestBid
+            || results.iter().flat_map(|d| &d.candidates).any(|c| {
+                c.report["account_economics_memory"]["markets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|m| {
+                        m["success_shares"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|q| q.as_str().unwrap() != "0")
+                    })
+            }),
+        "公平价兼容夹具必须存在可独立核对的实际成交；买一模式按真实结果记录零成交"
     );
     // SIM 原记录精确比较；NOE/账本耐久记录也保留，比较时排除元数据中的运行路径。
     let mut durable = BTreeMap::new();
@@ -338,7 +342,7 @@ fn bounded_dual_stream_dual_candidate_cost() {
         serde_json::to_vec(&json!({"business":business,"reports":reports,"sim":durable})).unwrap(),
     )
     .unwrap();
-    let summary = json!({"mode":mode,"scale":scale,"streams":2,"candidates_per_stream":2,"concurrent_worker_units":6,"input_count_per_stream":results.iter().map(|r|r.public_applied_inputs).collect::<Vec<_>>(),"pm_levels_per_side":n_levels(scale),"pm_source_changes_per_stream":96*scale,"evaluations":evaluations,"public_bytes":public_bytes,"candidate_bytes":candidate_bytes,"research_bytes":public_bytes+candidate_bytes,"cost":cost});
+    let summary = json!({"mode":mode,"price_reference":c.quote.initial_pair_price_reference,"scale":scale,"streams":2,"candidates_per_stream":2,"concurrent_worker_units":6,"input_count_per_stream":results.iter().map(|r|r.public_applied_inputs).collect::<Vec<_>>(),"pm_levels_per_side":n_levels(scale),"pm_source_changes_per_stream":96*scale,"evaluations":evaluations,"public_bytes":public_bytes,"candidate_bytes":candidate_bytes,"research_bytes":public_bytes+candidate_bytes,"cost":cost});
     std::fs::write(
         output.join("cost.json"),
         serde_json::to_vec_pretty(&summary).unwrap(),

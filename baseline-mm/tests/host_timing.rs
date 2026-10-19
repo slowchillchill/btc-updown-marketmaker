@@ -31,16 +31,16 @@ use sim_system::{
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Instant};
 
 // 当前探针使用V2合成工程配置；历史V1候选与旧测量结果保持原身份。
-fn timing_engineering_config() -> ComplementaryPairConfigV2 {
-    ComplementaryPairConfigV2::parse_toml(include_str!(
-        "../configs/strategies/complementary_pair/synthetic-engineering.toml"
+fn timing_engineering_config() -> ComplementaryPairConfigV3 {
+    ComplementaryPairConfigV3::parse_toml(include_str!(
+        "../configs/strategies/complementary_pair/synthetic-engineering-v3.toml"
     ))
     .unwrap()
 }
 #[test]
-fn timing_entry_configuration_is_current_v2_engineering_material() {
+fn timing_entry_configuration_is_current_v3_engineering_material() {
     let config = timing_engineering_config();
-    assert_eq!(RULE_VERSION, "candidate_v2");
+    assert_eq!(RULE_VERSION, "candidate_v3");
     let value = serde_json::to_value(config).unwrap();
     assert!(value["repair"].get("maximum_overfill_shares").is_none());
     assert!(value["repair"].get("maximum_overfill_pusd").is_none());
@@ -523,7 +523,7 @@ async fn representative_host_calculation_timing() {
                 )
                 .await
                 .unwrap();
-            let config: ComplementaryPairConfigV2 =
+            let config: ComplementaryPairConfigV3 =
                 serde_json::from_value(candidate["strategy"].clone()).unwrap();
             let mut strategy = ComplementaryPairV1::new(
                 config,
@@ -805,7 +805,7 @@ async fn representative_host_calculation_timing() {
         }
     }
     assert_eq!(cells.len() * 32, 96);
-    let output = json!({"format":"issue185-host-economics-composition-diagnostic-v1","strategy_rule_version":RULE_VERSION,"configuration_source":"synthetic-engineering.toml","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rules_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"configuration_sha256":hash(include_bytes!("../configs/strategies/complementary_pair/synthetic-engineering.toml")),"markets":866,"history_points":301,"history_span_ms":300000,"warmup_per_cell":1,"samples_per_cell":32,"sample_count":96,"timed_path":"separate complete assembly and pure decide; eight independent same-state public diagnostics, not additive decomposition","cells":cells});
+    let output = json!({"format":"issue185-host-economics-composition-diagnostic-v1","strategy_rule_version":RULE_VERSION,"configuration_source":"synthetic-engineering-v3.toml","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rules_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"configuration_sha256":hash(include_bytes!("../configs/strategies/complementary_pair/synthetic-engineering-v3.toml")),"markets":866,"history_points":301,"history_span_ms":300000,"warmup_per_cell":1,"samples_per_cell":32,"sample_count":96,"timed_path":"separate complete assembly and pure decide; eight independent same-state public diagnostics, not additive decomposition","cells":cells});
     std::fs::write(
         std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(),
         serde_json::to_vec_pretty(&output).unwrap(),
@@ -1088,7 +1088,7 @@ async fn representative_notrade_host_calculation_timing() {
         cells.push(json!({"state":state,"prefix":prefix,"samples":samples,"setup_history_points":material.history.len(),"setup_extra_fresh_prefix":material.follow_up.is_some(),"warmup":1,"sample_count":32,"classification_counts":{"NoTrade":32,"Actions":0}}));
         driver.stop_and_drain().unwrap();
     }
-    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(), serde_json::to_vec_pretty(&json!({"format":"issue185-notrade-timing-v1","strategy_rule_version":RULE_VERSION,"configuration_source":"synthetic-engineering.toml","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"helper_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rule_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"cells":cells,"sample_count":64,"limits":"fixed real NoTrade prefixes; setup/restore/serialization/comparison outside timing; combined assembly+calculate excludes feed/qualification/send and is not online end-to-end latency"})).unwrap()).unwrap();
+    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(), serde_json::to_vec_pretty(&json!({"format":"issue185-notrade-timing-v1","strategy_rule_version":RULE_VERSION,"configuration_source":"synthetic-engineering-v3.toml","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"helper_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rule_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"cells":cells,"sample_count":64,"limits":"fixed real NoTrade prefixes; setup/restore/serialization/comparison outside timing; combined assembly+calculate excludes feed/qualification/send and is not online end-to-end latency"})).unwrap()).unwrap();
 }
 
 /// 正常零目标撤单形成历史；保持866市场和当前两笔策略挂单，比较同版本两种表示。
@@ -1332,7 +1332,7 @@ async fn completed_cancel_history_owned_and_borrowed_strategy_inputs() {
         );
         cells.push(json!({"zero_target_completed_cancels":history,"completed_cancellation_requests":totals.completed_receipted_cancellation_requests,"active_current_orders":2,"market_count":before.markets.len(),"source_points":material.history.len(),"extra_fresh_prefix":true,"warmup":1,"samples":samples,"actions_equivalence_checked":true,"NoTrade_samples":32}));
     }
-    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(),serde_json::to_vec_pretty(&json!({"format":"issue185-cancel-history-borrowed-v1","strategy_rule_version":RULE_VERSION,"configuration_source":"synthetic-engineering.toml","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"helper_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"cells":cells,"limits":"同候选版本owning/borrowed路径对照；owning也复用投影，不是原main实测；准备/恢复/比较在计时外，不分派计时输出，无性能门槛"})).unwrap()).unwrap();
+    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(),serde_json::to_vec_pretty(&json!({"format":"issue185-cancel-history-borrowed-v1","strategy_rule_version":RULE_VERSION,"configuration_source":"synthetic-engineering-v3.toml","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"helper_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"cells":cells,"limits":"同候选版本owning/borrowed路径对照；owning也复用投影，不是原main实测；准备/恢复/比较在计时外，不分派计时输出，无性能门槛"})).unwrap()).unwrap();
 }
 
 /// 固定当前市场与两处真实旧义务，仅增加已结束、无义务历史。
@@ -1575,7 +1575,7 @@ async fn relevant_market_history_growth_timing() {
         cells.push(json!({"completed_without_obligation":completed,"all_markets":owned.markets.len(),"selected_markets":selected_count,"samples":samples}));
         driver.stop_and_drain().unwrap();
     }
-    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(), serde_json::to_vec_pretty(&json!({"format":"issue185-relevant-history-timing-v1","strategy_rule_version":RULE_VERSION,"configuration_source":"synthetic-engineering.toml","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rule_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"cells":cells,"limits":"same fixed consumed prefixes; setup, serialization, assertions, qualification and feed outside assembly/calculation timers; full owned control uses current strategy diagnostic contract; no four-hour or online-capacity claim"})).unwrap()).unwrap();
+    std::fs::write(std::env::var("ISSUE185_TIMING_OUTPUT").unwrap(), serde_json::to_vec_pretty(&json!({"format":"issue185-relevant-history-timing-v1","strategy_rule_version":RULE_VERSION,"configuration_source":"synthetic-engineering-v3.toml","base_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_identity":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"rule_sha256":RULE_SHA,"finality_sha256":FINALITY_SHA,"cells":cells,"limits":"same fixed consumed prefixes; setup, serialization, assertions, qualification and feed outside assembly/calculation timers; full owned control uses current strategy diagnostic contract; no four-hour or online-capacity claim"})).unwrap()).unwrap();
 }
 
 struct NecessaryReadProbe {

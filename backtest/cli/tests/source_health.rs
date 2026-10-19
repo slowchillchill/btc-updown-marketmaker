@@ -271,7 +271,7 @@ impl Drop for Trace {
 fn run_day_trace(
     config: &HistoricalRunConfigV1,
     rules: Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
-    c: ComplementaryPairConfigV2,
+    c: ComplementaryPairConfigV3,
     root: &Path,
 ) -> (serde_json::Value, TraceSummary) {
     run_day_trace_with_research(config, rules, c, root, false)
@@ -279,7 +279,7 @@ fn run_day_trace(
 fn run_day_trace_with_research(
     config: &HistoricalRunConfigV1,
     rules: Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
-    c: ComplementaryPairConfigV2,
+    c: ComplementaryPairConfigV3,
     root: &Path,
     research: bool,
 ) -> (serde_json::Value, TraceSummary) {
@@ -295,7 +295,7 @@ fn run_day_trace_with_research(
 fn run_day_trace_evidence(
     config: &HistoricalRunConfigV1,
     rules: Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
-    c: ComplementaryPairConfigV2,
+    c: ComplementaryPairConfigV3,
     root: &Path,
     research: bool,
 ) -> (serde_json::Value, TraceSummary) {
@@ -366,9 +366,9 @@ fn run_day_trace_evidence(
 
     (report, trace)
 }
-fn strategy_config() -> ComplementaryPairConfigV2 {
-    let mut c = ComplementaryPairConfigV2::parse_toml(include_str!(
-        "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering.toml"
+fn strategy_config() -> ComplementaryPairConfigV3 {
+    let mut c = ComplementaryPairConfigV3::parse_toml(include_str!(
+        "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering-v3.toml"
     ))
     .unwrap();
     c.probability.binance_innovation_weight = 0.0;
@@ -525,7 +525,7 @@ fn fixture_with_reference(
 async fn run(
     config: &HistoricalRunConfigV1,
     rules: Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
-    c: ComplementaryPairConfigV2,
+    c: ComplementaryPairConfigV3,
 ) -> (HistoricalRunReportV1, Trace) {
     let mut config = config.clone();
     config.strategy.effective_parameters = serde_json::to_value(&c).unwrap();

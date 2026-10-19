@@ -381,6 +381,50 @@ impl ComplementaryPairV1 {
         };
         Ok(Some([a, b]))
     }
+    /// 仅用于初始配对及一般维护；修复继续调用 quotes()。
+    pub(super) fn initial_pair_targets(
+        &self,
+        o: &PairObservation<'_>,
+        p: &ProbabilityEstimateV1,
+        s: &MarketState,
+    ) -> Result<[Result<Decimal, InitialPairPriceUnavailableV1>; 2], StrategyErrorV1> {
+        use InitialPairPriceUnavailableV1 as U;
+        if self.config.quote.initial_pair_price_reference == InitialPairPriceReferenceV1::FairValue
+        {
+            return Ok(match self.quotes(o, p, s)? {
+                Some(prices) => prices.map(Ok),
+                None => {
+                    [Err(if p.up().is_none() {
+                        U::EstimateRequired
+                    } else {
+                        U::NoLegalMakerPrice
+                    }); 2]
+                }
+            });
+        }
+        let mut targets = [Err(U::MissingPositiveBid); 2];
+        for (side, target) in targets.iter_mut().enumerate() {
+            let Some(asset) = o.assets.get(side) else {
+                continue;
+            };
+            let Some(levels) = value(&asset.bids) else {
+                continue;
+            };
+            let mut bid = None;
+            for level in levels {
+                if decimal(&level.quantity_shares)? > Decimal::ZERO {
+                    let price = decimal(&level.price_pusd_per_share)?;
+                    bid = Some(bid.map_or(price, |old: Decimal| old.max(price)));
+                }
+            }
+            if let Some(bid) = bid {
+                *target = self
+                    .price(asset, bid, || o.top_ask(side))?
+                    .ok_or(U::NoLegalMakerPrice);
+            }
+        }
+        Ok(targets)
+    }
     pub(super) fn loss_allowance(
         &self,
         o: &MarketBusinessObservationV1,

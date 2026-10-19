@@ -10,10 +10,10 @@
 
 公共行情、模拟时序与撮合、订单提交、NOE、Ledger、NAV 和结算由原模块维护。策略只派生其决策与诊断，不复制现金、持仓或订单账本。公共缺口由所属模块补齐，公共回测负责历史装配与通用结果，模型开发竞赛和独立留出评价仍由其所属模块负责。
 
-入口为 `baseline_mm::ComplementaryPairV1`，业务身份 `complementary_pair`、规则版本 `candidate_v2`。宿主提供完整 `ComplementaryPairConfigV2`、封存公共规则、独立请求命名空间与 `StrategyContinuityV2`；新账户用 `new_account()`，原账户接续用原高水位／终止相关窗口／请求序号／未决利润占用，不能当新账户重置。配置解析 `parse_toml` 只读完整策略文件，不实现另一层 CLI 合并；当前没有正式风险默认值。
+入口为 `baseline_mm::ComplementaryPairV1`，业务身份 `complementary_pair`、规则版本 `candidate_v3`。宿主提供完整 `ComplementaryPairConfigV3`、封存公共规则、独立请求命名空间与 `StrategyContinuityV2`；新账户用 `new_account()`，原账户接续用原高水位／终止相关窗口／请求序号／未决利润占用，不能当新账户重置。配置解析 `parse_toml` 只读完整策略文件，不实现另一层 CLI 合并；当前没有正式风险默认值。
 
 ```rust,ignore
-let config = ComplementaryPairConfigV2::parse_toml(&configuration_text)?;
+let config = ComplementaryPairConfigV3::parse_toml(&configuration_text)?;
 let mut strategy = ComplementaryPairV1::new(config, sealed_rules, namespace, continuity)?;
 let input = shared.strategy_input(&mut driver)?.expect("原公共可决策组");
 let calculation = input.calculate(&mut strategy, measured_start)?;
@@ -23,7 +23,26 @@ let dispatch = shared.dispatch_strategy_qualified(&mut decision, &mut strategy, 
 
 宿主依获批时序推进到发送点；本策略选用来源健康，宿主用 `dispatch_strategy_qualified` 逐项复核，并将真实批次结果或明确失效通知原实例。策略仅对真实已发或结果未知请求保留利润占用。低层 `execute_batch_reserved` 的直接消费者需自行调用同一 `StrategyV1::dispatched` 通知，不能把形成候选当已发请求。泛型诊断随冻结计算保存在内存，后来的账户／行情归约不能改变旧诊断；本库不落盘 JSON 或数据库。
 
-[合成配置](configs/strategies/complementary_pair/synthetic-engineering.toml) 全部参数显式且无校准资格。规则、公式、公共成本界与限制见规格第 11 节；集成测试经原 DPT／SIM／NOE／Ledger 构造费用、平均成本池、预留和撤单反馈，不建策略影子账本。
+[合成配置](configs/strategies/complementary_pair/synthetic-engineering-v3.toml) 全部参数显式且无校准资格。规则、公式、公共成本界与限制见规格第 11 节；集成测试经原 DPT／SIM／NOE／Ledger 构造费用、平均成本池、预留和撤单反馈，不建策略影子账本。
+
+### 初始双腿价格参考
+
+[#337](https://github.com/slowchillchill/btc-updown-marketmaker/issues/337) 增加必填第 42 字段 `quote.initial_pair_price_reference`。`fair_value` 保留原公平价、spread 和库存偏移；`best_bid` 取同一冻结观察中各腿正量 bid 的最高价，再沿原 tick 向下取整、`1−tick` 和可见 `ask−tick` 裁剪。合法空 ask 不单独阻止报价。未知、空或只有零量 bid 时，该侧目标未知，不填零或回退公平价；任一侧目标未知不生成新配对。概率仍参与原经营评分和修复，库存仍参与原数量、现金、投入和风险判断。
+
+两种模式都复用不高于目标的最低旧价。因此实际请求可能低于买一，买一上移不会自动追价。一般维护与 `new_pair` 内的价格判断处理全部当前挂单；缺买一逐侧撤单，另一侧继续按自身目标判断。一般维护保留原局部 `qualified` 修复例外；`new_pair` 不继承该豁免。`repair` 内部继续用原公平价公式及成本、撤换和优先调度；历史修复来源单失去当前修复用途后也可能被买一目标撤销。保留孤腿但没有修复动作或 `Maintain` 等阻断结果时，仍可按原条件新配对。
+
+`pair_entry.price_reference` 保存参考；`target_prices` 按 Up/Down 保存两个可空目标，`target_unavailable` 区分 `MissingPositiveBid`、`EstimateRequired` 和 `NoLegalMakerPrice`；未执行该分支的 `evaluated` 仍为 false。`reused_prices` 及原始请求可连接目标、复用价和实际请求价；继续使用 `minimal-research-v1`，不复制全市场盘口。读取旧诊断时，旧 `target_prices` 的两项非空数字字符串保持可读。
+
+完整 42 字段工程示例为[公平价](configs/strategies/complementary_pair/synthetic-engineering-v3.toml)和[买一](configs/strategies/complementary_pair/synthetic-engineering-v3-best-bid.toml)，两份仅参考字段不同。它们未经校准，不是 R3 实验包。原 `synthetic-engineering.toml` 保留旧 41 字段身份；当前解析器拒绝缺少新字段的配置，当前构造器拒绝旧 `candidate_v1` / `candidate_v2` 连续状态。历史源码、参数及结果沿原提交和元数据追溯，不能更改标签后当作新结果。
+
+配置文件和 CLI 由 `backtest-cli` 合并：
+
+```bash
+backtest-cli --mode day --config <完整宿主配置.json> \
+  --strategy.quote.initial_pair_price_reference best_bid
+```
+
+同一二进制可显式覆盖为 `fair_value`；宿主仍需提供其原规则、账户、输入、输出与时序配置。该命令只说明使用入口，不签发历史回放。
 
 ### 来源健康与冻结动作
 

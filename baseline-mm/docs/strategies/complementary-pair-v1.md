@@ -1,6 +1,6 @@
-# 互补配对做市：candidate_v2 计算规格与研究边界
+# 互补配对做市：candidate_v3 计算规格与研究边界
 
-当前规则为 `candidate_v2`，按 [#318](https://github.com/slowchillchill/btc-updown-marketmaker/issues/318) 和 [D-0360](https://github.com/slowchillchill/btc-updown-marketmaker/issues/315#issuecomment-6217387315) 区分策略估计与平台执行。本文路径保留既有引用；历史 `candidate_v1` 参数包、研究结果与旧源码不改写，也不能直接交给新入口运行。
+当前规则为 `candidate_v3`，按 [#337](https://github.com/slowchillchill/btc-updown-marketmaker/issues/337) 增加显式初始报价参考，沿 [#318](https://github.com/slowchillchill/btc-updown-marketmaker/issues/318) 和 [D-0360](https://github.com/slowchillchill/btc-updown-marketmaker/issues/315#issuecomment-6217387315) 区分策略估计与平台执行。本文路径保留既有引用；历史 `candidate_v1` / `candidate_v2` 参数包、研究结果与旧源码不改写，也不能直接交给新入口运行。
 
 ## 1. 适用边界与依据
 
@@ -254,17 +254,17 @@ Binance 特征候选为因果收益、滚动波动、聚合成交方向、深度
 
 ## 11. 任务 2 的具体候选实现
 
-库入口为 `ComplementaryPairConfigV2::parse_toml`、`ComplementaryPairV1::new` 与公共 `StrategyV1`。完整参数必须显式提供；`synthetic-engineering.toml` 仅是工程测试材料，未经风险审定与校准。调用与构造见 [模块 README](../../README.md)。公共核心只携带泛型诊断与真实分派结果，不依赖该策略业务规则。
+库入口为 `ComplementaryPairConfigV3::parse_toml`、`ComplementaryPairV1::new` 与公共 `StrategyV1`。完整参数必须显式提供；`synthetic-engineering-v3.toml` 仅是工程测试材料，未经风险审定与校准。调用与构造见 [模块 README](../../README.md)。公共核心只携带泛型诊断与真实分派结果，不依赖该策略业务规则。
 
 按 [D-0333](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6109289580)，生产在原逐 condition 的 `decide` 调用内独立接纳合格 Chainlink 现价；Chainlink 自身合格时，Binance 综合健康失败不阻挡历史维护或首次记忆创建。综合健康仍限制概率估计与原交易。市场未结束、结算规则及原价格前置保持；缺参考锚点不阻挡此前的接纳。不回填、不预热、不新增市场开始门；计算等待期间没有逐公开组补充历史，不能保证保留全部中间价格。接收毫秒非未来且严格递增，同毫秒保留首个接纳点，数值转换沿用公共原语。无新点、同毫秒和有效 TWAP 回退仍执行原窗口清理，保留波动窗与结算窗所需的左前驱。历史和基差沿用策略 checkpoint，没有新历史文件或恢复状态。
 
 概率只将 Chainlink 现价写入因果持价历史，以滚动平方变动／经过秒数估计波动；rolling TWAP 回退只用于未来水平估计，不进入现价积分或波动样本。样本不足用显式初始波动候选。TWAP 窗口内持价积分是近似，不声称底层精确报告积分。Binance 修正由因果配对建立基差后比较两源变化，再加独立成交方向与深度压力候选；原概率估计先按旧基差计算创新，再在更晚接收点刷新基差，首对创新为零；独立历史维护不提前更新基差，反转持续重算。盘口减量不变造成交，当前 Polymarket 最佳卖价限制 post_only 报价；这些值并非已训练的短时响应模型。
 
-报价按 `fair - spread ± inventory_shift`。spread 为基础项、`p(1-p)` 误差位置项和相对创新项；偏移按剩余本金金额，参数全部显式。新配对用配置中的四种相关联合情景权重比较双侧、单侧和未成交结果，单侧情景混合可见价格处未来 Maker 修复与留孤腿；权重不是声称已经估得的成交概率。等量新目标按现金、1000 pUSD 含费投入、两侧潜在暴露和互斥单侧后续修复现金场景缩量。普通换价仍合并新旧承诺，目标价位按资产身份连接，不按公共数组位置猜 Up/Down。
+初始报价和一般维护按必填 `quote.initial_pair_price_reference` 选择参考。`fair_value` 按 `fair - spread ± inventory_shift`；`best_bid` 按逐腿正量最高买价形成目标，再复用原 tick / ask 裁剪和旧低价。缺目标逐侧处理，一般维护原局部例外与修复调度保持，完整语义及诊断见[使用说明](../../README.md#初始双腿价格参考)。修复内部的 `quotes()` 继续按 `fair - spread ± inventory_shift`。spread 为基础项、`p(1-p)` 误差位置项和相对创新项；偏移按剩余本金金额，参数全部显式。新配对用配置中的四种相关联合情景权重比较双侧、单侧和未成交结果，单侧情景混合可见价格处未来 Maker 修复与留孤腿；权重不是声称已经估得的成交概率。等量新目标按现金、1000 pUSD 含费投入、两侧潜在暴露和互斥单侧后续修复现金场景缩量。普通换价仍合并新旧承诺，目标价位按资产身份连接，不按公共数组位置猜 Up/Down。
 
 修复比较定义：`risk = residual_risk_weight × 原含费成本/份 × (流逝时间比例 + 库存额度占比)`；留孤腿值为 `-risk`，等待值为留孤腿值加显式可能价格改善项。Maker 值为 `maker_fill_weight × (比较基准 - Maker价) + (1-maker_fill_weight) × 留孤腿值`；FAK 值为比较基准减公开场景每份预计含费成本。公平值可用时是比较基准；估计缺失时可用持有腿公开标记价的互补值独立比较，诊断保留公平溢价缺失。Maker/FAK/等待/留孤腿只在实际可行条件满足后比较；系数与“值”是未经校准的经营候选，没有独立溢价拒绝条件。
 
-新增 Maker 沿 LIMIT 数量轴与最小份额判断，已接受订单的合法部分余量可以继续维护；FAK 按最低原本金独立判断，不附加 LIMIT 最小份额门。配置、接续和利润估计采用真实V2结构边界；旧overfill字段和显式 `candidate_v1` 明确拒绝，CLI不能悄悄改版本。新规则运行须另行绑定窗口、候选和投入获准，旧研究预算不自动授权。
+新增 Maker 沿 LIMIT 数量轴与最小份额判断，已接受订单的合法部分余量可以继续维护；FAK 按最低原本金独立判断，不附加 LIMIT 最小份额门。配置采用显式 42 字段 V3 结构；接续和利润估计保留原结构与真实边界，旧overfill字段、缺失新参考字段以及显式 `candidate_v1` / `candidate_v2` 明确拒绝，CLI不能悄悄改版本。新规则运行须另行绑定窗口、候选和投入获准，旧研究预算不自动授权。
 
 每轮直接消费公共成本池、逐成交实际费用／剩余贡献、现金、预留、订单与在途。策略记忆包含信号、高水位、终止相关窗口、请求序号和未决增量利润分配。`continuity()` 导出后三者与占用供显式接续；调用者须继续恢复原公共账户并沿用命名空间，信号历史需重新提供因果数据。库没有文件写入、完整账户恢复或三环境宿主。
 

@@ -2,7 +2,7 @@ use super::*;
 
 impl ComplementaryPairV1 {
     pub fn new(
-        config: ComplementaryPairConfigV2,
+        config: ComplementaryPairConfigV3,
         rules: Arc<SealedProcessRuleSnapshotV3>,
         request_namespace: String,
         continuity: StrategyContinuityV2,
@@ -95,7 +95,7 @@ impl ComplementaryPairV1 {
         }
     }
     pub fn restore(
-        config: ComplementaryPairConfigV2,
+        config: ComplementaryPairConfigV3,
         rules: Arc<SealedProcessRuleSnapshotV3>,
         saved: ComplementaryPairCheckpointV2,
     ) -> Result<Self, StrategyErrorV1> {
@@ -108,7 +108,7 @@ impl ComplementaryPairV1 {
         self.entry_market_range = range;
         self
     }
-    pub fn config(&self) -> &ComplementaryPairConfigV2 {
+    pub fn config(&self) -> &ComplementaryPairConfigV3 {
         &self.config
     }
     pub fn continuity(&self) -> StrategyContinuityV2 {

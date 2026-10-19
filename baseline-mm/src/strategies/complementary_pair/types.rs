@@ -203,7 +203,9 @@ impl EntryMarketRangeV1 {
 pub struct PairEntryEvaluationV1 {
     pub market_eligible: bool,
     pub evaluated: bool,
-    pub target_prices: Option<[ExactDecimal; 2]>,
+    pub price_reference: Option<InitialPairPriceReferenceV1>,
+    pub target_prices: Option<[Option<ExactDecimal>; 2]>,
+    pub target_unavailable: Option<[Option<InitialPairPriceUnavailableV1>; 2]>,
     pub reused_prices: Option<[ExactDecimal; 2]>,
     pub bid_distance: Option<[Option<ExactDecimal>; 2]>,
     pub ask_distance: Option<[Option<ExactDecimal>; 2]>,
@@ -216,4 +218,21 @@ pub struct PairEntryEvaluationV1 {
     pub minimum_shares: Option<ExactDecimal>,
     pub no_new_needed: Option<bool>,
     pub limit_budget_passed: Option<bool>,
+}
+
+/// 逐侧报价缺失原因；未知买一不回退公平价或填零。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InitialPairPriceUnavailableV1 {
+    MissingPositiveBid,
+    EstimateRequired,
+    NoLegalMakerPrice,
+}
+impl PairEntryEvaluationV1 {
+    pub(super) fn record_targets(
+        &mut self,
+        targets: &[Result<Decimal, InitialPairPriceUnavailableV1>; 2],
+    ) {
+        self.target_prices = Some((*targets).map(|p| p.ok().map(|p| ExactDecimal(p.to_string()))));
+        self.target_unavailable = Some((*targets).map(Result::err));
+    }
 }

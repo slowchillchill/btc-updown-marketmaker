@@ -13,6 +13,7 @@ impl ComplementaryPairV1 {
         now: i64,
         s: &MarketState,
         p: &ProbabilityEstimateV1,
+        targets: [Result<Decimal, InitialPairPriceUnavailableV1>; 2],
         cash: &mut Decimal,
         account_exposure: &mut R,
         intents: &mut Vec<ReservedIntentV1>,
@@ -20,15 +21,17 @@ impl ComplementaryPairV1 {
     ) -> Result<(), StrategyErrorV1> {
         let o = &f.observation;
         diag.pair_entry.evaluated = true;
-        let Some(mut prices) = self.quotes(o, p, s)? else {
-            diag.unavailable.push(if p.up().is_none() {
-                ActionUnavailableV1::EstimateRequired
-            } else {
-                ActionUnavailableV1::NoLegalMakerPrice
-            });
+        // 买一能形成价格，仍不替代原经营评分所需概率。
+        if p.up().is_none() {
+            diag.unavailable.push(ActionUnavailableV1::EstimateRequired);
+            return Ok(());
+        }
+        let [Ok(a), Ok(b)] = targets else {
+            diag.unavailable
+                .push(ActionUnavailableV1::NoLegalMakerPrice);
             return Ok(());
         };
-        diag.pair_entry.target_prices = Some(prices.map(|p| ExactDecimal(p.to_string())));
+        let mut prices = [a, b];
         if s.unknown {
             diag.unavailable
                 .push(ActionUnavailableV1::UnknownCostOrCommitment);

@@ -52,9 +52,9 @@ use sim_system::{
 use std::{path::Path, sync::Arc};
 
 type Driver = FinitePublicConsumptionV1<RecordedPublicGroupSourceV1<MemoryRecordedTimes>>;
-fn config() -> ComplementaryPairConfigV2 {
-    let mut c = ComplementaryPairConfigV2::parse_toml(include_str!(
-        "../configs/strategies/complementary_pair/synthetic-engineering.toml"
+fn config() -> ComplementaryPairConfigV3 {
+    let mut c = ComplementaryPairConfigV3::parse_toml(include_str!(
+        "../configs/strategies/complementary_pair/synthetic-engineering-v3.toml"
     ))
     .unwrap();
     // 旧经营反例使用长窗口显式工程阈值；健康到期另由专项反例验证。
@@ -107,7 +107,7 @@ fn setup(root: &Path, cash: &str) -> (SharedExecutionV2, Driver, Arc<SealedProce
     (shared, driver, rules)
 }
 fn strategy(
-    c: ComplementaryPairConfigV2,
+    c: ComplementaryPairConfigV3,
     rules: Arc<SealedProcessRuleSnapshotV3>,
 ) -> ComplementaryPairV1 {
     ComplementaryPairV1::new(
@@ -338,7 +338,7 @@ async fn construction_config_and_frozen_pair_diagnostics_use_public_dispatch() {
     );
     let calculation = input.calculate(&mut s, 22_000).unwrap();
     let frozen = diagnostic(&calculation.output).clone();
-    assert_eq!(frozen.rule_version, "candidate_v2");
+    assert_eq!(frozen.rule_version, "candidate_v3");
     assert!(
         matches!(intents(&calculation.output)[0].intent.as_ref(),ModelIntentV1::SubmitPairedBuy{orders,..} if matches!((&orders[0].order,&orders[1].order),(BuyOrderIntentV1::GtcLimit{size_shares:a,post_only:true,..},BuyOrderIntentV1::GtcLimit{size_shares:b,post_only:true,..}) if a==b))
     );
@@ -381,7 +381,7 @@ async fn construction_config_and_frozen_pair_diagnostics_use_public_dispatch() {
         "后一轮估计不能污染旧冻结诊断"
     );
     assert!(
-        ComplementaryPairConfigV2::parse_toml("[repair]\nenable_active_repair=false").is_err(),
+        ComplementaryPairConfigV3::parse_toml("[repair]\nenable_active_repair=false").is_err(),
         "缺失完整风险配置不能伪装为正式默认"
     );
 }
@@ -573,8 +573,20 @@ async fn profitable_pool(
     Arc<SealedProcessRuleSnapshotV3>,
     StrategyInputV1,
 ) {
+    profitable_pool_shape(root, 10, 10).await
+}
+async fn profitable_pool_shape(
+    root: &Path,
+    scale: u32,
+    down_shares: u32,
+) -> (
+    SharedExecutionV2,
+    PoolDriver,
+    Arc<SealedProcessRuleSnapshotV3>,
+    StrategyInputV1,
+) {
     let dpt = root.join("dpt");
-    let (core, times) = recorded_scaled_average_pool(&dpt, false, 10);
+    let (core, times) = recorded_scaled_average_pool(&dpt, false, scale);
     let (mut execution, observation, rules) = execution_with_fee_v4(
         &root.join("sim.jsonl"),
         &core,
@@ -644,7 +656,7 @@ async fn profitable_pool(
                         &rules,
                         "pool-down",
                         DOWN_TOKEN_ID,
-                        Decimal::from(10),
+                        Decimal::from(down_shares),
                         Decimal::new(2, 1),
                         true,
                     )],
@@ -652,13 +664,9 @@ async fn profitable_pool(
                 .await
                 .unwrap();
         }
-        if input
-            .action_before
-            .economics()
-            .markets
-            .iter()
-            .any(|m| Decimal::from_str_exact(&m.paired_shares.0).unwrap() == Decimal::from(10))
-        {
+        if input.action_before.economics().markets.iter().any(|m| {
+            Decimal::from_str_exact(&m.paired_shares.0).unwrap() == Decimal::from(scale.min(20))
+        }) {
             return (shared, driver, rules, input);
         }
     }
@@ -2321,18 +2329,21 @@ async fn v2_existing_maker_quantity_beyond_gap_can_be_maintained_with_real_old_c
     driver.stop_and_drain().unwrap();
 }
 #[tokio::test(flavor = "current_thread")]
-async fn v2_continuity_rejects_missing_or_explicit_old_rule_without_resetting_it() {
+async fn v3_continuity_rejects_missing_or_explicit_old_rule_without_resetting_it() {
     let mut old = serde_json::to_value(StrategyContinuityV2::new_account()).unwrap();
     old.as_object_mut().unwrap().remove("rule_version");
     assert!(serde_json::from_value::<StrategyContinuityV2>(old).is_err());
     let temp = tempfile::tempdir().unwrap();
     let (_, driver, rules) = setup(temp.path(), "2000");
-    let mut old = StrategyContinuityV2::new_account();
-    old.rule_version = "candidate_v1".into();
-    let result = ComplementaryPairV1::new(config(), rules, "no-silent-upgrade".into(), old);
-    assert!(
-        matches!(result,Err(StrategyErrorV1::Configuration(message)) if message.contains("candidate_v1") && message.contains("candidate_v2"))
-    );
+    for version in ["candidate_v1", "candidate_v2"] {
+        let mut old = StrategyContinuityV2::new_account();
+        old.rule_version = version.into();
+        let result =
+            ComplementaryPairV1::new(config(), rules.clone(), "no-silent-upgrade".into(), old);
+        assert!(
+            matches!(result,Err(StrategyErrorV1::Configuration(message)) if message.contains(version) && message.contains("candidate_v3"))
+        );
+    }
     driver.stop_and_drain().unwrap();
 }
 
@@ -2402,3 +2413,6 @@ async fn startup_scope_only_blocks_new_pairs_and_keeps_real_probability_sampling
         );
     }
 }
+
+#[path = "support/initial_best_bid.rs"]
+mod initial_best_bid;
