@@ -5,7 +5,7 @@ use sim_system::{
 };
 
 /// 所有延迟显式提供。序列不隐式重复或在耗尽后改用零延迟。
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DelayScheduleV1 {
     Fixed(u64),
     Sequence(Vec<u64>),
@@ -25,8 +25,26 @@ impl DelayScheduleV1 {
         }
     }
 }
+/// 原事件模式保持默认；100ms模式保留每个合法市场帧，按原单计算/发送槽顺序处理。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoricalDecisionModeV1 {
+    #[default]
+    EventDriven,
+    Fixed100msFifo,
+}
+impl HistoricalDecisionModeV1 {
+    pub fn is_event_driven(&self) -> bool {
+        *self == Self::EventDriven
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistoricalTimingV1 {
+    #[serde(
+        default,
+        skip_serializing_if = "HistoricalDecisionModeV1::is_event_driven"
+    )]
+    pub decision_mode: HistoricalDecisionModeV1,
     pub public_delivery_delay_ms: DelayScheduleV1,
     pub calculation_start_delay_ms: DelayScheduleV1,
     pub calculation_duration_ms: DelayScheduleV1,

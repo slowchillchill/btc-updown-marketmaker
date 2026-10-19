@@ -29,6 +29,7 @@ struct Probe {
     trade_details: Option<bool>,
     quantity_demand: Option<bool>,
     expected_quantity_projection: Option<bool>,
+    statistics_expected: bool,
     saw_depth: Option<Arc<std::sync::atomic::AtomicBool>>,
     rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
     cancel_first: bool,
@@ -93,6 +94,40 @@ impl StrategyV1 for Probe {
             for market in &input.markets {
                 if let Some(depth) = &market.observation.binance_depth.value {
                     assert_eq!(depth.full().is_some(), full, "共享日采用全部候选需求并集");
+                    if self.statistics_expected {
+                        let stats = market
+                            .statistics
+                            .as_ref()
+                            .expect("共同统计已在真实day入口启用");
+                        assert_eq!(
+                            stats.depth.best_bid_usdt_per_btc.value,
+                            Some(Decimal::from(64100))
+                        );
+                        assert_eq!(
+                            stats.depth.best_ask_usdt_per_btc.value,
+                            Some(Decimal::from(64200))
+                        );
+                        assert_eq!(
+                            stats.depth.midpoint_usdt_per_btc.value,
+                            Some(Decimal::from(64150))
+                        );
+                        assert_eq!(
+                            stats.depth.spread_usdt_per_btc.value,
+                            Some(Decimal::from(100))
+                        );
+                        if at < BASE + 2601 {
+                            // 快照两档bid .7+.5=1.2，ask .4，压力(1.2-.4)/(1.2+.4)=.5。
+                            assert_eq!(
+                                stats.depth.bid_quantity_btc.value,
+                                Some(Decimal::new(12, 1))
+                            );
+                            assert_eq!(
+                                stats.depth.ask_quantity_btc.value,
+                                Some(Decimal::new(4, 1))
+                            );
+                            assert_eq!(stats.depth.imbalance.value, Some(Decimal::new(5, 1)));
+                        }
+                    }
                     self.saw_depth
                         .as_ref()
                         .unwrap()
@@ -1879,12 +1914,19 @@ fn two_original_dates_keep_two_thousand_and_same_day_cross_market_continuity() {
 #[test]
 fn original_day_quantity_demand_union_preserves_complete_and_quantity_free_candidates() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    for any_full in [false, true] {
+    for (any_full, statistics_enabled) in [(false, false), (true, false), (false, true)] {
         let tmp = tempfile::tempdir().unwrap();
         let (config, rules) = setup(tmp.path());
         add_binance_depth_to_reuse_material(&config);
-        let first = HistoricalPreparedRunConfigV1::from(&config);
+        let mut first = HistoricalPreparedRunConfigV1::from(&config);
         let mut second = first.clone();
+        if statistics_enabled {
+            first.public_statistics = Some(PublicStatisticsConfigV1 {
+                momentum_windows_ms: vec![1000],
+                spot_variance_windows_ms: vec![1000],
+                terminal_integral_windows_ms: vec![1000],
+            });
+        }
         second.session.run_id = "quantity-second".into();
         second.session.account_id = "quantity-second-account".into();
         second.sim_log = tmp.path().join("second-sim.jsonl");
@@ -1907,7 +1949,8 @@ fn original_day_quantity_demand_union_preserves_complete_and_quantity_free_candi
             let index = usize::from(candidate.session.run_id == "quantity-second");
             Ok(Probe {
                 quantity_demand: Some(any_full && index == 0),
-                expected_quantity_projection: Some(any_full),
+                expected_quantity_projection: Some(any_full || statistics_enabled),
+                statistics_expected: statistics_enabled && index == 0,
                 saw_depth: Some(seen[index].clone()),
                 rules: Some(rules.clone()),
                 ..Default::default()
@@ -2748,4 +2791,376 @@ fn explicit_finite_host_consumes_complete_tail_groups_but_excludes_late_delivery
             "同毫秒尾部不可读半侧"
         );
     }
+}
+
+fn fifo_model_train_setup(
+    root: &std::path::Path,
+) -> (HistoricalRunConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
+    let (mut config, original) = setup(root);
+    config.public_statistics = Some(PublicStatisticsConfigV1 {
+        momentum_windows_ms: vec![100, 1000],
+        spot_variance_windows_ms: vec![1000],
+        terminal_integral_windows_ms: vec![1000],
+    });
+    config.session.caller_role = SimCallerRoleV1::ModelTrain;
+    config.session.input_lifecycle_policy =
+        sim_system::public_consumption::InputLifecyclePolicyV1::FiniteInput;
+    let rules = derive_public_maker_snapshot_v3(
+        HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: original.path().to_path_buf(),
+            expected_file_sha256: original.file_sha256().clone(),
+            replay_causal_start_utc_ms: i64::MAX,
+        },
+        root.join("fifo-rules.json"),
+        config.implementation_identity.clone(),
+        &[SimCallerRoleV1::ModelTrain],
+    )
+    .unwrap();
+    (config, rules)
+}
+#[derive(Debug)]
+struct FifoRead {
+    market_at: i64,
+    earliest_start: i64,
+    started_at: i64,
+    up_ask: Option<String>,
+    applied_trades: usize,
+    available: ExactDecimal,
+    commitments: usize,
+}
+struct FifoProbe {
+    inner: Probe,
+    calls: Vec<FifoRead>,
+}
+impl StrategyV1 for FifoProbe {
+    type Error = &'static str;
+    type Diagnostics = ();
+    fn decide(
+        &mut self,
+        input: &StrategyInputV1,
+        at: i64,
+    ) -> Result<StrategyOutputV1, Self::Error> {
+        let frame = input.market_frame_timing.as_ref().expect("实际FIFO帧");
+        let market_at = frame.market_cutoff.decision_time().logical_time_utc_ms();
+        assert_eq!(
+            input
+                .action_before
+                .cutoff()
+                .decision_time()
+                .logical_time_utc_ms(),
+            at
+        );
+        assert!(at >= frame.earliest_start_at_utc_ms);
+        for market in &input.markets {
+            assert!(
+                market.statistics.is_some(),
+                "实际新宿主显式接入共同统计，不能以None通过"
+            );
+            if let Some(stats) = &market.statistics {
+                assert_eq!(stats.definition_version, PUBLIC_STATISTICS_VERSION_V1);
+                assert_eq!(&stats.group, frame.market_cutoff.receipt().group());
+                assert_eq!(stats.config.momentum_windows_ms, vec![100, 1000]);
+                assert_eq!(stats.momentum.len(), 2);
+                assert_eq!(stats.spot_variance.len(), 1);
+                assert_eq!(stats.spot_integrals.len(), 1);
+                assert_eq!(stats.source_applied_at_utc_ms.len(), 5);
+                // 本合法材料无Binance/RTDS；F1—F8缺失不能在网格上补零或造消息。
+                assert!(stats.depth.best_bid_usdt_per_btc.value.is_none());
+                assert!(stats.latest_trade_pressure.value.is_none());
+                assert!(
+                    stats
+                        .momentum
+                        .iter()
+                        .all(|m| m.change_usdt_per_btc.value.is_none())
+                );
+                if market_at == BASE + 1300 && market.observation.market.condition_id.0 == FIRST {
+                    assert!(
+                        stats
+                            .pm_quantities
+                            .iter()
+                            .any(|q| q.asset.token_id.0 == "20"
+                                && q.ask_shares.value == Some(Decimal::from(100)))
+                    );
+                }
+                assert_eq!(
+                    stats.observed_at_utc_ms, market_at,
+                    "静默网格读取原共同统计，非新行情采样"
+                );
+            }
+        }
+        self.calls.push(FifoRead {
+            market_at,
+            earliest_start: frame.earliest_start_at_utc_ms,
+            started_at: at,
+            up_ask: input
+                .markets
+                .iter()
+                .find(|m| m.observation.market.condition_id.0 == FIRST)
+                .and_then(|m| {
+                    m.observation
+                        .assets
+                        .iter()
+                        .find(|a| a.asset.token_id.0 == "20")
+                })
+                .and_then(|a| a.asks.value.as_ref())
+                .and_then(|v| v.first())
+                .map(|l| l.price_pusd_per_share.0.clone()),
+            applied_trades: input
+                .trade_economics
+                .iter()
+                .filter(|t| t.economic_applied)
+                .count(),
+            available: input
+                .action_before
+                .economics()
+                .cash
+                .actual_available_pusd
+                .clone(),
+            commitments: input.action_before.commitments().count(),
+        });
+        self.inner.decide(input, at)
+    }
+    fn dispatched(
+        &mut self,
+        c: &StrategyCalculationV1,
+        r: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+    ) {
+        self.inner.dispatched(c, r)
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn fifo_grid_keeps_silent_frames_without_extra_memory_calls_or_bridge_requests() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = fifo_model_train_setup(temp.path());
+    config.preparation.scope.received_end_utc_ms = BASE + 3000;
+    config.timing.decision_mode = HistoricalDecisionModeV1::Fixed100msFifo;
+    config.timing.calculation_duration_ms = DelayScheduleV1::Fixed(0);
+    config.timing.dispatch_delay_ms = DelayScheduleV1::Fixed(0);
+    let mut probe = FifoProbe {
+        inner: Probe {
+            no_trade_only: true,
+            ..Default::default()
+        },
+        calls: vec![],
+    };
+    let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
+    // metadata 在1ms合法接纳，加100ms交付，首个合法网格为200ms。
+    let expected = (200..3000)
+        .step_by(100)
+        .map(|t| BASE + t)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        probe.calls.iter().map(|c| c.market_at).collect::<Vec<_>>(),
+        expected
+    );
+    assert!(
+        probe
+            .calls
+            .iter()
+            .all(|c| c.started_at == c.market_at && c.earliest_start == c.market_at)
+    );
+    let fifo = report.fifo.unwrap();
+    assert_eq!(fifo.grid_opportunities, 30);
+    assert_eq!(fifo.grid_without_market_frame, 2);
+    assert_eq!(fifo.generated_market_frames, 28);
+    assert_eq!(fifo.started_market_frames, 28);
+    assert_eq!(fifo.queued_market_frames, 0);
+    assert_eq!(
+        probe.inner.dispatched, 28,
+        "只有显式空动作才回调，空档没有模型调用"
+    );
+    assert_eq!(report.calculation_count, 28);
+    assert_eq!(report.unclosed_commitments, 0);
+    assert!(!report.pending_calculation);
+}
+#[tokio::test(flavor = "current_thread")]
+async fn fifo_burst_preserves_old_market_and_reads_actual_sim_account_before_catching_up() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = fifo_model_train_setup(temp.path());
+    config.preparation.scope.received_end_utc_ms = BASE + 6000;
+    config.timing.decision_mode = HistoricalDecisionModeV1::Fixed100msFifo;
+    // 首帧200ms；第13帧1400ms占用原槽到1400+900+100=2400ms。
+    let mut durations = vec![0; 60];
+    durations[12] = 900;
+    let mut dispatches = vec![0; 60];
+    dispatches[12] = 100;
+    config.timing.calculation_duration_ms = DelayScheduleV1::Sequence(durations);
+    config.timing.dispatch_delay_ms = DelayScheduleV1::Sequence(dispatches);
+    let mut probe = FifoProbe {
+        inner: Probe {
+            rules: Some(rules.clone()),
+            ..Default::default()
+        },
+        calls: vec![],
+    };
+    let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
+    let expected = (200..6000)
+        .step_by(100)
+        .map(|t| BASE + t)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        probe.calls.iter().map(|c| c.market_at).collect::<Vec<_>>(),
+        expected
+    );
+    let delayed = probe
+        .calls
+        .iter()
+        .find(|c| c.market_at == BASE + 1500)
+        .unwrap();
+    assert_eq!(delayed.started_at, BASE + 2400);
+    assert_eq!(
+        delayed.up_ask.as_deref(),
+        Some("0.6"),
+        "实际2301ms已交付0.5，旧帧仍是0.6"
+    );
+    assert_eq!(delayed.earliest_start, BASE + 1500);
+    assert!(
+        delayed.applied_trades > 0,
+        "等待期间原单成交已合法交付，不能被冻结在1500ms"
+    );
+    assert!(Decimal::from_str_exact(&delayed.available.0).unwrap() < Decimal::from(2000));
+    assert!(delayed.commitments > 0, "原旧单/在途义务继续存在");
+    assert_eq!(
+        probe.inner.frozen_down_price,
+        Some(Decimal::new(45, 2)),
+        "原完整动作不按后来0.65改价"
+    );
+    let fifo = report.fifo.unwrap();
+    assert_eq!(fifo.generated_market_frames, 58);
+    assert_eq!(fifo.started_market_frames, 58);
+    assert_eq!(fifo.peak_queued_market_frames, 10);
+    assert_eq!(fifo.queued_market_frames, 0);
+    assert_eq!(report.calculation_count, probe.calls.len());
+}
+#[tokio::test(flavor = "current_thread")]
+async fn fifo_finite_tail_reports_waiting_frames_and_pending_action_without_draining() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = fifo_model_train_setup(temp.path());
+    config.preparation.scope.received_end_utc_ms = BASE + 3000;
+    config.timing.decision_mode = HistoricalDecisionModeV1::Fixed100msFifo;
+    config.timing.calculation_start_delay_ms = DelayScheduleV1::Fixed(50);
+    config.timing.calculation_duration_ms = DelayScheduleV1::Fixed(5000);
+    config.timing.dispatch_delay_ms = DelayScheduleV1::Fixed(0);
+    let mut probe = FifoProbe {
+        inner: Probe {
+            no_trade_only: true,
+            ..Default::default()
+        },
+        calls: vec![],
+    };
+    let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
+    assert_eq!(probe.calls.len(), 1);
+    assert_eq!(probe.calls[0].market_at, BASE + 200);
+    assert_eq!(probe.calls[0].earliest_start, BASE + 250);
+    assert_eq!(probe.calls[0].started_at, BASE + 250);
+    assert_eq!(probe.inner.dispatched, 0, "未完成计算不能当显式NoTrade派发");
+    let fifo = report.fifo.unwrap();
+    assert_eq!(fifo.generated_market_frames, 28);
+    assert_eq!(fifo.started_market_frames, 1);
+    assert_eq!(fifo.queued_market_frames, 27);
+    assert_eq!(fifo.peak_queued_market_frames, 27);
+    assert_eq!(
+        fifo.queued_frame_timings[0]
+            .market_cutoff
+            .decision_time()
+            .logical_time_utc_ms(),
+        BASE + 300
+    );
+    assert!(report.pending_calculation);
+    assert_eq!(
+        report
+            .pending_calculation_timing
+            .unwrap()
+            .calculation_completed_at_utc_ms,
+        BASE + 5250
+    );
+    assert_eq!(report.last_observed_at_utc_ms, Some(BASE + 2999));
+    assert_eq!(report.end_reason, HistoricalEndReasonV1::RangeEnd);
+}
+
+struct FifoSharedStatisticsProbe {
+    captured: bool,
+    shared: Arc<std::sync::Mutex<Vec<(Arc<PublicMarketStatisticsV1>, ExactDecimal)>>>,
+}
+impl StrategyV1 for FifoSharedStatisticsProbe {
+    type Error = &'static str;
+    type Diagnostics = ();
+    fn decide(&mut self, input: &StrategyInputV1, _: i64) -> Result<StrategyOutputV1, Self::Error> {
+        if !self.captured {
+            self.captured = true;
+            self.shared.lock().unwrap().push((
+                input.markets[0].statistics.as_ref().unwrap().clone(),
+                input
+                    .action_before
+                    .economics()
+                    .cash
+                    .actual_available_pusd
+                    .clone(),
+            ));
+        }
+        Ok(StrategyOutputV1::Continue {
+            intents: vec![],
+            next_evaluation_at_utc_ms: None,
+            diagnostics: (),
+        })
+    }
+}
+#[test]
+fn fifo_day_shares_original_statistics_history_with_independent_accounts_and_processing_delays() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, rules) = fifo_model_train_setup(temp.path());
+    let mut first = HistoricalPreparedRunConfigV1::from(&config);
+    first.timing.decision_mode = HistoricalDecisionModeV1::Fixed100msFifo;
+    first.timing.calculation_duration_ms = DelayScheduleV1::Fixed(0);
+    first.timing.dispatch_delay_ms = DelayScheduleV1::Fixed(0);
+    first.finite_in_flight_groups = 0;
+    let mut second = first.clone();
+    second.session.run_id = "fifo-independent".into();
+    second.session.account_id = "fifo-independent-account".into();
+    second.session.initial_account_state.available_pusd = ExactDecimal("3000".into());
+    second.timing.calculation_duration_ms = DelayScheduleV1::Fixed(200);
+    second.sim_log = temp.path().join("second-sim");
+    second.noe_root = temp.path().join("second-noe");
+    second.ledger_root = temp.path().join("second-ledger");
+    second.metadata_path = temp.path().join("second-metadata.json");
+    second.result_path = temp.path().join("second-result.json");
+    let shared = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let day = HistoricalDayConfigV1 {
+        preparation: config.preparation,
+        candidates: vec![first, second],
+        progress_interval_seconds: 0,
+        producer_lead_groups: Some(1),
+    };
+    let result = run_historical_days_v1(&[day], rules, &|_| {
+        Ok(FifoSharedStatisticsProbe {
+            captured: false,
+            shared: shared.clone(),
+        })
+    })
+    .unwrap();
+    let observations = shared.lock().unwrap();
+    assert_eq!(observations.len(), 2);
+    assert!(
+        Arc::ptr_eq(&observations[0].0.identity, &observations[1].0.identity)
+            && Arc::ptr_eq(&observations[0].0.config, &observations[1].0.config),
+        "同输入/交付/参数使用同一个原统计流，不按账户另建历史"
+    );
+    assert_eq!(
+        observations[0].0, observations[1].0,
+        "同一帧统计值相同；不要求有界末值缓存永久持有所有旧查询结果"
+    );
+    assert_ne!(
+        observations[0].1, observations[1].1,
+        "公共相同，账户真实可用现金独立"
+    );
+    assert_eq!(
+        result[0].candidates[0].report["fifo"]["queued_market_frames"],
+        0
+    );
+    assert!(
+        result[0].candidates[1].report["fifo"]["queued_market_frames"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 }

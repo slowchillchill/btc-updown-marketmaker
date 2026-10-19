@@ -78,6 +78,7 @@ fn day_saves_real_requests_after_eof_and_final_failure_keeps_business_reports() 
         let temp = tempfile::tempdir().unwrap();
         let (mut config, rules) = fixture(temp.path(), "100010", &[800]);
         config.timing = HistoricalTimingV1 {
+            decision_mode: backtest::HistoricalDecisionModeV1::EventDriven,
             public_delivery_delay_ms: DelayScheduleV1::Fixed(0),
             calculation_start_delay_ms: DelayScheduleV1::Fixed(0),
             calculation_duration_ms: DelayScheduleV1::Fixed(15),

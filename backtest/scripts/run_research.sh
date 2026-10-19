@@ -19,7 +19,7 @@ for day in config.get('days', []):
             if value is not None:
                 Path(value).parent.mkdir(parents=True, exist_ok=True)
 PREPARE
-/usr/bin/time -v -o "$output/cli-resource-usage.txt" \
+"${GNU_TIME_BIN:-/usr/bin/time}" -v -o "$output/cli-resource-usage.txt" \
   "$binary" --mode day --config "$config" \
   --progress-interval-seconds 900 --research-summary --wall-budget-seconds 86400 \
   --summary-reserve-seconds 900 > "$output/research-output.json" 2> "$output/progress.log"

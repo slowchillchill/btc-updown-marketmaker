@@ -72,6 +72,8 @@ pub struct HistoricalRebateEntitlementReadV1 {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistoricalRunConfigV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_statistics: Option<PublicStatisticsConfigV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rebate_entitlement_queries: Vec<RebateEntitlementQueryV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,6 +107,8 @@ pub struct HistoricalRunConfigV1 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoricalPreparedRunConfigV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_statistics: Option<PublicStatisticsConfigV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rebate_entitlement_queries: Vec<RebateEntitlementQueryV1>,
     #[serde(
@@ -144,6 +148,7 @@ pub struct HistoricalPreparedRunConfigV1 {
 impl From<&HistoricalRunConfigV1> for HistoricalPreparedRunConfigV1 {
     fn from(c: &HistoricalRunConfigV1) -> Self {
         Self {
+            public_statistics: c.public_statistics.clone(),
             gamma_resolution_policy: c.gamma_resolution_policy,
             rebate_entitlement_queries: c.rebate_entitlement_queries.clone(),
             strategy_request_namespace: None,
@@ -179,6 +184,8 @@ pub enum HistoricalEndReasonV1 {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CalculationTimingRecordV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub market_frame_timing: Option<MarketFrameTimingV1>,
     pub observation_at_utc_ms: i64,
     pub calculation_started_at_utc_ms: i64,
     pub calculation_completed_at_utc_ms: i64,
@@ -248,8 +255,21 @@ pub struct SourceHealthRunSummaryV1 {
     pub invalidated_batches: u64,
     pub last_invalidated_calculation_timing: Option<CalculationTimingRecordV1>,
 }
+/// 仅保存队列数量和未消费帧的时间身份，不输出完整观察过程。
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct HistoricalFifoSummaryV1 {
+    pub grid_opportunities: u64,
+    pub grid_without_market_frame: u64,
+    pub generated_market_frames: u64,
+    pub started_market_frames: u64,
+    pub queued_market_frames: usize,
+    pub peak_queued_market_frames: usize,
+    pub queued_frame_timings: Vec<MarketFrameTimingV1>,
+}
 #[derive(Debug, Serialize)]
 pub struct HistoricalRunReportV1 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fifo: Option<HistoricalFifoSummaryV1>,
     /// 当前SIM经济前缀的显式日桶标签，不与过去的 observation_cutoff 混用。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rebate_entitlements: Vec<HistoricalRebateEntitlementReadV1>,
@@ -536,6 +556,7 @@ fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         )
     });
     HistoricalRunReportV1 {
+        fifo: None,
         rebate_entitlements: rebate_queries
             .iter()
             .map(|query| HistoricalRebateEntitlementReadV1 {
@@ -715,6 +736,13 @@ where
     let config = &effective_config;
     let metadata = serde_json::json!({"effective_entry_market_scope":config.effective_entry_market_scope,"config": metadata_config, "prepared_material": material, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "source_identity_sha256": prepared.source_identity_sha256, "initialization": prepared.initialization, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "maker_model_version": rules.maker_model_version_for(config.session.caller_role), "caller_role": config.session.caller_role, "input_lifecycle_policy":config.session.input_lifecycle_policy, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
     let context = HistoricalRuntimeContextV1 {
+        statistics: statistics_stream(
+            config,
+            prepared.source_identity_sha256.clone(),
+            material.preparation.effective_header(),
+            rules.file_sha256().clone(),
+        )
+        .map_err(material_failure)?,
         public_observer: None,
         start: material.preparation.scope.received_start_utc_ms,
         source_identity: prepared.source_identity_sha256,
@@ -737,7 +765,38 @@ pub(crate) struct HistoricalRuntimeCatalogV1 {
     pub markets: std::collections::BTreeMap<String, PlatformMarketV1>,
     pub initialization: HistoricalInitializationProvenanceV1,
 }
+pub(crate) fn statistics_stream(
+    config: &HistoricalPreparedRunConfigV1,
+    source_identity: Sha256Hex,
+    header: PublicInputStreamHeaderV1,
+    rules_identity: Sha256Hex,
+) -> Result<
+    Option<Arc<data_pipeline_core::public_statistics::PublicStatisticsStreamV1>>,
+    MaterialError,
+> {
+    config
+        .public_statistics
+        .as_ref()
+        .map(|parameters| {
+            let identity = PublicStatisticsIdentityV1 {
+                input_set_identity: source_identity,
+                stream_header: header,
+                rules_identity,
+                delivery_policy: format!(
+                    "visible+delay;monotonic-max:v1:{}",
+                    serde_json::to_string(&config.timing.public_delivery_delay_ms)?
+                ),
+            };
+            data_pipeline_core::public_statistics::PublicStatisticsStreamV1::new(
+                identity,
+                parameters.clone(),
+            )
+            .map_err(|error| -> MaterialError { error.into() })
+        })
+        .transpose()
+}
 pub(crate) struct HistoricalRuntimeContextV1 {
+    pub statistics: Option<Arc<data_pipeline_core::public_statistics::PublicStatisticsStreamV1>>,
     pub public_observer: Option<Arc<dyn HistoricalPublicObserverV1>>,
     pub start: i64,
     pub source_identity: Sha256Hex,
@@ -821,6 +880,14 @@ where
                 report: None,
             }
         })?;
+    if let Some(stream) = &context.statistics {
+        driver
+            .enable_public_statistics(stream.clone())
+            .map_err(|cause| HistoricalRunFailureV1 {
+                cause: HistoricalFailureCauseV1::Sim(cause),
+                report: None,
+            })?;
+    }
     driver
         .enable_finite_recording_wait()
         .map_err(|cause| HistoricalRunFailureV1 {
@@ -842,8 +909,14 @@ where
         mut day_economics,
         mut research,
     } = RuntimeLoopStateV1::default();
+    let fifo_enabled =
+        config.timing.decision_mode == crate::HistoricalDecisionModeV1::Fixed100msFifo;
+    let mut fifo = std::collections::VecDeque::<FrozenStrategyMarketFrameV1>::new();
+    let mut fifo_summary = HistoricalFifoSummaryV1::default();
     let end = context.end;
     let operating_start = context.operating_start;
+    let mut grid_at =
+        fifo_enabled.then_some(context.start.max(operating_start.unwrap_or(context.start)));
     let economics_start = context.start.max(operating_start.unwrap_or(context.start));
     sample_day_economics(&driver, &shared, economics_start, &mut day_economics);
     if control.research_enabled() {
@@ -902,7 +975,8 @@ where
                 hidden_at,
                 required,
                 start_at.filter(|_| pending.is_none()),
-                evaluation_at.filter(|_| pending.is_none()),
+                evaluation_at.filter(|_| pending.is_none() && !fifo_enabled),
+                grid_at,
                 pending_at,
                 health_at,
             ]
@@ -1433,7 +1507,70 @@ where
                 )
                 .map_err(HistoricalFailureCauseV1::Ledger)?;
             }
-            if pending.is_none() && dirty && start_at.is_none() {
+            if grid_at == Some(at) {
+                fifo_summary.grid_opportunities += 1;
+                if let Some(cutoff) = driver.observation_cutoff() {
+                    let frames = if strategy.selects_relevant_markets() {
+                        shared
+                            .strategy_selected_current_observations(
+                                &driver,
+                                &strategy.historical_market_requirements(),
+                            )
+                            .map_err(HistoricalFailureCauseV1::Ledger)?
+                    } else {
+                        driver.frames_at_observation()
+                    };
+                    if !frames.is_empty() {
+                        let earliest_start_at_utc_ms = crate::timing::after(
+                            at,
+                            config
+                                .timing
+                                .calculation_start_delay_ms
+                                .at(
+                                    usize::try_from(fifo_summary.generated_market_frames).map_err(
+                                        |_| {
+                                            HistoricalFailureCauseV1::Sim(
+                                                SimRunActorErrorV2::InvalidBusinessRequest(
+                                                    "市场帧序号超出时序定义域",
+                                                ),
+                                            )
+                                        },
+                                    )?,
+                                )
+                                .map_err(HistoricalFailureCauseV1::Sim)?,
+                        )
+                        .map_err(HistoricalFailureCauseV1::Sim)?;
+                        fifo.push_back(FrozenStrategyMarketFrameV1 {
+                            timing: MarketFrameTimingV1 {
+                                market_cutoff: cutoff,
+                                earliest_start_at_utc_ms,
+                            },
+                            markets: frames
+                                .iter()
+                                .map(|f| FrozenMarketReadV1 {
+                                    statistics: f.statistics.clone(),
+                                    observation: f.observation.clone(),
+                                    rule_context: f.rule_context.clone(),
+                                })
+                                .collect(),
+                        });
+                        fifo_summary.generated_market_frames += 1;
+                        fifo_summary.peak_queued_market_frames =
+                            fifo_summary.peak_queued_market_frames.max(fifo.len());
+                    } else {
+                        fifo_summary.grid_without_market_frame += 1;
+                    }
+                } else {
+                    fifo_summary.grid_without_market_frame += 1;
+                }
+                grid_at = at.checked_add(100).filter(|next| *next < end);
+            }
+            if fifo_enabled && pending.is_none() && start_at.is_none() {
+                start_at = fifo
+                    .front()
+                    .map(|frame| frame.timing.earliest_start_at_utc_ms.max(at));
+            }
+            if !fifo_enabled && pending.is_none() && dirty && start_at.is_none() {
                 start_at = Some(
                     crate::timing::after(
                         at,
@@ -1448,7 +1585,16 @@ where
             }
             if pending.is_none() && start_at == Some(at) {
                 start_at = None;
-                let calculation = if health_enabled && strategy.uses_borrowed_input() {
+                let calculation = if fifo_enabled {
+                    let frame = fifo.pop_front().expect("已到队首处理时刻");
+                    let input = shared.strategy_input_for_market_frame(
+                        &mut driver, frame, strategy.requires_trade_economics_details(),
+                    ).map_err(HistoricalFailureCauseV1::Ledger)?;
+                    input.map(|input| {
+                        fifo_summary.started_market_frames += 1;
+                        input.calculate(strategy, at)
+                    }).transpose().map_err(HistoricalFailureCauseV1::Strategy)?
+                } else if health_enabled && strategy.uses_borrowed_input() {
                     let input = measure_stage!(
                         stages,
                         StrategyInputAssembly,
@@ -1527,7 +1673,7 @@ where
                         evidence.record(&serde_json::json!({
                             "record_type":"calculation", "run_id": config.session.run_id,
                             "calculation_index": calculation_index,
-                            "input_cutoff": calculation.input_cutoff,
+                            "input_cutoff": calculation.input_cutoff, "market_frame_timing": calculation.market_frame_timing,
                             "started_at_utc_ms": calculation.calculation_started_at_utc_ms,
                             "outcome": outcome, "intents": intents,
                             "diagnostics": strategy.research_compact_diagnostics(diagnostics),
@@ -1587,6 +1733,7 @@ where
                         )
                         .filter(|next| *next > at);
                     }
+                    let market_frame_timing = calculation.market_frame_timing.clone();
                     pending = Some(Pending {
                         calculation_cash: if matches!(&calculation.output, StrategyOutputV1::Continue {intents,..} if !intents.is_empty()) {action_cash(&shared)} else {None},
                         calculation: calculation.complete(completed_at),
@@ -1594,6 +1741,7 @@ where
                         completed_at,
                         send_at,
                         record: CalculationTimingRecordV1 {
+                            market_frame_timing,
                             observation_at_utc_ms: observation_at,
                             calculation_started_at_utc_ms: at,
                             calculation_completed_at_utc_ms: completed_at,
@@ -1701,6 +1849,8 @@ where
         (Ok(_), Err(error)) => Err(HistoricalFailureCauseV1::Material(error)),
         (result, _) => result,
     };
+    fifo_summary.queued_market_frames = fifo.len();
+    fifo_summary.queued_frame_timings = fifo.iter().map(|frame| frame.timing.clone()).collect();
     match running {
         Ok((reason, ended_at)) => {
             let normal = reason == HistoricalEndReasonV1::RangeEnd;
@@ -1714,6 +1864,7 @@ where
                 calculation_index,
                 &config.rebate_entitlement_queries,
             );
+            result.fifo = fifo_enabled.then_some(fifo_summary);
             result.local_funds_rejected_batches = local_funds_rejected_batches;
             result.delivery_summary = operating_start.map(|_| delivery_summary.clone());
             result.day_economics = day_economics.summary();
@@ -1822,6 +1973,7 @@ where
                     &day_economics,
                 )))
             });
+            failure_report.fifo = fifo_enabled.then_some(fifo_summary);
             failure_report.local_funds_rejected_batches = local_funds_rejected_batches;
             failure_report.source_health = health_enabled.then_some(health_summary);
             Err(HistoricalRunFailureV1 {

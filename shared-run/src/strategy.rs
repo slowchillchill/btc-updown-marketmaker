@@ -65,11 +65,23 @@ impl StrategyMarketReadV1 for PublicObservationFrameV1<'_> {
         &self.rule_context
     }
 }
+/// 市场帧的原公开截止与显式最早处理时刻；账户截止另由 action_before 持有。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct MarketFrameTimingV1 {
+    #[serde(with = "sim_system::public_consumption::checkpoint::cutoff")]
+    pub market_cutoff: TrustedGroupDecisionCutoffV1,
+    pub earliest_start_at_utc_ms: i64,
+}
+pub struct FrozenStrategyMarketFrameV1 {
+    pub timing: MarketFrameTimingV1,
+    pub markets: Vec<FrozenMarketReadV1>,
+}
 pub struct StrategyInputV1<
     G = SharedExecutionRegistryV2,
     M = FrozenMarketReadV1,
     A = OwnedActionAccountV2,
 > {
+    pub market_frame_timing: Option<MarketFrameTimingV1>,
     pub action_before: ActionBeforeReadV2<G, A>,
     pub markets: Vec<M>,
     pub trade_economics: Vec<FrozenTradeEconomicsV1>,
@@ -292,6 +304,8 @@ pub trait StrategyV1 {
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct StrategyCalculationV1<D = ()> {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub market_frame_timing: Option<MarketFrameTimingV1>,
     #[serde(with = "sim_system::public_consumption::checkpoint::cutoff")]
     pub input_cutoff: TrustedGroupDecisionCutoffV1,
     pub calculation_started_at_utc_ms: i64,
@@ -321,6 +335,7 @@ impl StrategyInputV1 {
         calculation_started_at_utc_ms: i64,
     ) -> Result<StrategyCalculationV1<S::Diagnostics>, S::Error> {
         Ok(StrategyCalculationV1 {
+            market_frame_timing: self.market_frame_timing.clone(),
             input_cutoff: self.action_before.cutoff().clone(),
             calculation_started_at_utc_ms,
             output: strategy.decide(self, calculation_started_at_utc_ms)?,
@@ -330,6 +345,7 @@ impl StrategyInputV1 {
 impl BorrowedStrategyInputV1<'_> {
     pub fn to_owned_input(&self) -> StrategyInputV1 {
         StrategyInputV1 {
+            market_frame_timing: self.market_frame_timing.clone(),
             action_before: self.action_before.to_owned_read(),
             markets: self
                 .action_before
@@ -353,6 +369,7 @@ impl BorrowedStrategyInputV1<'_> {
         at: i64,
     ) -> Result<StrategyCalculationV1<S::Diagnostics>, S::Error> {
         Ok(StrategyCalculationV1 {
+            market_frame_timing: self.market_frame_timing.clone(),
             input_cutoff: self.action_before.cutoff().clone(),
             calculation_started_at_utc_ms: at,
             output: strategy.decide_borrowed(self, at)?,
@@ -440,6 +457,7 @@ impl SharedExecutionV2 {
             return Ok(None);
         };
         Ok(Some(StrategyInputV1 {
+            market_frame_timing: None,
             action_before,
             trade_economics: if details {
                 self.freeze_trade_economics()
@@ -468,6 +486,7 @@ impl SharedExecutionV2 {
             return Ok(None);
         };
         Ok(Some(StrategyInputV1 {
+            market_frame_timing: None,
             action_before,
             markets: frames,
             trade_economics: if details {
@@ -519,6 +538,34 @@ impl SharedExecutionV2 {
         let frames = self.selected_observations(driver, historical);
         self.observe_group(&frames);
         Ok(frames)
+    }
+    /// 原市场帧保持冻结；账户、在途、已合法交付反馈及估值取当前真实观察前缀。
+    /// 本方法不推进SIM时钟，宿主必须先沿原驱动链到达处理开始时刻。
+    pub fn strategy_input_for_market_frame(
+        &mut self,
+        driver: &mut PublicConsumptionStateV1,
+        frame: FrozenStrategyMarketFrameV1,
+        details: bool,
+    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+        self.apply_closed()?;
+        let Some(cutoff) = driver.observation_cutoff() else {
+            return Ok(None);
+        };
+        let current = driver.frames_at_observation();
+        self.observe_group(&current);
+        let Some(action_before) = self.freeze_action_before(cutoff, &current) else {
+            return Ok(None);
+        };
+        Ok(Some(StrategyInputV1 {
+            market_frame_timing: Some(frame.timing),
+            action_before,
+            markets: frame.markets,
+            trade_economics: if details {
+                self.freeze_trade_economics()
+            } else {
+                Vec::new()
+            },
+        }))
     }
     pub fn strategy_input(
         &mut self,
@@ -632,6 +679,7 @@ impl SharedExecutionV2 {
     ) -> Option<StrategyInputV1> {
         let action_before = self.freeze_action_before(cutoff, frames)?;
         Some(StrategyInputV1 {
+            market_frame_timing: None,
             action_before,
             trade_economics: if details {
                 self.freeze_trade_economics()

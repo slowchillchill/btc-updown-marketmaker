@@ -110,7 +110,7 @@ SIM 的 CleanRun 完成入口在业务义务闭合、投影排空后执行真实
 
 ## 公共账户估值 v3
 
-当前动作前读取使用 `AccountEconomicsReadV3`（`account_economics_v3`），组合同截止 Ledger 与所有公开市场观察。
+当前动作前读取使用 `AccountEconomicsReadV3`（`account_economics_v3`），组合当前合法 Ledger 与同一账户读取截止的公开市场观察。
 未判定剩余孤腿按对应结果侧有效最佳买价乘份额标记；最优档数量不足不折扣。
 DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完整 L2：首档本价位及完整快照的实际来源版本决定 L2 候选；其他价位删除不刷新首档，较低候选不能覆盖仍有效的直接买价；直接买价自身的新数量只证明该价位存在，不刷新整项 BBA 的来源版本；本价位缺失只撤销该直接价，不抹除其对旧更高价的排除证据；直接 `best_bid_ask` 字段保持独立。
 有效空买盘为已知零；必要报价未观测或不可用时 Conservative 与 Directional 为 `Unavailable`。
@@ -118,14 +118,14 @@ DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完�
 同一标记价值同时进入 Conservative 与 Directional；费用、返佣与已确认 PnL 沿原 Ledger。现金只暴露实际可用和实际预留。WCM 的原金额与未知传播保持，但只作为来源归因评价，不能证明后续交易无需方向回款或外部入金资助。
 配对、正式判定与真实赎回替换原价值；行情重估不产生账本分录。
 
-`action_before`、`freeze_action_before(cutoff, frames)` 及模型直接冻结都使用同截止原组观察；冻结结果后续不可变。
+`action_before` 及原单截止输入使用同截止原组观察；冻结结果后续不可变。`freeze_action_before(cutoff, frames)` 按传入公开观察给当前 Ledger 估值，调用方须先到达该真实截止。D-0369混合输入先用实际处理开始时的当前合法观察冻结账户及估值，再组合原市场帧，不能拿旧市场帧给新账户冒充当前估值。
 `UnmarkedAccountEconomicsReadV3::from_ledger` 为组合计算及零估值验收保留判定前孤腿零估值，现金结构同属 v3；当前动作读取使用 `AccountEconomicsReadV3`。旧 v1/v2 产物仍按生成时版本解释。
 规则及边界依据 [#183](https://github.com/slowchillchill/btc-updown-marketmaker/issues/183)。
 
 
 ## 公共策略调用与整批执行
 
-`SharedExecutionV2::strategy_input` 经原公共组准备／经济消费与冻结入口，产生 `StrategyInputV1`：同一截止的 `ActionBeforeReadV2`、逐市场原观察和不可变规则。冻结明细 `StrategyInputV1::trade_economics` 包含原成交事实、成功与经济应用标志、实际净费用和公共平均成本池的剩余贡献份额；后续消费不改旧快照。原模型读取及 `original_target` 的数量编码不变，其他策略从原登记 `origin.intent` 读取金额，不套用模型 `q=n/100` 假设。
+`SharedExecutionV2::strategy_input` 经原公共组准备／经济消费与冻结入口，产生 `StrategyInputV1`：同一截止的 `ActionBeforeReadV2`、逐市场原观察和不可变规则。 D-0369的 `strategy_input_for_market_frame` 接收原拥有式市场帧；其 `market_frame_timing.market_cutoff` 保留原整体市场截止，`action_before.cutoff()` 单独表示当前合法账户/反馈截止。输入和已完成计算都保留该市场时间身份。此入口不推进SIM时间，不借助 `BorrowedStrategyInputV1::to_owned_input` 重取当前市场；宿主先沿原驱动链到达实际开始时间。冻结明细 `StrategyInputV1::trade_economics` 包含原成交事实、成功与经济应用标志、实际净费用和公共平均成本池的剩余贡献份额；后续消费不改旧快照。原模型读取及 `original_target` 的数量编码不变，其他策略从原登记 `origin.intent` 读取金额，不套用模型 `q=n/100` 假设。
 
 `StrategyV1::decide` 返回计算错误或 `StrategyOutputV1<D>::{Continue, Exit}`，`D` 是策略自己的关联诊断类型。诊断随 `StrategyCalculationV1<D>` 冻结；公共层不解释业务含义。`calculate` 接收显式开始时间，`complete` 接收显式完成时间，`dispatch_strategy` 在当前真实决策截止发送，回传发送时间及实际回执，并在返回前把原成功／失败结果通知同一策略实例的 `dispatched`，供策略更新未决资源记忆；通知不自动重试或改变原错误。公共边界不提供计算延迟默认值、不用墙钟填历史时间、不将完成结果重新注入过去；宿主负责按已批准时序推进到可发送点、触发下一次计算及消费 `next_evaluation_at_utc_ms`。`Exit` 立即返回，没有发送、推进、排空或等待；该接口不等于完整历史／PAPER／LIVE 宿主，历史调用角色映射仍待所属宿主决定。
 

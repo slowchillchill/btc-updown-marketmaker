@@ -23,6 +23,11 @@ pub struct Config {
     pub progress_every: usize,
     pub public_delivery_delay_ms: u64,
     pub maker_trade: bool,
+    /// 指定时完整采用原时序；旧public_delivery_delay_ms仅用于未覆盖的旧入口。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing_override: Option<HistoricalTimingV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_statistics: Option<PublicStatisticsConfigV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub received_end_utc_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -164,6 +169,7 @@ pub fn run_fixture(
             c.implementation_identity.clone(),
             &[config.caller_role],
         )?;
+        c.public_statistics = config.public_statistics.clone();
         c.rebate_entitlement_queries = config.rebate_entitlement_queries.clone();
         if let Some(end) = config.received_end_utc_ms {
             c.preparation.scope.received_end_utc_ms = end;
@@ -172,6 +178,9 @@ pub fn run_fixture(
         c.session.input_lifecycle_policy = config.input_lifecycle_policy;
         c.gamma_resolution_policy = config.gamma_resolution_policy;
         c.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(config.public_delivery_delay_ms);
+        if let Some(timing) = &config.timing_override {
+            c.timing = timing.clone();
+        }
         std::fs::write(
             path.join("effective-backtest-config.json"),
             serde_json::to_vec_pretty(&c)?,
@@ -275,6 +284,8 @@ mod tests {
         ] {
             let temp = tempfile::tempdir().unwrap();
             let c = Config {
+                timing_override: None,
+                public_statistics: None,
                 caller_role: role,
                 implementation_identity: fixture_identity(),
                 input_lifecycle_policy: InputLifecyclePolicyV1::FiniteInput,
@@ -306,6 +317,8 @@ mod tests {
         ] {
             let temp = tempfile::tempdir().unwrap();
             let c = Config {
+                timing_override: None,
+                public_statistics: None,
                 caller_role: role,
                 implementation_identity: fixture_identity(),
                 input_lifecycle_policy: InputLifecyclePolicyV1::FiniteInput,
@@ -379,6 +392,8 @@ mod tests {
         ] {
             let temp = tempfile::tempdir().unwrap();
             let c = Config {
+                timing_override: None,
+                public_statistics: None,
                 caller_role: SimCallerRoleV1::ModelTrain,
                 implementation_identity: fixture_identity(),
                 input_lifecycle_policy: InputLifecyclePolicyV1::FiniteInput,
