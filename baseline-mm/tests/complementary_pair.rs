@@ -2243,6 +2243,7 @@ async fn amount_pending_keeps_original_estimate_and_only_incremental_loss_until_
             .unwrap()
             .action_before;
         let mut next = StrategyInputV1 {
+            market_frame_timing: None,
             action_before: action,
             markets: input.markets.clone(),
             trade_economics: input.trade_economics.clone(),

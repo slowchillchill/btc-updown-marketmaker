@@ -53,6 +53,7 @@ fn candidate(
     }
     run.strategy.effective_parameters = serde_json::to_value(c).unwrap();
     run.timing = HistoricalTimingV1 {
+        decision_mode: backtest::HistoricalDecisionModeV1::EventDriven,
         public_delivery_delay_ms: DelayScheduleV1::Fixed(0),
         calculation_start_delay_ms: DelayScheduleV1::Fixed(0),
         calculation_duration_ms: DelayScheduleV1::Fixed(15),

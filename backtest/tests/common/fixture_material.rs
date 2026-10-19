@@ -312,6 +312,7 @@ fn setup_day_material(
         max_temp_bytes: 1 << 26,
     };
     let config = HistoricalRunConfigV1 {
+        public_statistics: None,
         rebate_entitlement_queries: Vec::new(),
         entry_market_scope: None,
         research_evidence_path: None,
@@ -356,6 +357,7 @@ fn setup_day_material(
             hidden_stream_id: "synthetic-hidden".into(),
         },
         timing: HistoricalTimingV1 {
+            decision_mode: backtest::HistoricalDecisionModeV1::EventDriven,
             public_delivery_delay_ms: DelayScheduleV1::Fixed(100),
             calculation_start_delay_ms: DelayScheduleV1::Fixed(0),
             calculation_duration_ms: DelayScheduleV1::Fixed(200),

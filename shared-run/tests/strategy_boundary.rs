@@ -743,6 +743,44 @@ async fn frozen_strategy_input_explicit_time_empty_error_exit_and_original_amoun
                     .iter()
                     .any(|t| t.actual_net_fee_pusd.0 != "0")
             );
+            drop(current);
+            let mixed = shared
+                .strategy_input_for_market_frame(
+                    &mut driver,
+                    FrozenStrategyMarketFrameV1 {
+                        timing: MarketFrameTimingV1 {
+                            market_cutoff: original_cutoff.clone(),
+                            earliest_start_at_utc_ms: 22_000,
+                        },
+                        markets: input.markets.clone(),
+                    },
+                    true,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(mixed.action_before.cutoff(), fresh.action_before.cutoff());
+            assert_eq!(
+                mixed.action_before.economics(),
+                fresh.action_before.economics(),
+                "估值来自当前合法行情，而非传入旧帧"
+            );
+            assert_eq!(
+                mixed.trade_economics, fresh.trade_economics,
+                "旧市场帧不冻结后续合法反馈"
+            );
+            assert_eq!(
+                mixed.market_frame_timing.as_ref().unwrap().market_cutoff,
+                original_cutoff
+            );
+            assert_eq!(
+                mixed.markets[0].observation, old_market,
+                "拥有式混合读取不得重取当前市场帧"
+            );
+            assert_eq!(mixed.markets[0].statistics, input.markets[0].statistics);
+            assert!(Arc::ptr_eq(
+                &mixed.markets[0].rule_context,
+                &input.markets[0].rule_context
+            ));
             saw_new_trade = true;
             break;
         }

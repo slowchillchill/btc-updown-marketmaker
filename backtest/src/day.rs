@@ -327,10 +327,32 @@ where
             catalog,
         )
     };
+    // 同输入/规则/参数和交付时序复用一个统计流；不同交付时序保持各自历史。
+    let mut statistics: Vec<
+        Option<Arc<data_pipeline_core::public_statistics::PublicStatisticsStreamV1>>,
+    > = Vec::new();
+    for (index, candidate) in day.candidates.iter().enumerate() {
+        let previous = day.candidates[..index].iter().position(|previous| {
+            previous.public_statistics == candidate.public_statistics
+                && previous.timing.public_delivery_delay_ms
+                    == candidate.timing.public_delivery_delay_ms
+        });
+        let stream = match previous {
+            Some(previous) => statistics[previous].clone(),
+            None => crate::run::statistics_stream(
+                candidate,
+                source_identity.clone(),
+                config.effective_header(),
+                rules.file_sha256().clone(),
+            )?,
+        };
+        statistics.push(stream);
+    }
     std::thread::scope(|scope| {
         let mut workers = Vec::new();
         for (index, candidate) in day.candidates.iter().enumerate() {
             let context = HistoricalRuntimeContextV1 {
+                statistics: statistics[index].clone(),
                 public_observer: options.public_observer.clone(),
                 start: config.scope.received_start_utc_ms,
                 source_identity: source_identity.clone(),
@@ -365,7 +387,12 @@ where
                                 buffer.candidates[index].source_health =
                                     Some(strategy.uses_source_health());
                                 buffer.candidates[index].requirements =
-                                    Some(strategy.observation_requirements());
+                                    Some(if candidate.public_statistics.is_some() {
+                                        // F6需要全部可见深度数量，不被策略自己的精简投影请求删去。
+                                        PublicObservationRequirementsV1::FULL
+                                    } else {
+                                        strategy.observation_requirements()
+                                    });
                                 hub.0.1.control.notify_all();
                             }
                             let delivery = DayLocalDeliveryCacheV1::shared(&hub, index);
