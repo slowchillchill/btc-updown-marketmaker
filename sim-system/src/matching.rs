@@ -8,7 +8,7 @@ use contracts::{
     MarketResolutionTerminalV3, OrderKindProjectionV2, OrderLifecycleEventV2, OrderProjectionV2,
     OrderQuantityProjectionV2, PlatformAccountDeltaReasonV2, PlatformAccountDeltaV2,
     PlatformOutcomeBalanceV1, PublicTradeV2, QualityScopeV1, SettlementLifecycleEventV2,
-    SimCallerRoleV1, SimOrderTerminalReasonV2, SimulatedOrderKnownStatusV2, SimulatedOrderStatusV2,
+    SimOrderTerminalReasonV2, SimulatedOrderKnownStatusV2, SimulatedOrderStatusV2,
     SimulatedTradeKnownStatusV2, SimulatedTradeStatusV2, SubmissionFillV2,
     SubmissionMeasurementV2 as ContractSubmissionMeasurementV2, TokenId,
     TradeEconomicDispositionV2, TradeLiquidityRoleV2, TradeProjectionV2, TradeSide,
@@ -2789,14 +2789,10 @@ impl ExecutionStateV2 {
     ) -> Self {
         let role = account.account_instance_key().caller_role;
         let mut state = Self::new(directory, account);
-        if role == SimCallerRoleV1::HistoricalBacktest
-            && rules
-                .project_account_rules
-                .l2_queue_model
-                .value
-                .historical_backtest_model
-                .is_some()
-        {
+        if matches!(
+            rules.maker_model_for(role),
+            crate::platform_rules::SelectedMakerModelV1::PublicTradeConservativeFifoV1
+        ) {
             state.maker_model = MakerExecutionModelV1::PublicTradeConservativeFifoV1;
         }
         state

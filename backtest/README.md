@@ -444,3 +444,17 @@ python3 backtest/scripts/read_minimal_research.py <public-N.jsonl> <candidate-I-
 
 独立研究消费入口为 `export_public_continuous`，详见[启动配置、字段映射与中断限制](continuous-public-export.md)。
 它复用原 Parquet 日供料和公共统计，不创建策略、SIM 会话或 Ledger 账户。真实历史运行仍按研究授权签发。
+
+## 显式离线调用角色与有限输入
+
+D-0367 的公共环境适配复用上述原 Parquet 日供料及泛型策略入口。
+`session.caller_role` 可显式声明 `MODEL_TRAIN`、`HISTORICAL_BACKTEST`、`OFFLINE_EVALUATION`；
+`session.input_lifecycle_policy = "finite_input"` 选择流式登记及有限结束，缺字段保持旧 A 默认。
+角色必须与实际用途相符。Maker 使用相应角色已显式采用的新冻结规则文件；
+`gamma_resolution_policy = "qualified_public_consumption"` 继续使用原 Gamma 配置入口。
+输入范围继续由原 scope/调度拥有，不复制到 SIM。
+详细语义见 [SIM 有限公共环境](../sim-system/historical-consumption.md#新b显式公共环境d-0367)。
+
+这项适配不交付模型或学习入口，也不切换 A CLI 的策略工厂。
+可显式编译/调用的合成环境程序、配置及验证边界见
+[公共环境合成验收](examples/finite-environment-validation.md)。

@@ -769,6 +769,8 @@ struct UniqueSessionStateV2 {
     #[serde(default)]
     gamma_resolution_policy: crate::public_consumption::GammaResolutionPolicyV1,
     #[serde(default)]
+    input_lifecycle_policy: crate::public_consumption::InputLifecyclePolicyV1,
+    #[serde(default)]
     pending_gamma_resolutions: BTreeMap<String, crate::market::QualifiedMarketResolutionV2>,
 }
 
@@ -824,6 +826,10 @@ impl MarketEnrollmentStateV2 {
 }
 
 impl UniqueSessionStateV2 {
+    fn finite_input(&self) -> bool {
+        self.opening_fact.account_instance_key.caller_role == SimCallerRoleV1::HistoricalBacktest
+            || self.input_lifecycle_policy == InputLifecyclePolicyV1::FiniteInput
+    }
     fn recording_closed_through(&self) -> Option<i64> {
         match self.opening_fact.account_instance_key.caller_role {
             SimCallerRoleV1::Paper => self.public_visibility_frontier.closed_through_utc_ms,
@@ -855,7 +861,8 @@ impl UniqueSessionStateV2 {
         if matches!(
             caller_role,
             SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation
-        ) && self.market_enrollment.business_input_started
+        ) && !self.finite_input()
+            && self.market_enrollment.business_input_started
         {
             return Err(SimRunActorErrorV2::MarketEnrollmentFrozenAfterBusinessInput);
         }
@@ -930,6 +937,7 @@ impl UniqueSessionStateV2 {
             hidden_platform_frontier,
             public_visibility_frontier,
             gamma_resolution_policy,
+            input_lifecycle_policy,
             pending_gamma_resolutions,
         } = self;
         let (execution_state, result) = apply(execution_state)?;
@@ -952,6 +960,7 @@ impl UniqueSessionStateV2 {
                 hidden_platform_frontier,
                 public_visibility_frontier,
                 gamma_resolution_policy,
+                input_lifecycle_policy,
                 pending_gamma_resolutions,
             },
             result,
@@ -1477,6 +1486,40 @@ fn reduce_actor_input_v2(
                 .execution_state
                 .configure_cancel_scenario(scenario, input_sequence);
 
+            Ok((
+                state,
+                BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2::default()),
+            ))
+        }
+        BusinessInputV2::InputLifecyclePolicy(policy) => {
+            if *policy == InputLifecyclePolicyV1::FiniteInput
+                && opened.durability_role != RunDurabilityRoleV2::FiniteHistorical
+            {
+                return Err(unaccepted_business_input_v2(
+                    state,
+                    SimRunActorErrorV2::CompletionNotReady("有限输入政策需要有限记录运行"),
+                ));
+            }
+            let mut state = state;
+            let Some(session) = state.session.as_mut() else {
+                return Err(unaccepted_business_input_v2(
+                    state,
+                    SimRunActorErrorV2::SessionNotCreated,
+                ));
+            };
+            if session.market_enrollment.business_input_started
+                || (*policy == InputLifecyclePolicyV1::FiniteInput
+                    && session.opening_fact.account_instance_key.caller_role
+                        == SimCallerRoleV1::Paper)
+            {
+                return Err(unaccepted_business_input_v2(
+                    state,
+                    SimRunActorErrorV2::CompletionNotReady(
+                        "有限输入政策须在非PAPER会话业务供料前绑定",
+                    ),
+                ));
+            }
+            session.input_lifecycle_policy = *policy;
             Ok((
                 state,
                 BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2::default()),
@@ -2593,6 +2636,9 @@ where
             BusinessInputV2::CancelScenario(operation)
         }
         LoggedBusinessInputV2::Settlement(operation) => BusinessInputV2::Settlement(operation),
+        LoggedBusinessInputV2::InputLifecyclePolicy(policy) => {
+            BusinessInputV2::InputLifecyclePolicy(policy)
+        }
         LoggedBusinessInputV2::GammaResolutionPolicy(policy) => {
             BusinessInputV2::GammaResolutionPolicy(policy)
         }
@@ -5989,7 +6035,8 @@ pub(crate) fn drive_business_input_at_v2(
         ));
     }
     let drives_execution = market_path_drives_execution_for(caller_role, path);
-    let finite_obligation = caller_role == SimCallerRoleV1::HistoricalBacktest
+    let finite_input = state.session.as_ref().unwrap().finite_input();
+    let finite_obligation = finite_input
         && hidden_bucket.is_none()
         && bucket.is_none()
         && public_group.is_none()
@@ -6207,7 +6254,7 @@ pub(crate) fn drive_business_input_at_v2(
             );
         }
         if hidden.reference.closure() == contracts::ReplayIndexClosureV1::EndOfInput
-            && caller_role != SimCallerRoleV1::HistoricalBacktest
+            && !finite_input
         {
             state
                 .session
@@ -6232,7 +6279,7 @@ pub(crate) fn drive_business_input_at_v2(
         }
     }
     if public_closure.is_some_and(|c| c.closure == PublicTimeClosureReasonV1::EndOfInput)
-        && caller_role != SimCallerRoleV1::HistoricalBacktest
+        && !finite_input
     {
         state
             .session
@@ -6273,7 +6320,7 @@ pub(crate) fn drive_business_input_at_v2(
             && hidden_bucket.is_some_and(|b| {
                 b.reference.closure() == contracts::ReplayIndexClosureV1::EndOfInput
             }));
-    if successful_execution_eof && caller_role != SimCallerRoleV1::HistoricalBacktest {
+    if successful_execution_eof && !finite_input {
         while let Some(next_at) = next_scheduled_obligation_at_v2(&state, rules) {
             state = drain_scheduled_obligations_at_v2(
                 state,
@@ -6483,6 +6530,7 @@ fn reduce_business_input_v2(
                 public_visibility_frontier: LogicalPathFrontierV2::default(),
                 gamma_resolution_policy:
                     crate::public_consumption::GammaResolutionPolicyV1::default(),
+                input_lifecycle_policy: InputLifecyclePolicyV1::default(),
                 pending_gamma_resolutions: BTreeMap::new(),
             });
 
@@ -7641,6 +7689,70 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn explicit_finite_lifecycle_replays_original_control_log() {
+        for role in [
+            SimCallerRoleV1::ModelTrain,
+            SimCallerRoleV1::OfflineEvaluation,
+            SimCallerRoleV1::HistoricalBacktest,
+        ] {
+            let (directory, mut actor) = active_market_actor_with_explicit_rules(
+                role,
+                "finite-control",
+                successful_policy_v2_for_tests(),
+                true,
+            )
+            .await;
+            actor
+                .commit_group(vec![BusinessInputV2::InputLifecyclePolicy(
+                    InputLifecyclePolicyV1::FiniteInput,
+                )])
+                .unwrap();
+            actor
+                .commit_group(vec![BusinessInputV2::GammaResolutionPolicy(
+                    GammaResolutionPolicyV1::QualifiedPublicConsumption,
+                )])
+                .unwrap();
+            actor
+                .enroll_market(MarketEnrollmentRequestV1 {
+                    enrollment_request_id: "later".into(),
+                    market: market('d', "890", "102", "103"),
+                })
+                .unwrap();
+            let replayed = replay_event_log_v2(
+                &directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2),
+                &actor._rule_snapshot,
+                &actor._finality_policy,
+                &actor.scenario,
+                &actor._latency_profile,
+                MAX_GROUP_BYTES,
+                None,
+                |_| panic!("控制日志没有行情桶"),
+            )
+            .unwrap();
+            let session = replayed.state.session.as_ref().unwrap();
+            assert_eq!(session.opening_fact.account_instance_key.caller_role, role);
+            assert_eq!(
+                session.input_lifecycle_policy,
+                InputLifecyclePolicyV1::FiniteInput
+            );
+            assert_eq!(
+                session.gamma_resolution_policy,
+                GammaResolutionPolicyV1::QualifiedPublicConsumption
+            );
+            assert!(session.market_enrollment.successful("later").is_some());
+            assert_eq!(
+                serde_json::to_value(&session.execution_state).unwrap()["maker_model"],
+                "PublicTradeConservativeFifoV1"
+            );
+            assert!(
+                !std::fs::read_to_string(directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2))
+                    .unwrap()
+                    .contains("RunSeal")
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn historical_maker_role_dispatch_keeps_paper_and_training_legacy() {
         for (role, expected) in [
             (
@@ -7819,9 +7931,41 @@ mod tests {
         run_id: &str,
         finality_policy: Arc<TradeFinalityPolicyV2>,
     ) -> (tempfile::TempDir, SimRunActorV2) {
+        active_market_actor_with_explicit_rules(role, run_id, finality_policy, false).await
+    }
+    async fn active_market_actor_with_explicit_rules(
+        role: SimCallerRoleV1,
+        run_id: &str,
+        finality_policy: Arc<TradeFinalityPolicyV2>,
+        explicit: bool,
+    ) -> (tempfile::TempDir, SimRunActorV2) {
         let directory = tempfile::tempdir().expect("创建市场事件测试目录");
         let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
-        let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
+        let original = successful_snapshot_v3_for_sim_tests().await;
+        let rule_snapshot = if explicit {
+            // 旧内存夹具返回后已释放其TempDir；为派生入口保存本用例拥有的合法源文件。
+            let source = directory.path().join("original-rules.json");
+            let bytes = serde_json::to_vec(original.snapshot()).unwrap();
+            std::fs::write(&source, &bytes).unwrap();
+            use sha2::Digest;
+            crate::platform_rules::derive_public_maker_snapshot_v3(
+                crate::platform_rules::HistoricalProcessSnapshotRequestV1 {
+                    snapshot_path: source,
+                    expected_file_sha256: Sha256Hex(format!("{:x}", sha2::Sha256::digest(&bytes))),
+                    replay_causal_start_utc_ms: i64::MAX,
+                },
+                directory.path().join("explicit-rules.json"),
+                ImplementationIdentityV1 {
+                    git_commit: "a".repeat(40),
+                    source_identity_sha256: sha('5'),
+                    cargo_lock_sha256: sha('6'),
+                },
+                &[role],
+            )
+            .unwrap()
+        } else {
+            original
+        };
         let scenario = sealed_scenario();
         let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
         let mut run_opened = opened(
@@ -7833,6 +7977,9 @@ mod tests {
         );
         if role == SimCallerRoleV1::Paper {
             run_opened.durability_role = RunDurabilityRoleV2::RecoverablePaper;
+        }
+        if explicit {
+            run_opened.durability_role = RunDurabilityRoleV2::FiniteHistorical;
         }
         let mut actor = SimRunActorV2::create_new(
             &path,
@@ -8376,6 +8523,7 @@ mod tests {
             hidden_platform_frontier,
             public_visibility_frontier,
             gamma_resolution_policy,
+            input_lifecycle_policy,
             pending_gamma_resolutions,
         } = state.session.take().expect("BUY 候选必须拥有唯一会话");
         let (execution_state, disposition) = execution_state
@@ -8404,6 +8552,7 @@ mod tests {
             hidden_platform_frontier,
             public_visibility_frontier,
             gamma_resolution_policy,
+            input_lifecycle_policy,
             pending_gamma_resolutions,
         });
         (state, accepted)
@@ -8434,6 +8583,7 @@ mod tests {
             hidden_platform_frontier,
             public_visibility_frontier,
             gamma_resolution_policy,
+            input_lifecycle_policy,
             pending_gamma_resolutions,
         } = state.session.take().expect("返佣时钟候选必须拥有唯一会话");
         let (execution_state, effects) = execution_state
@@ -8458,6 +8608,7 @@ mod tests {
             hidden_platform_frontier,
             public_visibility_frontier,
             gamma_resolution_policy,
+            input_lifecycle_policy,
             pending_gamma_resolutions,
         });
         (state, effects)
@@ -8490,6 +8641,7 @@ mod tests {
             hidden_platform_frontier,
             public_visibility_frontier,
             gamma_resolution_policy,
+            input_lifecycle_policy,
             pending_gamma_resolutions,
         } = state.session.take().expect("最终性候选必须拥有唯一会话");
         let (execution_state, effects) = execution_state
@@ -8517,6 +8669,7 @@ mod tests {
             hidden_platform_frontier,
             public_visibility_frontier,
             gamma_resolution_policy,
+            input_lifecycle_policy,
             pending_gamma_resolutions,
         });
         (state, effects)
@@ -14627,119 +14780,148 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn historical_maker_trade_reaches_original_lifecycle_without_initial_l2_dependency() {
-        let (_dir, mut actor) = active_market_actor_with_policy(
-            SimCallerRoleV1::HistoricalBacktest, "historical-maker-chain",
+        for role in [
+            SimCallerRoleV1::HistoricalBacktest,
+            SimCallerRoleV1::ModelTrain,
+            SimCallerRoleV1::OfflineEvaluation,
+        ] {
+            let (_dir, mut actor) = active_market_actor_with_explicit_rules(
+            role, "historical-maker-chain",
             Arc::new(TradeFinalityPolicyV2::decode_and_seal(
                 br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10},{"state":"CONFIRMED","offset_ms":20}],"economic_application_ordinal":0},"failure_overrides":[]}"#).unwrap()),
-        ).await;
-        let trade = |source, received, seq| {
-            let event = crate::task21_tests::sealed_event(
-                ExecutionMarketEventPayloadV3::PublicTrade(contracts::PublicTradeV2 {
-                    asset: crate::task21_tests::asset("1", 0, "Up"),
-                    trade_id: format!("derived-{seq}"),
-                    trade_id_source: PublicTradeIdSourceV1::DerivedSourceEvidence,
-                    price_pusd_per_share: ExactDecimal("0.4".into()),
-                    quantity_shares: ExactDecimal("4".into()),
-                    aggressor_side: contracts::TradeSide::Sell,
-                    fee_rate_bps: None,
-                }),
-                crate::task21_tests::orderbook_evidence(source, received, seq),
-                crate::task21_tests::fresh_quality(),
-            );
-            data_pipeline_core::decode_execution_market_event_v3(
-                &data_pipeline_core::encode_execution_market_event_v3(&event).unwrap(),
-            )
-            .unwrap()
-        };
-        let early = trade(1050, 1090, 10);
-        let (state, effects) = reduce_market_event_slice_v2(
-            actor.state.take().unwrap(),
-            MarketEventPathV1::HiddenPlatform,
-            1050,
-            &[early],
-            actor._rule_snapshot.snapshot(),
-            &actor._finality_policy,
-        )
-        .unwrap_or_else(|_| panic!("合法成交不要求初始L2"));
-        assert_eq!(
-            effects
-                .execution
-                .iter()
-                .map(ExecutionMarketEventEffectsV2::initial_finality_count_for_tests)
-                .sum::<usize>(),
-            0
-        );
-        let initial = decoded_maker_initial_events();
-        let condition = initial[0].market.condition_id.clone();
-        let (state, _) = reduce_market_event_slice_v2(
-            state,
-            MarketEventPathV1::HiddenPlatform,
-            1100,
-            &initial,
-            actor._rule_snapshot.snapshot(),
-            &actor._finality_policy,
-        )
-        .unwrap_or_else(|_| panic!("初始盘口"));
-        let (state, _) = apply_buy_to_candidate(
-            state,
-            BuyOrderActionV2 {
-                global_request_id: "historical-maker-order".into(),
-                batch_item_ordinal: 0,
-                item_id: "item".into(),
-                condition_id: condition,
-                token_id: TokenId("1".into()),
-                effective_processing_at_utc_ms: 1200,
-                terms: BuyOrderTermsV2::Gtc {
-                    limit_price_pusd_per_share: "0.4".parse().unwrap(),
-                    accepted_base_units: 5_000_000,
-                    accepted_quote_units: 2_000_000,
-                    post_only: false,
-                },
-            },
-            actor._rule_snapshot.snapshot(),
-            &actor._finality_policy,
-        );
-        // 初始2股外部排位；订单先Taker买1.000001股，公开SELL4股仅再填Maker2股。
-        let later = trade(1300, 1500, 11);
-        let (state, effects) = reduce_market_event_slice_v2(
-            state,
-            MarketEventPathV1::HiddenPlatform,
-            1300,
-            &[later],
-            actor._rule_snapshot.snapshot(),
-            &actor._finality_policy,
-        )
-        .unwrap_or_else(|_| panic!("公开成交进入原生命周期链"));
-        let feedback = effects
-            .execution
-            .into_iter()
-            .map(ExecutionMarketEventEffectsV2::into_lifecycle_feedback)
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        let [LifecycleFeedbackEffectV2::Trade(fill)] = feedback.as_slice() else {
-            panic!("一笔Maker")
-        };
-        assert_eq!(fill.matched_at_utc_ms, 1300);
-        assert_eq!(fill.base_quantity_shares.0, "2");
-        assert_eq!(fill.quote_amount_pusd.0, "0.8");
-        assert_eq!(
-            fill.liquidity_role,
-            contracts::TradeLiquidityRoleV2::MakerInferred
-        );
-        assert!(fill.account_delta.is_some());
-        let session = state.session.unwrap();
-        assert_eq!(session.execution_state.fill_shape_for_tests(), (2, 3));
-        assert_eq!(
-            session
-                .execution_state
-                .base_order_quantities_for_tests("sim-1")
+        true).await;
+            let trade = |source, received, seq| {
+                let event = crate::task21_tests::sealed_event(
+                    ExecutionMarketEventPayloadV3::PublicTrade(contracts::PublicTradeV2 {
+                        asset: crate::task21_tests::asset("1", 0, "Up"),
+                        trade_id: format!("derived-{seq}"),
+                        trade_id_source: PublicTradeIdSourceV1::DerivedSourceEvidence,
+                        price_pusd_per_share: ExactDecimal("0.4".into()),
+                        quantity_shares: ExactDecimal("4".into()),
+                        aggressor_side: contracts::TradeSide::Sell,
+                        fee_rate_bps: None,
+                    }),
+                    crate::task21_tests::orderbook_evidence(source, received, seq),
+                    crate::task21_tests::fresh_quality(),
+                );
+                data_pipeline_core::decode_execution_market_event_v3(
+                    &data_pipeline_core::encode_execution_market_event_v3(&event).unwrap(),
+                )
                 .unwrap()
-                .0,
-            3_000_001
-        );
+            };
+            let early = trade(1050, 1090, 10);
+            let (state, effects) = reduce_market_event_slice_v2(
+                actor.state.take().unwrap(),
+                MarketEventPathV1::HiddenPlatform,
+                1050,
+                &[early],
+                actor._rule_snapshot.snapshot(),
+                &actor._finality_policy,
+            )
+            .unwrap_or_else(|_| panic!("合法成交不要求初始L2"));
+            assert_eq!(
+                effects
+                    .execution
+                    .iter()
+                    .map(ExecutionMarketEventEffectsV2::initial_finality_count_for_tests)
+                    .sum::<usize>(),
+                0
+            );
+            let initial = decoded_maker_initial_events();
+            let condition = initial[0].market.condition_id.clone();
+            let (state, _) = reduce_market_event_slice_v2(
+                state,
+                MarketEventPathV1::HiddenPlatform,
+                1100,
+                &initial,
+                actor._rule_snapshot.snapshot(),
+                &actor._finality_policy,
+            )
+            .unwrap_or_else(|_| panic!("初始盘口"));
+            let (state, _) = apply_buy_to_candidate(
+                state,
+                BuyOrderActionV2 {
+                    global_request_id: "historical-maker-order".into(),
+                    batch_item_ordinal: 0,
+                    item_id: "item".into(),
+                    condition_id: condition,
+                    token_id: TokenId("1".into()),
+                    effective_processing_at_utc_ms: 1200,
+                    terms: BuyOrderTermsV2::Gtc {
+                        limit_price_pusd_per_share: "0.4".parse().unwrap(),
+                        accepted_base_units: 5_000_000,
+                        accepted_quote_units: 2_000_000,
+                        post_only: false,
+                    },
+                },
+                actor._rule_snapshot.snapshot(),
+                &actor._finality_policy,
+            );
+            assert_eq!(
+                actor._rule_snapshot.maker_model_version_for(role),
+                "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1"
+            );
+            let removal = decoded_maker_level_event(BookSide::Bid, "0.4", "2", "0", 1250, 1260, 12);
+            let (state, removed) = reduce_market_event_slice_v2(
+                state,
+                MarketEventPathV1::HiddenPlatform,
+                1250,
+                &[removal],
+                actor._rule_snapshot.snapshot(),
+                &actor._finality_policy,
+            )
+            .unwrap_or_else(|_| panic!("合法盘口净减"));
+            assert_eq!(
+                removed
+                    .execution
+                    .iter()
+                    .map(ExecutionMarketEventEffectsV2::initial_finality_count_for_tests)
+                    .sum::<usize>(),
+                0,
+                "盘口净减不制造Maker成交"
+            );
+            // 初始2股外部排位；订单先Taker买1.000001股，公开SELL4股仅再填Maker2股。
+            let later = trade(1300, 1500, 11);
+            let (state, effects) = reduce_market_event_slice_v2(
+                state,
+                MarketEventPathV1::HiddenPlatform,
+                1300,
+                &[later],
+                actor._rule_snapshot.snapshot(),
+                &actor._finality_policy,
+            )
+            .unwrap_or_else(|_| panic!("公开成交进入原生命周期链"));
+            let feedback = effects
+                .execution
+                .into_iter()
+                .map(ExecutionMarketEventEffectsV2::into_lifecycle_feedback)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            let [LifecycleFeedbackEffectV2::Trade(fill)] = feedback.as_slice() else {
+                panic!("一笔Maker")
+            };
+            assert_eq!(fill.matched_at_utc_ms, 1300);
+            assert_eq!(fill.base_quantity_shares.0, "2");
+            assert_eq!(fill.quote_amount_pusd.0, "0.8");
+            assert_eq!(
+                fill.liquidity_role,
+                contracts::TradeLiquidityRoleV2::MakerInferred
+            );
+            assert!(fill.account_delta.is_some());
+            let session = state.session.unwrap();
+            assert_eq!(session.execution_state.fill_shape_for_tests(), (2, 3));
+            assert_eq!(
+                session
+                    .execution_state
+                    .base_order_quantities_for_tests("sim-1")
+                    .unwrap()
+                    .0,
+                3_000_001
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -20264,6 +20446,19 @@ impl PublicSimExecutionV1 {
         }
         Ok(())
     }
+    /// 首业务输入前显式选择有限生命周期；沿原日志重建，不复制宿主范围。
+    pub fn configure_input_lifecycle_policy_v1(
+        &mut self,
+        policy: InputLifecyclePolicyV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let committed = self
+            .actor
+            .commit_group(vec![BusinessInputV2::InputLifecyclePolicy(policy)])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        Ok(())
+    }
     /// 显式绑定新 Gamma 假设；记录及恢复沿唯一 SIM 输入链。
     pub fn configure_gamma_resolution_policy_v1(
         &mut self,
@@ -21046,8 +21241,7 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
                 .and_then(|state| state.session.as_ref())
                 .ok_or(SimRunActorErrorV2::SessionNotCreated)?;
             let frontier = &session.hidden_platform_frontier;
-            if session.opening_fact.account_instance_key.caller_role
-                == SimCallerRoleV1::HistoricalBacktest
+            if session.finite_input()
                 && frontier
                     .closed_through_utc_ms
                     .is_some_and(|closed| closed < before)
@@ -21191,8 +21385,7 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
             .as_ref()
             .and_then(|state| state.session.as_ref())
             .ok_or(SimRunActorErrorV2::SessionNotCreated)?;
-        if session.opening_fact.account_instance_key.caller_role
-            == SimCallerRoleV1::HistoricalBacktest
+        if session.finite_input()
             && session
                 .hidden_platform_frontier
                 .closed_through_utc_ms

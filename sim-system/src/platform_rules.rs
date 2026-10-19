@@ -400,6 +400,11 @@ pub struct L2QueueModelRuleV1 {
     /// 缺省字段属于旧快照；不能在恢复时自动换成新撮合。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub historical_backtest_model: Option<HistoricalMakerModelV1>,
+    /// 新运行显式选择；旧快照缺省保持各角色原模型。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_train_model: Option<HistoricalMakerModelV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline_evaluation_model: Option<HistoricalMakerModelV1>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -563,16 +568,37 @@ pub(crate) struct PlatformRuleSnapshotV3 {
 
 /// 已冻结规则的版本区分；未知/历史标记保持原读取语义，不新增装载拒绝门。
 pub(crate) const GTD_EFFECTIVE_EXPIRY_VERSION: &str = "POLYMARKET_GTD_EFFECTIVE_EXPIRY_V1";
+/// 实际算法选择与其原版本标记一起返回，避免由未知旧字符串猜测新算法。
+pub(crate) enum SelectedMakerModelV1<'a> {
+    L2BookDeltaFifoEstimateV1(&'a str),
+    PublicTradeConservativeFifoV1,
+}
 impl PlatformRuleSnapshotV3 {
     /// 同一进程的双模型由冻结快照和实际调用方共同选定。
     pub fn maker_model_version_for(&self, role: contracts::SimCallerRoleV1) -> &str {
+        match self.maker_model_for(role) {
+            SelectedMakerModelV1::PublicTradeConservativeFifoV1 => {
+                "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1"
+            }
+            SelectedMakerModelV1::L2BookDeltaFifoEstimateV1(version) => version,
+        }
+    }
+    pub(crate) fn maker_model_for(
+        &self,
+        role: contracts::SimCallerRoleV1,
+    ) -> SelectedMakerModelV1<'_> {
         let rule = &self.project_account_rules.l2_queue_model.value;
-        if role == contracts::SimCallerRoleV1::HistoricalBacktest
-            && rule.historical_backtest_model.is_some()
-        {
-            "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1"
-        } else {
-            &rule.model_version
+        let selected = match role {
+            contracts::SimCallerRoleV1::HistoricalBacktest => rule.historical_backtest_model,
+            contracts::SimCallerRoleV1::ModelTrain => rule.model_train_model,
+            contracts::SimCallerRoleV1::OfflineEvaluation => rule.offline_evaluation_model,
+            contracts::SimCallerRoleV1::Paper => None,
+        };
+        match selected {
+            Some(HistoricalMakerModelV1::PublicTradeConservativeFifoV1) => {
+                SelectedMakerModelV1::PublicTradeConservativeFifoV1
+            }
+            None => SelectedMakerModelV1::L2BookDeltaFifoEstimateV1(&rule.model_version),
         }
     }
 
@@ -1120,6 +1146,53 @@ pub fn derive_historical_maker_snapshot_v3(
             "; frozen-platform-source-sha256:{}",
             loaded.file_sha256().0
         ));
+    snapshot.provenance.implementation_identity = implementation_identity;
+    let (file_sha256, path, _) = seal_snapshot(&target_path, &snapshot, MAX_RULE_SNAPSHOT_BYTES)?;
+    Ok(Arc::new(SealedProcessRuleSnapshotV3 {
+        path,
+        file_sha256,
+        access_mode: SnapshotAccessMode::HistoricalAsOf,
+        snapshot,
+    }))
+}
+
+/// 为明确采用 D-0367 的角色派生独立冻结规则；不修改源文件或其他平台事实。
+pub fn derive_public_maker_snapshot_v3(
+    source: HistoricalProcessSnapshotRequestV1,
+    target_path: PathBuf,
+    implementation_identity: ImplementationIdentityV1,
+    roles: &[contracts::SimCallerRoleV1],
+) -> Result<Arc<SealedProcessRuleSnapshotV3>, RuleSnapshotError> {
+    let loaded = load_historical_process_snapshot_v3(source)?;
+    validate_implementation_identity(&implementation_identity)?;
+    let mut snapshot = loaded.snapshot().clone();
+    let rule = &mut snapshot.project_account_rules.l2_queue_model;
+    for role in roles {
+        let selection = match role {
+            contracts::SimCallerRoleV1::ModelTrain => &mut rule.value.model_train_model,
+            contracts::SimCallerRoleV1::OfflineEvaluation => {
+                &mut rule.value.offline_evaluation_model
+            }
+            contracts::SimCallerRoleV1::HistoricalBacktest => {
+                &mut rule.value.historical_backtest_model
+            }
+            contracts::SimCallerRoleV1::Paper => {
+                return Err(RuleSnapshotError::InvalidConfig(
+                    "D-0367不改变PAPER的Maker政策".into(),
+                ));
+            }
+        };
+        *selection = Some(HistoricalMakerModelV1::PublicTradeConservativeFifoV1);
+    }
+    rule.evidence.source.push_str(&format!(
+        "; D-0367 explicit roles:{roles:?}; frozen-platform-source-sha256:{}",
+        loaded.file_sha256().0
+    ));
+    rule.evidence.version = "PUBLIC_TRADE_ROLE_SELECTION_V1".into();
+    rule.evidence.reviewed_on_utc_date = "2026-10-19".into();
+    rule.evidence.scope =
+        format!("D-0367：{roles:?}显式采用保守公开成交Maker；未选择角色保留源快照政策");
+    rule.evidence.source.push_str("; https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6266028183");
     snapshot.provenance.implementation_identity = implementation_identity;
     let (file_sha256, path, _) = seal_snapshot(&target_path, &snapshot, MAX_RULE_SNAPSHOT_BYTES)?;
     Ok(Arc::new(SealedProcessRuleSnapshotV3 {

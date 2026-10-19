@@ -1,6 +1,6 @@
 # 有限历史消费
 
-`contracts::SimCallerRoleV1::HistoricalBacktest` 使用原隐藏撮合路径，与训练和独立评价共享行情归约、请求和经济链。Maker模型由冻结规则及实际调用方选择。公开路径默认仅用于因果观测；显式 Gamma 政策的窄终态接纳见下文。其市场登记可以随着连续历史材料继续增加；原训练和评价的登记冻结规则保持原有职责。
+`contracts::SimCallerRoleV1::HistoricalBacktest` 使用原隐藏撮合路径，与训练和独立评价共享行情归约、请求和经济链。Maker模型由冻结规则及实际调用方选择。公开路径默认仅用于因果观测；显式 Gamma 政策的窄终态接纳见下文。其市场登记可以随着连续历史材料继续增加；未选择下述显式有限输入政策的训练和评价，登记冻结规则保持原有职责。
 
 `PublicSimExecutionV1::create_new_historical` 使用 `RunDurabilityRoleV2::FiniteHistorical`。该角色表示实际有限记录前缀，不表示全部市场或经济义务已经闭合，不能签发 `CleanRun`。普通公共消费构造仍沿原持久角色运行。
 
@@ -65,6 +65,52 @@ Gamma 只在执行前沿完全闭合消费毫秒后，沿原判定、订单释�
 `resolution_public_consumed_at_utc_ms` 保存消费依据；WS 保持原整数源时间及原 JSON 形状。
 NOE 忠实传递这些依据，Ledger 继续归约原经济事实。交易侧不发起 redeem。
 这项政策是 SIM 对经济生效时点的假设，不证明真实平台兑付时间或始终比真实平台更晚。
+
+## 新B显式公共环境（D-0367）
+
+[采用决定 D-0367](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6266028183)
+允许新运行以真实 `ModelTrain`、`HistoricalBacktest`、`OfflineEvaluation` 身份共用保守公开成交 Maker、
+`QualifiedPublicConsumption` 和有限输入生命周期。角色描述实际用途；它不是启动训练、评价或数据作业的授权。
+
+Maker 继续归冻结的 `L2QueueModelRuleV1`。`model_train_model`、`offline_evaluation_model` 为可选字段，
+与原 `historical_backtest_model` 分别选择对应角色。缺字段仍使用源快照原 `model_version` 的旧模型；
+PAPER 不读取新增选择。规则查询和实际执行从同一个有类型的选择取得结果，不按旧版本字符串猜测新算法。
+派生新文件复用封存、历史装载和实现身份；不修改旧文件、其他平台规则及经济算法。
+
+原五参数规则命令保持原历史用途。第六参数显式给出角色数组文件时，使用 `derive_public_maker_snapshot_v3`：
+
+```json
+["MODEL_TRAIN", "HISTORICAL_BACKTEST", "OFFLINE_EVALUATION"]
+```
+
+```bash
+cargo run -p sim-system --example derive_historical_maker_rules --locked --offline -- \
+  <源规则JSON> <源规则SHA256> <输入因果开始UTC毫秒> <新规则JSON> <实现身份JSON> <角色数组JSON>
+```
+
+输出列出三类离线角色及 PAPER 的实际 Maker 版本。不要只换 `caller_role` 而继续使用未采用新 Maker 的旧规则。
+
+`PublicSimExecutionV1::configure_input_lifecycle_policy_v1(InputLifecyclePolicyV1::FiniteInput)`
+在有限历史记录会话的首业务输入前绑定生命周期，沿原接纳输入日志及会话重建保存。
+未配置的 `RoleDefault` 完整保留旧角色分支，PAPER 不采用这项政策。
+新政策允许训练/独评沿真实输入追加登记；公开组和隐藏 step 桶的 EOF 不要求全部市场具有经济终态，
+也不自动排空未来到期、反馈或付款。历史旧桶接口的既有完整性合同不因此扩展。
+原完整组、隐藏桶前沿及范围内义务处理仍适用，实际来源错误不变成 EOF。
+
+SIM 不保存第二个范围截止点。backtest 原调度只消费严格早于 `received_end_utc_ms` 的合法运行事件，
+尾部使用 `finish_input_at(end-1)`。原始输入在范围内、延迟后交付越界时，不会因此获得公开消费回执。
+有限 EOF 只结束输入前缀；未闭挂单、成交、预留和经济项继续如实保留。
+`stop_and_drain` 仅排空已接纳记录，仍不生成 `CleanRun` 或 `RunSeal`。
+这不定义账户重置、经济终值、模型记忆或学习恢复。
+
+Gamma 直接复用前节接口及前驱规则。选择新 Maker 或有限生命周期不会隐式选择 Gamma；
+新B调用方显式传入 `QualifiedPublicConsumption`，需要对照时也可显式传入 `SourceTimeOnly`。
+
+backtest 泛型宿主在 `HistoricalSessionV1.caller_role` 传递实际身份，
+`HistoricalSessionV1.input_lifecycle_policy` 传递显式生命周期；旧 JSON 缺省仍是 HistoricalBacktest/RoleDefault。
+日入口及已准备入口的元数据记录实际角色、Maker版本及生命周期。
+A CLI 仍使用原策略工厂；公共适配不把该命令变成 B 模型或训练程序。
+合成环境调用及验收见 [公共环境夹具](../backtest/examples/finite-environment-validation.md)。
 
 ## 延迟采样与恢复版本
 

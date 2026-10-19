@@ -241,6 +241,7 @@ pub(crate) enum BusinessInputV2 {
     CancelScenario(CancelScenarioOperationV1),
     Settlement(crate::matching::settlement::SettlementOperationV1),
     GammaResolutionPolicy(crate::public_consumption::GammaResolutionPolicyV1),
+    InputLifecyclePolicy(crate::public_consumption::InputLifecyclePolicyV1),
     CreateSession(SessionSpecV3),
     ActivateSession {
         activation_id: String,
@@ -274,6 +275,7 @@ pub(crate) enum LoggedBusinessInputV2 {
     CancelScenario(CancelScenarioOperationV1),
     Settlement(crate::matching::settlement::SettlementOperationV1),
     GammaResolutionPolicy(crate::public_consumption::GammaResolutionPolicyV1),
+    InputLifecyclePolicy(crate::public_consumption::InputLifecyclePolicyV1),
     CreateSession(SessionSpecV3),
     ActivateSession {
         activation_id: String,

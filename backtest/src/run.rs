@@ -18,6 +18,17 @@ pub struct StrategyDescriptorV1 {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistoricalSessionV1 {
+    /// 缺省保持旧A身份；新B消费者显式声明实际用途。
+    #[serde(
+        default = "historical_caller_role",
+        skip_serializing_if = "is_historical_caller_role"
+    )]
+    pub caller_role: SimCallerRoleV1,
+    #[serde(
+        default,
+        skip_serializing_if = "InputLifecyclePolicyV1::is_role_default"
+    )]
+    pub input_lifecycle_policy: InputLifecyclePolicyV1,
     pub run_id: String,
     pub session_id: String,
     pub account_id: String,
@@ -27,13 +38,19 @@ pub struct HistoricalSessionV1 {
     pub initial_account_state: InitialAccountStateV2,
     pub session_seed: Sha256Hex,
 }
+fn historical_caller_role() -> SimCallerRoleV1 {
+    SimCallerRoleV1::HistoricalBacktest
+}
+fn is_historical_caller_role(role: &SimCallerRoleV1) -> bool {
+    *role == historical_caller_role()
+}
 impl HistoricalSessionV1 {
     fn spec(&self) -> SessionSpecV3 {
         SessionSpecV3 {
             run_id: self.run_id.clone(),
             session_id: self.session_id.clone(),
             account_id: self.account_id.clone(),
-            caller_role: SimCallerRoleV1::HistoricalBacktest,
+            caller_role: self.caller_role,
             caller_instance_id: self.caller_instance_id.clone(),
             creation_request_id: self.creation_request_id.clone(),
             response_bridge_binding_id: self.response_bridge_binding_id.clone(),
@@ -395,6 +412,21 @@ fn assemble(
             }
         }
     }
+    if !config.session.input_lifecycle_policy.is_role_default() {
+        loop {
+            match execution
+                .configure_input_lifecycle_policy_v1(config.session.input_lifecycle_policy)
+            {
+                Err(SimRunActorErrorV2::RecordingBackpressured) => {
+                    execution.wait_for_recording_capacity()?
+                }
+                result => {
+                    result?;
+                    break;
+                }
+            }
+        }
+    }
     if !config.gamma_resolution_policy.is_source_time_only() {
         loop {
             match execution.configure_gamma_resolution_policy_v1(config.gamma_resolution_policy) {
@@ -653,7 +685,7 @@ where
         .transpose()
         .map_err(material_failure)?;
     let config = &effective_config;
-    let metadata = serde_json::json!({"effective_entry_market_scope":config.effective_entry_market_scope,"config": metadata_config, "prepared_material": material, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "source_identity_sha256": prepared.source_identity_sha256, "initialization": prepared.initialization, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "maker_model_version": rules.maker_model_version_for(SimCallerRoleV1::HistoricalBacktest), "caller_role": SimCallerRoleV1::HistoricalBacktest, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
+    let metadata = serde_json::json!({"effective_entry_market_scope":config.effective_entry_market_scope,"config": metadata_config, "prepared_material": material, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "source_identity_sha256": prepared.source_identity_sha256, "initialization": prepared.initialization, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "maker_model_version": rules.maker_model_version_for(config.session.caller_role), "caller_role": config.session.caller_role, "input_lifecycle_policy":config.session.input_lifecycle_policy, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
     let context = HistoricalRuntimeContextV1 {
         public_observer: None,
         start: material.preparation.scope.received_start_utc_ms,

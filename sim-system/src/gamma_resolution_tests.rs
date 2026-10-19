@@ -161,10 +161,7 @@ fn gamma_redemptions(delivered: &DeliveredFeedbackState) -> Vec<SettlementLifecy
 
 #[tokio::test(flavor = "current_thread")]
 async fn actual_gamma_only_takes_effect_after_successful_consumption_and_hidden_closure() {
-    for policy in [
-        GammaResolutionPolicyV1::SourceTimeOnly,
-        GammaResolutionPolicyV1::QualifiedPublicConsumption,
-    ] {
+    for (role, policy) in [SimCallerRoleV1::HistoricalBacktest, SimCallerRoleV1::ModelTrain, SimCallerRoleV1::OfflineEvaluation].into_iter().flat_map(|role| [GammaResolutionPolicyV1::SourceTimeOnly, GammaResolutionPolicyV1::QualifiedPublicConsumption].map(|policy| (role, policy))) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("dpt");
         let terminal = gamma_row();
@@ -181,13 +178,14 @@ async fn actual_gamma_only_takes_effect_after_successful_consumption_and_hidden_
         let (mut execution, delivered) = public_execution_with_scenario_capacity_layout(
             &temp.path().join("sim.jsonl"),
             scenario,
-            SimCallerRoleV1::HistoricalBacktest,
+            role,
             32,
             None,
             None,
             true,
         )
         .await;
+        execution.configure_input_lifecycle_policy_v1(InputLifecyclePolicyV1::FiniteInput).unwrap();
         execution
             .configure_gamma_resolution_policy_v1(policy)
             .unwrap();

@@ -2691,3 +2691,61 @@ fn early_strategy_exit_before_eof_propagates_required_public_finish_failure() {
     assert_eq!(report["end_reason"], "StrategyExit");
     assert!(report["last_observed_at_utc_ms"].as_i64().unwrap() < BASE + 6000);
 }
+
+#[test]
+fn explicit_finite_host_consumes_complete_tail_groups_but_excludes_late_delivery() {
+    struct TailProbe(Arc<std::sync::Mutex<Vec<(i64, Vec<bool>)>>>);
+    impl StrategyV1 for TailProbe {
+        type Error = &'static str;
+        type Diagnostics = ();
+        fn decide(
+            &mut self,
+            input: &StrategyInputV1,
+            at: i64,
+        ) -> Result<StrategyOutputV1, Self::Error> {
+            for m in &input.markets {
+                self.0.lock().unwrap().push((
+                    at,
+                    m.observation
+                        .assets
+                        .iter()
+                        .map(|a| a.asks.value.is_some())
+                        .collect(),
+                ));
+            }
+            Ok(StrategyOutputV1::Continue {
+                intents: vec![],
+                next_evaluation_at_utc_ms: None,
+                diagnostics: (),
+            })
+        }
+    }
+    for (end_offset, visible) in [(1201, false), (1202, true)] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, rules) = setup(temp.path());
+        // 正式两条book都于1100接收、1101接纳，100ms交付后同为1201。
+        // cutoff=1201排除二者；cutoff=1202必须完整消费二者，不能读半侧。
+        config.preparation.scope.received_end_utc_ms = BASE + end_offset;
+        config.session.caller_role = SimCallerRoleV1::ModelTrain;
+        config.session.input_lifecycle_policy =
+            sim_system::public_consumption::InputLifecyclePolicyV1::FiniteInput;
+        config.timing.calculation_duration_ms = DelayScheduleV1::Fixed(0);
+        config.timing.dispatch_delay_ms = DelayScheduleV1::Fixed(0);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let day = research_day(&config, temp.path());
+        let result =
+            run_historical_days_v1(&[day], rules, &|_| Ok(TailProbe(seen.clone()))).unwrap();
+        assert_eq!(result[0].candidates[0].report["end_reason"], "RangeEnd");
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().all(|(at, _)| *at < BASE + end_offset));
+        assert_eq!(
+            seen.iter().any(|(_, sides)| sides.iter().any(|v| *v)),
+            visible
+        );
+        assert!(
+            seen.iter()
+                .all(|(_, sides)| !sides.iter().any(|v| *v) || sides.iter().all(|v| *v)),
+            "同毫秒尾部不可读半侧"
+        );
+    }
+}
