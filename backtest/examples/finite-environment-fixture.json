@@ -1,0 +1,14 @@
+{
+  "caller_role": "MODEL_TRAIN",
+  "implementation_identity": {
+    "git_commit": "b5dd31a0a4aab89486d251a07b84b582ed5a146f",
+    "source_identity_sha256": "e48446e8e86098c16a1bb53d27afb708e485fde6b14999f2f3c673708282df71",
+    "cargo_lock_sha256": "147ea6966e1315cea85d1434b2220b323346e1a11afbe999b1040cee18c485eb"
+  },
+  "input_lifecycle_policy": "finite_input",
+  "gamma_resolution_policy": "qualified_public_consumption",
+  "iterations": 1,
+  "progress_every": 1,
+  "public_delivery_delay_ms": 100,
+  "maker_trade": true
+}

@@ -113,6 +113,7 @@ fn material(
     base: i64,
     utc_day: &str,
     terminal: Option<(PolymarketMarketMetadataV5Row, PolymarketOrderbookV3Message)>,
+    maker_trade: bool,
 ) -> std::path::PathBuf {
     let day = root.join("inputs");
     std::fs::create_dir(&day).unwrap();
@@ -171,6 +172,40 @@ fn material(
         book(SECOND, "21", base + 10100, base + 10200, 5, "0.6"),
         book(SECOND, "4", base + 10100, base + 10200, 6, "0.6"),
     ];
+    if maker_trade {
+        use data_collect::polymarket_orderbook_v3::{
+            PolymarketLastTradePriceV3, PolymarketPriceChangeEntryV3, PolymarketPriceChangeV3,
+        };
+        let mut removal = book(FIRST, "20", base + 2500, base + 2500, 7, "0.5");
+        removal.event = PolymarketOrderbookV3Event::PriceChange(PolymarketPriceChangeV3 {
+            price_changes: vec![PolymarketPriceChangeEntryV3 {
+                asset_id: "20".into(),
+                price: "0.4".into(),
+                size: Some("0".into()),
+                side: "BUY".into(),
+                best_bid: None,
+                best_ask: None,
+            }],
+        });
+        let mut trade = book(FIRST, "20", base + 4000, base + 4000, 8, "0.5");
+        trade.event = PolymarketOrderbookV3Event::LastTradePrice(PolymarketLastTradePriceV3 {
+            asset_id: "20".into(),
+            price: "0.4".into(),
+            size: Some("105".into()),
+            side: Some("SELL".into()),
+            fee_rate_bps: None,
+        });
+        pm_rows.extend([removal, trade]);
+        pm_rows.sort_by_key(|r| {
+            (
+                r.envelope.timestamp_received,
+                r.envelope.collector_admission_sequence,
+            )
+        });
+        for (i, r) in pm_rows.iter_mut().enumerate() {
+            r.envelope.collector_admission_sequence = i as u64 + 1;
+        }
+    }
     pm_rows.extend(terminal_pm);
     pm_writer
         .write_polymarket_orderbook_v3_messages(
@@ -192,13 +227,43 @@ pub(super) fn setup_day_with_terminal(
     utc_day: &str,
     terminal: Option<(PolymarketMarketMetadataV5Row, PolymarketOrderbookV3Message)>,
 ) -> (HistoricalRunConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
-    let manifest = material(root, base, utc_day, terminal);
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|path| path.join("sim-system").is_dir())
+    setup_day_material(root, base, utc_day, terminal, false, false)
+}
+#[allow(dead_code)] // 部分集成夹具只消费原场景；公共环境示例消费此场景。
+pub(super) fn setup_day_with_embedded_rules(
+    root: &Path,
+    base: i64,
+    utc_day: &str,
+    maker_trade: bool,
+) -> (HistoricalRunConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
+    setup_day_material(root, base, utc_day, None, maker_trade, true)
+}
+fn setup_day_material(
+    root: &Path,
+    base: i64,
+    utc_day: &str,
+    terminal: Option<(PolymarketMarketMetadataV5Row, PolymarketOrderbookV3Message)>,
+    maker_trade: bool,
+    embedded_rules: bool,
+) -> (HistoricalRunConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
+    let manifest = material(root, base, utc_day, terminal, maker_trade);
+    let rule_path = if embedded_rules {
+        let path = root.join("source-rules.json");
+        std::fs::write(
+            &path,
+            include_bytes!(
+                "../../../sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json"
+            ),
+        )
         .unwrap();
-    let rule_path =
-        workspace.join("sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
+        path
+    } else {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|path| path.join("sim-system").is_dir())
+            .unwrap();
+        workspace.join("sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json")
+    };
     let rule_sha = format!("{:x}", Sha256::digest(std::fs::read(&rule_path).unwrap()));
     let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
         snapshot_path: rule_path,
@@ -268,6 +333,9 @@ pub(super) fn setup_day_with_terminal(
             dispatch_delay_ms: DelayScheduleV1::Fixed(200),
         },
         session: HistoricalSessionV1 {
+            caller_role: contracts::SimCallerRoleV1::HistoricalBacktest,
+            input_lifecycle_policy:
+                sim_system::public_consumption::InputLifecyclePolicyV1::RoleDefault,
             run_id: "synthetic-history".into(),
             session_id: "one-session".into(),
             account_id: "one-account".into(),
