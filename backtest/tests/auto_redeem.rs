@@ -114,6 +114,7 @@ async fn original_auto_redeem_allocates_pair_and_orphan_once_and_preserves_pendi
             .unwrap();
         let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
         let mut driver = FinitePublicConsumptionV1::new(execution, source, "auto".into());
+        driver.enable_finite_recording_wait().unwrap();
         for _ in 0..4 {
             driver.next_group().unwrap().unwrap();
         }
@@ -842,7 +843,13 @@ async fn historical_v4_and_day_hosts_apply_original_auto_feedback_and_gamma() {
             end_at_utc_ms: base + 10000,
         },
     };
-    for (delay, gamma) in [(0, false), (100, false), (100, true)] {
+    for (delay, gamma, role) in [
+        (0, false, SimCallerRoleV1::HistoricalBacktest),
+        (100, false, SimCallerRoleV1::HistoricalBacktest),
+        (100, true, SimCallerRoleV1::HistoricalBacktest),
+        (100, true, SimCallerRoleV1::ModelTrain),
+        (100, true, SimCallerRoleV1::OfflineEvaluation),
+    ] {
         // 两个原 WS 交付档，加一个当前日入口的 Gamma 经济链。
         let temp = tempfile::tempdir().unwrap().keep();
         eprintln!("historical auto delay={delay} fixture={}", temp.display());
@@ -961,6 +968,23 @@ async fn historical_v4_and_day_hosts_apply_original_auto_feedback_and_gamma() {
             "collector 正式终态: {validation:?}"
         );
         let (mut config, rules) = historical_common::setup_with_terminal(&temp, metadata, pm);
+        let rules = if role != SimCallerRoleV1::HistoricalBacktest {
+            config.session.caller_role = role;
+            config.session.input_lifecycle_policy = InputLifecyclePolicyV1::FiniteInput;
+            sim_system::platform_rules::derive_public_maker_snapshot_v3(
+                sim_system::platform_rules::HistoricalProcessSnapshotRequestV1 {
+                    snapshot_path: rules.path().to_path_buf(),
+                    expected_file_sha256: rules.file_sha256().clone(),
+                    replay_causal_start_utc_ms: i64::MAX,
+                },
+                temp.join("explicit-rules.json"),
+                config.implementation_identity.clone(),
+                &[role],
+            )
+            .unwrap()
+        } else {
+            rules
+        };
         config.timing.public_delivery_delay_ms = backtest::DelayScheduleV1::Fixed(delay);
         if gamma {
             config.preparation.scope.received_end_utc_ms = base + 192000;

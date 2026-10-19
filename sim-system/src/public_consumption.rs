@@ -5,6 +5,20 @@ use data_pipeline_core::pm_reduction::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// 显式有限输入只改变登记与输入结束；范围仍由宿主拥有。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputLifecyclePolicyV1 {
+    #[default]
+    RoleDefault,
+    FiniteInput,
+}
+impl InputLifecyclePolicyV1 {
+    pub fn is_role_default(&self) -> bool {
+        *self == Self::RoleDefault
+    }
+}
+
 /// 缺少平台源时间的 Gamma 终态经济政策。旧运行和恢复默认保持原语义。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
