@@ -10,6 +10,7 @@ default = []
 stage-timing = ["data-pipeline-training/stage-timing"]
 
 [dependencies]
+rust_decimal = { version = "=1.42.1", default-features = false, features = ["std"] }
 contracts = { path = "../contracts" }
 data-pipeline-core = { path = "../data-pipeline/core" }
 data-pipeline-training = { path = "../data-pipeline/training" }

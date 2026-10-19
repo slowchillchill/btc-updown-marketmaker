@@ -1165,6 +1165,7 @@ dependencies = [
  "data-pipeline-core",
  "data-pipeline-training",
  "ledger",
+ "rayon",
  "rust_decimal",
  "serde",
  "serde_json",

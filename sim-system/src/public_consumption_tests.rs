@@ -243,7 +243,7 @@ fn checkpoint_prepared_groups_keep_nonempty_empty_and_unknown_valuation() {
             _ => panic!("真实PM输入"),
         };
         let position = input.input_position;
-        let mut day = data_pipeline_training::day_producer::DayAppliedV1 {
+        let mut day = data_pipeline_training::day_producer::DayAppliedV1 {new_public_trades:vec![],
             input,
             applied: applied.applied,
             first_canonical_position: canonical_position,
@@ -3781,7 +3781,7 @@ fn assert_shared_day_observation_encoding(day: bool) {
                     .map(|c| (o.market.condition_id.0.clone(), c))
             })
             .collect();
-        let mut day = data_pipeline_training::day_producer::DayAppliedV1 {
+        let mut day = data_pipeline_training::day_producer::DayAppliedV1 {new_public_trades:vec![],
             input,
             applied: applied.applied,
             first_canonical_position,
@@ -3941,7 +3941,7 @@ fn long_window_two_scale_observation_cost() {
             let applied=core.push(&prepared).unwrap().into_owned();
             let prepared_pm=match prepared.current {PreparedCanonicalInputV1::PolymarketMessage(p)=>Some(p),_=>None};
             let contexts=BTreeMap::from([(CONDITION_ID.into(),core.prepared_pm_context(CONDITION_ID).unwrap())]);
-            let mut day=data_pipeline_training::day_producer::DayAppliedV1 {input,applied:applied.applied, first_canonical_position:canonical,prepared_pm,contexts,initialization_binding:None,hidden:vec![]};
+            let mut day=data_pipeline_training::day_producer::DayAppliedV1 {new_public_trades:vec![],input,applied:applied.applied, first_canonical_position:canonical,prepared_pm,contexts,initialization_binding:None,hidden:vec![]};
             deliveries.extend(PreparedPublicGroupV1::from_day(&mut day));
         }
         let producer_ns=producer_started.elapsed().as_nanos();

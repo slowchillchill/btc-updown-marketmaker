@@ -1,4 +1,4 @@
-//! 单日唯一公共 Core 与隐藏私有状态；只交付本次应用结果。
+//! 单日唯一公共 Core；公共专用消费跳过隐藏模拟材料，只交付本次应用结果。
 use crate::{day_stream::*, hidden_stream::*, public_recording::RecordingResult};
 use contracts::*;
 use data_pipeline_core::{
@@ -11,12 +11,27 @@ pub struct DayProducerV1<'a> {
     pub ingress: DayIngressV1<'a>,
     pub hidden: StreamingHiddenStateV1,
     ended: bool,
+    public_only: bool,
     queued: VecDeque<PrefetchedInputV1>,
     queued_error: Option<String>,
     #[cfg(feature = "stage-timing")]
     timings: DayProducerStageTimingsV1,
 }
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DayPublicTradeV1 {
+    pub market: MarketIdentityV2,
+    pub position: PublicFactPositionV1,
+    pub member_index: Option<u32>,
+    pub step_index: u32,
+    pub canonical_fact_id: CanonicalEventId,
+    pub trade: PublicTradeV2,
+    pub source: SourceEvidenceRefV3,
+    pub direct_time: EventTimeV2,
+    pub quality: EventQualityV2,
+}
 pub struct DayAppliedV1 {
+    /// 仅公共消费模式交付正式接纳的新成交；不是最近成交快照。
+    pub new_public_trades: Vec<DayPublicTradeV1>,
     pub input: RecordedIngressV1,
     pub applied: AppliedIngressV1,
     pub first_canonical_position: u64,
@@ -158,11 +173,22 @@ impl<'a> DayProducerV1<'a> {
             ingress,
             hidden: StreamingHiddenStateV1::new(hidden_stream, input_identity, epochs),
             ended: false,
+            public_only: false,
             queued: VecDeque::new(),
             queued_error: None,
             #[cfg(feature = "stage-timing")]
             timings: Default::default(),
         })
+    }
+    /// 无账户宿主只需要公共归约，不准备隐藏模拟材料。
+    pub fn new_public_only(
+        ingress: DayIngressV1<'a>,
+        header: PublicInputStreamHeaderV1,
+        input_identity: Sha256Hex,
+    ) -> RecordingResult<Self> {
+        let mut producer = Self::new(ingress, header, input_identity, String::new())?;
+        producer.public_only = true;
+        Ok(producer)
     }
     fn fill_queue(&mut self) -> RecordingResult<()> {
         use rayon::prelude::*;
@@ -330,14 +356,59 @@ impl<'a> DayProducerV1<'a> {
             reductions,
             pm_reductions,
         } = self.core.push_day(&prepared)?;
-        // 日链无人消费借用 PM reductions；直接释放，不复制快照档位。
-        drop(pm_reductions);
         #[cfg(feature = "stage-timing")]
         {
             let elapsed = core_started.elapsed().as_nanos();
             self.timings.core_ns += elapsed;
             self.timings.by_source[timing_source].stage_ns[2] += elapsed;
         }
+        let mut new_public_trades = Vec::new();
+        if self.public_only {
+            for (position, reduction) in pm_reductions {
+                for step in reduction.steps {
+                    if let PmStepChangeV1::PublicTrade { trade } = step.change {
+                        let market = applied
+                            .closed_groups
+                            .iter()
+                            .flat_map(|g| g.records.iter())
+                            .find_map(|fact| {
+                                if fact.position != position {
+                                    return None;
+                                }
+                                match &fact.payload {
+                                    PublicBusinessPayloadV1::PolymarketMessage(pm) => {
+                                        Some(pm.market.clone())
+                                    }
+                                    _ => None,
+                                }
+                            })
+                            .expect("正式PM归约对应已关闭公共事实");
+                        new_public_trades.push(DayPublicTradeV1 {
+                            market,
+                            position: position.clone(),
+                            member_index: step.member_index,
+                            step_index: step.step_index,
+                            canonical_fact_id: step.canonical_fact_id,
+                            trade,
+                            source: step.direct.source().clone(),
+                            direct_time: step.direct_time,
+                            quality: step.quality,
+                        });
+                    }
+                }
+            }
+            return Ok(Some(DayAppliedV1 {
+                input,
+                applied,
+                first_canonical_position,
+                new_public_trades,
+                prepared_pm: None,
+                contexts: BTreeMap::new(),
+                initialization_binding,
+                hidden: Vec::new(),
+            }));
+        }
+        drop(pm_reductions);
         #[cfg(feature = "stage-timing")]
         let material_started = std::time::Instant::now();
         let dependencies = prepared.recorded.dependency_record_refs.clone();
@@ -430,6 +501,7 @@ impl<'a> DayProducerV1<'a> {
             self.timings.by_source[timing_source].stage_ns[4] += elapsed;
         }
         Ok(Some(DayAppliedV1 {
+            new_public_trades,
             input,
             applied,
             first_canonical_position,
