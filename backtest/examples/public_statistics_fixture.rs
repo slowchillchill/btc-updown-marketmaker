@@ -177,7 +177,7 @@ impl Fixture {
             .iter()
             .map(|g| g.records.len() as u64)
             .sum::<u64>();
-        let mut day = data_pipeline_training::day_producer::DayAppliedV1 {
+        let mut day = data_pipeline_training::day_producer::DayAppliedV1 {new_public_trades:vec![],
             input,
             applied,
             first_canonical_position: self.canonical_position,

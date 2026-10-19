@@ -440,6 +440,11 @@ python3 backtest/scripts/read_minimal_research.py <public-N.jsonl> <candidate-I-
 运行结束或已有整点输出；公共观察阶段嵌套于原生产交付阶段，不能重复相加或跨候选相加当墙钟。
 进度由 `--progress-interval-seconds` 控制，工作总量或剩余时间未知时沿原输出标为未知。
 
+## 连续零账户公共观察
+
+独立研究消费入口为 `export_public_continuous`，详见[启动配置、字段映射与中断限制](continuous-public-export.md)。
+它复用原 Parquet 日供料和公共统计，不创建策略、SIM 会话或 Ledger 账户。真实历史运行仍按研究授权签发。
+
 ## 显式离线调用角色与有限输入
 
 D-0367 的公共环境适配复用上述原 Parquet 日供料及泛型策略入口。

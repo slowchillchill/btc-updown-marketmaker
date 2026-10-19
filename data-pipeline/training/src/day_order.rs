@@ -172,6 +172,7 @@ pub(crate) fn locate(
     range: &std::ops::Range<i64>,
     opened: &[crate::typed_raw::OpenedParquetV1],
     limit: usize,
+    control: Option<&(dyn Fn(u64) -> RecordingResult<()> + Sync)>,
 ) -> RecordingResult<(Vec<Vec<LocatedInputV1>>, BTreeMap<(u8, String), u64>)> {
     use parquet::arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder};
     use rayon::prelude::*;
@@ -299,6 +300,9 @@ pub(crate) fn locate(
                         ));
                     }
                     offset += batch.num_rows() as u64;
+                    if let Some(control) = control {
+                        control(batch.num_rows() as u64)?;
+                    }
                 }
             }
             Ok((entries, starts))

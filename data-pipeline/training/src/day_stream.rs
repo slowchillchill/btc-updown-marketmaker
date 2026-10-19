@@ -134,6 +134,29 @@ impl<'a> DayIngressV1<'a> {
         initial: Vec<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>,
         max_epochs: usize,
     ) -> RecordingResult<Self> {
+        Self::open_with_control(
+            files,
+            stream,
+            rows,
+            bytes,
+            received_range,
+            initial,
+            max_epochs,
+            None,
+        )
+    }
+    /// 每批顺序定位后报告实际扫描行数，并允许调用方停止准备。
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_with_control(
+        files: &[&'a ValidatedDirectSourceParquetFileV3],
+        stream: String,
+        rows: usize,
+        bytes: usize,
+        received_range: std::ops::Range<i64>,
+        initial: Vec<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>,
+        max_epochs: usize,
+        control: Option<&(dyn Fn(u64) -> RecordingResult<()> + Sync)>,
+    ) -> RecordingResult<Self> {
         let cursors = files
             .iter()
             .enumerate()
@@ -153,7 +176,7 @@ impl<'a> DayIngressV1<'a> {
             .map(|file| file.take_opened())
             .collect::<Result<Vec<_>, _>>()?;
         let (order, epochs) =
-            crate::day_order::locate(files, rows, &received_range, &opened, max_epochs)?;
+            crate::day_order::locate(files, rows, &received_range, &opened, max_epochs, control)?;
         let mut keyed = initial
             .into_iter()
             .map(|(row, binding)| {
