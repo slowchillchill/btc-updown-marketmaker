@@ -1,0 +1,52 @@
+# 合成工程夹具；未经数据校准或正式风险审定，不能作为经营配置或交易默认值。
+[health]
+polymarket_silence_normal_ms = 0
+polymarket_silence_ms = 60000
+polymarket_event_delay_normal_ms = 0
+polymarket_event_delay_ms = 60000
+chainlink_silence_normal_ms = 0
+chainlink_silence_ms = 60000
+chainlink_event_delay_normal_ms = 0
+chainlink_event_delay_ms = 60000
+binance_trade_silence_normal_ms = 0
+binance_trade_silence_ms = 60000
+binance_trade_event_delay_normal_ms = 0
+binance_trade_event_delay_ms = 60000
+binance_depth_silence_normal_ms = 0
+binance_depth_silence_ms = 60000
+binance_depth_event_delay_normal_ms = 0
+binance_depth_event_delay_ms = 60000
+
+[probability]
+volatility_window_ms = 60000
+initial_sigma_usd_per_sqrt_second = 10.0
+estimation_error_usd = 1.0
+binance_innovation_weight = 1.0
+binance_pressure_weight_usd = 0.0
+binance_trade_pressure_weight_usd = 0.0
+
+[quote]
+initial_pair_price_reference = "best_bid"
+base_pair_shares = "10"
+base_half_spread = "0.02"
+inventory_shift_per_pusd = "0.001"
+uncertainty_spread_weight = "0.01"
+signal_spread_weight = "0.1"
+joint_fill_scenario_weights = [0.5, 0.2, 0.2, 0.1]
+minimum_business_result_per_share = "0"
+execution_path_ms = 200
+
+[repair]
+base_loss_allowance_per_share = "0.03"
+time_loss_allowance_per_share = "0.02"
+inventory_loss_allowance_per_share = "0.02"
+maker_fill_weight = 0.5
+wait_price_improvement_per_share = "0"
+residual_risk_weight = "1"
+maker_path_ms = 50
+active_path_ms = 150
+enable_active_repair = true
+
+[risk]
+per_market_orphan_limit_pusd = "100"
+account_orphan_limit_pusd = "500"

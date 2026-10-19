@@ -10,7 +10,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 struct CommandConfig<R = HistoricalRunConfigV1> {
     run: R,
     rules: HistoricalProcessSnapshotRequestConfig,
-    strategy: ComplementaryPairConfigV2,
+    strategy: ComplementaryPairConfigV3,
     request_namespace: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25,7 +25,7 @@ type CommandError = Box<dyn std::error::Error + Send + Sync>;
 #[serde(deny_unknown_fields)]
 struct DayCandidateCommand {
     run: HistoricalPreparedRunConfigV1,
-    strategy: ComplementaryPairConfigV2,
+    strategy: ComplementaryPairConfigV3,
     request_namespace: String,
 }
 #[derive(Deserialize)]
@@ -50,7 +50,7 @@ fn require_current_rule(run: &serde_json::Value) -> Result<(), CommandError> {
         .and_then(|s| s.get("strategy_rule_version"))
     {
         if version.as_str() != Some(RULE_VERSION) {
-            return Err(format!("策略版本{version}不能由当前{RULE_VERSION}运行；请生成新版本材料，不能覆盖旧candidate_v1历史包").into());
+            return Err(format!("策略版本{version}不能由当前{RULE_VERSION}运行；请生成新版本材料，不能覆盖旧candidate_v1/candidate_v2历史包").into());
         }
     }
     Ok(())
@@ -87,7 +87,7 @@ fn load_days_command(mut value: serde_json::Value) -> Result<DaysCommand, Comman
                     }
                 }
             }
-            let strategy: ComplementaryPairConfigV2 = serde_json::from_value(
+            let strategy: ComplementaryPairConfigV3 = serde_json::from_value(
                 candidate
                     .get("strategy")
                     .cloned()
@@ -101,6 +101,7 @@ fn load_days_command(mut value: serde_json::Value) -> Result<DaysCommand, Comman
 }
 #[derive(Clone, Copy)]
 enum ParameterType {
+    PriceReference,
     Decimal,
     U64,
     F64,
@@ -115,6 +116,11 @@ impl ParameterType {
             Ok(serde_json::to_value(serde_json::from_str::<T>(raw)?)?)
         }
         match self {
+            Self::PriceReference => Ok(serde_json::to_value(serde_json::from_value::<
+                InitialPairPriceReferenceV1,
+            >(
+                serde_json::Value::String(raw.into()),
+            )?)?),
             Self::Decimal => Ok(serde_json::Value::String(
                 raw.parse::<rust_decimal::Decimal>()?.to_string(),
             )),
@@ -166,6 +172,10 @@ const PARAMETERS: &[(&str, ParameterType)] = &[
     (
         "probability.binance_trade_pressure_weight_usd",
         ParameterType::F64,
+    ),
+    (
+        "quote.initial_pair_price_reference",
+        ParameterType::PriceReference,
     ),
     ("quote.base_pair_shares", ParameterType::Decimal),
     ("quote.base_half_spread", ParameterType::Decimal),
@@ -308,7 +318,7 @@ fn load_config<R: serde::de::DeserializeOwned>(
 ) -> Result<CommandConfig<R>, CommandError> {
     let mut value = load_value(args)?;
     require_current_rule(value.get("run").ok_or("配置缺少run")?)?;
-    let strategy: ComplementaryPairConfigV2 =
+    let strategy: ComplementaryPairConfigV3 =
         serde_json::from_value(value.get("strategy").cloned().ok_or("配置缺少策略参数")?)?;
     let descriptor = StrategyDescriptorV1 {
         strategy_id: STRATEGY_ID.into(),
@@ -568,8 +578,8 @@ mod tests {
     use super::*;
     #[test]
     fn cli_parameters_cover_actual_strategy_fields() {
-        let config = ComplementaryPairConfigV2::parse_toml(include_str!(
-            "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering.toml"
+        let config = ComplementaryPairConfigV3::parse_toml(include_str!(
+            "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering-v3.toml"
         ))
         .unwrap();
         let value = serde_json::to_value(config).unwrap();

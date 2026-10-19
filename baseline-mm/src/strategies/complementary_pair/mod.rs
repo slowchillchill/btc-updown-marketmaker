@@ -31,7 +31,7 @@ use sim_system::{
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
 pub const STRATEGY_ID: &str = "complementary_pair";
-pub const RULE_VERSION: &str = "candidate_v2";
+pub const RULE_VERSION: &str = "candidate_v3";
 
 #[derive(Debug)]
 pub enum StrategyErrorV1 {
@@ -125,7 +125,7 @@ struct RemainingRepairEstimate {
 
 /// 只保存信号、高水位、终止与未决增量占用；库存/费用/订单每轮重新读取公共事实。
 pub struct ComplementaryPairV1 {
-    config: ComplementaryPairConfigV2,
+    config: ComplementaryPairConfigV3,
     entry_market_range: Option<EntryMarketRangeV1>,
     rules: Arc<SealedProcessRuleSnapshotV3>,
     namespace: String,
@@ -587,6 +587,7 @@ impl ComplementaryPairV1 {
             let mut d = MarketDecisionDiagnosticV1 {
                 condition_id: o.market.condition_id.clone(),
                 pair_entry: PairEntryEvaluationV1 {
+                    price_reference: Some(self.config.quote.initial_pair_price_reference),
                     market_eligible: self
                         .entry_market_range
                         .is_none_or(|r| r.contains(o.market.window.start_at_utc_ms)),
@@ -615,22 +616,24 @@ impl ComplementaryPairV1 {
                 repair_sources.extend(probability_sources);
             }
             let repair_healthy = healthy(&repair_sources);
+            if trading && repair_healthy {
+                self.repair(
+                    input,
+                    f,
+                    now,
+                    s,
+                    &p,
+                    &mut cash,
+                    &mut account_exposure,
+                    &mut profit,
+                    &mut intents,
+                    &mut d,
+                    &mut diagnostic.profit_allocations,
+                )?;
+            }
+            let targets = self.initial_pair_targets(o, &p, s)?;
+            d.pair_entry.record_targets(&targets);
             if trading {
-                if repair_healthy {
-                    self.repair(
-                        input,
-                        f,
-                        now,
-                        s,
-                        &p,
-                        &mut cash,
-                        &mut account_exposure,
-                        &mut profit,
-                        &mut intents,
-                        &mut d,
-                        &mut diagnostic.profit_allocations,
-                    )?;
-                }
                 // 单次目标结构优先维护/修复；保留孤腿时仍可在容量与经营条件下新配对。
                 if !self.continuity.terminating
                     && d.source_health.is_empty()
@@ -647,6 +650,7 @@ impl ComplementaryPairV1 {
                         now,
                         s,
                         &p,
+                        targets,
                         &mut cash,
                         &mut account_exposure,
                         &mut intents,
@@ -689,7 +693,6 @@ impl ComplementaryPairV1 {
                 || p.up().is_none()
                 || !trading;
             let cap = d.maximum_repair_price.as_ref().map(decimal).transpose()?;
-            let targets = self.quotes(o, &p, s)?;
             let mut cancel = Vec::new();
             for pending in &s.pending {
                 let qualified = missing.is_some_and(|side| {
@@ -698,12 +701,19 @@ impl ComplementaryPairV1 {
                         .is_some_and(|a| a.asset.token_id == pending.token)
                 }) && cap.is_some_and(|cap| pending.price <= cap)
                     && !s.unknown;
-                let price_invalid = targets.is_some_and(|targets| {
-                    o.assets
+                let price_invalid = !(self.config.quote.initial_pair_price_reference
+                    == InitialPairPriceReferenceV1::FairValue
+                    && targets.iter().all(Result::is_err))
+                    && o.assets
                         .iter()
                         .position(|a| a.asset.token_id == pending.token)
-                        .is_none_or(|side| pending.price > targets[side])
-                });
+                        .is_none_or(|side| match targets[side] {
+                            Ok(target) => pending.price > target,
+                            Err(_) => {
+                                self.config.quote.initial_pair_price_reference
+                                    == InitialPairPriceReferenceV1::BestBid
+                            }
+                        });
                 if (restricted || price_invalid)
                     && !qualified
                     && let Some(id) = &pending.order_id

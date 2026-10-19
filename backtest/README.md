@@ -223,7 +223,7 @@ D-0311/D-0312 下的 `run_historical_days_v1` 接收 `HistoricalDayConfigV1` 日
 
 `summarize_independent_historical_days_v1` 按策略配置、四项时序、准入、实现及规则身份汇总独立日结果。原确认净损益相加，平均日确认收益率为总确认净损益／各日原初始本金之和；另列扣除未到账确认返佣后的净结果。它保留最差每日公共NAV回撤、未闭合数、待消费NOE及Exit／未完成日数，不串接净值或算复利，不把未知净结果当零。确认结果仍以每日报告的原已消费前缀为界，未闭合日不冒充最终结算。
 
-CLI使用 `--mode day --config <JSON或TOML> --progress-interval-seconds <秒>`。配置顶层提供 `rules`（原规则快照配置）、可选 `parallel_dates` 和 `days`。每个日期提供 `preparation`、`candidates` 和可选 `producer_lead_groups`。每个候选提供原独立宿主 `run: HistoricalPreparedRunConfigV1`、完整41字段 `strategy: ComplementaryPairConfigV2` 和固定 `request_namespace`；宿主时序、规则、账户和命名空间不由策略参数文件自动补齐。CLI沿原字段类型覆盖 `--strategy.<字段> <值>`，day模式把显式覆盖应用到各候选，记录完整有效参数和请求命名空间。每次调用从头运行；stdout输出 `days` 及上述 `summaries`。旧run／prepare／reuse入口保持原调用。
+CLI使用 `--mode day --config <JSON或TOML> --progress-interval-seconds <秒>`。配置顶层提供 `rules`（原规则快照配置）、可选 `parallel_dates` 和 `days`。每个日期提供 `preparation`、`candidates` 和可选 `producer_lead_groups`。每个候选提供原独立宿主 `run: HistoricalPreparedRunConfigV1`、完整42字段 `strategy: ComplementaryPairConfigV3` 和固定 `request_namespace`；宿主时序、规则、账户和命名空间不由策略参数文件自动补齐。CLI沿原字段类型覆盖 `--strategy.<字段> <值>`，day模式把显式覆盖应用到各候选，记录完整有效参数和请求命名空间。每次调用从头运行；stdout输出 `days` 及上述 `summaries`。旧run／prepare／reuse入口保持原调用。
 
 A的36份策略配置分布在对应五折（7/8/7/7/7），每份只含原43策略字段。调用方按获批比较窗和相应冻结配置装配日期及每候选每日独立2000pUSD账户；入口不自动把36候选用于所有日期，也不自动启动经营研究。
 
@@ -300,9 +300,9 @@ CLI 日模式失败时仍输出一次 JSON：`status="failed"`、`error`、`fail
 
 旧日检查点只能由对应旧程序解释，当前日入口不迁移或读取它们。旧录制的规范内容身份与重放材料保持其原格式。空材料不触发发布锁和队列通知，实际控制状态通知继续发送。
 
-### candidate_v2 与正常资金拒绝
+### candidate_v3 与正常资金拒绝
 
-当前人工策略入口按[#318](https://github.com/slowchillchill/btc-updown-marketmaker/issues/318)使用 `ComplementaryPairConfigV2` 和 `candidate_v2`。旧overfill字段和显式candidate_v1运行描述明确失败，不能由CLI静默覆盖；当前工程示例使用新结构，历史研究包／结果保持原绑定。新版本冒烟与研究仍须单独获准，修复验收使用确定性组合夹具。
+当前人工策略入口按[#337](https://github.com/slowchillchill/btc-updown-marketmaker/issues/337)使用 `ComplementaryPairConfigV3` 和 `candidate_v3`。完整 42 字段必须显式提供 `quote.initial_pair_price_reference={fair_value,best_bid}`；CLI 使用 `--strategy.quote.initial_pair_price_reference best_bid` 或 `fair_value` 覆盖。旧overfill字段、缺少新参考字段的旧配置和显式candidate_v1/candidate_v2运行描述明确失败，不能由CLI静默升级。历史研究包／结果保持原绑定；两份当前工程示例和价格/维护边界见[策略使用说明](../baseline-mm/README.md#初始双腿价格参考)。工程只验证能力，不自动启动 R3 或证明收益。
 
 日入口的来源健康开、关两条分派路径均使用公共 `is_local_funds_rejection()` 分类。明确零发送的本地资金不足只停止本批，后续新公共观察仍可计算；不立即无限重试，也不伪装成来源健康失效。报告 `local_funds_rejected_batches`计数保留该差别，平台拒绝、成交与FAILED沿原SIM／NOE／Ledger和既有结果汇总表达；真实故障仍停止。
 
