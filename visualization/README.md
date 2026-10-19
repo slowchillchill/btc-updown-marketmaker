@@ -326,17 +326,19 @@ CARGO_TARGET_DIR="$TARGET" node visualization/ui/tests/research-browser.mjs "$SO
   "runs": [
     {"label":"已停止工程容量诊断", "existing_source":{"kind":"completion", "paths":{"completion":"<completion.json>"}}},
     {"label":"原生输入优化成本", "existing_source":{"kind":"continuous", "paths":{
-      "summary":"model-train/validation/issue-178/evidence/continuous/continuous-summary.json",
-      "pooled":"model-train/validation/issue-178/evidence/continuous/pooled-summary.json",
-      "calls":"model-train/validation/issue-178/evidence/continuous/continuous-calls.csv.gz",
-      "provenance":"model-train/validation/issue-178/evidence/source/provenance.json",
-      "run_order":"model-train/validation/issue-178/evidence/continuous/run-order.jsonl",
-      "report":"model-train/validation/issue-178/evidence/continuous/comparison.md"
+      "summary":"<已有工程报告目录>/continuous-summary.json",
+      "pooled":"<已有工程报告目录>/pooled-summary.json",
+      "calls":"<已有工程报告目录>/continuous-calls.csv.gz",
+      "provenance":"<已有工程报告目录>/provenance.json",
+      "run_order":"<已有工程报告目录>/run-order.jsonl",
+      "report":"<已有工程报告目录>/comparison.md"
     }}},
     {"label":"历史采集摘要", "existing_source":{"kind":"collection_manifest", "paths":{"manifest":"<明确交接的 day_dir>"}}}
   ]
 }
 ```
+
+旧模型生成器及其验证材料已退出当前源码树。以上占位路径需替换为已有材料的实际路径；读取器仍支持显式提供的报告。这些历史报告格式不规定新 B 的模型设计。下文带日期的测量摘要记录当时的版本、路径与结果，不表示这些文件仍随当前源码提供。
 
 `paths.manifest` **是日期目录**，复用 `data_collect::daily_manifest::load_day_manifest` 固定只读取该目录的 `manifest.json`，再用 `manifest_collection_day_coverage` 校验原覆盖结构/状态。配置、UI文件名与计量目标是同一实际清单。不会寻找其他日期、读取声明的 Parquet、重做文件哈希或归约。在线 `file_bytes` 是文件长度，原 loader 未返回实际 payload 字节数，`bytes_read` 保留 null；实际系统调用读量由有限测量单独给出。缺覆盖不补完整，原空 gaps 不保证无遗漏；无统一单位的 `source_timestamp` 仅保留详情，明确 `*_utc_ms` 可进入有限时钟。
 
@@ -381,7 +383,7 @@ CARGO_TARGET_DIR=<实际target> node visualization/ui/tests/existing-leaf-browse
 ```json
 {"runs":[
   {"label":"有限模型宿主工程诊断", "existing_source":{"kind":"model_timing","paths":{
-    "time_results":"model-train/validation/issue-180/evidence/time-results.json",
+    "time_results":"<明确工程目录>/time-results.json",
     "trace":"<明确工程目录>/trace.jsonl", "time_sim":"<明确工程目录>/time-sim.jsonl",
     "feedback":"<明确工程目录>/consumed-feedback.jsonl", "run":"<明确工程目录>/run.json"}}},
   {"label":"十二分钟完整流程测量报告", "existing_source":{"kind":"remeasurement_12m","paths":{
@@ -389,7 +391,7 @@ CARGO_TARGET_DIR=<实际target> node visualization/ui/tests/existing-leaf-browse
 ]}
 ```
 
-相对路径仍沿启动目录解析；只读这些显式文件，不发现目录、启动模型或重跑研究。JSONL 用 serde_json 按原行序解析并保存为现有可选择数组；每份文件独立状态，截断/未知报告版本不修复原文件。trace/state 中嵌套张量数组以原路径/长度下钻，首屏不发送全部模型输入。trace、feedback、run 无统一 schema，显式 kind 和原 time-results 的冻结修订/产物SHA定义该批工程证据，不冒充稳定公共业务 API。原说明及生成点在 `model-train/validation/issue-180/time-report.md`、`time-host.rs`、`time-host.py`。
+相对路径仍沿启动目录解析；只读这些显式文件，不发现目录、启动模型或重跑研究。JSONL 用 serde_json 按原行序解析并保存为现有可选择数组；每份文件独立状态，截断/未知报告版本不修复原文件。trace/state 中嵌套张量数组以原路径/长度下钻，首屏不发送全部模型输入。trace、feedback、run 无统一 schema，显式 kind 和原 time-results 的冻结修订/产物SHA定义该批工程证据，不冒充稳定公共业务 API。原说明及生成点可在[清理前版本的验证目录](https://github.com/slowchillchill/btc-updown-marketmaker/tree/c1830bd064b3c735b36139e6a3e0fd4feff43620/model-train/validation/issue-180)追溯。
 
 真实49条trace、84条time-sim、4条feedback的原索引/身份可分页选择。工程逻辑毫秒起点86100000与T−30热身、观察/计算开始/冻结完成/发送/未来必需位置分开；不绑定真实研究日期。50/250ms为预声明经济延迟，queue_wait_ms是原排队时长，compute_wall_ns是实测时长，不合成网络或CPU时间点。结构化SIM PUBLIC_OBSERVE_TIME与PUBLIC_REQUEST的send_time/cutoff可映射原逻辑点；RUN_OPENED V4、后续ACCEPTED_INPUTS_V3和工程aaaa/bbbb身份保留，不代替冻结生产修订。反馈原request_id/ordinal可查，Debug outcome/source_reference/receipt/intent不解析、不从文本取时钟、不反造NOE引用。exit0、CLEAN_RUN及stopped_without_future不证明经济闭合，下一必需PublicVisibility86401011仍为未知未来。
 
