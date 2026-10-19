@@ -1,0 +1,26 @@
+{
+  "caller_role": "MODEL_TRAIN",
+  "implementation_identity": {
+    "git_commit": "f6f9c7c3486a88995da72e5ec4720e65c5c44bde",
+    "source_identity_sha256": "11bbb9e1a40579fd0c219005fa87edb53740fecbe7520d3bf25353fc35ca2473",
+    "cargo_lock_sha256": "39f5d16835e953303b74db105eb4e591ebab22feaf477164827fa53b2519ddde"
+  },
+  "input_lifecycle_policy": "finite_input",
+  "gamma_resolution_policy": "qualified_public_consumption",
+  "iterations": 1,
+  "progress_every": 1,
+  "public_delivery_delay_ms": 100,
+  "maker_trade": true,
+  "received_end_utc_ms": 1787616000001,
+  "first_market_end_utc_ms": 1787616000000,
+  "rebate_entitlement_queries": [
+    {
+      "kind": "Maker",
+      "attribution_day_start_utc_ms": 1787529600000
+    },
+    {
+      "kind": "Taker",
+      "attribution_day_start_utc_ms": 1787529600000
+    }
+  ]
+}
