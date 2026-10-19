@@ -1,7 +1,7 @@
 //! 仅生成有限合成Parquet；不打开真实数据、不运行账户。
 #[path = "../../tests/common/mod.rs"]
 #[allow(dead_code, unused_imports)]
-mod common;
+pub(crate) mod common;
 use backtest::*;
 use contracts::*;
 use data_collect::{
@@ -136,6 +136,10 @@ pub fn initialized(root: &Path) -> ContinuousPublicExportConfigV1 {
 /// 为真实Parquet出口补充有限深度/spot时间线；每个来源保持原正式格式。
 #[allow(dead_code)]
 pub fn append_reference_inputs(root: &Path) {
+    append_reference_inputs_at(root, common::BASE);
+}
+#[allow(dead_code)]
+pub fn append_reference_inputs_at(root: &Path, base: i64) {
     use data_collect::source_hourly_layout::*;
     let day = root.join("inputs");
     let mut depth = TypedParquetSegmentWriter::create_for_typed_source(
@@ -147,8 +151,8 @@ pub fn append_reference_inputs(root: &Path) {
     .unwrap();
     let rows = [(1500, 1, "99", "101"), (2500, 2, "100", "102")].map(|(at, n, bid, ask)| {
         BinanceDepthSnapshotHourlyRow {
-            timestamp_received: common::BASE + at,
-            snapshot_fetch_start_utc: common::BASE + at - 10,
+            timestamp_received: base + at,
+            snapshot_fetch_start_utc: base + at - 10,
             last_update_id: n,
             bids: format!(r#"[["{bid}","5"]]"#),
             asks: format!(r#"[["{ask}","3"]]"#),
@@ -160,7 +164,7 @@ pub fn append_reference_inputs(root: &Path) {
             connection_generation: Some(1),
             depth_ingress_sequence: Some(n),
             collector_admission_sequence: Some(n),
-            collector_admission_time_utc_ms: Some(common::BASE + at + 1),
+            collector_admission_time_utc_ms: Some(base + at + 1),
             collector_host_id: "synthetic-collector".into(),
             collector_region: "test".into(),
             schema_version: BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION.into(),
@@ -183,7 +187,7 @@ pub fn append_reference_inputs(root: &Path) {
         "polymarket_rtds_chainlink_btc_usd",
     )
     .unwrap();
-    let rows=[(1500,"100"),(2500,"103"),(2500,"104"),(3500,"103")].into_iter().enumerate().map(|(n,(at,value))|RtdsChainlinkBtcUsdHourlyRow{timestamp_received:common::BASE+at,message_timestamp:common::BASE+at-1,payload_timestamp:common::BASE+at-1,age_ms:Some(1),symbol:"btc/usd".into(),value:value.into(),topic:"crypto_prices_chainlink".into(),message_type:"update".into(),freshness_status:"fresh".into(),subscription_filter:"{}".into(),source_native_payload_json:format!(r#"{{"symbol":"btc/usd","timestamp":{},"value":"{value}","synthetic_message":{n}}}"#,common::BASE+at-1),collector_host_id:"synthetic-collector".into(),collector_region:"test".into(),source_endpoint:"wss://ws-live-data.polymarket.com".into(),schema_version:version.into()}).collect::<Vec<_>>();
+    let rows=[(1500,"100"),(2500,"103"),(2500,"104"),(3500,"103")].into_iter().enumerate().map(|(n,(at,value))|RtdsChainlinkBtcUsdHourlyRow{timestamp_received:base+at,message_timestamp:base+at-1,payload_timestamp:base+at-1,age_ms:Some(1),symbol:"btc/usd".into(),value:value.into(),topic:"crypto_prices_chainlink".into(),message_type:"update".into(),freshness_status:"fresh".into(),subscription_filter:"{}".into(),source_native_payload_json:format!(r#"{{"symbol":"btc/usd","timestamp":{},"value":"{value}","synthetic_message":{n}}}"#,base+at-1),collector_host_id:"synthetic-collector".into(),collector_region:"test".into(),source_endpoint:"wss://ws-live-data.polymarket.com".into(),schema_version:version.into()}).collect::<Vec<_>>();
     spot.write_rtds_chainlink_btc_usd_rows(&rows).unwrap();
     finish_source(
         root,
@@ -217,11 +221,15 @@ fn finish_source(
 }
 #[allow(dead_code)]
 pub fn append_late_anchor(root: &Path) {
+    append_late_anchor_at(root, common::BASE);
+}
+#[allow(dead_code)]
+pub fn append_late_anchor_at(root: &Path, base: i64) {
     use data_collect::polymarket_market_metadata_v6_layout::*;
     use sha2::{Digest, Sha256};
-    let at = common::BASE + 2000;
+    let at = base + 2000;
     let body = r#"{"eventMetadata":{"priceToBeat":100}}"#;
-    let row=PolymarketMarketMetadataV6Row::from_raw_value(json!({"schema_version":POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION,"metadata_row_kind":"market_anchor_rule_update","timestamp_received":at,"metadata_origin":"gamma_event_by_slug","collector_host_id":"synthetic-collector","collector_region":"test","slug":"btc-updown-5m-engineering","condition_id":common::FIRST,"clob_market_id":"3195576","asset_ids":"[\"20\",\"3\"]","market_start_utc":common::BASE+1000,"market_end_utc":common::BASE+10000,"fixed_identity_verified_at_utc":common::BASE-1,"market_lifecycle_state":"active","market_runtime_role":"current","metadata_fetch_start_utc":at-10,"anchor_query_source_epoch_id":"anchor-test","anchor_query_ordinal":1,"anchor_query_result":"observed","price_to_beat_decimal":"100","price_to_beat_source_field":"eventMetadata.priceToBeat","twap_enabled":true,"twap_lookback_seconds":30,"http_received_at_utc":at,"http_request_url":"https://gamma-api.polymarket.com/events/slug/btc-updown-5m-engineering","http_body_encoding":"utf8","http_body":body,"http_body_sha256":format!("{:x}",Sha256::digest(body.as_bytes()))}),4,at+1).unwrap();
+    let row=PolymarketMarketMetadataV6Row::from_raw_value(json!({"schema_version":POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION,"metadata_row_kind":"market_anchor_rule_update","timestamp_received":at,"metadata_origin":"gamma_event_by_slug","collector_host_id":"synthetic-collector","collector_region":"test","slug":"btc-updown-5m-engineering","condition_id":common::FIRST,"clob_market_id":"3195576","asset_ids":"[\"20\",\"3\"]","market_start_utc":base+1000,"market_end_utc":base+10000,"fixed_identity_verified_at_utc":base-1,"market_lifecycle_state":"active","market_runtime_role":"current","metadata_fetch_start_utc":at-10,"anchor_query_source_epoch_id":"anchor-test","anchor_query_ordinal":1,"anchor_query_result":"observed","price_to_beat_decimal":"100","price_to_beat_source_field":"eventMetadata.priceToBeat","twap_enabled":true,"twap_lookback_seconds":30,"http_received_at_utc":at,"http_request_url":"https://gamma-api.polymarket.com/events/slug/btc-updown-5m-engineering","http_body_encoding":"utf8","http_body":body,"http_body_sha256":format!("{:x}",Sha256::digest(body.as_bytes()))}),4,at+1).unwrap();
     let mut w = TypedParquetSegmentWriter::create_for_typed_source(
         &root.join("inputs"),
         "late-anchor",

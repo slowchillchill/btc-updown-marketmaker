@@ -12,6 +12,7 @@ members = [
     "baseline-mm",
     "backtest",
     "backtest/cli",
+    "model-train",
     "visualization",
 ]
 exclude = ["third_party/polymarket_client_sdk_v2-0.7.0-p1"]

@@ -3170,6 +3170,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "model-train"
+version = "0.1.0"
+dependencies = [
+ "backtest",
+ "contracts",
+ "data-collect",
+ "data-pipeline-core",
+ "data-pipeline-training",
+ "execution-normalization",
+ "ledger",
+ "num-bigint",
+ "num-traits",
+ "polymarket_client_sdk_v2",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shared-run",
+ "sim-system",
+ "tempfile",
+]
+
+[[package]]
 name = "num-bigint"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"

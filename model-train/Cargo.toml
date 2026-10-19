@@ -1,0 +1,26 @@
+[package]
+name = "model-train"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+contracts = { path = "../contracts" }
+backtest = { path = "../backtest" }
+shared-run = { path = "../shared-run" }
+ledger = { path = "../ledger" }
+sim-system = { path = "../sim-system", features = ["shared-execution"] }
+rust_decimal = { version = "=1.42.1", default-features = false, features = ["std"] }
+num-bigint = "=0.4.8"
+num-traits = "=0.2.19"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+sha2 = "=0.10.9"
+
+[dev-dependencies]
+polymarket_client_sdk_v2 = { version = "=0.7.0", default-features = false, features = ["clob"] }
+execution-normalization = { path = "../execution-normalization" }
+data-pipeline-core = { path = "../data-pipeline/core" }
+data-collect = { path = "../data-collect" }
+data-pipeline-training = { path = "../data-pipeline/training" }
+tempfile = "=3.27.0"
