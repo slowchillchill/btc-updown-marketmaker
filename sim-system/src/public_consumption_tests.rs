@@ -3973,3 +3973,110 @@ fn long_window_two_scale_observation_cost() {
         println!("long_window_cost={}",serde_json::json!({"history_markets":history,"active_markets":1,"events":events,"candidates":7,"obligations":0,"prepare_ns":prepare_ns,"producer_ns":producer_ns,"candidate_ns":candidate_ns,"public_capture_ns":capture_ns,"public_encode_ns":encode_ns,"write_sync_ns":write_sync_ns,"public_bytes":encoded.len()}));
     }
 }
+
+// r1尾部复用必须保留原拒绝：已消费或已观察的更晚时刻不能回填成旧尾部。
+#[tokio::test(flavor = "current_thread")]
+async fn finite_finish_rejects_later_consumed_group() {
+    finite_finish_rejects_later_time(false).await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn finite_finish_rejects_later_silent_observation() {
+    finite_finish_rejects_later_time(true).await;
+}
+async fn finite_finish_rejects_later_time(silent: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let core = recorded_books(&root);
+    let context = core.pm_context(CONDITION_ID).unwrap();
+    let scenario = sealed_scenario_for_markets(vec![
+        crate::scenario::PlatformMarketV1::try_new(
+            context.market,
+            context
+                .assets
+                .into_iter()
+                .map(|a| a.asset)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap(),
+    ]);
+    let (mut execution, _) = public_execution_with_scenario_capacity_layout(
+        &temp.path().join("sim.jsonl"),
+        scenario,
+        SimCallerRoleV1::ModelTrain,
+        32,
+        None,
+        None,
+        true,
+    )
+    .await;
+    execution
+        .configure_input_lifecycle_policy_v1(InputLifecyclePolicyV1::FiniteInput)
+        .unwrap();
+    let reader = PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap();
+    let hidden = prepare_hidden_v1(
+        core,
+        reader,
+        &temp.path().join("hidden"),
+        &config(),
+        "tail-hidden".into(),
+    )
+    .unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes)
+        .unwrap()
+        .take(2);
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "tail-regression".into());
+    driver.enable_finite_recording_wait().unwrap();
+    let (first, _) = driver.next_group().unwrap().unwrap();
+    let mut hidden_source = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
+    while let Some(bucket) = hidden_source.next_bucket().unwrap() {
+        driver.hidden_bucket(bucket).unwrap();
+    }
+    let (second, _) = driver.next_group().unwrap().unwrap();
+    assert!(
+        second.execution_time().logical_time_utc_ms()
+            > first.execution_time().logical_time_utc_ms()
+    );
+    // 空源且hidden已真实覆盖目标尾部；不是依靠未来未消费组或伪造前沿拒绝。
+    assert_eq!(driver.next_group_at().unwrap(), None);
+    let tail = if silent {
+        let observed = second.execution_time().logical_time_utc_ms() + 20;
+        driver.observe_at(observed).unwrap();
+        observed - 1
+    } else {
+        first.execution_time().logical_time_utc_ms()
+    };
+    let session = driver
+        .execution
+        .actor
+        .state
+        .as_ref()
+        .unwrap()
+        .session
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        session.public_visibility_frontier.closed_through_utc_ms,
+        Some(tail)
+    );
+    assert!(
+        session
+            .hidden_platform_frontier
+            .closed_through_utc_ms
+            .is_some_and(|closed| closed >= tail)
+    );
+    let before = driver.observation_cutoff().unwrap();
+    let frames = serde_json::to_value(driver.frames_at_observation()).unwrap();
+    let result = driver.finish_input_at(tail);
+    assert!(
+        result.is_err(),
+        "不得将更晚的成功消费/观察改配到较早尾部: silent={silent}, result={result:?}"
+    );
+    assert_eq!(driver.observation_cutoff().unwrap(), before);
+    assert_eq!(
+        serde_json::to_value(driver.frames_at_observation()).unwrap(),
+        frames
+    );
+    driver.stop_and_drain().unwrap();
+}

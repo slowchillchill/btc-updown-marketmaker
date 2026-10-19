@@ -59,8 +59,21 @@ impl HistoricalSessionV1 {
         }
     }
 }
+/// 只为范围结束的经济标签出口选择日桶；不进入策略输入或推进付款。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RebateEntitlementQueryV1 {
+    pub kind: contracts::economics::RebateKindV1,
+    pub attribution_day_start_utc_ms: i64,
+}
+#[derive(Debug, Serialize)]
+pub struct HistoricalRebateEntitlementReadV1 {
+    pub query: RebateEntitlementQueryV1,
+    pub result: ExecutionReadValueV1<contracts::economics::RebateEntitlementReadV1<String>>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistoricalRunConfigV1 {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rebate_entitlement_queries: Vec<RebateEntitlementQueryV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub research_evidence_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,6 +105,8 @@ pub struct HistoricalRunConfigV1 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoricalPreparedRunConfigV1 {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rebate_entitlement_queries: Vec<RebateEntitlementQueryV1>,
     #[serde(
         default,
         skip_serializing_if = "GammaResolutionPolicyV1::is_source_time_only"
@@ -130,6 +145,7 @@ impl From<&HistoricalRunConfigV1> for HistoricalPreparedRunConfigV1 {
     fn from(c: &HistoricalRunConfigV1) -> Self {
         Self {
             gamma_resolution_policy: c.gamma_resolution_policy,
+            rebate_entitlement_queries: c.rebate_entitlement_queries.clone(),
             strategy_request_namespace: None,
             entry_market_scope: c.entry_market_scope.clone(),
             effective_entry_market_scope: None,
@@ -234,6 +250,9 @@ pub struct SourceHealthRunSummaryV1 {
 }
 #[derive(Debug, Serialize)]
 pub struct HistoricalRunReportV1 {
+    /// 当前SIM经济前缀的显式日桶标签，不与过去的 observation_cutoff 混用。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rebate_entitlements: Vec<HistoricalRebateEntitlementReadV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub research: Option<crate::research_summary::ResearchSummaryV1>,
     pub day_economics: HistoricalDayEconomicsSummaryV1,
@@ -506,6 +525,7 @@ fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
     timing: Option<CalculationTimingRecordV1>,
     pending_timing: Option<CalculationTimingRecordV1>,
     count: usize,
+    rebate_queries: &[RebateEntitlementQueryV1],
 ) -> HistoricalRunReportV1 {
     let observation_cutoff = driver.observation_cutoff();
     let frames = driver.frames_at_observation();
@@ -516,6 +536,14 @@ fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         )
     });
     HistoricalRunReportV1 {
+        rebate_entitlements: rebate_queries
+            .iter()
+            .map(|query| HistoricalRebateEntitlementReadV1 {
+                query: query.clone(),
+                result: driver
+                    .rebate_entitlement_read_v1(query.kind, query.attribution_day_start_utc_ms),
+            })
+            .collect(),
         research: None,
         end_reason: reason,
         last_observed_at_utc_ms: observation_cutoff
@@ -1684,6 +1712,7 @@ where
                 timing,
                 pending.as_ref().map(|p| p.record.clone()),
                 calculation_index,
+                &config.rebate_entitlement_queries,
             );
             result.local_funds_rejected_batches = local_funds_rejected_batches;
             result.delivery_summary = operating_start.map(|_| delivery_summary.clone());
@@ -1739,6 +1768,7 @@ where
                 timing,
                 failed_timing.or_else(|| pending.as_ref().map(|p| p.record.clone())),
                 calculation_index,
+                &config.rebate_entitlement_queries,
             );
             let dispatch_effects = failed_dispatch_effects.or_else(|| match &cause {
                 HistoricalFailureCauseV1::Dispatch(e) => Some(FailedDispatchEffectsV1 {

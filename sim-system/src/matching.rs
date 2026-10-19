@@ -5159,6 +5159,59 @@ impl ExecutionStateV2 {
         }))
     }
 
+    /// 只读原日桶；调用者只能传入本会话成功闭合的隐藏平台前沿。
+    pub(crate) fn rebate_entitlement_read_v1(
+        &self,
+        kind: contracts::economics::RebateKindV1,
+        attribution_day_start_utc_ms: i64,
+        hidden_closed_through_utc_ms: Option<i64>,
+    ) -> contracts::ExecutionReadValueV1<contracts::economics::RebateEntitlementReadV1<String>>
+    {
+        use contracts::ExecutionReadValueV1::{Known, Unavailable};
+        use contracts::economics::{RebateDayResultV1, RebateEntitlementReadV1};
+        let days = match kind {
+            contracts::economics::RebateKindV1::Maker => &self.maker_rebate.days,
+            contracts::economics::RebateKindV1::Taker => &self.taker_rebate.days,
+        };
+        // 无桶不证明完整的零；失败成交有真实登记桶，可在屏障闭合后确认为零。
+        let Some(day) = days.get(&attribution_day_start_utc_ms) else {
+            return Unavailable;
+        };
+        let already_finalized = day.final_state.as_ref();
+        if already_finalized.is_none() {
+            let Some(day_end) = attribution_day_start_utc_ms.checked_add(86_400_000 - 1) else {
+                return Unavailable;
+            };
+            if !hidden_closed_through_utc_ms.is_some_and(|closed| closed >= day_end)
+                || day.pending_predecessor_count != 0
+            {
+                return Unavailable;
+            }
+        }
+        let amounts = already_finalized
+            .cloned()
+            .unwrap_or_else(|| finalized_day_state(day.accrued_pusd));
+        // finalized_day_state 的 paid 是内部计划值，不能证明实际已付款。
+        let paid_pusd = if already_finalized.is_some_and(|state| state.paid) {
+            amounts.payable_pusd
+        } else {
+            Decimal::ZERO
+        };
+        Known(RebateEntitlementReadV1 {
+            day_result: RebateDayResultV1 {
+                kind,
+                attribution_day_start_utc_ms,
+                accrued_pusd: ExactDecimal(day.accrued_pusd.normalize().to_string()),
+                payable_pusd: ExactDecimal(amounts.payable_pusd.normalize().to_string()),
+                locked_remainder_pusd: ExactDecimal(
+                    amounts.locked_remainder_pusd.normalize().to_string(),
+                ),
+                contribution_refs: day.contribution_trade_ids.clone(),
+            },
+            paid_pusd: ExactDecimal(paid_pusd.normalize().to_string()),
+        })
+    }
+
     fn settle_ready_days(
         &mut self,
         platform_effective_at_utc_ms: i64,
@@ -8945,6 +8998,142 @@ mod tests {
         assert_eq!(state.taker_rebate.days[&0].accrued_pusd, Decimal::ZERO);
         assert_eq!(state.account.next_account_transition_seq(), 5);
         assert_eq!(state.next_scheduled_finality_at_utc_ms(), None);
+        let contracts::ExecutionReadValueV1::Known(read) = state.rebate_entitlement_read_v1(
+            contracts::economics::RebateKindV1::Taker,
+            0,
+            Some(86_399_999),
+        ) else {
+            panic!("失败前驱闭合后可确认真实零")
+        };
+        assert_eq!(read.day_result.accrued_pusd.0, "0");
+        assert_eq!(read.day_result.payable_pusd.0, "0");
+        assert_eq!(read.paid_pusd.0, "0");
+        assert!(read.day_result.contribution_refs.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rebate_entitlement_read_is_stable_before_and_after_original_payment() {
+        use contracts::ExecutionReadValueV1::{Known, Unavailable};
+        use contracts::economics::RebateKindV1 as Kind;
+        let (mut state, condition, token) = execution_state_v2_for_resting_limit_tests("1000");
+        state
+            .apply_initial_levels(
+                &condition.0,
+                &token.0,
+                &[],
+                &[(decimal("0.5"), 1_000_001_000)],
+            )
+            .unwrap();
+        let rules = crate::platform_rules::tests::successful_snapshot_v3_for_sim_tests().await;
+        let policy = crate::finality::successful_policy_v2_for_tests();
+        let (state, disposition) = state
+            .apply_buy_order(
+                BuyOrderActionV2 {
+                    global_request_id: "entitlement".into(),
+                    batch_item_ordinal: 0,
+                    item_id: "entitlement".into(),
+                    condition_id: condition,
+                    token_id: token,
+                    effective_processing_at_utc_ms: 1500,
+                    terms: BuyOrderTermsV2::Fok {
+                        worst_price_pusd_per_share: decimal("0.5"),
+                        accepted_quote_budget_units: 500_000_500,
+                        sdk_taker_amount_audit_base_units: 1_000_001_000,
+                    },
+                },
+                rules.snapshot(),
+                &policy,
+            )
+            .unwrap();
+        assert!(matches!(disposition, BuyOrderDispositionV2::Accepted(_)));
+        let (state, _) = state
+            .advance_next_scheduled_finality_at(1510, &policy, rules.snapshot())
+            .unwrap();
+        // 即便已覆盖日末，原终局前驱没有闭合仍未知。
+        assert_eq!(
+            state.rebate_entitlement_read_v1(Kind::Taker, 0, Some(86_399_999)),
+            Unavailable
+        );
+        let (state, _) = state
+            .advance_next_scheduled_finality_at(1520, &policy, rules.snapshot())
+            .unwrap();
+        // EOF或pending=0不证明日贡献完整；必须有真正的日末前沿。
+        assert_eq!(
+            state.rebate_entitlement_read_v1(Kind::Taker, 0, None),
+            Unavailable
+        );
+        assert_eq!(
+            state.rebate_entitlement_read_v1(Kind::Taker, 0, Some(86_399_998)),
+            Unavailable
+        );
+        assert_eq!(
+            state.rebate_entitlement_read_v1(Kind::Maker, 0, Some(86_399_999)),
+            Unavailable
+        );
+        let before = serde_json::to_vec(&state).unwrap();
+        let Known(frozen) = state.rebate_entitlement_read_v1(Kind::Taker, 0, Some(86_399_999))
+        else {
+            panic!("原日屏障齐备后应确认")
+        };
+        // 原费用17.50002 * 8%=1.4000016；门槛后截四位为1.4，锁定.0000016。
+        assert_eq!(frozen.day_result.accrued_pusd.0, "1.4000016");
+        assert_eq!(frozen.day_result.payable_pusd.0, "1.4");
+        assert_eq!(frozen.day_result.locked_remainder_pusd.0, "0.0000016");
+        assert_eq!(frozen.day_result.contribution_refs, vec!["sim-1"]);
+        assert_eq!(frozen.paid_pusd.0, "0");
+        for _ in 0..3 {
+            assert_eq!(
+                state.rebate_entitlement_read_v1(Kind::Taker, 0, Some(86_399_999)),
+                Known(frozen.clone())
+            );
+        }
+        assert_eq!(serde_json::to_vec(&state).unwrap(), before);
+        // 此计时只覆盖新增只读查询及必要编码；绝不表示完整供料/训练吞吐。
+        for count in [1000, 10000] {
+            let start = std::time::Instant::now();
+            let mut bytes = 0;
+            for _ in 0..count {
+                let value = state.rebate_entitlement_read_v1(Kind::Taker, 0, Some(86_399_999));
+                bytes += serde_json::to_vec(&value).unwrap().len();
+                std::hint::black_box(value);
+            }
+            eprintln!(
+                "返佣只读增量成本 {}",
+                serde_json::json!({"reads":count,"encoded_bytes":bytes,"elapsed_seconds":start.elapsed().as_secs_f64(),"build_profile":if cfg!(debug_assertions) {"debug"} else {"release"},"scope":"read plus JSON encoding only; no state retained"})
+            );
+        }
+        let cash_before = state.account.available_pusd();
+        let (state, _) = state.advance_next_rebate_clock_at(2000).unwrap();
+        let (state, effects) = state.advance_next_rebate_clock_at(87_000_000).unwrap();
+        let [
+            EconomicLifecycleEffectV2::DayFinalized(finalized),
+            EconomicLifecycleEffectV2::Paid(paid),
+        ] = effects.settlement.as_slice()
+        else {
+            panic!("原付款链应只日结并付款一次")
+        };
+        assert_eq!(
+            finalized.contribution_trade_ids,
+            frozen.day_result.contribution_refs
+        );
+        assert_eq!(finalized.payable_pusd, decimal("1.4"));
+        assert_eq!(paid.paid_pusd, decimal("1.4"));
+        let Known(after) = state.rebate_entitlement_read_v1(Kind::Taker, 0, None) else {
+            panic!("正式日结可直接复用")
+        };
+        assert_eq!(after.day_result, frozen.day_result);
+        assert_eq!(after.paid_pusd.0, "1.4");
+        assert_eq!(state.account.available_pusd(), cash_before + decimal("1.4"));
+        assert_eq!(frozen.paid_pusd.0, "0");
+        let after_state = serde_json::to_vec(&state).unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                state.rebate_entitlement_read_v1(Kind::Taker, 0, None),
+                Known(after.clone())
+            );
+        }
+        assert_eq!(serde_json::to_vec(&state).unwrap(), after_state);
+        assert_eq!(state.next_rebate_clock_at_utc_ms(), None);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -9388,6 +9577,14 @@ mod tests {
             .expect("maker 市场结束时钟必须先建立终态屏障");
         state = next;
         assert!(maker_end.settlement.is_empty());
+        assert_eq!(
+            state.rebate_entitlement_read_v1(
+                contracts::economics::RebateKindV1::Maker,
+                0,
+                Some(86_399_999)
+            ),
+            contracts::ExecutionReadValueV1::Unavailable
+        );
 
         let scenario = crate::scenario::scenario_for_sim_tests();
         let member = &scenario.market_set().markets()[0];

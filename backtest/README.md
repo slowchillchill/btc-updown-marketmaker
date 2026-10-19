@@ -458,3 +458,6 @@ D-0367 的公共环境适配复用上述原 Parquet 日供料及泛型策略入�
 这项适配不交付模型或学习入口，也不切换 A CLI 的策略工厂。
 可显式编译/调用的合成环境程序、配置及验证边界见
 [公共环境合成验收](examples/finite-environment-validation.md)。
+
+公共返佣资格/金额与实际付款分开的只读接口、显式日桶查询及报告边界，见
+[公共返佣权益确认](rebate-entitlements.md)。默认不查询，不改变原策略输入、NOE或Ledger。

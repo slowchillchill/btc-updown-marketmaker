@@ -23,6 +23,12 @@ pub struct Config {
     pub progress_every: usize,
     pub public_delivery_delay_ms: u64,
     pub maker_trade: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_end_utc_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_market_end_utc_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rebate_entitlement_queries: Vec<RebateEntitlementQueryV1>,
 }
 struct Orders {
     rules: Arc<SealedProcessRuleSnapshotV3>,
@@ -135,11 +141,12 @@ pub fn run_fixture(
     for i in 0..config.iterations {
         let path = root.join(format!("case-{i}"));
         std::fs::create_dir(&path)?;
-        let (mut c, original) = fixture_material::setup_day_with_embedded_rules(
+        let (mut c, original) = fixture_material::setup_day_with_rebate_end(
             &path,
             fixture_material::BASE,
             "2026-08-24",
             config.maker_trade,
+            config.first_market_end_utc_ms,
         );
         c.implementation_identity = config.implementation_identity.clone();
         c.strategy = StrategyDescriptorV1 {
@@ -157,6 +164,10 @@ pub fn run_fixture(
             c.implementation_identity.clone(),
             &[config.caller_role],
         )?;
+        c.rebate_entitlement_queries = config.rebate_entitlement_queries.clone();
+        if let Some(end) = config.received_end_utc_ms {
+            c.preparation.scope.received_end_utc_ms = end;
+        }
         c.session.caller_role = config.caller_role;
         c.session.input_lifecycle_policy = config.input_lifecycle_policy;
         c.gamma_resolution_policy = config.gamma_resolution_policy;
@@ -272,6 +283,9 @@ mod tests {
                 progress_every: 1,
                 public_delivery_delay_ms: 100,
                 maker_trade: false,
+                received_end_utc_ms: None,
+                first_market_end_utc_ms: None,
+                rebate_entitlement_queries: Vec::new(),
             };
             let result = run_fixture(temp.path(), &c).unwrap();
             let report = &result["reports"][0];
@@ -300,6 +314,9 @@ mod tests {
                 progress_every: 1,
                 public_delivery_delay_ms: 100,
                 maker_trade: true,
+                received_end_utc_ms: None,
+                first_market_end_utc_ms: None,
+                rebate_entitlement_queries: Vec::new(),
             };
             let result = run_fixture(temp.path(), &c).unwrap();
             let facts: Vec<serde_json::Value> = serde_json::from_slice(
@@ -339,6 +356,76 @@ mod tests {
                     .unwrap()
                     > 0
             );
+        }
+    }
+    #[test]
+    fn rebate_entitlement_export_requires_real_day_frontier_and_preserves_cash() {
+        use contracts::economics::RebateKindV1;
+        for (end, market_end, known) in [
+            (fixture_material::BASE + 12000, None, false),
+            (fixture_material::BASE + 86_400_000, None, true),
+            // 真实隐藏前沿已闭到日末，但市场end在D+1零点，尚未达到。
+            (
+                fixture_material::BASE + 86_400_000,
+                Some(fixture_material::BASE + 86_400_000),
+                false,
+            ),
+            // 只在明确新范围真正消费到市场end后闭合原市场屏障。
+            (
+                fixture_material::BASE + 86_400_001,
+                Some(fixture_material::BASE + 86_400_000),
+                true,
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let c = Config {
+                caller_role: SimCallerRoleV1::ModelTrain,
+                implementation_identity: fixture_identity(),
+                input_lifecycle_policy: InputLifecyclePolicyV1::FiniteInput,
+                gamma_resolution_policy: GammaResolutionPolicyV1::QualifiedPublicConsumption,
+                iterations: 1,
+                progress_every: 1,
+                public_delivery_delay_ms: 100,
+                maker_trade: true,
+                received_end_utc_ms: Some(end),
+                first_market_end_utc_ms: market_end,
+                rebate_entitlement_queries: vec![
+                    RebateEntitlementQueryV1 {
+                        kind: RebateKindV1::Maker,
+                        attribution_day_start_utc_ms: fixture_material::BASE,
+                    },
+                    RebateEntitlementQueryV1 {
+                        kind: RebateKindV1::Taker,
+                        attribution_day_start_utc_ms: fixture_material::BASE,
+                    },
+                ],
+            };
+            let result = run_fixture(temp.path(), &c).unwrap();
+            let report = &result["reports"][0];
+            let read = &report["rebate_entitlements"][0]["result"];
+            if known {
+                // 5股 * .07 * .4 * .6 * .20 = .0168，低于原1pUSD门槛，不结转。
+                assert_eq!(read["Known"]["day_result"]["accrued_pusd"], "0.0168");
+                assert_eq!(read["Known"]["day_result"]["payable_pusd"], "0");
+                assert_eq!(read["Known"]["day_result"]["locked_remainder_pusd"], "0");
+                assert_eq!(read["Known"]["paid_pusd"], "0");
+            } else {
+                assert_eq!(read, "Unavailable");
+            }
+            // 无taker日桶不能确认为完整零；查询/日末不会造返佣现金。
+            assert_eq!(report["rebate_entitlements"][1]["result"], "Unavailable");
+            let cash = &report["account_economics_memory"]["cash"];
+            let available: Decimal = cash["actual_available_pusd"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let reserved: Decimal = cash["actual_reserved_pusd"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(available + reserved, Decimal::from(1998));
         }
     }
 }

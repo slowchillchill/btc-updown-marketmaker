@@ -188,6 +188,14 @@ pub struct RebateDayResultV1<I> {
     pub locked_remainder_pusd: ExactDecimal,
     pub contribution_refs: Vec<I>,
 }
+/// 当前经济前缀的只读权益投影，不是 DayFinalized 或 Payment 事件。
+/// payable_pusd 是确认的合格权益；paid_pusd 只来自实际付款事实。
+/// 训练消费者按账户、种类和归属日识别同一权益，付款不能再次计为收益。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebateEntitlementReadV1<I> {
+    pub day_result: RebateDayResultV1<I>,
+    pub paid_pusd: ExactDecimal,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebatePaymentFactV1<I> {
     pub kind: RebateKindV1,

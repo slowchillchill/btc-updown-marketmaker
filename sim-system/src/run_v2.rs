@@ -7753,6 +7753,79 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn finite_finish_without_receipt_keeps_original_rejection_and_replayed_frontiers() {
+        let (directory, mut actor) = active_market_actor_with_explicit_rules(
+            SimCallerRoleV1::ModelTrain,
+            "closed-tail",
+            successful_policy_v2_for_tests(),
+            true,
+        )
+        .await;
+        actor
+            .commit_group(vec![BusinessInputV2::InputLifecyclePolicy(
+                InputLifecyclePolicyV1::FiniteInput,
+            )])
+            .unwrap();
+        // 使用原执行器真实最早到期义务，不构造任意隐藏封口时间。
+        let required = actor.next_required_logical_drive().unwrap();
+        assert_eq!(required.path, MarketEventPathV1::HiddenPlatform);
+        let at = required.required_at_utc_ms;
+        actor
+            .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                path: required.path,
+                closed_through_utc_ms: at,
+                next_index_position: 0,
+            })
+            .unwrap();
+        let mut driver = FinitePublicConsumptionV1::new(
+            PublicSimExecutionV1 { actor },
+            std::iter::empty::<Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>(),
+            "closed-tail".into(),
+        );
+        driver
+            .state
+            .close_at(at, PublicTimeClosureReasonV1::NextGlobalEventAt(at + 1))
+            .unwrap();
+        // 普通观察仍不能向已闭毫秒再次提交业务输入。
+        assert!(driver.state.observe_at(at).is_err());
+        // 没有行情回执时也能合法观察更晚时刻，但last_cutoff仍为None。
+        driver.state.observe_at(at + 1).unwrap();
+        assert!(driver.observation_cutoff().is_none());
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let before_log = std::fs::read(&path).unwrap();
+        assert!(
+            driver.finish_input_at(at).is_err(),
+            "None不证明当前观察没有更晚"
+        );
+        assert!(driver.observation_cutoff().is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), before_log);
+        let actor = &driver.execution.actor;
+        let replayed = replay_event_log_v2(
+            &path,
+            &actor._rule_snapshot,
+            &actor._finality_policy,
+            &actor.scenario,
+            &actor._latency_profile,
+            MAX_GROUP_BYTES,
+            None,
+            |_| panic!("本例只有原必要义务/控制，不含行情桶"),
+        )
+        .unwrap();
+        let original = actor.state.as_ref().unwrap().session.as_ref().unwrap();
+        let rebuilt = replayed.state.session.as_ref().unwrap();
+        assert_eq!(
+            original.hidden_platform_frontier,
+            rebuilt.hidden_platform_frontier
+        );
+        assert_eq!(
+            original.public_visibility_frontier,
+            rebuilt.public_visibility_frontier
+        );
+        assert_eq!(original.execution_state, rebuilt.execution_state);
+        assert!(!String::from_utf8(before_log).unwrap().contains("RunSeal"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn historical_maker_role_dispatch_keeps_paper_and_training_legacy() {
         for (role, expected) in [
             (
@@ -20762,6 +20835,29 @@ impl PublicConsumptionStateV1 {
     ) -> Option<&Arc<data_pipeline_core::public_statistics::PublicStatisticsHistoryV1>> {
         self.statistics_prefix.as_ref()
     }
+    /// 当前会话的返佣经济标签，只查询显式种类/归属日，不推进输入或付款。
+    /// 使用当前真实隐藏平台前沿；不能把返回值放入较早的冻结模型观察。
+    pub fn rebate_entitlement_read_v1(
+        &self,
+        kind: contracts::economics::RebateKindV1,
+        attribution_day_start_utc_ms: i64,
+    ) -> contracts::ExecutionReadValueV1<contracts::economics::RebateEntitlementReadV1<String>>
+    {
+        let Some(session) = self
+            .execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|s| s.session.as_ref())
+        else {
+            return contracts::ExecutionReadValueV1::Unavailable;
+        };
+        session.execution_state.rebate_entitlement_read_v1(
+            kind,
+            attribution_day_start_utc_ms,
+            session.hidden_platform_frontier.closed_through_utc_ms,
+        )
+    }
     /// 查询原成功登记映射，不另存宿主市场集合。
     pub fn has_enrolled_market(&self, condition: &contracts::ConditionId) -> bool {
         self.rules.contains_key(&condition.0)
@@ -20967,16 +21063,24 @@ impl PublicConsumptionStateV1 {
         &mut self,
         at: i64,
     ) -> Result<Option<TrustedGroupDecisionCutoffV1>, SimRunActorErrorV2> {
-        self.unfinished_public_markets.retain(|_, end| *end > at);
         let time = self.time(at);
         self.execution.observe_time(time.clone())?;
+        Ok(self.observe_applied_time(time))
+    }
+    /// 只更新已成功到达时刻的观察投影，不再提交业务时间输入。
+    fn observe_applied_time(
+        &mut self,
+        time: TrustedActorExecutionTimeV1,
+    ) -> Option<TrustedGroupDecisionCutoffV1> {
+        self.unfinished_public_markets
+            .retain(|_, end| *end > time.logical_time_utc_ms());
         self.drive_position += 1;
         if let Some(receipt) = self.last_receipt.clone() {
             let mut cutoff = self.execution.decision_cutoff(receipt);
             cutoff.decision_time = time;
             self.last_cutoff = Some(cutoff);
         }
-        Ok(self.observation_cutoff())
+        self.observation_cutoff()
     }
     /// 当前受信观察时间与实际领取反馈前缀，不应用事实或执行请求。
     pub fn observation_cutoff(&self) -> Option<TrustedGroupDecisionCutoffV1> {
@@ -21399,6 +21503,33 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
                     closed_through_utc_ms: at,
                     next_index_position,
                 })?;
+        }
+        let public_tail_already_closed = self
+            .execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .is_some_and(|session| {
+                session.finite_input()
+                    && session.public_visibility_frontier.closed_through_utc_ms == Some(at)
+            })
+            && self
+                .state
+                .last_cutoff
+                .as_ref()
+                .is_some_and(|cutoff| cutoff.decision_time().logical_time_utc_ms() <= at);
+        if public_tail_already_closed {
+            // 已闭前沿不证明当前观察还在该尾部；同时复用现有成功截止，
+            // 不把较晚组/静默观察或没有截止的None回填到过去。
+            // 不重复提交observe/close；仍按同一时点领取合法反馈。
+            let time = self.state.time(at);
+            self.execution
+                .actor
+                .projection_port
+                .observe_public_time(&time);
+            self.state.observe_applied_time(time);
+            return Ok(());
         }
         self.state.observe_at(at)?;
         self.state

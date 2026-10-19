@@ -114,6 +114,7 @@ fn material(
     utc_day: &str,
     terminal: Option<(PolymarketMarketMetadataV5Row, PolymarketOrderbookV3Message)>,
     maker_trade: bool,
+    first_market_end_utc_ms: Option<i64>,
 ) -> std::path::PathBuf {
     let day = root.join("inputs");
     std::fs::create_dir(&day).unwrap();
@@ -133,7 +134,7 @@ fn material(
             ["20", "3"],
             base,
             base + 1000,
-            base + 10000,
+            first_market_end_utc_ms.unwrap_or(base + 10000),
             1,
         ),
         metadata(
@@ -227,7 +228,7 @@ pub(super) fn setup_day_with_terminal(
     utc_day: &str,
     terminal: Option<(PolymarketMarketMetadataV5Row, PolymarketOrderbookV3Message)>,
 ) -> (HistoricalRunConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
-    setup_day_material(root, base, utc_day, terminal, false, false)
+    setup_day_material(root, base, utc_day, terminal, false, false, None)
 }
 #[allow(dead_code)] // 部分集成夹具只消费原场景；公共环境示例消费此场景。
 pub(super) fn setup_day_with_embedded_rules(
@@ -236,7 +237,26 @@ pub(super) fn setup_day_with_embedded_rules(
     utc_day: &str,
     maker_trade: bool,
 ) -> (HistoricalRunConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
-    setup_day_material(root, base, utc_day, None, maker_trade, true)
+    setup_day_material(root, base, utc_day, None, maker_trade, true, None)
+}
+// 返佣边界夹具显式选市场结束时刻；普通调用保留原市场/输入身份。
+#[allow(dead_code)]
+pub(super) fn setup_day_with_rebate_end(
+    root: &Path,
+    base: i64,
+    utc_day: &str,
+    maker_trade: bool,
+    first_market_end_utc_ms: Option<i64>,
+) -> (HistoricalRunConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
+    setup_day_material(
+        root,
+        base,
+        utc_day,
+        None,
+        maker_trade,
+        true,
+        first_market_end_utc_ms,
+    )
 }
 fn setup_day_material(
     root: &Path,
@@ -245,8 +265,16 @@ fn setup_day_material(
     terminal: Option<(PolymarketMarketMetadataV5Row, PolymarketOrderbookV3Message)>,
     maker_trade: bool,
     embedded_rules: bool,
+    first_market_end_utc_ms: Option<i64>,
 ) -> (HistoricalRunConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
-    let manifest = material(root, base, utc_day, terminal, maker_trade);
+    let manifest = material(
+        root,
+        base,
+        utc_day,
+        terminal,
+        maker_trade,
+        first_market_end_utc_ms,
+    );
     let rule_path = if embedded_rules {
         let path = root.join("source-rules.json");
         std::fs::write(
@@ -284,6 +312,7 @@ fn setup_day_material(
         max_temp_bytes: 1 << 26,
     };
     let config = HistoricalRunConfigV1 {
+        rebate_entitlement_queries: Vec::new(),
         entry_market_scope: None,
         research_evidence_path: None,
         gamma_resolution_policy: Default::default(),
