@@ -259,6 +259,23 @@ impl SealedProcessRuleSnapshotV3 {
         self.snapshot.maker_model_version_for(role)
     }
 
+    /// 组合根记录原封存身份；只读，不改变验证或业务规则。
+    pub fn implementation_identity(&self) -> &ImplementationIdentityV1 {
+        &self.snapshot.provenance.implementation_identity
+    }
+    pub fn reference_market(&self) -> &ReferenceMarketSpecV1 {
+        &self.snapshot.provenance.reference_market
+    }
+    pub fn rules_observed_at_utc_ms(&self) -> i64 {
+        self.snapshot.provenance.rules_observed_at_utc_ms
+    }
+    pub fn static_config(&self) -> &StaticConfigEvidenceV1 {
+        &self.snapshot.provenance.static_config
+    }
+    pub fn maker_policy(&self) -> &L2QueueModelRuleV1 {
+        &self.snapshot.project_account_rules.l2_queue_model.value
+    }
+
     pub(crate) fn snapshot(&self) -> &PlatformRuleSnapshotV3 {
         &self.snapshot
     }
@@ -1164,6 +1181,16 @@ pub fn derive_public_maker_snapshot_v3(
     roles: &[contracts::SimCallerRoleV1],
 ) -> Result<Arc<SealedProcessRuleSnapshotV3>, RuleSnapshotError> {
     let loaded = load_historical_process_snapshot_v3(source)?;
+    derive_public_maker_from_sealed_v3(loaded, target_path, implementation_identity, roles)
+}
+
+/// 已验证的CURRENT_QUERY/历史/恢复句柄共用D-0367角色派生；保留来源及访问模式。
+pub fn derive_public_maker_from_sealed_v3(
+    loaded: Arc<SealedProcessRuleSnapshotV3>,
+    target_path: PathBuf,
+    implementation_identity: ImplementationIdentityV1,
+    roles: &[contracts::SimCallerRoleV1],
+) -> Result<Arc<SealedProcessRuleSnapshotV3>, RuleSnapshotError> {
     validate_implementation_identity(&implementation_identity)?;
     let mut snapshot = loaded.snapshot().clone();
     let rule = &mut snapshot.project_account_rules.l2_queue_model;
@@ -1198,7 +1225,7 @@ pub fn derive_public_maker_snapshot_v3(
     Ok(Arc::new(SealedProcessRuleSnapshotV3 {
         path,
         file_sha256,
-        access_mode: SnapshotAccessMode::HistoricalAsOf,
+        access_mode: loaded.access_mode(),
         snapshot,
     }))
 }
@@ -2952,6 +2979,81 @@ pub(crate) mod tests {
         assert!(matches!(error, RuleSnapshotError::SnapshotIntegrity(_)));
 
         assert_eq!(server.request_count(), request_count);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn current_sealed_role_derivation_keeps_late_origin_and_one_query_transaction() {
+        use contracts::SimCallerRoleV1 as R;
+        let server = ScriptedServer::start(successful_responses()).await;
+        let directory = tempfile::tempdir().unwrap();
+        let source =
+            create_successful_snapshot_v3(&server, directory.path().join("current.json")).await;
+        assert_eq!(server.request_count(), 3, "原加载器的一次事务含三个合法GET");
+        let s = fixed_now_utc_ms().unwrap() - 1;
+        assert!(matches!(
+            load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+                snapshot_path: source.path().into(),
+                expected_file_sha256: source.file_sha256().clone(),
+                replay_causal_start_utc_ms: s
+            }),
+            Err(RuleSnapshotError::HistoricalNotApplicable { .. })
+        ));
+        let selected = derive_public_maker_from_sealed_v3(
+            source.clone(),
+            directory.path().join("selected.json"),
+            test_implementation_identity(),
+            &[R::ModelTrain],
+        )
+        .unwrap();
+        assert_eq!(selected.access_mode(), SnapshotAccessMode::CurrentQuery);
+        assert_eq!(
+            selected.rules_observed_at_utc_ms(),
+            source.rules_observed_at_utc_ms()
+        );
+        assert!(selected.rules_observed_at_utc_ms() > s);
+        assert_eq!(selected.synchronized_rules(), source.synchronized_rules());
+        assert_eq!(
+            selected.snapshot.documented_platform_rules,
+            source.snapshot.documented_platform_rules
+        );
+        assert_eq!(
+            selected.maker_policy().model_train_model,
+            Some(HistoricalMakerModelV1::PublicTradeConservativeFifoV1)
+        );
+        assert_eq!(
+            selected.maker_policy().historical_backtest_model,
+            source.maker_policy().historical_backtest_model
+        );
+        assert_eq!(
+            selected.maker_model_version_for(R::Paper),
+            source.maker_model_version_for(R::Paper)
+        );
+        assert_eq!(
+            selected.maker_model_version_for(R::ModelTrain),
+            "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1"
+        );
+        let recovered = recover_process_snapshot_v3(RecoveryProcessSnapshotRequestV1 {
+            snapshot_path: selected.path().into(),
+            expected_file_sha256: selected.file_sha256().clone(),
+            expected_implementation_identity: test_implementation_identity(),
+        })
+        .unwrap();
+        assert_eq!(recovered.file_sha256(), selected.file_sha256());
+        assert_eq!(server.request_count(), 3, "派生/恢复不重新查询");
+        assert!(
+            derive_public_maker_snapshot_v3(
+                HistoricalProcessSnapshotRequestV1 {
+                    snapshot_path: source.path().into(),
+                    expected_file_sha256: source.file_sha256().clone(),
+                    replay_causal_start_utc_ms: s
+                },
+                directory.path().join("not-created.json"),
+                test_implementation_identity(),
+                &[R::ModelTrain]
+            )
+            .is_err()
+        );
+        assert!(!directory.path().join("not-created.json").exists());
     }
 
     #[tokio::test(flavor = "current_thread")]

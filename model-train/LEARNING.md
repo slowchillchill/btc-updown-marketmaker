@@ -2,6 +2,7 @@
 
 本段交付[#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181)任务3及任务2步骤7，采用[D-0371](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6287942857)。
 D-0369全部帧FIFO和双截止、D-0370模型1/订单1/修复3继续生效。
+规则来源后继已接入[CURRENT_QUERY与恢复接口](RULES.md)，同一冻结身份进入采集及公共再生。
 本段完成工程合成验证；真实行情扫描、账户回放、真实数据学习、独立评价及PAPER/LIVE仍需相应授权。
 
 ## 公共经济与尾部

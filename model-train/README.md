@@ -81,7 +81,8 @@ cargo build -p model-train --release --bins --examples --locked --offline -j <�
 <model_consumer> run <原日消费者配置.json> <新summary.json>
 ```
 
-`ConsumerRunConfig`直接组合原`HistoricalDayConfigV1`、规则快照及哈希和显式worker配置。
+`ConsumerRunConfig`直接组合原`HistoricalDayConfigV1`、明确规则来源和显式worker配置。
+新B已接入CURRENT_QUERY/显式HISTORICAL_AS_OF/RECOVERY，业务前一次解析并同句柄进入采集和公共再生；完整配置、新/恢复命令见[RULES.md](RULES.md)。
 每个原候选的`strategy.effective_parameters.model_consumer`接受`ConsumerConfig`：
 `account_key`、`sampling_seed`、`request_namespace`、`progress_every`。账户键必须在同一worker中唯一；
 显式新运行初始化自己的隐藏状态，不承诺跨日或中断恢复。

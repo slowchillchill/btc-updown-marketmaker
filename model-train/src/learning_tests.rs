@@ -55,7 +55,7 @@ fn heterogeneous_statistics_and_delivery_replay_use_own_identity_and_equal_input
         })
         .collect();
     let mut received = BTreeMap::new();
-    let streams = visit_day_frames(&rules, &day, &queries, |key, at, group, frames| {
+    let streams = visit_day_frames(&rules, None, &day, &queries, |key, at, group, frames| {
         let values = frames
             .iter()
             .map(|f| crate::encoding::market_projection(f, at))
@@ -129,7 +129,7 @@ fn zero_read() -> LearningAccountReadV1 {
         qualified_rebates: vec![],
     }
 }
-fn collection(root: &std::path::Path, mixed: bool) -> (LearningJobConfig, Value) {
+pub(super) fn collection(root: &std::path::Path, mixed: bool) -> (LearningJobConfig, Value) {
     let (rules, mut day) = material(root);
     let mut second = day.candidates[0].clone();
     second.strategy.effective_parameters["model_consumer"]["account_key"] = json!("b");
@@ -144,7 +144,7 @@ fn collection(root: &std::path::Path, mixed: bool) -> (LearningJobConfig, Value)
     ]
     .into_iter()
     .collect();
-    visit_day_frames(&rules, &day, &q, |_, _, g, _| {
+    visit_day_frames(&rules, None, &day, &q, |_, _, g, _| {
         group = serde_json::to_value(g)?;
         Ok(())
     })
@@ -163,7 +163,7 @@ fn collection(root: &std::path::Path, mixed: bool) -> (LearningJobConfig, Value)
             json!({"trajectory_path":path});
         reports.push(json!({"report":{"calculation_count":count,"learning_account_start":zero_read(),"learning_account_memory":zero_read()}}));
     }
-    let consumer=crate::ConsumerRunConfig {rules,days:vec![day],parallel_dates:1,worker:serde_json::from_value(json!({"python":"unused","script":"unused","model":"unused","device":"cuda:0","torch_threads":4,"max_batch":2,"encoding":{"field_buckets":4096,"category_buckets":4096}})).unwrap()};
+    let consumer=crate::ConsumerRunConfig {rules:rules.into(),days:vec![day],parallel_dates:1,worker:serde_json::from_value(json!({"python":"unused","script":"unused","model":"unused","device":"cuda:0","torch_threads":4,"max_batch":2,"encoding":{"field_buckets":4096,"category_buckets":4096}})).unwrap()};
     let parameters = LearningParameters {
         learning_rate: 0.0003,
         epsilon: 0.15,

@@ -13,11 +13,17 @@ use std::time::Instant;
 #[serde(deny_unknown_fields)]
 pub struct ConsumerRunConfig {
     pub worker: WorkerConfig,
-    pub rules: PublicExportRulesV1,
+    pub rules: crate::ConsumerRulesV1,
     pub days: Vec<HistoricalDayConfigV1>,
     pub parallel_dates: usize,
 }
 pub fn run_consumer(config: &ConsumerRunConfig) -> Result<Value, MaterialError> {
+    run_consumer_with_opener(config, crate::rules::open_consumer_rules)
+}
+pub(crate) fn run_consumer_with_opener(
+    config: &ConsumerRunConfig,
+    open: impl FnOnce(&ConsumerRunConfig) -> Result<crate::rules::OpenedRulesV1, MaterialError>,
+) -> Result<Value, MaterialError> {
     let started = Instant::now();
     for day in &config.days {
         for candidate in &day.candidates {
@@ -32,18 +38,12 @@ pub fn run_consumer(config: &ConsumerRunConfig) -> Result<Value, MaterialError> 
             }
         }
     }
-    let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
-        snapshot_path: config.rules.snapshot_path.clone(),
-        expected_file_sha256: config.rules.expected_file_sha256.clone(),
-        replay_causal_start_utc_ms: config
-            .days
-            .iter()
-            .map(|d| d.preparation.scope.received_start_utc_ms)
-            .min()
-            .ok_or("未指定日输入")?,
-    })?;
+    let opened = open(config)?;
+    let effective = crate::rules::bind_consumer(config, &opened.binding);
     let worker = ModelWorker::start(config.worker.clone())?;
-    run_with_worker(config, worker, rules, started)
+    let mut summary = run_with_worker(&effective, worker, opened.rules, started)?;
+    summary["rules_opened_via"] = serde_json::to_value(opened.opened_via)?;
+    Ok(summary)
 }
 pub fn run_with_worker(
     config: &ConsumerRunConfig,
@@ -51,6 +51,16 @@ pub fn run_with_worker(
     rules: std::sync::Arc<SealedProcessRuleSnapshotV3>,
     started: Instant,
 ) -> Result<Value, MaterialError> {
+    let canonical;
+    let config = if config.rules.frozen().is_some() {
+        config
+    } else {
+        canonical = crate::rules::bind_consumer(
+            config,
+            &crate::FrozenRuleBindingV1::from_sealed(&rules, rules.access_mode()),
+        );
+        &canonical
+    };
     let before = ProcessCountersV1::read().ok();
     let mut days = config.days.clone();
     for day in &mut days {
@@ -74,6 +84,7 @@ pub fn run_with_worker(
                 c.effective_entry_market_scope
                     .clone()
                     .ok_or("原day未展开声明市场范围")?,
+                config.rules.frozen().ok_or("缺已解析规则绑定")?,
             )
             .map_err(Into::into)
         },

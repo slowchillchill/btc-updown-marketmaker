@@ -156,7 +156,8 @@ fn main() -> Result<(), MaterialError> {
         rules: PublicExportRulesV1 {
             snapshot_path: rules.path().into(),
             expected_file_sha256: rules.file_sha256().clone(),
-        },
+        }
+        .into(),
         days,
         parallel_dates: 1,
     };

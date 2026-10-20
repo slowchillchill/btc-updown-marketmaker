@@ -264,7 +264,9 @@ impl Trajectory {
                 break;
             }
             let value: Value = serde_json::from_str(&line)?;
-            if value["record_type"] == "confirmed_economic_update" {
+            if value["record_type"] == "confirmed_economic_update"
+                || value["record_type"] == "rules_binding"
+            {
                 continue;
             }
             let typed: StoredFrame = serde_json::from_value(value)?;
@@ -318,6 +320,7 @@ impl Trajectory {
 /// 与原日供料相同：只有统计配置及公共交付时序相等的账户共享一次再生。
 fn visit_day_frames(
     rules: &backtest::PublicExportRulesV1,
+    sealed_rules: Option<std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>>,
     day: &backtest::HistoricalDayConfigV1,
     queries: &std::collections::BTreeMap<String, std::collections::BTreeSet<i64>>,
     mut visit: impl FnMut(
@@ -375,28 +378,39 @@ fn visit_day_frames(
             export_new_trades: false,
         };
         streams += 1;
-        visit_continuous_public_frames_v1(
-            &config,
-            |at, group, frames| {
+        let sink =
+            |at, group: &PublicGroupReferenceV1, frames: Vec<shared_run::FrozenMarketReadV1>| {
                 for key in &keys {
                     if queries[key].contains(&at) {
                         visit(key, at, group, &frames)?;
                     }
                 }
                 Ok(())
-            },
-            |p| {
-                if p.stage == "public_application"
-                    && progress_every > 0
-                    && p.applied_groups.is_multiple_of(progress_every)
-                {
-                    eprintln!(
-                        "公共再生: 原输入{}，组{}，耗时{:.3}s",
-                        p.processed_inputs, p.applied_groups, p.elapsed_seconds
-                    );
-                }
-            },
-        )?;
+            };
+        let progress = |p: &ContinuousPublicExportProgressV1| {
+            if p.stage == "public_application"
+                && progress_every > 0
+                && p.applied_groups.is_multiple_of(progress_every)
+            {
+                eprintln!(
+                    "公共再生: 原输入{}，组{}，耗时{:.3}s",
+                    p.processed_inputs, p.applied_groups, p.elapsed_seconds
+                );
+            }
+        };
+        match &sealed_rules {
+            Some(rules) => {
+                visit_continuous_public_frames_with_rules_v1(
+                    &config,
+                    rules.clone(),
+                    sink,
+                    progress,
+                )?;
+            }
+            None => {
+                visit_continuous_public_frames_v1(&config, sink, progress)?;
+            }
+        }
     }
     Ok(streams)
 }
@@ -404,6 +418,7 @@ fn visit_day_frames(
 fn visit_group_frames(
     consumer: &crate::ConsumerRunConfig,
     rows: &mut std::collections::BTreeMap<String, Trajectory>,
+    sealed_rules: std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
     mut visit: impl FnMut(&str, usize, Value) -> Result<(), backtest::MaterialError>,
 ) -> Result<(), backtest::MaterialError> {
     use crate::encoding::*;
@@ -423,46 +438,57 @@ fn visit_group_frames(
                 Ok((config.account_key, times))
             })
             .collect::<Result<std::collections::BTreeMap<_, _>, serde_json::Error>>()?;
-        visit_day_frames(&consumer.rules, day, &queries, |key, at, group, frames| {
-            for index in rows[key].positions_at(at) {
-                let row = rows.get_mut(key).unwrap().get(index)?;
-                let expected = &row["market_frame"]["market_cutoff"]["receipt"]["group"];
-                if serde_json::to_value(group)? != *expected {
-                    return Err("公共再生组与原帧可信前缀不同".into());
-                }
-                let started = row["processing_start_utc_ms"]
-                    .as_i64()
-                    .ok_or("实际开始缺失")?;
-                let mut markets = Vec::new();
-                for (i, id) in row["market_ids"]
-                    .as_array()
-                    .ok_or("市场顺序缺失")?
-                    .iter()
-                    .enumerate()
-                {
-                    let f = frames
+        let public_rules = consumer
+            .rules
+            .frozen()
+            .ok_or("公共再生缺原已解析规则")?
+            .public_rules();
+        visit_day_frames(
+            &public_rules,
+            Some(sealed_rules.clone()),
+            day,
+            &queries,
+            |key, at, group, frames| {
+                for index in rows[key].positions_at(at) {
+                    let row = rows.get_mut(key).unwrap().get(index)?;
+                    let expected = &row["market_frame"]["market_cutoff"]["receipt"]["group"];
+                    if serde_json::to_value(group)? != *expected {
+                        return Err("公共再生组与原帧可信前缀不同".into());
+                    }
+                    let started = row["processing_start_utc_ms"]
+                        .as_i64()
+                        .ok_or("实际开始缺失")?;
+                    let mut markets = Vec::new();
+                    for (i, id) in row["market_ids"]
+                        .as_array()
+                        .ok_or("市场顺序缺失")?
                         .iter()
-                        .find(|f| {
-                            serde_json::to_value(&f.observation.market.condition_id)
-                                .ok()
-                                .as_ref()
-                                == Some(id)
-                        })
-                        .ok_or("公共再生缺原可见市场")?;
-                    let mut projected = row["market_private"][i].clone();
-                    projected["public"] = market_projection(f, started);
-                    markets.push(tokens(&projected, &consumer.worker.encoding));
+                        .enumerate()
+                    {
+                        let f = frames
+                            .iter()
+                            .find(|f| {
+                                serde_json::to_value(&f.observation.market.condition_id)
+                                    .ok()
+                                    .as_ref()
+                                    == Some(id)
+                            })
+                            .ok_or("公共再生缺原可见市场")?;
+                        let mut projected = row["market_private"][i].clone();
+                        projected["public"] = market_projection(f, started);
+                        markets.push(tokens(&projected, &consumer.worker.encoding));
+                    }
+                    let mut payload = row.clone();
+                    payload["global"] = serde_json::to_value(tokens(
+                        &row["global_private"],
+                        &consumer.worker.encoding,
+                    ))?;
+                    payload["markets"] = serde_json::to_value(markets)?;
+                    visit(key, index, payload)?;
                 }
-                let mut payload = row.clone();
-                payload["global"] = serde_json::to_value(tokens(
-                    &row["global_private"],
-                    &consumer.worker.encoding,
-                ))?;
-                payload["markets"] = serde_json::to_value(markets)?;
-                visit(key, index, payload)?;
-            }
-            Ok(())
-        })?;
+                Ok(())
+            },
+        )?;
     }
     Ok(())
 }
@@ -566,10 +592,31 @@ fn finish_without_actor(
 }
 
 pub fn run_learning_job(config: &LearningJobConfig) -> Result<Value, backtest::MaterialError> {
+    run_learning_job_with_opener(config, crate::rules::open_consumer_rules)
+}
+fn run_learning_job_with_opener(
+    config: &LearningJobConfig,
+    open: impl FnOnce(
+        &crate::ConsumerRunConfig,
+    ) -> Result<crate::rules::OpenedRulesV1, backtest::MaterialError>,
+) -> Result<Value, backtest::MaterialError> {
+    let started = std::time::Instant::now();
+    let opened = open(&config.consumer)?;
+    let mode = opened.opened_via;
+    let mut result = run_learning_job_opened(config, opened, started)?;
+    result["rules_opened_via"] = serde_json::to_value(mode)?;
+    Ok(result)
+}
+fn run_learning_job_opened(
+    original: &LearningJobConfig,
+    opened: crate::rules::OpenedRulesV1,
+    started: std::time::Instant,
+) -> Result<Value, backtest::MaterialError> {
     use crate::{run_with_worker, worker::ModelWorker};
-    use sim_system::platform_rules::*;
     use std::{collections::BTreeMap, time::Instant};
-    let started = Instant::now();
+    let mut effective_config = original.clone();
+    effective_config.consumer = crate::rules::bind_consumer(&original.consumer, &opened.binding);
+    let config = &effective_config;
     if config.parameters.trajectory_page_rows == 0
         || config.parameters.trajectory_cached_pages == 0
         || config.parameters.training_sequence_batch == 0
@@ -614,9 +661,9 @@ pub fn run_learning_job(config: &LearningJobConfig) -> Result<Value, backtest::M
     std::fs::create_dir_all(&config.output_directory)?;
     let worker = ModelWorker::start(config.consumer.worker.clone())?;
     let outcome = (|| -> Result<Value, backtest::MaterialError> {
-        let opened=worker.request(json!({"phase":"learn_open","config":config.parameters,"group":group,"account_weights":weights}))?;
-        if opened["already_committed"] == true {
-            let result = json!({"already_committed":true,"group":group,"result":opened,"model":worker.request(json!({"phase":"metrics"}))?,"elapsed_seconds":started.elapsed().as_secs_f64()});
+        let transaction=worker.request(json!({"phase":"learn_open","config":config.parameters,"group":group,"account_weights":weights}))?;
+        if transaction["already_committed"] == true {
+            let result = json!({"already_committed":true,"group":group,"result":transaction,"model":worker.request(json!({"phase":"metrics"}))?,"elapsed_seconds":started.elapsed().as_secs_f64()});
             write_new(&config.attempt_report, &result)?;
             return Ok(result);
         }
@@ -652,6 +699,7 @@ pub fn run_learning_job(config: &LearningJobConfig) -> Result<Value, backtest::M
                 c.strategy.effective_parameters["purpose"] =
                     json!("D-0371 ModelTrain采集及外层整组学习消费者");
                 c.strategy.effective_parameters["learning_group"] = json!(config.group_id);
+                c.strategy.effective_parameters["rules_binding"] = json!(opened.binding);
                 c.sim_log = out.join("sim.jsonl");
                 c.noe_root = out.join("noe");
                 c.ledger_root = out.join("ledger");
@@ -667,17 +715,12 @@ pub fn run_learning_job(config: &LearningJobConfig) -> Result<Value, backtest::M
             }
             value
         } else {
-            let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
-                snapshot_path: effective.rules.snapshot_path.clone(),
-                expected_file_sha256: effective.rules.expected_file_sha256.clone(),
-                replay_causal_start_utc_ms: effective
-                    .days
-                    .iter()
-                    .map(|d| d.preparation.scope.received_start_utc_ms)
-                    .min()
-                    .ok_or("无经营单元")?,
-            })?;
-            let outcome = run_with_worker(&effective, worker.clone(), rules, Instant::now());
+            let outcome = run_with_worker(
+                &effective,
+                worker.clone(),
+                opened.rules.clone(),
+                Instant::now(),
+            );
             let summary = match outcome {
                 Ok(s) => s,
                 Err(e) => {
@@ -722,19 +765,25 @@ pub fn run_learning_job(config: &LearningJobConfig) -> Result<Value, backtest::M
         };
         if config.audit_before_update {
             worker.request(json!({"phase":"audit_open"}))?;
-            visit_group_frames(&effective, &mut rows, |key, index, frame| {
-                let old = frame["old_joint_logp"].clone();
-                let response = worker.request(json!({"phase":"audit_step","frame":frame}))?;
-                let audit = json!({"account":key,"index":index,"old_logp":old,"result":response});
-                if let Some(file) = &mut audit_output {
-                    use std::io::Write;
-                    serde_json::to_writer(&mut *file, &audit)?;
-                    file.write_all(b"\n")?;
-                    file.flush()?;
-                }
-                audits.push(audit);
-                Ok(())
-            })?;
+            visit_group_frames(
+                &effective,
+                &mut rows,
+                opened.rules.clone(),
+                |key, index, frame| {
+                    let old = frame["old_joint_logp"].clone();
+                    let response = worker.request(json!({"phase":"audit_step","frame":frame}))?;
+                    let audit =
+                        json!({"account":key,"index":index,"old_logp":old,"result":response});
+                    if let Some(file) = &mut audit_output {
+                        use std::io::Write;
+                        serde_json::to_writer(&mut *file, &audit)?;
+                        file.write_all(b"\n")?;
+                        file.flush()?;
+                    }
+                    audits.push(audit);
+                    Ok(())
+                },
+            )?;
         }
         let mut references = Value::Null;
         if config.gradient_checks {
@@ -744,12 +793,17 @@ pub fn run_learning_job(config: &LearningJobConfig) -> Result<Value, backtest::M
                 .map(|(key, _)| key.clone())
                 .ok_or("无真实调用")?;
             let mut frames = Vec::new();
-            visit_group_frames(&effective, &mut rows, |k, _, frame| {
-                if k == key {
-                    frames.push(frame);
-                }
-                Ok(())
-            })?;
+            visit_group_frames(
+                &effective,
+                &mut rows,
+                opened.rules.clone(),
+                |k, _, frame| {
+                    if k == key {
+                        frames.push(frame);
+                    }
+                    Ok(())
+                },
+            )?;
             let bptt=worker.request(json!({"phase":"gradient_reference","kind":"bptt","frames":frames,"labels":labels[&key],"money_scale_pusd":config.parameters.money_scale_pusd,"tbptt_steps":config.parameters.tbptt_steps}))?;
             let critic=worker.request(json!({"phase":"gradient_reference","kind":"critic","frames":frames,"labels":labels[&key],"money_scale_pusd":config.parameters.money_scale_pusd,"tbptt_steps":config.parameters.tbptt_steps}))?;
             references = json!({"bptt":bptt,"critic":critic});
@@ -763,17 +817,24 @@ pub fn run_learning_job(config: &LearningJobConfig) -> Result<Value, backtest::M
             worker.request(json!({"phase":"learn_epoch"}))?;
             let mut batch = Vec::new();
             let mut batch_keys = std::collections::BTreeSet::new();
-            visit_group_frames(&effective, &mut rows, |key, index, frame| {
-                if batch_keys.contains(key)
-                    || batch.len() == config.parameters.training_sequence_batch
-                {
-                    worker.request_batch(std::mem::take(&mut batch))?;
-                    batch_keys.clear();
-                }
-                batch.push(json!({"phase":"learn_step","frame":frame,"label":labels[key][index]}));
-                batch_keys.insert(key.to_owned());
-                Ok(())
-            })?;
+            visit_group_frames(
+                &effective,
+                &mut rows,
+                opened.rules.clone(),
+                |key, index, frame| {
+                    if batch_keys.contains(key)
+                        || batch.len() == config.parameters.training_sequence_batch
+                    {
+                        worker.request_batch(std::mem::take(&mut batch))?;
+                        batch_keys.clear();
+                    }
+                    batch.push(
+                        json!({"phase":"learn_step","frame":frame,"label":labels[key][index]}),
+                    );
+                    batch_keys.insert(key.to_owned());
+                    Ok(())
+                },
+            )?;
             if !batch.is_empty() {
                 worker.request_batch(batch)?;
             }
@@ -973,3 +1034,7 @@ mod frozen_snapshot_tests {
 #[cfg(test)]
 #[path = "learning_tests.rs"]
 mod learning_tests;
+
+#[cfg(test)]
+#[path = "rule_startup_tests.rs"]
+mod rule_startup_tests;
