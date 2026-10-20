@@ -285,6 +285,10 @@ pub struct HistoricalRunReportV1 {
     /// 与 ledger_consumed_memory 同次读取，按 observation_cutoff 的公开观察估值。
     /// 不表示所有已观察反馈均已被 Ledger 消费或已经持久化。
     pub account_economics_memory: Option<AccountEconomicsReadV3>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub learning_account_memory: Option<LearningAccountReadV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub learning_account_start: Option<LearningAccountReadV1>,
     pub conservative_nav_pusd: Option<ExecutionReadValueV1<ExactRationalV1>>,
     pub worst_case_maker_nav_pusd: Option<ExactRationalV1>,
     pub unclosed_commitments: usize,
@@ -581,6 +585,8 @@ fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
             .as_ref()
             .map(|read| read.worst_case_maker_nav_pusd.clone()),
         account_economics_memory: economics,
+        learning_account_memory: None,
+        learning_account_start: None,
         unclosed_commitments: shared.registry().all_commitments().count(),
         pending_noe_records: shared.pending_noe_record_count(),
         pending_calculation: pending_timing.is_some(),
@@ -914,10 +920,18 @@ where
     let mut fifo = std::collections::VecDeque::<FrozenStrategyMarketFrameV1>::new();
     let mut fifo_summary = HistoricalFifoSummaryV1::default();
     let end = context.end;
+    let active_end = strategy.active_until_utc_ms().unwrap_or(end);
+    if active_end > end {
+        return Err(material_failure("经营截止E晚于证据截止H".into()));
+    }
     let operating_start = context.operating_start;
     let mut grid_at =
         fifo_enabled.then_some(context.start.max(operating_start.unwrap_or(context.start)));
     let economics_start = context.start.max(operating_start.unwrap_or(context.start));
+    let learning_account_start = strategy
+        .requires_learning_economics()
+        .then(|| shared.learning_account_at_v1(&driver))
+        .flatten();
     sample_day_economics(&driver, &shared, economics_start, &mut day_economics);
     if control.research_enabled() {
         let baseline_at = driver.observation_cutoff().map_or(economics_start, |c| {
@@ -974,11 +988,11 @@ where
                 public_at,
                 hidden_at,
                 required,
-                start_at.filter(|_| pending.is_none()),
-                evaluation_at.filter(|_| pending.is_none() && !fifo_enabled),
-                grid_at,
-                pending_at,
-                health_at,
+                start_at.filter(|t| pending.is_none() && *t < active_end),
+                evaluation_at.filter(|t| pending.is_none() && !fifo_enabled && *t < active_end),
+                grid_at.filter(|t| *t < active_end),
+                pending_at.filter(|t| *t < active_end),
+                health_at.filter(|t| *t < active_end),
             ]
             .into_iter()
             .flatten()
@@ -1021,7 +1035,7 @@ where
                 }
             }
             let operating = operating_start.is_none_or(|start| at >= start);
-            if pending_at == Some(at)
+            if at < active_end && pending_at == Some(at)
                 && pending.as_ref().is_some_and(|p| {
                     matches!(
                         p.calculation.calculation.output,
@@ -1036,7 +1050,7 @@ where
                 );
                 return Ok((HistoricalEndReasonV1::StrategyExit, at));
             }
-            let health_due = health_at == Some(at);
+            let health_due = at < active_end && health_at == Some(at);
             if health_due {
                 health_at = None;
                 health_summary.deadline_wakeups += 1;
@@ -1275,7 +1289,7 @@ where
                 }
             });
             // 已冻结发送先于本毫秒完整隐藏桶闭合，允许原 SIM 请求/行情竞速。
-            if pending_due {
+            if pending_due && at < active_end {
                 let p = pending.as_ref().expect("待完成计算");
                 if matches!(
                     p.calculation.calculation.output,
@@ -1507,7 +1521,7 @@ where
                 )
                 .map_err(HistoricalFailureCauseV1::Ledger)?;
             }
-            if grid_at == Some(at) {
+            if grid_at == Some(at) && at < active_end {
                 fifo_summary.grid_opportunities += 1;
                 if let Some(cutoff) = driver.observation_cutoff() {
                     let frames = if strategy.selects_relevant_markets() {
@@ -1563,14 +1577,14 @@ where
                 } else {
                     fifo_summary.grid_without_market_frame += 1;
                 }
-                grid_at = at.checked_add(100).filter(|next| *next < end);
+                grid_at = at.checked_add(100).filter(|next| *next < active_end);
             }
-            if fifo_enabled && pending.is_none() && start_at.is_none() {
+            if at < active_end && fifo_enabled && pending.is_none() && start_at.is_none() {
                 start_at = fifo
                     .front()
                     .map(|frame| frame.timing.earliest_start_at_utc_ms.max(at));
             }
-            if !fifo_enabled && pending.is_none() && dirty && start_at.is_none() {
+            if at < active_end && !fifo_enabled && pending.is_none() && dirty && start_at.is_none() {
                 start_at = Some(
                     crate::timing::after(
                         at,
@@ -1583,12 +1597,12 @@ where
                     .map_err(HistoricalFailureCauseV1::Sim)?,
                 );
             }
-            if pending.is_none() && start_at == Some(at) {
+            if at < active_end && pending.is_none() && start_at == Some(at) {
                 start_at = None;
                 let calculation = if fifo_enabled {
                     let frame = fifo.pop_front().expect("已到队首处理时刻");
-                    let input = shared.strategy_input_for_market_frame(
-                        &mut driver, frame, strategy.requires_trade_economics_details(),
+                    let input = shared.strategy_input_for_market_frame_with_learning(
+                        &mut driver, frame, strategy.requires_trade_economics_details(), strategy.requires_learning_economics(),
                     ).map_err(HistoricalFailureCauseV1::Ledger)?;
                     input.map(|input| {
                         fifo_summary.started_market_frames += 1;
@@ -1864,6 +1878,10 @@ where
                 calculation_index,
                 &config.rebate_entitlement_queries,
             );
+            if strategy.requires_learning_economics() {
+                result.learning_account_memory = shared.learning_account_at_v1(&driver);
+                result.learning_account_start = learning_account_start.clone();
+            }
             result.fifo = fifo_enabled.then_some(fifo_summary);
             result.local_funds_rejected_batches = local_funds_rejected_batches;
             result.delivery_summary = operating_start.map(|_| delivery_summary.clone());
@@ -1921,6 +1939,10 @@ where
                 calculation_index,
                 &config.rebate_entitlement_queries,
             );
+            if strategy.requires_learning_economics() {
+                failure_report.learning_account_memory = shared.learning_account_at_v1(&driver);
+                failure_report.learning_account_start = learning_account_start.clone();
+            }
             let dispatch_effects = failed_dispatch_effects.or_else(|| match &cause {
                 HistoricalFailureCauseV1::Dispatch(e) => Some(FailedDispatchEffectsV1 {
                     sent: e.sent.clone(),

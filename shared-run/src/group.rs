@@ -41,6 +41,9 @@ impl<R: Clone + std::fmt::Debug + Eq, G: Borrow<SharedExecutionRegistry<R>>, A: 
     pub fn pending_noe_record_count(&self) -> usize {
         self.pending_noe_record_count
     }
+    pub fn learning_account(&self) -> Option<&crate::LearningAccountReadV1> {
+        self.account.full().learning.as_ref()
+    }
     pub fn economics(&self) -> &AccountEconomicsReadV3 {
         &self.account.full().economics
     }
@@ -338,6 +341,7 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         Some(ActionBeforeRead {
             pending_noe_record_count: self.pending.len(),
             account: OwnedActionAccountV2 {
+                learning: None,
                 request_trades,
                 economics: AccountEconomicsReadV3::from_ledger_and_observations(
                     &economic,

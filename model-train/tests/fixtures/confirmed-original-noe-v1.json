@@ -1,0 +1,158 @@
+{
+  "producers": [
+    "ledger/tests/memory_v2.rs::early_applied_negative_is_known_once_before_details_and_after_compensation",
+    "shared-run/tests/economic_settlement.rs::real_partial_makers_fix_average_cost_and_nonterminating_fraction (fractional=false)"
+  ],
+  "negative": {
+    "before_details": {
+      "components": [
+        {
+          "amount_pusd": {
+            "denominator": "250",
+            "numerator": "21"
+          },
+          "identity": "market:condition:taker-fee",
+          "kind": "TakerFee"
+        }
+      ],
+      "covered_unapportioned_negative_cost_identities": [
+        "unapportioned:MemoryLogicalIdentityV1 { account: SourceNeutralAccountIdentityV1 { source_category: \"platform\", environment: \"simulation\", run_scope: \"known-negative-before-details\", account_scope: \"{\\\"run_id\\\":\\\"known-negative-before-details\\\",\\\"caller_role\\\":\\\"PAPER\\\",\\\"caller_instance_id\\\":\\\"caller\\\",\\\"account_id\\\":\\\"account\\\",\\\"platform_source\\\":\\\"SIMULATED\\\"}\" }, key: Entity(Trade { source_trade_id: \"trade\" }) }"
+      ],
+      "unknown_negative_cost_identities": [],
+      "unresolved_position_principal_pusd": {
+        "denominator": "1",
+        "numerator": "3"
+      },
+      "version": "confirmed_economics_v1"
+    },
+    "compensated": {
+      "components": [
+        {
+          "amount_pusd": {
+            "denominator": "1",
+            "numerator": "0"
+          },
+          "identity": "market:condition:paired",
+          "kind": "PairedGross"
+        },
+        {
+          "amount_pusd": {
+            "denominator": "1",
+            "numerator": "0"
+          },
+          "identity": "market:condition:taker-fee",
+          "kind": "TakerFee"
+        },
+        {
+          "amount_pusd": {
+            "denominator": "1",
+            "numerator": "0"
+          },
+          "identity": "market:condition:other-cost",
+          "kind": "OtherCost"
+        },
+        {
+          "amount_pusd": {
+            "denominator": "1",
+            "numerator": "0"
+          },
+          "identity": "market:condition:orphan-loss",
+          "kind": "OrphanLoss"
+        }
+      ],
+      "covered_unapportioned_negative_cost_identities": [],
+      "unknown_negative_cost_identities": [],
+      "unresolved_position_principal_pusd": {
+        "denominator": "1",
+        "numerator": "0"
+      },
+      "version": "confirmed_economics_v1"
+    },
+    "detailed": {
+      "components": [
+        {
+          "amount_pusd": {
+            "denominator": "1",
+            "numerator": "0"
+          },
+          "identity": "market:condition:paired",
+          "kind": "PairedGross"
+        },
+        {
+          "amount_pusd": {
+            "denominator": "250",
+            "numerator": "21"
+          },
+          "identity": "market:condition:taker-fee",
+          "kind": "TakerFee"
+        },
+        {
+          "amount_pusd": {
+            "denominator": "1",
+            "numerator": "0"
+          },
+          "identity": "market:condition:other-cost",
+          "kind": "OtherCost"
+        },
+        {
+          "amount_pusd": {
+            "denominator": "1",
+            "numerator": "0"
+          },
+          "identity": "market:condition:orphan-loss",
+          "kind": "OrphanLoss"
+        }
+      ],
+      "covered_unapportioned_negative_cost_identities": [],
+      "unknown_negative_cost_identities": [],
+      "unresolved_position_principal_pusd": {
+        "denominator": "1",
+        "numerator": "3"
+      },
+      "version": "confirmed_economics_v1"
+    }
+  },
+  "pair": {
+    "version": "confirmed_economics_v1",
+    "components": [
+      {
+        "identity": "market:0x1111111111111111111111111111111111111111111111111111111111111111:paired",
+        "kind": "PairedGross",
+        "amount_pusd": {
+          "numerator": "3",
+          "denominator": "10"
+        }
+      },
+      {
+        "identity": "market:0x1111111111111111111111111111111111111111111111111111111111111111:taker-fee",
+        "kind": "TakerFee",
+        "amount_pusd": {
+          "numerator": "0",
+          "denominator": "1"
+        }
+      },
+      {
+        "identity": "market:0x1111111111111111111111111111111111111111111111111111111111111111:other-cost",
+        "kind": "OtherCost",
+        "amount_pusd": {
+          "numerator": "0",
+          "denominator": "1"
+        }
+      },
+      {
+        "identity": "market:0x1111111111111111111111111111111111111111111111111111111111111111:orphan-loss",
+        "kind": "OrphanLoss",
+        "amount_pusd": {
+          "numerator": "0",
+          "denominator": "1"
+        }
+      }
+    ],
+    "unresolved_position_principal_pusd": {
+      "numerator": "1",
+      "denominator": "2"
+    },
+    "unknown_negative_cost_identities": [],
+    "covered_unapportioned_negative_cost_identities": []
+  }
+}

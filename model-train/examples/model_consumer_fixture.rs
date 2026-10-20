@@ -128,6 +128,7 @@ fn main() -> Result<(), MaterialError> {
                 sampling_seed: config.sampling_seeds[account],
                 request_namespace: key.clone(),
                 progress_every: config.progress_every,
+                learning: None,
             };
             candidate.strategy = StrategyDescriptorV1 {
                 strategy_id: "b-model-consumer".into(),

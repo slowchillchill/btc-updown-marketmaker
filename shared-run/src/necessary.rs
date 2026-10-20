@@ -11,6 +11,7 @@ use std::{
 
 #[derive(Clone)]
 pub struct OwnedActionAccountV2 {
+    pub(crate) learning: Option<crate::LearningAccountReadV1>,
     pub(crate) ledger: LedgerProjectionV2,
     pub(crate) economics: AccountEconomicsReadV3,
     pub(crate) request_trades: BTreeMap<String, Vec<Option<FrozenTradeEconomicsV1>>>,
@@ -269,6 +270,7 @@ impl ActionAccountReadV2 for BorrowedActionAccountV2<'_> {
                 )
             };
             OwnedActionAccountV2 {
+                learning: None,
                 request_trades: freeze_request_trades(self.ledger, &self.request_trade_ids),
                 ledger: read.into_base(),
                 economics,

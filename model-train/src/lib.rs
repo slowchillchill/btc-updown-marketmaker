@@ -6,3 +6,10 @@ pub mod worker;
 pub use strategy::*;
 mod run;
 pub use run::*;
+
+pub mod learning;
+
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+#[path = "../../backtest/examples/support/continuous_fixture.rs"]
+mod learning_test_fixture;

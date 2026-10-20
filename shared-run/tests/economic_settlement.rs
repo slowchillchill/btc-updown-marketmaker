@@ -771,6 +771,34 @@ async fn real_partial_makers_fix_average_cost_and_nonterminating_fraction() {
             }
         );
         assert_eq!(m.orphan_shares[up].0, if fractional { "2" } else { "1" });
+        let confirmed = read.confirmed_economics_v1();
+        let paired = confirmed
+            .components
+            .iter()
+            .find(|c| c.kind == ConfirmedComponentKindV1::PairedGross)
+            .unwrap();
+        assert_eq!(
+            paired.amount_pusd,
+            if fractional {
+                r("7", "15")
+            } else {
+                r("3", "10")
+            }
+        );
+        assert_eq!(
+            confirmed.unresolved_position_principal_pusd,
+            if fractional { r("2", "3") } else { r("1", "2") }
+        );
+        assert!(
+            Arc::ptr_eq(&confirmed, &read.confirmed_economics_v1()),
+            "同经济前缀重复读取复用原缓存"
+        );
+        if !fractional {
+            println!(
+                "CONFIRMED_PAIR_FIXTURE={}",
+                serde_json::to_string(&confirmed).unwrap()
+            );
+        }
         driver.stop_and_drain().unwrap();
     }
 }
@@ -1228,6 +1256,8 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
             .unwrap();
         let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
         let mut driver = FinitePublicConsumptionV1::new(execution, source, "late".into());
+        // 原有限宿主等待已有记录交接；不让后台调度速度改变经济测试结果。
+        driver.enable_finite_recording_wait().unwrap();
         for _ in 0..4 {
             driver.next_group().unwrap().unwrap();
         }
@@ -1455,6 +1485,8 @@ async fn stable_request_material_queries_pending_success_and_controlled_retry() 
             .unwrap();
         let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
         let mut driver = FinitePublicConsumptionV1::new(execution, source, "stable-query".into());
+        // 原有限宿主等待已有记录交接；不让后台调度速度改变经济测试结果。
+        driver.enable_finite_recording_wait().unwrap();
         for _ in 0..4 {
             driver.next_group().unwrap().unwrap();
         }
@@ -1675,6 +1707,17 @@ async fn pure_loser_closes_without_settlement_request_after_original_barriers() 
         read.market_totals().next().unwrap().confirmed_net_pnl_pusd,
         r("-771", "250")
     );
+    let confirmed = read.confirmed_economics_v1();
+    assert_eq!(
+        confirmed
+            .components
+            .iter()
+            .find(|c| c.kind == ConfirmedComponentKindV1::OrphanLoss)
+            .unwrap()
+            .amount_pusd,
+        r("3", "1")
+    );
+    assert_eq!(confirmed.unresolved_position_principal_pusd, r("0", "1"));
     driver.complete().unwrap();
 }
 
@@ -1713,6 +1756,7 @@ async fn paired_receivable_precedes_loser_failure_and_compensation_barrier() {
     let mut first = true;
     let mut pending_sent = false;
     let mut saw_blocked = false;
+    let mut saw_principal_dedup = false;
     let mut coordinator = SettlementCoordinatorV1::default();
     loop {
         let at = driver
@@ -1768,6 +1812,31 @@ async fn paired_receivable_precedes_loser_failure_and_compensation_barrier() {
                     assert_eq!(resolution.winner_orphan_receivable_pusd.0, "1");
                     assert!(resolution.request.is_none());
                     saw_blocked = true;
+                    let current = shared.learning_account_read_v1().unwrap();
+                    if read
+                        .trades()
+                        .any(|t| t.economic_applied && !t.success_applied)
+                    {
+                        assert!(
+                            current.obligations.is_empty(),
+                            "已应用本金由持仓承担，原Ledger义务本金已扣除"
+                        );
+                        assert_eq!(
+                            current.confirmed.unresolved_position_principal_pusd,
+                            r("3", "5")
+                        );
+                        saw_principal_dedup = true;
+                    }
+                    assert_eq!(
+                        current
+                            .confirmed
+                            .components
+                            .iter()
+                            .find(|c| c.kind == ConfirmedComponentKindV1::PairedGross)
+                            .unwrap()
+                            .amount_pusd,
+                        r("-1", "1")
+                    );
                 }
             }
         }
@@ -1776,6 +1845,7 @@ async fn paired_receivable_precedes_loser_failure_and_compensation_barrier() {
         }
     }
     assert!(saw_blocked);
+    assert!(saw_principal_dedup);
     assert!(shared.apply_closed().unwrap());
     let read = shared.ledger().economic_read().unwrap();
     assert_eq!(read.cash().actual_available_pusd.0, "99.1152");
@@ -1791,6 +1861,21 @@ async fn paired_receivable_precedes_loser_failure_and_compensation_barrier() {
     );
     driver.complete().unwrap();
     let restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
+    let cumulative = read.confirmed_economics_v1();
+    assert_eq!(
+        cumulative
+            .components
+            .iter()
+            .find(|c| c.kind == ConfirmedComponentKindV1::PairedGross)
+            .unwrap()
+            .amount_pusd,
+        r("-1", "1"),
+        "原配对赎回后累计贡献保留"
+    );
+    assert_eq!(
+        cumulative,
+        restored.economic_read().unwrap().confirmed_economics_v1()
+    );
     assert_eq!(
         restored
             .economic_read()

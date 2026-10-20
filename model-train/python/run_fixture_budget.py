@@ -35,8 +35,8 @@ def main():
     parser.add_argument("--evidence", required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
-    if not (0 < args.wall_seconds <= 300):
-        raise SystemExit("本轮单功能批/成本档上限为300秒")
+    if not (0 < args.wall_seconds <= 1200):
+        raise SystemExit("显式工程监督上限须在0—1200秒，具体档位遵循已批准预算")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     evidence = Path(args.evidence)
     evidence.mkdir()

@@ -384,6 +384,34 @@ pub fn export_continuous_public_v1(
     progress: impl Fn(&ContinuousPublicExportProgressV1) + Sync,
     should_stop: impl Fn() -> bool + Sync,
 ) -> Result<ContinuousPublicExportProgressV1, MaterialError> {
+    export_with_frames(config, &mut sink, progress, should_stop, true, |_, _, _| {
+        Ok(())
+    })
+}
+/// 重用原Parquet/公共组/统计，只交付显式查询帧；不创建账户或保存特征副本。
+pub fn visit_continuous_public_frames_v1(
+    config: &ContinuousPublicExportConfigV1,
+    frame_sink: impl FnMut(
+        i64,
+        &PublicGroupReferenceV1,
+        Vec<shared_run::FrozenMarketReadV1>,
+    ) -> Result<(), MaterialError>,
+    progress: impl Fn(&ContinuousPublicExportProgressV1) + Sync,
+) -> Result<ContinuousPublicExportProgressV1, MaterialError> {
+    export_with_frames(config, |_| Ok(()), progress, || false, false, frame_sink)
+}
+fn export_with_frames(
+    config: &ContinuousPublicExportConfigV1,
+    mut sink: impl FnMut(Value) -> Result<(), MaterialError>,
+    progress: impl Fn(&ContinuousPublicExportProgressV1) + Sync,
+    should_stop: impl Fn() -> bool + Sync,
+    compact: bool,
+    mut frame_sink: impl FnMut(
+        i64,
+        &PublicGroupReferenceV1,
+        Vec<shared_run::FrozenMarketReadV1>,
+    ) -> Result<(), MaterialError>,
+) -> Result<ContinuousPublicExportProgressV1, MaterialError> {
     let started = Instant::now();
     let mut state = ContinuousPublicExportProgressV1::default();
     let mut report = |stage| {
@@ -392,9 +420,11 @@ pub fn export_continuous_public_v1(
         progress(&state);
     };
     report("admission");
-    sink(
-        json!({"record_type":"config","schema_version":"continuous-public-export-v1","config":config,"requested_header":config.preparation.effective_header()}),
-    )?;
+    if compact {
+        sink(
+            json!({"record_type":"config","schema_version":"continuous-public-export-v1","config":config,"requested_header":config.preparation.effective_header()}),
+        )?;
+    }
     if should_stop() {
         state.stopped = true;
         return finish(state, &started, &mut sink, &progress);
@@ -529,9 +559,11 @@ pub fn export_continuous_public_v1(
             serde_json::to_string(&config.public_delivery_delay_ms)?
         ),
     };
-    sink(
-        json!({"record_type":"identity","replay_causal_start_utc_ms":causal_start,"statistics_identity":identity,"statistics_config":config.statistics,"definition_version":PUBLIC_STATISTICS_VERSION_V1,"initialization_files":selection.as_ref().map(|s|&s.files)}),
-    )?;
+    if compact {
+        sink(
+            json!({"record_type":"identity","replay_causal_start_utc_ms":causal_start,"statistics_identity":identity,"statistics_config":config.statistics,"definition_version":PUBLIC_STATISTICS_VERSION_V1,"initialization_files":selection.as_ref().map(|s|&s.files)}),
+        )?;
+    }
     let stream = PublicStatisticsStreamV1::new(identity, config.statistics.clone())?;
     let mut producer = DayProducerV1::new_public_only(ingress, header, source_identity)?;
     producer
@@ -578,6 +610,8 @@ pub fn export_continuous_public_v1(
                     &mut selected,
                     &mut writer,
                     &mut sink,
+                    compact,
+                    &mut frame_sink,
                 )?;
                 query_index += 1;
             }
@@ -588,7 +622,7 @@ pub fn export_continuous_public_v1(
             state.last_group = Some(reference.clone());
             selected.sync(&g.observations, &config.markets);
             if let Some(h) = history {
-                if config.observe_after_groups {
+                if compact && config.observe_after_groups {
                     for o in selected.read(&g.observations, at, &config.markets) {
                         writer.observe(&o, &h, at, false, None, &mut sink)?;
                     }
@@ -601,7 +635,8 @@ pub fn export_continuous_public_v1(
                 .filter(|trade| g.records.iter().any(|f| f.position == trade.position))
             {
                 state.new_trades += 1;
-                if config.export_new_trades
+                if compact
+                    && config.export_new_trades
                     && g.observations
                         .get_market(&trade.market.condition_id.0)
                         .is_some_and(|o| config.markets.includes(&o.market))
@@ -611,9 +646,11 @@ pub fn export_continuous_public_v1(
                     )?;
                 }
             }
-            sink(
-                json!({"record_type":"group_applied","group":reference,"applied_at_utc_ms":at,"source_visible_lower_bound_utc_ms":visible,"delivery_frontier_exclusive_utc_ms":at.min(p.scope.received_end_utc_ms)}),
-            )?;
+            if compact {
+                sink(
+                    json!({"record_type":"group_applied","group":reference,"applied_at_utc_ms":at,"source_visible_lower_bound_utc_ms":visible,"delivery_frontier_exclusive_utc_ms":at.min(p.scope.received_end_utc_ms)}),
+                )?;
+            }
         }
         state.elapsed_seconds = started.elapsed().as_secs_f64();
         progress(&state);
@@ -635,6 +672,8 @@ pub fn export_continuous_public_v1(
                 &mut selected,
                 &mut writer,
                 &mut sink,
+                compact,
+                &mut frame_sink,
             )?;
             query_index += 1;
         }
@@ -649,17 +688,50 @@ fn emit_query(
     selected: &mut ObservationSelection,
     writer: &mut CompactWriter,
     sink: &mut impl FnMut(Value) -> Result<(), MaterialError>,
+    compact: bool,
+    frame_sink: &mut impl FnMut(
+        i64,
+        &PublicGroupReferenceV1,
+        Vec<shared_run::FrozenMarketReadV1>,
+    ) -> Result<(), MaterialError>,
 ) -> Result<(), MaterialError> {
     let mut observed_markets = Vec::new();
     if let Some((h, g)) = current {
-        for o in selected.read(&g.observations, t, markets) {
-            observed_markets.push(o.market.condition_id.clone());
-            writer.observe(&o, h, t, true, frontier, sink)?;
+        let mut frames = Vec::new();
+        let visible = if compact {
+            selected.read(&g.observations, t, markets)
+        } else {
+            g.observations
+                .iter()
+                .filter(|o| markets.includes(&o.market))
+                .collect()
+        };
+        for o in visible {
+            if compact {
+                observed_markets.push(o.market.condition_id.clone());
+                writer.observe(o, h, t, true, frontier, sink)?;
+            } else {
+                frames.push(shared_run::FrozenMarketReadV1 {
+                    statistics: Some(h.read(o, t)),
+                    rule_context: writer
+                        .rules
+                        .as_ref()
+                        .unwrap()
+                        .public_rule_context(o.market.clone())
+                        .into(),
+                    observation: o.clone(),
+                });
+            }
+        }
+        if !compact {
+            frame_sink(t, &h.group, frames)?;
         }
     }
-    sink(
-        json!({"record_type":"query_boundary","observed_at_utc_ms":t,"delivery_frontier_exclusive_utc_ms":frontier,"input_frontier_past_query":frontier.is_some_and(|f|f>t),"has_applied_prefix":current.is_some(),"observed_markets":observed_markets}),
-    )?;
+    if compact {
+        sink(
+            json!({"record_type":"query_boundary","observed_at_utc_ms":t,"delivery_frontier_exclusive_utc_ms":frontier,"input_frontier_past_query":frontier.is_some_and(|f|f>t),"has_applied_prefix":current.is_some(),"observed_markets":observed_markets}),
+        )?;
+    }
     Ok(())
 }
 fn finish(

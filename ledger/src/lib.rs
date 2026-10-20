@@ -38,3 +38,7 @@ pub use core::economics::EconomicSettlementStateV1;
 pub use core::economics::{
     AccountEconomicNumbersV1, LedgerNecessaryReadV2, MarketEconomicNumbersV1, MarketFundsNumbersV1,
 };
+
+pub use core::economics::{
+    ConfirmedComponentKindV1, ConfirmedComponentReadV1, ConfirmedEconomicsReadV1,
+};

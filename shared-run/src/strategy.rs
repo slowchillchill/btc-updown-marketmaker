@@ -190,6 +190,14 @@ pub enum QualifiedBatchResultV1 {
 pub trait StrategyV1 {
     type Error;
     type Diagnostics;
+    /// 可选经营截止；只停止新调用/新发送，不结束SIM和原有经济义务。
+    fn active_until_utc_ms(&self) -> Option<i64> {
+        None
+    }
+    fn requires_learning_economics(&self) -> bool {
+        false
+    }
+
     /// 只序列化真实诊断；默认消费者没有研究诊断。
     fn research_diagnostics(&self, _diagnostics: &Self::Diagnostics) -> serde_json::Value {
         serde_json::Value::Null
@@ -547,15 +555,28 @@ impl SharedExecutionV2 {
         frame: FrozenStrategyMarketFrameV1,
         details: bool,
     ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+        self.strategy_input_for_market_frame_with_learning(driver, frame, details, false)
+    }
+    /// 仅显式学习消费者取得累计经济与唯一本金，原消费者不新增扫描。
+    pub fn strategy_input_for_market_frame_with_learning(
+        &mut self,
+        driver: &mut PublicConsumptionStateV1,
+        frame: FrozenStrategyMarketFrameV1,
+        details: bool,
+        learning: bool,
+    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
         self.apply_closed()?;
         let Some(cutoff) = driver.observation_cutoff() else {
             return Ok(None);
         };
         let current = driver.frames_at_observation();
         self.observe_group(&current);
-        let Some(action_before) = self.freeze_action_before(cutoff, &current) else {
+        let Some(mut action_before) = self.freeze_action_before(cutoff, &current) else {
             return Ok(None);
         };
+        if learning {
+            action_before.account.learning = self.learning_account_at_v1(driver);
+        }
         Ok(Some(StrategyInputV1 {
             market_frame_timing: Some(frame.timing),
             action_before,

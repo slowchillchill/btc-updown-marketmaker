@@ -8,7 +8,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use shared_run::*;
 use sim_system::{execution::RequestContextV2, platform_rules::SealedProcessRuleSnapshotV3};
-use std::{sync::Arc, time::Instant};
+use std::{
+    cell::RefCell,
+    io::{BufWriter, Write},
+    sync::Arc,
+    time::Instant,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,6 +22,8 @@ pub struct ConsumerConfig {
     pub sampling_seed: u64,
     pub request_namespace: String,
     pub progress_every: u64,
+    #[serde(default)]
+    pub learning: Option<crate::learning::CollectionConfig>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct ModelDiagnostics {
@@ -39,6 +46,11 @@ pub struct ModelConsumer {
     rules: Arc<SealedProcessRuleSnapshotV3>,
     call: u64,
     entry_scope: backtest::EffectiveEntryMarketScopeV1,
+    rpc: RefCell<Vec<Value>>,
+    trajectory: Option<BufWriter<std::fs::File>>,
+    last_confirmed: Option<Arc<ledger::ConfirmedEconomicsReadV1>>,
+    confirmed_revision: u64,
+    last_qualified: Vec<shared_run::QualifiedRebateReadV1>,
 }
 #[derive(Clone)]
 struct MarketDomain {
@@ -160,24 +172,47 @@ pub fn repair_eligibility(
         json!({"condition_id":id,"confirmed_net_side0_minus_side1":net.public(),"economic_success_shares":economic.map(|e| market.assets.iter().map(|asset|e.assets.as_ref().and_then(|a|a.iter().position(|b|b.token_id==asset.asset.token_id)).map(|i|&e.success_shares[i])).collect::<Vec<_>>()),"known_static_rejection_count":known_static_rejection_count,"known_remaining_target_shares":[remaining[0].public(),remaining[1].public()],"remaining_has_unavailable":unknown,"commitments":commitment_features}),
     ))
 }
+pub(crate) fn open_collection_trajectory(
+    path: &std::path::Path,
+) -> Result<BufWriter<std::fs::File>, String> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map(BufWriter::new)
+        .map_err(|e| e.to_string())
+}
 impl ModelConsumer {
     pub fn new(
         config: ConsumerConfig,
         worker: ModelWorker,
         rules: Arc<SealedProcessRuleSnapshotV3>,
         entry_scope: backtest::EffectiveEntryMarketScopeV1,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let trajectory = config
+            .learning
+            .as_ref()
+            .map(|c| open_collection_trajectory(&c.trajectory_path))
+            .transpose()?;
+        Ok(Self {
             config,
             worker,
             rules,
             call: 0,
             entry_scope,
-        }
+            rpc: RefCell::new(Vec::new()),
+            trajectory,
+            last_confirmed: None,
+            confirmed_revision: 0,
+            last_qualified: Vec::new(),
+        })
     }
     fn exchange(&self, v: Value, elapsed: &mut f64) -> Result<Value, String> {
         let s = Instant::now();
-        let r = self.worker.request(v)?;
+        let r = self.worker.request(v.clone())?;
+        if self.config.learning.is_some() && v["phase"] != "begin" {
+            self.rpc.borrow_mut().push(json!({"request":v,"response":{"post_only":r["post_only"],"index":r["index"],"rank":r["rank"]}}));
+        }
         *elapsed += s.elapsed().as_secs_f64();
         Ok(r)
     }
@@ -188,6 +223,12 @@ impl ModelConsumer {
 impl StrategyV1 for ModelConsumer {
     type Error = String;
     type Diagnostics = ModelDiagnostics;
+    fn active_until_utc_ms(&self) -> Option<i64> {
+        self.config.learning.as_ref().map(|c| c.active_end_utc_ms)
+    }
+    fn requires_learning_economics(&self) -> bool {
+        self.config.learning.is_some()
+    }
     fn research_diagnostics(&self, d: &Self::Diagnostics) -> Value {
         serde_json::to_value(d).unwrap()
     }
@@ -201,10 +242,17 @@ impl StrategyV1 for ModelConsumer {
     ) -> Result<StrategyOutputV1<Self::Diagnostics>, String> {
         let started = Instant::now();
         self.call += 1;
+        self.rpc.borrow_mut().clear();
         let cash = input.action_before.cash_available();
-        let time = time_projection(input, at);
+        let mut time = time_projection(input, at);
+        if let Some(c) = &self.config.learning {
+            time["active_end_utc_ms"] = c.active_end_utc_ms.into();
+            time["evidence_end_utc_ms"] = c.evidence_end_utc_ms.into();
+            time["until_active_end_ms"] = (c.active_end_utc_ms - at).into();
+        }
         let mut domains = Vec::new();
         let mut market_tokens = Vec::new();
+        let mut private_markets = Vec::new();
         let mut repair_evidence = Vec::new();
         let mut options = vec![json!({"kind":"NoTrade","market":null,"side":null})];
         for (index, m) in input.markets.iter().enumerate() {
@@ -217,7 +265,10 @@ impl StrategyV1 for ModelConsumer {
             repair_evidence.push(evidence);
             let order_feedback=input.action_before.orders().filter(|r|r.condition_id==Some(&o.market.condition_id)).map(|r|json!({"token_id":r.token_id,"matched_shares":r.matched_shares,"active_unfilled_shares":r.active_unfilled_shares,"accepted":r.accepted.is_some(),"formed":r.formed.is_some(),"latest_lifecycle":r.latest_lifecycle.map(|x|x.record()),"latest_direct_feedback":r.latest_direct_feedback.map(|x|x.record()),"cancellable":r.cancellable})).collect::<Vec<_>>();
             let funds = input.action_before.market_funds(&o.market.condition_id);
-            let projection = json!({"public":market_projection(m,at),"account":account,"order_feedback":order_feedback,"funds":{"principal":funds.principal.to_string(),"fee":funds.fee.to_string(),"local_principal":funds.local_principal.to_string(),"local_fee":funds.local_fee.to_string(),"platform_pending_principal":funds.platform_pending_principal.to_string(),"platform_pending_fee":funds.platform_pending_fee.to_string(),"pending_count":funds.pending_count}});
+            let private = json!({"account":account,"order_feedback":order_feedback,"funds":{"principal":funds.principal.to_string(),"fee":funds.fee.to_string(),"local_principal":funds.local_principal.to_string(),"local_fee":funds.local_fee.to_string(),"platform_pending_principal":funds.platform_pending_principal.to_string(),"platform_pending_fee":funds.platform_pending_fee.to_string(),"pending_count":funds.pending_count}});
+            let mut projection = private.clone();
+            projection["public"] = market_projection(m, at);
+            private_markets.push(private);
             market_tokens.push(tokens(&projection, &self.worker.config.encoding));
             let mut ticks = [ExactDecimal("0".into()), ExactDecimal("0".into())];
             let mut max_prices = [0u16; 2];
@@ -270,10 +321,8 @@ impl StrategyV1 for ModelConsumer {
             }
             domains.push(d);
         }
-        let global = tokens(
-            &json!({"time":time,"cash_available":cash.to_string(),"unfinished_order_count":input.action_before.orders().count(),"commitment_count":input.action_before.commitments().count()}),
-            &self.worker.config.encoding,
-        );
+        let global_projection = json!({"time":time,"cash_available":cash.to_string(),"unfinished_order_count":input.action_before.orders().count(),"commitment_count":input.action_before.commitments().count()});
+        let global = tokens(&global_projection, &self.worker.config.encoding);
         let encoding_seconds = started.elapsed().as_secs_f64();
         let mut roundtrip = 0.0;
         let mut request = self.base("begin");
@@ -486,6 +535,32 @@ impl StrategyV1 for ModelConsumer {
                 intent: Arc::new(intent),
                 reserves,
             });
+        }
+        if let Some(c) = &self.config.learning {
+            let economic = input
+                .action_before
+                .learning_account()
+                .ok_or("学习消费者缺公共经济读取")?;
+            if self.last_confirmed.as_ref().is_none_or(|old| {
+                !Arc::ptr_eq(old, &economic.confirmed) && **old != *economic.confirmed
+            }) || self.last_qualified != economic.qualified_rebates
+            {
+                self.confirmed_revision += 1;
+                let update = json!({"record_type":"confirmed_economic_update","revision":self.confirmed_revision,"confirmed":economic.confirmed,"qualified_rebates":economic.qualified_rebates});
+                let file = self.trajectory.as_mut().unwrap();
+                serde_json::to_writer(&mut *file, &update).map_err(|e| e.to_string())?;
+                file.write_all(b"\n").map_err(|e| e.to_string())?;
+                self.last_confirmed = Some(economic.confirmed.clone());
+                self.last_qualified = economic.qualified_rebates.clone();
+            }
+            let record = json!({"version":"learning-trajectory-v1","group":c.group_id,"account":self.config.account_key,"call":self.call,"processing_start_utc_ms":at,"market_frame":input.market_frame_timing,"account_cutoff":input.action_before.cutoff(),"market_ids":input.markets.iter().map(|m|m.observation.market.condition_id.clone()).collect::<Vec<_>>(),"global_private":global_projection,"market_private":private_markets,"options":options,"selected_option":selected,"rpc":self.rpc.borrow().clone(),"old_joint_logp":logp,"old_value":begin["value"],"behavior":begin["behavior"],"k_exact":crate::learning::confirmed_k(economic)?.public(),"economic":{"confirmed_revision":self.confirmed_revision,"obligations":economic.obligations,"pending_noe_record_count":economic.pending_noe_record_count},"actual_intents":intents,"special":{"frame_age_ms":time["frame_age_ms"],"eligible_record_threshold_ms":100,"repair_evidence":repair_evidence,"action":action,"numeric_special_reward":false}});
+            let file = self.trajectory.as_mut().unwrap();
+            serde_json::to_writer(&mut *file, &record).map_err(|e| e.to_string())?;
+            file.write_all(b"\n").map_err(|e| e.to_string())?;
+            file.flush().map_err(|e| e.to_string())?;
+            if c.collection_fault_after_call == Some(self.call) {
+                return Err("injected-collection-boundary-fault".into());
+            }
         }
         let total = started.elapsed().as_secs_f64();
         let diagnostics = ModelDiagnostics {

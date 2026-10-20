@@ -18,8 +18,6 @@ impl MarketFundsNumbersV1 {
             .add(&R::from_decimal(self.fee))
             .add(&R::from_decimal(self.local_principal))
             .add(&R::from_decimal(self.local_fee))
-            .add(&R::from_decimal(self.platform_pending_principal))
-            .add(&R::from_decimal(self.platform_pending_fee))
     }
     pub fn has_obligation(&self) -> bool {
         self.pending_count != 0 || !self.total().is_zero()
@@ -298,5 +296,32 @@ impl<'a> LedgerNecessaryReadV2<'a> {
             id,
             trade,
         ))
+    }
+}
+
+#[cfg(test)]
+mod fund_total_tests {
+    use super::*;
+    #[test]
+    fn pending_platform_amount_is_included_once_and_fees_remain() {
+        let f = MarketFundsNumbersV1 {
+            principal: Decimal::from(12),
+            fee: Decimal::from(3),
+            local_principal: Decimal::from(5),
+            local_fee: Decimal::ONE,
+            platform_pending_principal: Decimal::from(7),
+            platform_pending_fee: Decimal::from(2),
+            pending_count: 0,
+        };
+        assert_eq!(f.total(), R::from_decimal(Decimal::from(21)));
+        assert!(f.has_obligation());
+        assert!(
+            MarketFundsNumbersV1 {
+                pending_count: 1,
+                ..Default::default()
+            }
+            .has_obligation()
+        );
+        assert!(!MarketFundsNumbersV1::default().has_obligation());
     }
 }
