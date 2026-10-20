@@ -499,3 +499,28 @@ fn parquet_bba_valuation_does_not_replace_nonempty_l2_best_bid() {
     assert_eq!(missing_bba["valuation_best_bid_state"], "known_empty");
     assert_eq!(missing_bba["bid_materialized"], true);
 }
+
+#[test]
+fn explicit_typed_frames_preserve_visible_prestart_market_while_compact_keeps_its_window() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut c = fixture::build(temp.path(), 0);
+    c.query_times_utc_ms = vec![BASE + 200];
+    c.observe_after_groups = false;
+    c.export_new_trades = false;
+    let mut seen = Vec::new();
+    visit_continuous_public_frames_v1(
+        &c,
+        |at, _, frames| {
+            for f in frames {
+                seen.push((at, f.observation.market.window.start_at_utc_ms));
+            }
+            Ok(())
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert!(!seen.is_empty());
+    assert!(seen.iter().any(|(at, start)| at < start));
+    let (_, compact) = run(&c);
+    assert!(!compact.iter().any(|r| r["record_type"] == "query"));
+}

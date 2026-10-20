@@ -17,6 +17,9 @@ use read_index::EconomicReadIndex;
 #[path = "economics/necessary.rs"]
 mod necessary;
 pub use necessary::*;
+#[path = "economics/confirmed.rs"]
+mod confirmed;
+pub use confirmed::*;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Pool {
     pub quantity: Decimal,
@@ -1001,6 +1004,14 @@ impl EconomicsState {
             .read_index
             .take()
             .unwrap_or_else(|| EconomicReadIndex::from_state(self));
+        if !patch.markets.is_empty()
+            || !patch.trades.is_empty()
+            || !patch.day_updates.is_empty()
+            || !patch.unapportioned_trades.is_empty()
+            || patch.cash.is_some()
+        {
+            index.confirmed.take();
+        }
         for (id, trade) in &patch.trades {
             index.replace_trade(id, self.trades.get(id), Some(trade));
         }
@@ -1207,6 +1218,7 @@ pub struct LedgerEconomicReadV2<'a> {
     cash: CashReadV1,
     residual: ResidualCashReadV1,
     state: &'a EconomicsState,
+    lifecycle: &'a crate::lifecycle::LifecycleStateV1,
 }
 impl LedgerWriterV1 {
     pub(crate) fn cash_balances(&self) -> Result<(Decimal, Decimal), LedgerErrorV1> {
@@ -1238,6 +1250,7 @@ impl LedgerWriterV1 {
                 other_cash_pusd: exact(self.economics.cash.other_cash),
             },
             state: &self.economics,
+            lifecycle: &self.lifecycle,
         })
     }
 }

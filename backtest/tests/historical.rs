@@ -3164,3 +3164,120 @@ fn fifo_day_shares_original_statistics_history_with_independent_accounts_and_pro
             > 0
     );
 }
+
+// E/H is a model consumer's declared cutoff; legacy strategies keep their original end.
+struct ActiveWindowProbe {
+    inner: FifoProbe,
+    end: i64,
+}
+impl StrategyV1 for ActiveWindowProbe {
+    type Error = &'static str;
+    type Diagnostics = ();
+    fn active_until_utc_ms(&self) -> Option<i64> {
+        Some(self.end)
+    }
+    fn requires_learning_economics(&self) -> bool {
+        true
+    }
+    fn decide(
+        &mut self,
+        input: &StrategyInputV1,
+        at: i64,
+    ) -> Result<StrategyOutputV1, Self::Error> {
+        assert!(at < self.end);
+        self.inner.decide(input, at)
+    }
+    fn dispatched(
+        &mut self,
+        c: &StrategyCalculationV1,
+        r: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+    ) {
+        self.inner.dispatched(c, r)
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn learning_eh_preserves_cross_e_calculation_without_tail_actor_or_dispatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = fifo_model_train_setup(temp.path());
+    config.preparation.scope.received_end_utc_ms = BASE + 3000;
+    config.timing.decision_mode = HistoricalDecisionModeV1::Fixed100msFifo;
+    config.timing.calculation_start_delay_ms = DelayScheduleV1::Fixed(50);
+    config.timing.calculation_duration_ms = DelayScheduleV1::Fixed(1000);
+    config.timing.dispatch_delay_ms = DelayScheduleV1::Fixed(0);
+    let mut p = ActiveWindowProbe {
+        inner: FifoProbe {
+            inner: Probe {
+                no_trade_only: true,
+                ..Default::default()
+            },
+            calls: vec![],
+        },
+        end: BASE + 500,
+    };
+    let r = run_historical_v1(&config, rules, &mut p).await.unwrap();
+    assert_eq!(p.inner.calls.len(), 1);
+    assert_eq!(p.inner.inner.dispatched, 0);
+    assert!(r.pending_calculation);
+    assert_eq!(
+        r.pending_calculation_timing
+            .unwrap()
+            .calculation_completed_at_utc_ms,
+        BASE + 1250
+    );
+    assert_eq!(r.fifo.as_ref().unwrap().generated_market_frames, 3);
+    assert_eq!(r.fifo.as_ref().unwrap().queued_market_frames, 2);
+    assert_eq!(r.last_observed_at_utc_ms, Some(BASE + 2999));
+    assert!(r.learning_account_start.is_some());
+    assert!(r.learning_account_memory.is_some());
+}
+#[tokio::test(flavor = "current_thread")]
+async fn learning_e_later_than_h_is_an_error_and_never_silently_shortened() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, rules) = fifo_model_train_setup(temp.path());
+    let end = config.preparation.scope.received_end_utc_ms + 1;
+    let mut p = ActiveWindowProbe {
+        inner: FifoProbe {
+            inner: Probe::default(),
+            calls: vec![],
+        },
+        end,
+    };
+    assert!(run_historical_v1(&config, rules, &mut p).await.is_err());
+    assert!(p.inner.calls.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn learning_fixture_schedule_has_eight_calls_and_a_frozen_e_crossing() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = fifo_model_train_setup(temp.path());
+    config.preparation.scope.received_end_utc_ms = BASE + 3000;
+    config.timing.decision_mode = HistoricalDecisionModeV1::Fixed100msFifo;
+    config.timing.calculation_start_delay_ms = DelayScheduleV1::Fixed(10);
+    config.timing.calculation_duration_ms =
+        DelayScheduleV1::Sequence(vec![200, 20, 20, 20, 20, 20, 20, 400]);
+    config.timing.dispatch_delay_ms = DelayScheduleV1::Fixed(30);
+    let mut p = ActiveWindowProbe {
+        inner: FifoProbe {
+            inner: Probe {
+                no_trade_only: true,
+                ..Default::default()
+            },
+            calls: vec![],
+        },
+        end: BASE + 1000,
+    };
+    let r = run_historical_v1(&config, rules, &mut p).await.unwrap();
+    assert_eq!(
+        p.inner.calls.len(),
+        8,
+        "已批准模型验证工作量由原宿主时序决定"
+    );
+    assert!(r.pending_calculation);
+    assert!(
+        r.pending_calculation_timing
+            .unwrap()
+            .scheduled_send_at_utc_ms
+            >= BASE + 1000
+    );
+    assert!(p.inner.calls.iter().all(|c| c.started_at < BASE + 1000));
+}

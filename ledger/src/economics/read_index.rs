@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 #[derive(Default, Serialize, Deserialize)]
 pub(super) struct EconomicReadIndex {
     #[serde(skip)]
+    pub confirmed: std::sync::OnceLock<std::sync::Arc<super::ConfirmedEconomicsReadV1>>,
+    #[serde(skip)]
     pub account: std::sync::OnceLock<super::necessary::AccountIndex>,
     pub markets: BTreeMap<String, TradeTotals>,
     pub estimates: BTreeMap<(RebateKindV1, i64), BTreeMap<String, Estimate>>,

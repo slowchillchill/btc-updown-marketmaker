@@ -3,6 +3,6 @@
   "layers": 1,
   "field_buckets": 4096,
   "category_buckets": 4096,
-  "initialization_seed": 1810370,
+  "initialization_seed": 1810371,
   "initialization": "controlled_synthetic_v1"
 }

@@ -67,14 +67,15 @@ pub fn run_with_worker(
         &|c| {
             let consumer: ConsumerConfig =
                 serde_json::from_value(c.strategy.effective_parameters["model_consumer"].clone())?;
-            Ok(ModelConsumer::new(
+            ModelConsumer::new(
                 consumer,
                 worker.clone(),
                 rules.clone(),
                 c.effective_entry_market_scope
                     .clone()
                     .ok_or("原day未展开声明市场范围")?,
-            ))
+            )
+            .map_err(Into::into)
         },
         config.parallel_dates,
     )?;

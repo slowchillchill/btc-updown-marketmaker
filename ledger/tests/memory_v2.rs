@@ -1101,3 +1101,175 @@ fn background_arrow_batch_stops_at_first_unstable_noe_before_later_reservation()
     let restored = LedgerWriterV1::open_durable(&root).unwrap();
     assert_eq!(restored.projection_v2(), writer.projection_v2());
 }
+
+#[test]
+fn early_applied_negative_is_known_once_before_details_and_after_compensation() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut source = Source::new(&temp.path().join("noe"), "known-negative-before-details");
+    source.accept(Kind::Economic {
+        evidence: SourceNeutralEconomicEvidenceV1::AccountOpening {
+            opening_evidence_identity: "opening".into(),
+            available_pusd: number("100"),
+        },
+    });
+    let mut writer =
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
+    writer
+        .apply_noe_memory_v1(&source.source.opening_record().unwrap())
+        .unwrap();
+    let order = order_identity(&source, "order");
+    let trade = Identity::entity(
+        &Arc::new(source.context.account_identity.clone()),
+        &SourceNeutralEntityKeyV1::Trade {
+            source_trade_id: "trade".into(),
+        },
+    )
+    .unwrap();
+    let condition = ConditionId("condition".into());
+    let mut accepted = delta("0", "-3.084", "0");
+    accepted.principal_encumbrance_pusd_delta = number("3");
+    accepted.immediate_taker_fee_encumbrance_pusd_delta = number("0.084");
+    source.accept(Kind::Economic {
+        evidence: SourceNeutralEconomicEvidenceV1::AccountTransition {
+            account_transition_seq: 1,
+            economic_effective_at_utc_ms: 101,
+            condition_id: Some(condition.clone()),
+            transition: SourceNeutralAccountTransitionKindV1::OrderAcceptedEncumbranceApplied {
+                order_identity: order.clone(),
+            },
+            balance_delta: Box::new(accepted),
+        },
+    });
+    let mut applied = delta("-3.084", "0", "0");
+    applied.principal_encumbrance_pusd_delta = number("-3");
+    applied.immediate_taker_fee_encumbrance_pusd_delta = number("-0.084");
+    applied.outcome_balance_deltas = vec![SourceNeutralOutcomeBalanceDeltaV1 {
+        token_id: TokenId("up".into()),
+        balance_shares_delta: number("5"),
+    }];
+    source.accept(Kind::Economic {
+        evidence: SourceNeutralEconomicEvidenceV1::AccountTransition {
+            account_transition_seq: 2,
+            economic_effective_at_utc_ms: 102,
+            condition_id: Some(condition.clone()),
+            transition: SourceNeutralAccountTransitionKindV1::FillFinalityEconomicApplied {
+                trade_identity: trade.clone(),
+                path_ordinal: 0,
+            },
+            balance_delta: Box::new(applied),
+        },
+    });
+    source.stable();
+    for record in source.source.take_closed(500, 700) {
+        writer.apply_noe_memory_v1(&record).unwrap();
+    }
+    let before = writer.economic_read().unwrap().confirmed_economics_v1();
+    assert_eq!(
+        before.covered_unapportioned_negative_cost_identities.len(),
+        1
+    );
+    assert!(before.unknown_negative_cost_identities.is_empty());
+    let principal =
+        contracts::economics::EconomicRational::from_decimal(rust_decimal::Decimal::from(3))
+            .public();
+    assert_eq!(before.unresolved_position_principal_pusd, principal);
+    let fee = || {
+        contracts::economics::EconomicRational::from_decimal(rust_decimal::Decimal::new(84, 3))
+            .public()
+    };
+    assert_eq!(
+        before
+            .components
+            .iter()
+            .find(|v| v.kind == ConfirmedComponentKindV1::TakerFee)
+            .unwrap()
+            .amount_pusd,
+        fee()
+    );
+    let funds = writer.necessary_read_v2().unwrap().market_funds(&condition);
+    assert_eq!(
+        funds.principal + funds.local_principal,
+        rust_decimal::Decimal::ZERO
+    );
+    source.accept(Kind::TradeLifecycle {
+        result: Trade {
+            trade_identity: trade.clone(),
+            order_identity: order,
+            condition_id: condition.clone(),
+            token_id: TokenId("up".into()),
+            state: SourceNeutralTradeStateV1::Mined,
+            economic_disposition: SourceNeutralTradeEconomicDispositionV1::PendingApplied,
+            fill_sequence: 1,
+            matched_at_utc_ms: 100,
+            liquidity_role: TradeLiquidityRoleV2::Taker,
+            source_price_pusd_per_share: number("0.6"),
+            base_quantity_shares: number("5"),
+            quote_amount_pusd: number("3"),
+            immediate_taker_fee_pusd: number("0.084"),
+            economic_application_account_transition_seq: Some(2),
+        },
+    });
+    source.stable();
+    for record in source.source.take_closed(500, 700) {
+        writer.apply_noe_memory_v1(&record).unwrap();
+    }
+    let detailed = writer.economic_read().unwrap().confirmed_economics_v1();
+    assert!(
+        detailed
+            .covered_unapportioned_negative_cost_identities
+            .is_empty()
+    );
+    assert!(detailed.unknown_negative_cost_identities.is_empty());
+    assert_eq!(detailed.unresolved_position_principal_pusd, principal);
+    assert_eq!(
+        detailed
+            .components
+            .iter()
+            .find(|v| v.kind == ConfirmedComponentKindV1::TakerFee)
+            .unwrap()
+            .amount_pusd,
+        fee()
+    );
+    let mut compensation = delta("3.084", "3.084", "0");
+    compensation.outcome_balance_deltas = vec![SourceNeutralOutcomeBalanceDeltaV1 {
+        token_id: TokenId("up".into()),
+        balance_shares_delta: number("-5"),
+    }];
+    source.accept(Kind::Economic {
+        evidence: SourceNeutralEconomicEvidenceV1::AccountTransition {
+            account_transition_seq: 3,
+            economic_effective_at_utc_ms: 103,
+            condition_id: Some(condition),
+            transition: SourceNeutralAccountTransitionKindV1::FillFinalityCompensationApplied {
+                trade_identity: trade,
+                path_ordinal: 0,
+            },
+            balance_delta: Box::new(compensation),
+        },
+    });
+    source.stable();
+    for record in source.source.take_closed(500, 700) {
+        writer.apply_noe_memory_v1(&record).unwrap();
+    }
+    let reversed = writer.economic_read().unwrap().confirmed_economics_v1();
+    assert_eq!(
+        reversed.unresolved_position_principal_pusd,
+        contracts::economics::EconomicRational::zero().public()
+    );
+    assert_eq!(
+        reversed
+            .components
+            .iter()
+            .find(|v| v.kind == ConfirmedComponentKindV1::TakerFee)
+            .unwrap()
+            .amount_pusd,
+        contracts::economics::EconomicRational::zero().public()
+    );
+    println!(
+        "CONFIRMED_NEGATIVE_FIXTURE={}",
+        serde_json::to_string(
+            &serde_json::json!({"before_details":before,"detailed":detailed,"compensated":reversed})
+        )
+        .unwrap()
+    );
+}

@@ -1,7 +1,8 @@
 # 新 B 模型消费者
 
 任务入口为 [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181)。
-本目录实现任务2步骤6的真实推理与动作接线；没有学习更新、奖励、正式训练或协调恢复。
+本目录实现真实模型消费者，以及[D-0371](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6287942857)采用的公共经济目标、整组PPO/TBPTT学习和事务恢复。
+学习接口、当前合成成本及边界见[学习交付说明](LEARNING.md)。真实数据学习、独立评价及经营验收仍未授权。
 模型、订单和修复政策采用 [D-0370](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6272123144)，
 时序沿用 [D-0369](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6270139404)。
 合成权重仅证明接线，不证明模型学会交易、盈利、应对积压或达到100ms容量。
@@ -10,7 +11,7 @@
 
 `原Parquet → backtest原日供料/公共归约/统计 → 原100ms FIFO → StrategyInputV1 → ModelConsumer → ReservedIntentV1 → 原Bridge/SIM/NOE/Ledger → 后续合法反馈`。
 
-Rust保持精确动作、预留及公共环境。Python常驻进程只持有网络、每账户隐藏状态、采样状态和本次动作临时上下文。
+Rust保持精确动作、预留及公共环境。Python常驻进程持有网络、每账户隐藏状态、采样状态和本次动作临时上下文；显式学习入口还持有联合optimizer与组事务候选。
 公共模块不依赖模型。合成夹具和显式原日配置程序调用同一消费者；没有影子撮合、现金或统计。
 同日多个账户沿原日生产者共享公共页，各账户保留自己的经济状态。模型传输是当次必要投影，不保存完整行情或特征副本。
 
@@ -89,11 +90,12 @@ cargo build -p model-train --release --bins --examples --locked --offline -j <�
 `print-config`只解析和打印，不打开行情、不启动模型。
 已有支持参数的改变不要求修改源码或重新编译；模型形状/编码桶改变需产生对应的新模型文件。
 
-## 合成验证与成本边界
+## 推理合成接口与历史成本边界
 
-`examples/model-initialization.json`明确新的48宽、1层和423807参数，种子仅供本段工程验证。
+当前`examples/model-initialization.json`明确48宽、1层Actor/Critic的423856参数，种子1810371只供工程验证。
+当前模型格式为`b-gru-actor-critic-gtc-v2`；PR347的旧纯Actor权重不含价值头，不能作为此格式的检查点。
 `controlled_synthetic_v1`通过初始化条件头偏置增加特定价格/数量被抽到的机会；
-它仍运行真实GRU和条件网络，不按时刻或账户脚本发单，也不进行学习。
+它仍运行真实GRU和条件网络，不按时刻或账户脚本发单。下列`model_consumer_fixture run`只推理；学习必须使用显式`model_learner`入口。
 `examples/model-fixture-config.json`声明两账户、现金2000/0.02、独立采样种子及2000ms成交终局延迟。
 其12秒合成Parquet短窗保留原公开/隐藏时差、部分Maker成交、原单及EOF义务。
 新增参考通过既有合成来源生成器进入原流，不另算统计。
@@ -106,7 +108,7 @@ cargo build -p model-train --release --bins --examples --locked --offline -j <�
 ```
 
 准备模式只生成合成材料及完整消费者配置，不前向。运行模式的计时包含材料准备和完整公共链。
-本轮两个合成账户功能批总计最多256次真实前向；另做同短窗1/10独立运行成本档，各档最多5分钟墙钟。
+PR347历史推理验收的两个合成账户功能批总计最多256次真实前向；另做同短窗1/10独立运行成本档，各档最多5分钟墙钟。
 监督器到限保留失败/部分输出并停止本次工程作业；这个限制不进入策略、服务或SIM时间。
 不自动扩大工作量或重跑凑通过。编译和依赖成本另列并纳入交付总成本。
 
@@ -120,7 +122,9 @@ Rust逐次计编码、完整往返和精确域/意图构造；worker在实际收
 奖励、学习方法、日账户/未闭终值和协调恢复仍留所属后继；有限EOF不排空范围外义务，不强平或补到账。
 
 
-## 本段工程证据的适用范围
+## PR347历史推理工程证据的适用范围
+
+以下成本绑定PR347原纯Actor产物，不是当前Actor/Critic学习成本；当前证据见[学习交付说明](LEARNING.md)。
 
 本次合成功能累计256次真实主GRU前向，不再补跑。原236次整链记录暴露了必拒本地请求误算风险的资格偏差；
 修正后低现金定向实际6次前向，看到5帧必拒承诺仍可见但可信风险为零，修复资格关闭，新Pair仍可选。

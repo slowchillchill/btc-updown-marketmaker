@@ -1,4 +1,4 @@
-"""#181推理消费者：无优化器、反向传播、行情归约或经济状态。"""
+"""#181真实Actor/Critic消费者：公共经济归Rust，学习按显式整组事务进行。"""
 import hashlib
 import json
 import math
@@ -10,7 +10,7 @@ import time
 import torch
 from torch import nn
 
-MODEL_VERSION = "b-gru-conditional-gtc-v1"
+MODEL_VERSION = "b-gru-actor-critic-gtc-v2"
 ENCODING_VERSION = "b-public-token-log1p-v1"
 
 
@@ -26,6 +26,7 @@ class Policy(nn.Module):
         self.token = nn.Sequential(nn.Linear(width, width), nn.Tanh())
         self.input = nn.Linear(width * 2, width)
         self.gru = nn.GRU(width, width, config["layers"], batch_first=True)
+        self.value = nn.Linear(width, 1)
         self.option = nn.Linear(width * 2, 1)
         self.option_bias = nn.Parameter(torch.zeros(4))
         self.decoder = nn.GRUCell(4, width)
@@ -99,6 +100,8 @@ class Service:
         self.model.load_state_dict(package["state_dict"], strict=True)
         self.model.eval().to(self.device)
         self.accounts = {}
+        from learning_engine import LearningEngine
+        self.learning = LearningEngine(self)
         self.pending = {}
         self.metrics = {"forwards": 0, "forward_batches": 0, "maximum_forward_batch": 0,
                         "heads": 0, "h2d_bytes": 0, "d2h_bytes": 0,
@@ -107,7 +110,7 @@ class Service:
                         "load_seconds": time.perf_counter() - started,
                         "model_state_h2d_bytes": sum(t.numel() * t.element_size() for t in self.model.state_dict().values()) if self.device.type == "cuda" else 0}
         self.identity = {"model_sha256": sha256(path), "version": MODEL_VERSION,
-                         "torch": torch.__version__, "device": str(self.device),
+                         "torch": str(torch.__version__), "device": str(self.device),
                          "cuda_arch_list": torch.cuda.get_arch_list() if self.device.type == "cuda" else [],
                          "config": self.config,
                          "numerical_runtime": {"default_dtype": str(torch.get_default_dtype()),
@@ -144,6 +147,7 @@ class Service:
         return allowed[ordinal], logp, 1
 
     def begin(self, requests):
+        self.model.eval()
         started = time.perf_counter()
         keys = [r["account"] for r in requests]
         if len(set(keys)) != len(keys):
@@ -173,6 +177,7 @@ class Service:
             pooled = markets.mean(0) if count else torch.zeros_like(encoded[offset])
             inputs.append(self.model.input(torch.cat([encoded[offset], pooled])))
         before = torch.cat([a["hidden"] for a in accounts], dim=1)
+        self.metrics["forwards"] += len(requests)
         output, after = self.model.gru(torch.stack(inputs).unsqueeze(1), before)
         self.sync()
         responses = []
@@ -198,7 +203,11 @@ class Service:
             if self.device.type == "cuda":
                 self.metrics["d2h_bytes"] += norms.numel() * norms.element_size()
                 self.metrics["d2h_copies"] += 1
-            responses.append({"option": selected, "log_probability": logp, "heads": heads,
+            value_cpu=self.model.value(latent).squeeze().to("cpu")
+            if self.device.type=="cuda":
+                self.metrics["d2h_bytes"]+=value_cpu.numel()*value_cpu.element_size()
+                self.metrics["d2h_copies"]+=1
+            responses.append({"value":float(value_cpu),"behavior":dict(self.identity),"option": selected, "log_probability": logp, "heads": heads,
                               "head_trace": list(account["head_trace"]),
                               "forward": {"account_call": account["calls"], "batch": len(requests),
                                           "hidden_before_norm": float(norms[0]), "hidden_after_norm": float(norms[1]),
@@ -210,7 +219,6 @@ class Service:
                     self.metrics["d2h_bytes"] += hidden_cpu.numel() * hidden_cpu.element_size()
                     self.metrics["d2h_copies"] += 1
             self.metrics["heads"] += heads
-        self.metrics["forwards"] += len(requests)
         self.metrics["forward_batches"] += 1
         self.metrics["maximum_forward_batch"] = max(self.metrics["maximum_forward_batch"], len(requests))
         self.metrics["begin_seconds"] += time.perf_counter() - started
@@ -307,35 +315,40 @@ class Service:
         return result
 
     def run(self):
-        with torch.inference_mode():
-            for line in sys.stdin:
-                request = json.loads(line)
-                if "hello" in request:
-                    hello = request["hello"]
-                    for key in ("field_buckets", "category_buckets"):
-                        if hello["encoding"][key] != self.config[key]:
-                            raise ValueError("编码参数与模型不匹配")
-                    if hello["encoding_version"] != ENCODING_VERSION:
-                        raise ValueError("编码版本不匹配")
-                    response = {"ready": True, "identity": self.identity, "load_seconds": self.metrics["load_seconds"]}
-                else:
-                    batch = request["batch"]
-                    results = [None] * len(batch)
-                    indices = [i for i, r in enumerate(batch) if r["phase"] == "begin"]
-                    if indices:
-                        for index, result in zip(indices, self.begin([batch[i] for i in indices])):
-                            results[index] = result
-                    for i, item in enumerate(batch):
-                        if item["phase"] == "begin":
-                            continue
-                        if item["phase"] == "metrics":
-                            results[i] = self.snapshot()
-                        elif item["phase"] == "account_snapshot":
-                            results[i] = self.account_snapshot(item["account"])
-                        else:
-                            results[i] = self.decode(item)
-                    response = {"batch": results}
-                print(json.dumps(response, ensure_ascii=False, allow_nan=False), flush=True)
+        for line in sys.stdin:
+            request = json.loads(line)
+            if "hello" in request:
+                hello = request["hello"]
+                for key in ("field_buckets", "category_buckets"):
+                    if hello["encoding"][key] != self.config[key]:
+                        raise ValueError("编码参数与模型不匹配")
+                if hello["encoding_version"] != ENCODING_VERSION:
+                    raise ValueError("编码版本不匹配")
+                response={"ready":True,"identity":self.identity,"load_seconds":self.metrics["load_seconds"]}
+            else:
+                batch=request["batch"]
+                results=[None]*len(batch)
+                indices=[i for i,r in enumerate(batch) if r["phase"]=="begin"]
+                if indices:
+                    with torch.inference_mode():
+                        for index,result in zip(indices,self.begin([batch[i] for i in indices])):
+                            results[index]=result
+                for i,item in enumerate(batch):
+                    phase=item["phase"]
+                    if phase=="begin":
+                        continue
+                    if phase.startswith(("learn_","audit_")) or phase=="gradient_reference":
+                        with torch.enable_grad():
+                            results[i]=self.learning.dispatch(item)
+                    elif phase=="metrics":
+                        results[i]=self.snapshot()
+                    elif phase=="account_snapshot":
+                        results[i]=self.account_snapshot(item["account"])
+                    else:
+                        with torch.inference_mode():
+                            results[i]=self.decode(item)
+                response={"batch":results}
+            print(json.dumps(response,ensure_ascii=False,allow_nan=False),flush=True)
 
 
 if __name__ == "__main__":
