@@ -3190,6 +3190,7 @@ dependencies = [
  "shared-run",
  "sim-system",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

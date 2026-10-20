@@ -14,18 +14,13 @@ use model_train::{ConsumerRunConfig, domain::*};
 use num_bigint::BigUint;
 use rust_decimal::Decimal;
 use serde_json::json;
-use sim_system::platform_rules::*;
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = std::env::args().collect::<Vec<_>>();
     if args.len() != 3 {
         return Err("用法: model_precision_probe <本轮合成消费者配置.json> <新结果.json>".into());
     }
     let config: ConsumerRunConfig = serde_json::from_slice(&std::fs::read(&args[1])?)?;
-    let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
-        snapshot_path: config.rules.snapshot_path,
-        expected_file_sha256: config.rules.expected_file_sha256,
-        replay_causal_start_utc_ms: i64::MAX,
-    })?;
+    let rules = model_train::open_consumer_rules(&config)?.rules;
     let n = coefficient_max();
     let q = shares(&n)?;
     let price = Decimal::new(9999, 4);

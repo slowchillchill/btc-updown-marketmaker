@@ -384,9 +384,15 @@ pub fn export_continuous_public_v1(
     progress: impl Fn(&ContinuousPublicExportProgressV1) + Sync,
     should_stop: impl Fn() -> bool + Sync,
 ) -> Result<ContinuousPublicExportProgressV1, MaterialError> {
-    export_with_frames(config, &mut sink, progress, should_stop, true, |_, _, _| {
-        Ok(())
-    })
+    export_with_frames(
+        config,
+        None,
+        &mut sink,
+        progress,
+        should_stop,
+        true,
+        |_, _, _| Ok(()),
+    )
 }
 /// 重用原Parquet/公共组/统计，只交付显式查询帧；不创建账户或保存特征副本。
 pub fn visit_continuous_public_frames_v1(
@@ -398,10 +404,41 @@ pub fn visit_continuous_public_frames_v1(
     ) -> Result<(), MaterialError>,
     progress: impl Fn(&ContinuousPublicExportProgressV1) + Sync,
 ) -> Result<ContinuousPublicExportProgressV1, MaterialError> {
-    export_with_frames(config, |_| Ok(()), progress, || false, false, frame_sink)
+    export_with_frames(
+        config,
+        None,
+        |_| Ok(()),
+        progress,
+        || false,
+        false,
+        frame_sink,
+    )
 }
+/// 组合根已封存的同一规则；不重新查询，也不套用历史来源时间检查。
+pub fn visit_continuous_public_frames_with_rules_v1(
+    config: &ContinuousPublicExportConfigV1,
+    rules: Arc<SealedProcessRuleSnapshotV3>,
+    frame_sink: impl FnMut(
+        i64,
+        &PublicGroupReferenceV1,
+        Vec<shared_run::FrozenMarketReadV1>,
+    ) -> Result<(), MaterialError>,
+    progress: impl Fn(&ContinuousPublicExportProgressV1) + Sync,
+) -> Result<ContinuousPublicExportProgressV1, MaterialError> {
+    export_with_frames(
+        config,
+        Some(rules),
+        |_| Ok(()),
+        progress,
+        || false,
+        false,
+        frame_sink,
+    )
+}
+
 fn export_with_frames(
     config: &ContinuousPublicExportConfigV1,
+    sealed_rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
     mut sink: impl FnMut(Value) -> Result<(), MaterialError>,
     progress: impl Fn(&ContinuousPublicExportProgressV1) + Sync,
     should_stop: impl Fn() -> bool + Sync,
@@ -537,11 +574,26 @@ fn export_with_frames(
         }
         Err(e) => return Err(e),
     };
-    let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
-        snapshot_path: config.rules.snapshot_path.clone(),
-        expected_file_sha256: config.rules.expected_file_sha256.clone(),
-        replay_causal_start_utc_ms: causal_start,
-    })?;
+    let rules = match sealed_rules {
+        Some(rules) => {
+            // 显式历史句柄仍保持原初始化前史的适用性检查；当前/恢复不套历史门。
+            if rules.access_mode() == SnapshotAccessMode::HistoricalAsOf
+                && rules.rules_observed_at_utc_ms() > causal_start
+            {
+                return Err(RuleSnapshotError::HistoricalNotApplicable {
+                    observed_at_utc_ms: rules.rules_observed_at_utc_ms(),
+                    causal_start_utc_ms: causal_start,
+                }
+                .into());
+            }
+            rules
+        }
+        None => load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: config.rules.snapshot_path.clone(),
+            expected_file_sha256: config.rules.expected_file_sha256.clone(),
+            replay_causal_start_utc_ms: causal_start,
+        })?,
+    };
     let mut header = p.effective_header();
     header.input_scope = format!(
         "{};received=[{},{});source={}",

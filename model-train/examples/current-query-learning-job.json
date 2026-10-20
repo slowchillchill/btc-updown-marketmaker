@@ -1,0 +1,220 @@
+{
+  "consumer": {
+    "worker": {
+      "python": "dependencies/venv/bin/python",
+      "script": "artifacts/model_worker.py",
+      "model": "artifacts/initial-model.pt",
+      "device": "cuda:0",
+      "torch_threads": 4,
+      "max_batch": 2,
+      "encoding": {
+        "field_buckets": 4096,
+        "category_buckets": 4096
+      }
+    },
+    "rules": {
+      "mode": "CURRENT_QUERY",
+      "reference_market": {
+        "condition_id": "0xd4346bcf419856fa3261d3c0705597d5c909ead020b9f1a0de468092704fc65f",
+        "clob_market_id": "3278040",
+        "slug": "btc-updown-5m-1785715500",
+        "outcomes": [
+          {
+            "token_id": "45253098770861975037434792771412818336165758089047645530470012231811628219325",
+            "outcome": "Up"
+          },
+          {
+            "token_id": "13103176462561566402126211408478811357460751704260150146723274072578196298541",
+            "outcome": "Down"
+          }
+        ]
+      },
+      "source_snapshot_path": "runs/example/queried-rules.json",
+      "snapshot_path": "runs/example/modeltrain-rules.json",
+      "effective_config_path": "runs/example/effective-consumer.json",
+      "implementation_identity": {
+        "git_commit": "0000000000000000000000000000000000000000",
+        "source_identity_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "cargo_lock_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "public_maker_roles": [
+        "MODEL_TRAIN"
+      ]
+    },
+    "days": [
+      {
+        "preparation": {
+          "scope": {
+            "manifest_paths": [
+              "inputs/2026-08-24/manifest.json"
+            ],
+            "received_start_utc_ms": 1787529900000,
+            "received_end_utc_ms": 1787529912000,
+            "purpose": "配置形状示例；实际输入及作业须另获授权"
+          },
+          "metadata_initialization": null,
+          "work_root": "runs/example/prepared",
+          "header": {
+            "input_stream_id": "synthetic-history",
+            "canonical_rule_version": "canonical-reduction-v1",
+            "observation_version": "market_business_observation_v1",
+            "ordering_version": "historical-source-head-v1",
+            "input_scope": "explicit-manifests/synthetic",
+            "max_pending_ws_terminals": 10,
+            "initial_state": "Empty"
+          },
+          "canonical": {
+            "decode_batch_rows": 10,
+            "max_decode_batch_bytes": 1048576,
+            "max_temporary_row_bytes": 1048576,
+            "max_epoch_count_per_source": 10,
+            "max_pending_ws_terminals": 10,
+            "max_retained_reducer_entries": 100,
+            "canonical_rule_version": "canonical-reduction-v1",
+            "sort": {
+              "max_run_rows": 100,
+              "max_run_bytes": 1048576,
+              "max_temp_run_files": 20,
+              "merge_fan_in": 4,
+              "merge_workers": 1,
+              "max_open_files": 8,
+              "batch_rows": 10,
+              "max_temp_bytes": 67108864
+            }
+          },
+          "recording": {
+            "max_artifact_payload_bytes": 1048576,
+            "max_capture_output_bytes": 33554432,
+            "max_candidate_directory_bytes": 67108864,
+            "max_observation_l2_levels": 100,
+            "sort": {
+              "max_run_rows": 100,
+              "max_run_bytes": 1048576,
+              "max_temp_run_files": 20,
+              "merge_fan_in": 4,
+              "merge_workers": 1,
+              "max_open_files": 8,
+              "batch_rows": 10,
+              "max_temp_bytes": 67108864
+            }
+          },
+          "read_page_rows": 10,
+          "max_read_batch_bytes": 1048576,
+          "hidden_stream_id": "synthetic-hidden"
+        },
+        "candidates": [
+          {
+            "public_statistics": {
+              "momentum_windows_ms": [
+                100,
+                1000
+              ],
+              "spot_variance_windows_ms": [
+                1000
+              ],
+              "terminal_integral_windows_ms": [
+                1000
+              ]
+            },
+            "gamma_resolution_policy": "qualified_public_consumption",
+            "research_evidence_path": "runs/example/account-0/decisions.jsonl",
+            "timing": {
+              "decision_mode": "fixed100ms_fifo",
+              "public_delivery_delay_ms": {
+                "Fixed": 100
+              },
+              "calculation_start_delay_ms": {
+                "Fixed": 10
+              },
+              "calculation_duration_ms": {
+                "Sequence": [
+                  200,
+                  20,
+                  20,
+                  20,
+                  20,
+                  20,
+                  20,
+                  400
+                ]
+              },
+              "dispatch_delay_ms": {
+                "Fixed": 30
+              }
+            },
+            "session": {
+              "caller_role": "MODEL_TRAIN",
+              "input_lifecycle_policy": "finite_input",
+              "run_id": "synthetic-0-0",
+              "session_id": "synthetic-0-0",
+              "account_id": "synthetic-0-0",
+              "caller_instance_id": "synthetic-host",
+              "creation_request_id": "opening",
+              "response_bridge_binding_id": "bridge",
+              "initial_account_state": {
+                "available_pusd": "2000"
+              },
+              "session_seed": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            },
+            "strategy": {
+              "strategy_id": "b-model-consumer",
+              "strategy_rule_version": "b-gru-conditional-gtc-v1",
+              "effective_parameters": {
+                "model": "由顶层worker显式指定",
+                "model_consumer": {
+                  "account_key": "synthetic-0-0",
+                  "learning": null,
+                  "progress_every": 1,
+                  "request_namespace": "synthetic-0-0",
+                  "sampling_seed": 37101
+                },
+                "purpose": "CURRENT_QUERY组合接口示例；不签发真实作业"
+              }
+            },
+            "implementation_identity": {
+              "git_commit": "0000000000000000000000000000000000000000",
+              "source_identity_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "cargo_lock_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "finality_policy_path": "artifacts/finality.json",
+            "sim_log": "runs/example/account-0/sim.jsonl",
+            "noe_root": "runs/example/account-0/noe",
+            "ledger_root": "runs/example/account-0/ledger",
+            "metadata_path": "runs/example/account-0/run.json",
+            "result_path": "runs/example/account-0/result.json",
+            "activation_id": "activate",
+            "consumption_sequence_ref": "historical-host",
+            "noe_implementation_identity": "public-v4",
+            "admission_policy": "ActualCashNoMarketLimit",
+            "max_group_bytes": 16777216,
+            "finite_in_flight_groups": 128,
+            "replay_progress_interval_seconds": 0
+          }
+        ],
+        "progress_interval_seconds": 1,
+        "producer_lead_groups": 2
+      }
+    ],
+    "parallel_dates": 1
+  },
+  "parameters": {
+    "learning_rate": 0.0003,
+    "epsilon": 0.15,
+    "value_weight": 1.0,
+    "money_scale_pusd": 2000.0,
+    "tau_gae_s": 300.0,
+    "tbptt_steps": 4,
+    "ppo_epochs": 2,
+    "checkpoint_directory": "runs/example/checkpoint",
+    "trajectory_page_rows": 4,
+    "trajectory_cached_pages": 2,
+    "training_sequence_batch": 2
+  },
+  "group_id": "example-new-group",
+  "output_directory": "runs/example/group",
+  "active_end_utc_ms": 1787529901000,
+  "audit_before_update": false,
+  "gradient_checks": false,
+  "fault": null,
+  "attempt_report": "runs/example/attempt-1.json"
+}

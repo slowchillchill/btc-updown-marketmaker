@@ -13,3 +13,9 @@ pub mod learning;
 #[allow(dead_code, unused_imports)]
 #[path = "../../backtest/examples/support/continuous_fixture.rs"]
 mod learning_test_fixture;
+
+mod rules;
+pub use rules::{
+    ConsumerRulesV1, FrozenRuleBindingV1, OpenedRulesV1, QueriedSourceV1, RuleOpenV1,
+    open_consumer_rules,
+};
