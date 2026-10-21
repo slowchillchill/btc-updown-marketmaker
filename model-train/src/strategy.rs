@@ -45,6 +45,7 @@ pub struct ModelConsumer {
     worker: ModelWorker,
     rules: Arc<SealedProcessRuleSnapshotV3>,
     call: u64,
+    first_observation: Option<Arc<crate::first_observation::FirstObservation>>,
     entry_scope: backtest::EffectiveEntryMarketScopeV1,
     rpc: RefCell<Vec<Value>>,
     trajectory: Option<BufWriter<std::fs::File>>,
@@ -210,6 +211,7 @@ impl ModelConsumer {
             worker,
             rules,
             call: 0,
+            first_observation: None,
             entry_scope,
             rpc: RefCell::new(Vec::new()),
             trajectory,
@@ -217,6 +219,13 @@ impl ModelConsumer {
             confirmed_revision: 0,
             last_qualified: Vec::new(),
         })
+    }
+    pub(crate) fn with_first_observation(
+        mut self,
+        timing: Arc<crate::first_observation::FirstObservation>,
+    ) -> Self {
+        self.first_observation = Some(timing);
+        self
     }
     fn exchange(&self, v: Value, elapsed: &mut f64) -> Result<Value, String> {
         let s = Instant::now();
@@ -258,6 +267,14 @@ impl StrategyV1 for ModelConsumer {
         at: i64,
     ) -> Result<StrategyOutputV1<Self::Diagnostics>, String> {
         let started = Instant::now();
+        if let Some(timing) = &self.first_observation {
+            timing.record(
+                &self.config.account_key,
+                self.call + 1,
+                at,
+                input.market_frame_timing.as_ref(),
+            );
+        }
         self.call += 1;
         self.rpc.borrow_mut().clear();
         let cash = input.action_before.cash_available();
