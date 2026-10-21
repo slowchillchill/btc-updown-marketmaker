@@ -11,6 +11,12 @@ pub struct StrategyContinuityV2 {
     pub unresolved_profit_allocations: BTreeMap<String, ProfitAllocationV2>,
 }
 impl StrategyContinuityV2 {
+    pub fn new_public_account() -> Self {
+        Self {
+            rule_version: PUBLIC_RULE_VERSION.into(),
+            ..Self::new_account()
+        }
+    }
     pub fn new_account() -> Self {
         Self {
             rule_version: RULE_VERSION.into(),
@@ -70,6 +76,8 @@ pub struct RepairComparisonV1 {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MarketDecisionDiagnosticV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_inputs: Option<PublicProbabilityInputsV4>,
     pub condition_id: ConditionId,
     #[serde(default)]
     pub pair_entry: PairEntryEvaluationV1,
@@ -201,6 +209,8 @@ impl EntryMarketRangeV1 {
 /// None 表示该分支未评估，不把未执行的检查写成失败。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PairEntryEvaluationV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_entry: Option<PublicEntryEvaluationV4>,
     pub market_eligible: bool,
     pub evaluated: bool,
     pub price_reference: Option<InitialPairPriceReferenceV1>,

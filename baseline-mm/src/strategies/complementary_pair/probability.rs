@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EstimateUnavailableV1 {
     MissingReference,
+    MissingPublicStatistics,
     MissingSettlementRule,
     MissingSettlementPrice,
     MissingWindowHistory,

@@ -12,6 +12,9 @@ pub struct PublicStatisticsConfigV1 {
     pub momentum_windows_ms: Vec<u64>,
     pub spot_variance_windows_ms: Vec<u64>,
     pub terminal_integral_windows_ms: Vec<u64>,
+    /// 显式消费者所需的 F2 asof 回看；空集合不物化历史端点。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blb_lookback_windows_ms: Vec<u64>,
 }
 /// 绑定输入内容、归约/观察、排序、规则及实际交付时序。配置另以完整值绑定。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +107,7 @@ pub struct PublicMarketStatisticsV1 {
     pub until_market_end_ms: i64,
     pub depth: Arc<PublicDepthStatisticsV1>,
     pub blb: BlbResearchV1,
+    pub blb_lookbacks: Vec<PublicBlbLookbackV1>,
     pub momentum: Vec<PublicMomentumV1>,
     pub spot_variance: Vec<PublicSpotVarianceV1>,
     pub spot_integrals: Vec<PublicSpotIntegralV1>,
@@ -113,6 +117,35 @@ pub struct PublicMarketStatisticsV1 {
     /// F9 原质量、证据、来源时间由同前缀 F0 观察提供；首次应用时间保存在此。
     pub source_applied_at_utc_ms: [Option<i64>; 5],
     pub source_received_age_ms: [Option<i64>; 5],
+}
+/// 正式应用时保存的 F2 必要标量及同端 F1/锚事实；不含盘口或档位数组。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PublicBlbEndpointV1 {
+    pub definition_version: String,
+    pub identity: Arc<PublicStatisticsIdentityV1>,
+    pub config: Arc<PublicStatisticsConfigV1>,
+    pub market: MarketIdentityV2,
+    pub group: PublicGroupReferenceV1,
+    pub applied_at_utc_ms: i64,
+    pub status: String,
+    pub unknown_reason: Option<String>,
+    pub midpoint_usdt_per_btc: Option<Decimal>,
+    pub official_k_usd_per_btc: Option<Decimal>,
+    pub side: Option<String>,
+    pub at_anchor: bool,
+    pub visible_quantity_btc: Option<Decimal>,
+    pub official_anchor: ObservedFactV1<MarketPriceAnchorV1>,
+    pub best_bid_usdt_per_btc: StatisticValueV1<Decimal>,
+    pub best_ask_usdt_per_btc: StatisticValueV1<Decimal>,
+    pub depth_quality: MarketDataQuality,
+    pub depth_anchors: Vec<DirectObservationAnchorV1>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PublicBlbLookbackV1 {
+    pub window_ms: u64,
+    pub left_query_at_utc_ms: i64,
+    pub left: Option<Arc<PublicBlbEndpointV1>>,
+    pub right: Option<Arc<PublicBlbEndpointV1>>,
 }
 pub const BLB_RESEARCH_VERSION_V1: &str = "blb-visible-interval-v1";
 #[derive(Clone, Debug, PartialEq, Serialize)]

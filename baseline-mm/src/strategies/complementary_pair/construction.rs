@@ -7,6 +7,29 @@ impl ComplementaryPairV1 {
         request_namespace: String,
         continuity: StrategyContinuityV2,
     ) -> Result<Self, StrategyErrorV1> {
+        Self::build(config, None, rules, request_namespace, continuity)
+    }
+    pub fn new_public(
+        config: ComplementaryPairConfigV4,
+        rules: Arc<SealedProcessRuleSnapshotV3>,
+        request_namespace: String,
+        continuity: StrategyContinuityV2,
+    ) -> Result<Self, StrategyErrorV1> {
+        Self::build(
+            config.parameters,
+            Some(config.blb_decrease_veto),
+            rules,
+            request_namespace,
+            continuity,
+        )
+    }
+    fn build(
+        config: ComplementaryPairConfigV3,
+        public_entry_veto: Option<bool>,
+        rules: Arc<SealedProcessRuleSnapshotV3>,
+        request_namespace: String,
+        continuity: StrategyContinuityV2,
+    ) -> Result<Self, StrategyErrorV1> {
         // 类型/算法的定义域检查，不把研究候选数值升级为额外交易资格。
         if request_namespace.is_empty() || request_namespace.trim() != request_namespace {
             return Err(StrategyErrorV1::Configuration(
@@ -68,15 +91,21 @@ impl ComplementaryPairV1 {
                 "统计系数不在其数学定义域".into(),
             ));
         }
-        if continuity.rule_version != RULE_VERSION {
+        let version = if public_entry_veto.is_some() {
+            PUBLIC_RULE_VERSION
+        } else {
+            RULE_VERSION
+        };
+        if continuity.rule_version != version {
             return Err(StrategyErrorV1::Configuration(format!(
-                "接续规则{}不能用于{RULE_VERSION}；旧材料须独立迁移",
+                "接续规则{}不能用于{version}；旧材料须独立迁移",
                 continuity.rule_version
             )));
         }
         rational(&continuity.confirmed_high_water_pusd)?;
         Ok(Self {
             config,
+            public_entry_veto,
             entry_market_range: None,
             rules,
             namespace: request_namespace,
@@ -151,9 +180,21 @@ impl shared_run::CheckpointStrategyV1 for ComplementaryPairV1 {
         &mut self,
         reader: &mut dyn std::io::Read,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let saved = ciborium::de::from_reader(reader)?;
-        *self = Self::restore(self.config.clone(), self.rules.clone(), saved)?
-            .with_entry_market_range(self.entry_market_range);
+        let saved: ComplementaryPairCheckpointV2 = ciborium::de::from_reader(reader)?;
+        *self = if let Some(blb_decrease_veto) = self.public_entry_veto {
+            Self::new_public(
+                ComplementaryPairConfigV4 {
+                    parameters: self.config.clone(),
+                    blb_decrease_veto,
+                },
+                self.rules.clone(),
+                saved.namespace,
+                saved.continuity,
+            )?
+        } else {
+            Self::restore(self.config.clone(), self.rules.clone(), saved)?
+        }
+        .with_entry_market_range(self.entry_market_range);
         Ok(())
     }
 }

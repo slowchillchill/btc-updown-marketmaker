@@ -107,3 +107,5 @@ Chainlink 与两个资产盘口是新增配对的依赖。Binance 只按实际�
 `research/research_probability_direct.py` 按原始 Parquet 必要列准备紧凑目标采样，复用公共参考、终局及深度数量状态，再按四折和最后开发窗做75次顺序拟合、冻结评价。准确查询、公式、候选、资源与一次运行命令见[方法及配置](docs/research/complementary-pair-probability-direct.md)。三次实际十八日prepare均已失败：身份前态、TWAP跨单元SQL和公共深度拼接状态分别保留独立记录；study均未启动。[第三次失败及窄范围公共修复](docs/research/complementary-pair-probability-run-20261007-repair2.md)保存准确运行身份、目录分母、深度边界及验证。修复不恢复所有未持久化reset；正式参数与完整经营比较仍未完成。
 
 依[#318](https://github.com/slowchillchill/btc-updown-marketmaker/issues/318)，当前V2删除两个额外overfill字段；旧字段、旧接续与明确candidate_v1材料须独立迁移，旧历史材料保留。未决金额单的原时点估计随已发送或效果未知请求登记，不随更乐观盘口释放；利润只占预计新增配平亏损。此修复不提供新盈利证据，也不授权重跑旧研究。
+
+受控研究候选 `candidate_v4_public_c0_c1` 的完整配置、公共 F0—F8 映射、200ms 端点规则及正式库／CLI 入口见[公共统计 C0/C1 候选说明](docs/strategies/complementary-pair-public-candidates.md)。它不改变旧 `candidate_v3` 的身份和实现路径。

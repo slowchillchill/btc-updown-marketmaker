@@ -67,6 +67,7 @@ pub fn build(root: &Path, trade_count: u64) -> ContinuousPublicExportConfigV1 {
             momentum_windows_ms: vec![250, 500, 1000, 2000, 5000],
             spot_variance_windows_ms: vec![1000],
             terminal_integral_windows_ms: vec![1000],
+            blb_lookback_windows_ms: vec![],
         },
         public_delivery_delay_ms: DelayScheduleV1::Fixed(100),
         observe_after_groups: true,
@@ -126,6 +127,7 @@ pub fn initialized(root: &Path) -> ContinuousPublicExportConfigV1 {
             momentum_windows_ms: vec![1000],
             spot_variance_windows_ms: vec![1000],
             terminal_integral_windows_ms: vec![1000],
+            blb_lookback_windows_ms: vec![],
         },
         public_delivery_delay_ms: DelayScheduleV1::Fixed(100),
         observe_after_groups: true,
@@ -198,7 +200,7 @@ pub fn append_reference_inputs_at(root: &Path, base: i64) {
         4,
     );
 }
-fn finish_source(
+pub(crate) fn finish_source(
     root: &Path,
     mut writer: TypedParquetSegmentWriter,
     source: &str,
