@@ -421,7 +421,6 @@ fn visit_group_frames(
     sealed_rules: std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
     mut visit: impl FnMut(&str, usize, Value) -> Result<(), backtest::MaterialError>,
 ) -> Result<(), backtest::MaterialError> {
-    use crate::encoding::*;
     for day in &consumer.days {
         let queries = day
             .candidates
@@ -455,35 +454,8 @@ fn visit_group_frames(
                     if serde_json::to_value(group)? != *expected {
                         return Err("公共再生组与原帧可信前缀不同".into());
                     }
-                    let started = row["processing_start_utc_ms"]
-                        .as_i64()
-                        .ok_or("实际开始缺失")?;
-                    let mut markets = Vec::new();
-                    for (i, id) in row["market_ids"]
-                        .as_array()
-                        .ok_or("市场顺序缺失")?
-                        .iter()
-                        .enumerate()
-                    {
-                        let f = frames
-                            .iter()
-                            .find(|f| {
-                                serde_json::to_value(&f.observation.market.condition_id)
-                                    .ok()
-                                    .as_ref()
-                                    == Some(id)
-                            })
-                            .ok_or("公共再生缺原可见市场")?;
-                        let mut projected = row["market_private"][i].clone();
-                        projected["public"] = market_projection(f, started);
-                        markets.push(tokens(&projected, &consumer.worker.encoding));
-                    }
-                    let mut payload = row.clone();
-                    payload["global"] = serde_json::to_value(tokens(
-                        &row["global_private"],
-                        &consumer.worker.encoding,
-                    ))?;
-                    payload["markets"] = serde_json::to_value(markets)?;
+                    let (payload, _) =
+                        compose_trajectory_frame(&row, frames, &consumer.worker.encoding, false)?;
                     visit(key, index, payload)?;
                 }
                 Ok(())
@@ -1038,3 +1010,51 @@ mod learning_tests;
 #[cfg(test)]
 #[path = "rule_startup_tests.rs"]
 mod rule_startup_tests;
+
+/// 同一轨迹私有投影与正式公开帧组合；生产重算和诊断共用。
+pub(crate) fn compose_trajectory_frame(
+    row: &Value,
+    frames: &[shared_run::FrozenMarketReadV1],
+    encoding: &crate::encoding::EncodingConfig,
+    capture_projection: bool,
+) -> Result<(Value, Value), backtest::MaterialError> {
+    use crate::encoding::*;
+    let started = row["processing_start_utc_ms"]
+        .as_i64()
+        .ok_or("实际开始缺失")?;
+    let mut markets = Vec::new();
+    let mut projections = Vec::new();
+    for (i, id) in row["market_ids"]
+        .as_array()
+        .ok_or("市场顺序缺失")?
+        .iter()
+        .enumerate()
+    {
+        let f = frames
+            .iter()
+            .find(|f| {
+                serde_json::to_value(&f.observation.market.condition_id)
+                    .ok()
+                    .as_ref()
+                    == Some(id)
+            })
+            .ok_or("公共再生缺原可见市场")?;
+        let mut projected = row["market_private"][i].clone();
+        projected["public"] = market_projection(f, started);
+        markets.push(tokens(&projected, encoding));
+        if capture_projection {
+            projections.push(projected);
+        }
+    }
+    let mut payload = row.clone();
+    payload["global"] = serde_json::to_value(tokens(&row["global_private"], encoding))?;
+    payload["markets"] = serde_json::to_value(markets)?;
+    Ok((
+        payload,
+        if capture_projection {
+            json!({"global":row["global_private"],"markets":projections})
+        } else {
+            Value::Null
+        },
+    ))
+}
