@@ -28,5 +28,6 @@
   "max_wall_seconds": 300,
   "progress_interval_ms": 2000,
   "stop_file": "outputs/diagnostic.stop",
-  "output_directory": "outputs/new-diagnostic"
+  "output_directory": "outputs/new-diagnostic",
+  "input_pair": "legacy_off_on"
 }

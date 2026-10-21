@@ -683,7 +683,7 @@ async fn run_material<S: StrategyV1>(
     if source.header() != &material.preparation.header {
         return Err(material_failure("描述与公共流头不符".into()));
     }
-    if strategy.uses_source_health() {
+    if strategy.uses_source_health() || strategy.requires_source_progress() {
         source.enable_source_progress();
     }
     source.set_progress(

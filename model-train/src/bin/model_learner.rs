@@ -4,8 +4,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if args.len() != 3 {
         return Err("用法: model_learner print-config|run <配置.json>".into());
     }
-    let config: LearningJobConfig = serde_json::from_slice(&std::fs::read(&args[2])?)?;
+    let mut config: LearningJobConfig = serde_json::from_slice(&std::fs::read(&args[2])?)?;
     if args[1] == "print-config" {
+        config.consumer = model_train::public_input::bind(&config.consumer);
         println!("{}", serde_json::to_string_pretty(&config)?);
         return Ok(());
     }

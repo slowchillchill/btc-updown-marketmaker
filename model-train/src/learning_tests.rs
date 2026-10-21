@@ -4,7 +4,7 @@ use crate::learning_test_fixture as fixture;
 use backtest::*;
 use std::collections::BTreeMap;
 
-fn material(root: &std::path::Path) -> (PublicExportRulesV1, HistoricalDayConfigV1) {
+pub(crate) fn material(root: &std::path::Path) -> (PublicExportRulesV1, HistoricalDayConfigV1) {
     let input = root.join("input");
     std::fs::create_dir(&input).unwrap();
     let export = fixture::build(&input, 0);
@@ -95,8 +95,12 @@ fn heterogeneous_statistics_and_delivery_replay_use_own_identity_and_equal_input
             query_times_utc_ms: vec![base + 2500, base + 4100],
             export_new_trades: false,
         };
-        visit_continuous_public_frames_v1(
+        let sealed=crate::open_consumer_rules(&crate::ConsumerRunConfig {rules:rules.clone().into(),days:vec![day.clone()],parallel_dates:1,worker:serde_json::from_value(json!({"python":"unused","script":"unused","model":"unused","device":"cpu","torch_threads":1,"max_batch":1,"encoding":{"field_buckets":4096,"category_buckets":4096}})).unwrap()}).unwrap().rules;
+        visit_continuous_public_frames_with_requirements_v1(
             &config,
+            sealed,
+            crate::public_input::OBSERVATION,
+            crate::public_input::SOURCE_PROGRESS,
             |at, group, frames| {
                 assert_eq!(
                     received[&(key.to_owned(), at)],
@@ -111,6 +115,7 @@ fn heterogeneous_statistics_and_delivery_replay_use_own_identity_and_equal_input
                 Ok(())
             },
             |_| {},
+            || false,
         )
         .unwrap();
     }
@@ -156,7 +161,7 @@ pub(super) fn collection(root: &std::path::Path, mixed: bool) -> (LearningJobCon
         drop(crate::strategy::open_collection_trajectory(&path).unwrap());
         let count = usize::from(mixed && i == 1);
         if count > 0 {
-            let frame = json!({"version":"learning-trajectory-v1","processing_start_utc_ms":fixture::common::BASE+2500,"old_value":0.5,"old_joint_logp":-0.3,"k_exact":R::zero().public(),"market_frame":{"market_cutoff":{"decision_time":{"logical_time_utc_ms":fixture::common::BASE+2500},"receipt":{"group":group}}}});
+            let frame = json!({"version":crate::public_input::TRAJECTORY_VERSION,"processing_start_utc_ms":fixture::common::BASE+2500,"old_value":0.5,"old_joint_logp":-0.3,"k_exact":R::zero().public(),"market_frame":{"market_cutoff":{"decision_time":{"logical_time_utc_ms":fixture::common::BASE+2500},"receipt":{"group":group}}}});
             std::fs::write(&path, format!("{frame}\n")).unwrap();
         }
         c.strategy.effective_parameters["model_consumer"]["learning"] =

@@ -21,3 +21,5 @@ pub use rules::{
 };
 
 pub mod diagnostic;
+
+pub mod public_input;

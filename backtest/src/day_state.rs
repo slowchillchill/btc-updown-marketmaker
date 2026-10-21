@@ -29,6 +29,7 @@ pub(crate) struct CandidateProgressV1 {
     pub active: bool,
     pub waiting: bool,
     pub source_health: Option<bool>,
+    pub source_progress: Option<bool>,
     pub requirements: Option<contracts::PublicObservationRequirementsV1>,
     pub runtime_started: bool,
 }
@@ -84,6 +85,7 @@ impl DayHubV1 {
                         active: true,
                         waiting: false,
                         source_health: None,
+                        source_progress: None,
                         requirements: None,
                         runtime_started: false,
                     })
@@ -803,6 +805,7 @@ mod tests {
                     active: true,
                     waiting: false,
                     source_health: None,
+                    source_progress: None,
                     requirements: None,
                     runtime_started: false,
                 });

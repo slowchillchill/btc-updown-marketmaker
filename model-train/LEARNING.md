@@ -153,3 +153,22 @@ v1—v4未独立保存历史Rust未提交源码全集或patch；源集合hash不
 Python核心比较及100个Pi/12个H的数值核对只证明各自窄范围，不能替代完整历史源码绑定或最终版本运行成本。
 v4目录旧artifact-hashes.json是复制旧清单，保留原件；更正清单区分原会话当时已打印的程序/worker/engine/model哈希与当前保留文件哈希。
 当时suite没有独立打印执行前哈希，不以当前hash反写历史。诊断小源码与能找回的原命令独立保留；当时未打印的rlib展开路径/哈希保持未知。
+
+## 公共输入与旧身份
+
+当前B的公共需求由 `public_input` 唯一声明：FULL数量，`source_progress=false`。
+消费者的策略需求与正式学习公共再生复用这一声明。未选择完整来源进展集合不等于删除F9：
+F0的quality、direct_anchors、缺失及证据时间和统计coverage/source时间仍进入原编码。
+显式来源进展需求通过独立 `requires_source_progress` 与observer/健康消费者需求合并，
+不启用B健康调度，也不让统计FULL覆盖独立证据请求。
+
+生效参数记录 `model_public_input`，沿既有consumer/group绑定比较保持语义身份。
+正式轨迹行、学习读取、group与checkpoint采用 `learning-trajectory-v2`，表示再生按同一B需求。
+原v1完成组和轨迹不静默升级；原完成记录binding不符时沿原比较拒绝，旧v1行在正式读取时拒绝。
+Python仍在恢复模型/优化器状态之前核对原checkpoint的trajectory_version；更换group id不能绕过此比较。
+已消费同id仍比较完整group，不重复消费。旧v1仅允许显式只读诊断引用；需要重新学习时应另建
+当前语义的采集组和checkpoint目录，不将旧学习checkpoint重新标为v2。
+`confirmed-finite-j-v1`、`b-public-token-log1p-v1`和模型格式均未改变。
+
+本次工程只通过合成Parquet/stdlib替身核对采集请求与生产再生，未执行模型初始化、前反向或更新。
+实际数值及最早call25/26重验仍需独立签发；CPU输入一致不等于CUDA/完整PPO验收。

@@ -199,7 +199,7 @@ impl ModelConsumer {
         if let Some(file) = trajectory.as_mut() {
             serde_json::to_writer(
                 &mut *file,
-                &json!({"record_type":"rules_binding","binding":rule_binding}),
+                &json!({"record_type":"rules_binding","binding":rule_binding,"model_public_input":crate::public_input::contract()}),
             )
             .map_err(|e| e.to_string())?;
             file.write_all(b"\n").map_err(|e| e.to_string())?;
@@ -232,6 +232,12 @@ impl ModelConsumer {
     }
 }
 impl StrategyV1 for ModelConsumer {
+    fn observation_requirements(&self) -> PublicObservationRequirementsV1 {
+        crate::public_input::OBSERVATION
+    }
+    fn requires_source_progress(&self) -> bool {
+        crate::public_input::SOURCE_PROGRESS
+    }
     type Error = String;
     type Diagnostics = ModelDiagnostics;
     fn active_until_utc_ms(&self) -> Option<i64> {
@@ -564,7 +570,7 @@ impl StrategyV1 for ModelConsumer {
                 self.last_confirmed = Some(economic.confirmed.clone());
                 self.last_qualified = economic.qualified_rebates.clone();
             }
-            let record = json!({"version":"learning-trajectory-v1","rules_identity":self.rules.file_sha256(),"group":c.group_id,"account":self.config.account_key,"call":self.call,"processing_start_utc_ms":at,"market_frame":input.market_frame_timing,"account_cutoff":input.action_before.cutoff(),"market_ids":input.markets.iter().map(|m|m.observation.market.condition_id.clone()).collect::<Vec<_>>(),"global_private":global_projection,"market_private":private_markets,"options":options,"selected_option":selected,"rpc":self.rpc.borrow().clone(),"old_joint_logp":logp,"old_value":begin["value"],"behavior":begin["behavior"],"k_exact":crate::learning::confirmed_k(economic)?.public(),"economic":{"confirmed_revision":self.confirmed_revision,"obligations":economic.obligations,"pending_noe_record_count":economic.pending_noe_record_count},"actual_intents":intents,"special":{"frame_age_ms":time["frame_age_ms"],"eligible_record_threshold_ms":100,"repair_evidence":repair_evidence,"action":action,"numeric_special_reward":false}});
+            let record = json!({"version":crate::public_input::TRAJECTORY_VERSION,"rules_identity":self.rules.file_sha256(),"group":c.group_id,"account":self.config.account_key,"call":self.call,"processing_start_utc_ms":at,"market_frame":input.market_frame_timing,"account_cutoff":input.action_before.cutoff(),"market_ids":input.markets.iter().map(|m|m.observation.market.condition_id.clone()).collect::<Vec<_>>(),"global_private":global_projection,"market_private":private_markets,"options":options,"selected_option":selected,"rpc":self.rpc.borrow().clone(),"old_joint_logp":logp,"old_value":begin["value"],"behavior":begin["behavior"],"k_exact":crate::learning::confirmed_k(economic)?.public(),"economic":{"confirmed_revision":self.confirmed_revision,"obligations":economic.obligations,"pending_noe_record_count":economic.pending_noe_record_count},"actual_intents":intents,"special":{"frame_age_ms":time["frame_age_ms"],"eligible_record_threshold_ms":100,"repair_evidence":repair_evidence,"action":action,"numeric_special_reward":false}});
             let file = self.trajectory.as_mut().unwrap();
             serde_json::to_writer(&mut *file, &record).map_err(|e| e.to_string())?;
             file.write_all(b"\n").map_err(|e| e.to_string())?;

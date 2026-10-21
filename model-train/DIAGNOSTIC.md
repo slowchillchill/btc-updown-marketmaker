@@ -29,7 +29,13 @@ RECOVERY 最终规则，不接受 CURRENT_QUERY 或以更晚时间替代 Histori
 
 ## 公共输入与停止
 
-本反例固定比较 `FULL/source_progress=false` 与 `FULL/source_progress=true`。
+`input_pair=legacy_off_on`（旧配置默认）保留原反例：比较 `FULL/source_progress=false` 与
+`FULL/source_progress=true`。这是历史缺陷对照，不能作为修后生产再生的验收。
+`input_pair=current_consumer_replay` 使用当前B需求重建采集侧，并让第二路直接调用正式
+学习公共再生 `visit_day_frames_controlled`。当前两路均为 FULL/off，报告使用
+`current_collection_off` / `production_learning_replay_off`，不将第二路标为on。
+`examples/diagnostic-current-consumer.json` 给出完整占位配置。此模式若投影或token不同就保留未知结果，
+不执行模型分支。token相同时只运行26推理+26teacher，最多52次，不建立第三共同输入控制。
 新窄 typed visitor 接受显式需求与停止回调，旧 visitor/compact 入口继续原 FULL/on 默认行为。
 没有通过 observer 或策略健康开关改变生产调度。两路各用一条原公共流，保留原 scope、
 合法初始化和规则来源；没有重新经营账户。
@@ -82,4 +88,9 @@ Service.begin 仍真实采样。诊断比较原冻结 NoTrade 索引在完整原
 工程阶段只用合法合成 Parquet 与 stdlib 协议替身，真实 Python 仅作 AST/静态审查。
 这验证公共需求、输入装配、顺序/组错误、独立分支协议和预算停止；不证明真实 CUDA 数值一致。
 初始模型、依赖、程序/脚本版本、完整配置及准确命令在独立交付包中绑定。
-后继最多两公共流、26+26+可选26前向、零反向/更新/提交的作业必须另获签发。
+旧模式后继最多两公共流、26+26+可选26前向；当前需求重验最多26+26=52次。
+两者均零反向/更新/提交，必须分别另获准确签发，既有作业预算不能沿用。
+
+原 `learning-trajectory-v1` 在此仅作为不变的只读反例引用。当前正式采集、读取、组和checkpoint
+使用 `learning-trajectory-v2`，不把原v1记录改名或迁入新事务；新事务需要独立完成采集身份。
+模型格式、编码版本和经济目标版本保持原值。

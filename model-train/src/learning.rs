@@ -270,7 +270,7 @@ impl Trajectory {
                 continue;
             }
             let typed: StoredFrame = serde_json::from_value(value)?;
-            if typed.version != "learning-trajectory-v1" {
+            if typed.version != crate::public_input::TRAJECTORY_VERSION {
                 return Err("未知轨迹版本".into());
             }
             let _ = &typed.market_frame.market_cutoff.receipt.group;
@@ -318,7 +318,21 @@ impl Trajectory {
     }
 }
 /// 与原日供料相同：只有统计配置及公共交付时序相等的账户共享一次再生。
-fn visit_day_frames(
+pub(crate) fn visit_day_frames(
+    rules: &backtest::PublicExportRulesV1,
+    sealed_rules: Option<std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>>,
+    day: &backtest::HistoricalDayConfigV1,
+    queries: &std::collections::BTreeMap<String, std::collections::BTreeSet<i64>>,
+    visit: impl FnMut(
+        &str,
+        i64,
+        &PublicGroupReferenceV1,
+        &[shared_run::FrozenMarketReadV1],
+    ) -> Result<(), backtest::MaterialError>,
+) -> Result<usize, backtest::MaterialError> {
+    visit_day_frames_controlled(rules, sealed_rules, day, queries, visit, || false, |_| {})
+}
+pub(crate) fn visit_day_frames_controlled(
     rules: &backtest::PublicExportRulesV1,
     sealed_rules: Option<std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>>,
     day: &backtest::HistoricalDayConfigV1,
@@ -329,6 +343,8 @@ fn visit_day_frames(
         &PublicGroupReferenceV1,
         &[shared_run::FrozenMarketReadV1],
     ) -> Result<(), backtest::MaterialError>,
+    should_stop: impl Fn() -> bool + Sync,
+    extra_progress: impl Fn(&backtest::ContinuousPublicExportProgressV1) + Sync,
 ) -> Result<usize, backtest::MaterialError> {
     use backtest::*;
     let mut groups: Vec<Vec<usize>> = Vec::new();
@@ -388,6 +404,7 @@ fn visit_day_frames(
                 Ok(())
             };
         let progress = |p: &ContinuousPublicExportProgressV1| {
+            extra_progress(p);
             if p.stage == "public_application"
                 && progress_every > 0
                 && p.applied_groups.is_multiple_of(progress_every)
@@ -398,19 +415,25 @@ fn visit_day_frames(
                 );
             }
         };
-        match &sealed_rules {
-            Some(rules) => {
-                visit_continuous_public_frames_with_rules_v1(
-                    &config,
-                    rules.clone(),
-                    sink,
-                    progress,
-                )?;
-            }
-            None => {
-                visit_continuous_public_frames_v1(&config, sink, progress)?;
-            }
-        }
+        let rules = match &sealed_rules {
+            Some(rules) => rules.clone(),
+            None => sim_system::platform_rules::load_historical_process_snapshot_v3(
+                sim_system::platform_rules::HistoricalProcessSnapshotRequestV1 {
+                    snapshot_path: config.rules.snapshot_path.clone(),
+                    expected_file_sha256: config.rules.expected_file_sha256.clone(),
+                    replay_causal_start_utc_ms: day.preparation.scope.received_start_utc_ms,
+                },
+            )?,
+        };
+        visit_continuous_public_frames_with_requirements_v1(
+            &config,
+            rules,
+            crate::public_input::OBSERVATION,
+            crate::public_input::SOURCE_PROGRESS,
+            sink,
+            progress,
+            &should_stop,
+        )?;
     }
     Ok(streams)
 }
@@ -572,6 +595,9 @@ fn run_learning_job_with_opener(
         &crate::ConsumerRunConfig,
     ) -> Result<crate::rules::OpenedRulesV1, backtest::MaterialError>,
 ) -> Result<Value, backtest::MaterialError> {
+    let mut current = config.clone();
+    current.consumer = crate::public_input::bind(&current.consumer);
+    let config = &current;
     let started = std::time::Instant::now();
     let opened = open(&config.consumer)?;
     let mode = opened.opened_via;
@@ -605,7 +631,7 @@ fn run_learning_job_opened(
     if let Some(ends) = &config.active_end_by_day_utc_ms {
         binding["active_end_by_day_utc_ms"] = json!(ends);
     }
-    let group = json!({"id":config.group_id,"binding":binding,"target_version":"confirmed-finite-j-v1","trajectory_version":"learning-trajectory-v1"});
+    let group = json!({"id":config.group_id,"binding":binding,"target_version":"confirmed-finite-j-v1","trajectory_version":crate::public_input::TRAJECTORY_VERSION});
     for (di, day) in config.consumer.days.iter().enumerate() {
         for c in &day.candidates {
             if c.session.caller_role != SimCallerRoleV1::ModelTrain
@@ -1058,3 +1084,7 @@ pub(crate) fn compose_trajectory_frame(
         },
     ))
 }
+
+#[cfg(test)]
+#[path = "public_input_tests.rs"]
+pub(crate) mod public_input_tests;

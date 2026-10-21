@@ -384,6 +384,8 @@ where
                             let mut strategy = factory(candidate)?;
                             {
                                 let mut buffer = hub.0.0.lock().unwrap();
+                                buffer.candidates[index].source_progress =
+                                    Some(strategy.requires_source_progress());
                                 buffer.candidates[index].source_health =
                                     Some(strategy.uses_source_health());
                                 buffer.candidates[index].requirements =
@@ -468,8 +470,8 @@ where
                     if day.progress_interval_seconds>0 && progress.elapsed()>=Duration::from_secs(day.progress_interval_seconds) {
                         eprintln!("日作业: phase={}, inputs={count}, active_candidates={}, retained_public_groups={}, retained_hidden_buckets={}, elapsed_seconds={}, total_inputs=unknown",if ended {"consuming"} else {"producing"},buffer.candidates.iter().filter(|c|c.active).count(),buffer.public.len(),buffer.hidden.len(),started.elapsed().as_secs());progress=Instant::now();
                     }
-                    if buffer.candidates.iter().any(|c|c.active&&(!c.runtime_started||c.source_health.is_none()||c.requirements.is_none())) {let _=measure_stage!(stages, ProducerWaitStartupOrCompletion, hub.0.1.control.wait_timeout(buffer,Duration::from_millis(20))).unwrap();continue;}
-                    if options.public_observer.is_some() || buffer.candidates.iter().any(|c|c.source_health==Some(true)) {producer.core.enable_source_progress();}
+                    if buffer.candidates.iter().any(|c|c.active&&(!c.runtime_started||c.source_health.is_none()||c.source_progress.is_none()||c.requirements.is_none())) {let _=measure_stage!(stages, ProducerWaitStartupOrCompletion, hub.0.1.control.wait_timeout(buffer,Duration::from_millis(20))).unwrap();continue;}
+                    if options.public_observer.is_some() || buffer.candidates.iter().any(|c|c.source_health==Some(true)||c.source_progress==Some(true)) {producer.core.enable_source_progress();}
                     if count == 0 {
                         producer.core.set_observation_requirements(contracts::PublicObservationRequirementsV1 {
                             binance_depth_quantities: options.public_observer.as_ref().is_some_and(|o| o.requirements().binance_depth_quantities) || buffer.candidates.iter().filter(|c|c.active).any(|c|c.requirements.is_some_and(|r| r.binance_depth_quantities)),

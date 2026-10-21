@@ -267,6 +267,10 @@ pub trait StrategyV1 {
     fn observation_requirements(&self) -> contracts::PublicObservationRequirementsV1 {
         contracts::PublicObservationRequirementsV1::FULL
     }
+    /// 只请求显式来源进展证据，不启用健康调度；与observer/健康消费者需求取并集。
+    fn requires_source_progress(&self) -> bool {
+        false
+    }
     /// 默认不选用；旧调用方继续使用原回调、时序与组节奏。
     fn uses_source_health(&self) -> bool {
         false

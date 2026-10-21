@@ -61,6 +61,7 @@ fn prepared(
     config.consumer.worker.script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/rule-protocol-worker.py");
     config.consumer.worker.model = control;
+    config.consumer = crate::public_input::bind(&config.consumer);
     (config, source, log)
 }
 fn injected(
@@ -115,6 +116,7 @@ fn rules_precede_worker_and_sim_completed_collection_and_consumed_recovery_do_no
             serde_json::from_str(std::fs::read_to_string(trace).unwrap().trim()).unwrap();
         assert_eq!(v["record_type"], "rules_binding");
         assert_eq!(v["binding"], json!(binding));
+        assert_eq!(v["model_public_input"], crate::public_input::contract());
     }
     let trace_bytes = (0..2)
         .map(|ai| {

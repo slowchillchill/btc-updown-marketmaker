@@ -33,9 +33,19 @@ impl DiagnosticFile {
         Ok(bytes)
     }
 }
+/// 旧反例对照保留；修后重验明确进入生产学习再生路径，不重标旧事务。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticInputPair {
+    #[default]
+    LegacyOffOn,
+    CurrentConsumerReplay,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticConfig {
+    #[serde(default)]
+    pub input_pair: DiagnosticInputPair,
     pub completed_collection: DiagnosticFile,
     pub trajectory: DiagnosticFile,
     pub worker: WorkerConfig,
@@ -142,11 +152,18 @@ fn rebuild(
     consumer: &ConsumerRunConfig,
     rows: &[Value],
     rules: Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
-    source_progress: bool,
+    learning_side: bool,
     budget: &Budget<'_>,
     report: &mut Value,
 ) -> Result<Vec<Value>, MaterialError> {
     budget.check()?;
+    let production_replay =
+        learning_side && config.input_pair == DiagnosticInputPair::CurrentConsumerReplay;
+    let source_progress = if config.input_pair == DiagnosticInputPair::LegacyOffOn {
+        learning_side
+    } else {
+        crate::public_input::SOURCE_PROGRESS
+    };
     let day = consumer.days.get(config.day_index).ok_or("日索引不存在")?;
     let candidate = day
         .candidates
@@ -189,51 +206,80 @@ fn rebuild(
     report["public_streams"]
         .as_array_mut()
         .unwrap()
-        .push(json!({"source_progress":source_progress,"status":"started"}));
+        .push(json!({"source_progress":source_progress,"observation":crate::public_input::OBSERVATION,"production_learning_replay":production_replay,"status":"started"}));
     save(&config.output_directory.join("progress.json"), report)?;
     let progress_at = std::sync::Mutex::new(Instant::now());
-    let state = visit_continuous_public_frames_with_requirements_v1(
-        &public,
-        rules,
-        PublicObservationRequirementsV1::FULL,
-        source_progress,
-        |at, group, frames| {
-            budget.check()?;
-            for (i, row) in rows.iter().enumerate().filter(|(i, _)| queries[*i] == at) {
-                let expected = &row["market_frame"]["market_cutoff"]["receipt"]["group"];
-                let actual = serde_json::to_value(group)?;
-                let (frame, projection) =
-                    compose_trajectory_frame(row, &frames, &config.worker.encoding, true)?;
-                output[i] = Some(
-                    json!({"call":row["call"],"expected_group":expected,"actual_group":actual,"group_matches":expected==&actual,"projection":projection,"frame":frame}),
-                );
-            }
-            if output.iter().all(Option::is_some) {
-                prefix_complete.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            Ok(())
-        },
-        |p| {
-            let mut previous = progress_at.lock().unwrap();
-            if previous.elapsed() >= Duration::from_millis(config.progress_interval_ms) {
-                eprintln!(
-                    "诊断公共流 source_progress={source_progress} 输入={} 组={} 总耗时={:.3}s",
-                    p.processed_inputs,
-                    p.applied_groups,
-                    budget.started.elapsed().as_secs_f64()
-                );
-                let _ = save(
-                    &config.output_directory.join("public-progress.json"),
-                    &json!({"stream":stream_index,"source_progress":source_progress,"progress":p,"elapsed_seconds":budget.started.elapsed().as_secs_f64()}),
-                );
-                *previous = Instant::now();
-            }
-        },
-        || budget.stopped() || prefix_complete.load(std::sync::atomic::Ordering::Relaxed),
-    )?;
+    let mut deliver = |at,
+                       group: &PublicGroupReferenceV1,
+                       frames: &[shared_run::FrozenMarketReadV1]| {
+        budget.check()?;
+        for (i, row) in rows.iter().enumerate().filter(|(i, _)| queries[*i] == at) {
+            let expected = &row["market_frame"]["market_cutoff"]["receipt"]["group"];
+            let actual = serde_json::to_value(group)?;
+            let (frame, projection) =
+                compose_trajectory_frame(row, frames, &config.worker.encoding, true)?;
+            output[i] = Some(
+                json!({"call":row["call"],"expected_group":expected,"actual_group":actual,"group_matches":expected==&actual,"projection":projection,"frame":frame}),
+            );
+        }
+        if output.iter().all(Option::is_some) {
+            prefix_complete.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    };
+    let notify = |p: &ContinuousPublicExportProgressV1| {
+        let mut previous = progress_at.lock().unwrap();
+        if previous.elapsed() >= Duration::from_millis(config.progress_interval_ms) {
+            eprintln!(
+                "诊断公共流 source_progress={source_progress} 输入={} 组={} 总耗时={:.3}s",
+                p.processed_inputs,
+                p.applied_groups,
+                budget.started.elapsed().as_secs_f64()
+            );
+            let _ = save(
+                &config.output_directory.join("public-progress.json"),
+                &json!({"stream":stream_index,"source_progress":source_progress,"progress":p,"elapsed_seconds":budget.started.elapsed().as_secs_f64()}),
+            );
+            *previous = Instant::now();
+        }
+    };
+    let stop = || budget.stopped() || prefix_complete.load(std::sync::atomic::Ordering::Relaxed);
+    let state = if production_replay {
+        let mut day = day.clone();
+        day.candidates = vec![candidate.clone()];
+        let account: crate::ConsumerConfig = serde_json::from_value(
+            candidate.strategy.effective_parameters["model_consumer"].clone(),
+        )?;
+        let queries = [(account.account_key, queries.iter().copied().collect())]
+            .into_iter()
+            .collect();
+        let last = std::sync::Mutex::new(ContinuousPublicExportProgressV1::default());
+        crate::learning::visit_day_frames_controlled(
+            &binding.public_rules(),
+            Some(rules),
+            &day,
+            &queries,
+            |_, at, group, frames| deliver(at, group, frames),
+            stop,
+            |p| {
+                *last.lock().unwrap() = p.clone();
+                notify(p);
+            },
+        )?;
+        last.into_inner().unwrap()
+    } else {
+        visit_continuous_public_frames_with_requirements_v1(
+            &public,
+            rules,
+            crate::public_input::OBSERVATION,
+            source_progress,
+            |at, g, f| deliver(at, g, &f),
+            notify,
+            stop,
+        )?
+    };
     let complete = prefix_complete.load(std::sync::atomic::Ordering::Relaxed);
-    report["public_streams"][stream_index] =
-        json!({"source_progress":source_progress,"state":state,"planned_prefix_complete":complete});
+    report["public_streams"][stream_index] = json!({"source_progress":source_progress,"observation":crate::public_input::OBSERVATION,"production_learning_replay":production_replay,"state":state,"planned_prefix_complete":complete});
     if budget.stopped() || (state.stopped && !complete) {
         return Err("公共再生停止，未完成必要查询；不运行模型".into());
     }
@@ -552,6 +598,12 @@ pub fn run_diagnostic(
             &mut report,
         )?;
         let right = rebuild(config, &consumer, &rows, rules, true, &budget, &mut report)?;
+        let (left_label, right_label) = match config.input_pair {
+            DiagnosticInputPair::LegacyOffOn => ("source_progress_off", "source_progress_on"),
+            DiagnosticInputPair::CurrentConsumerReplay => {
+                ("current_collection_off", "production_learning_replay_off")
+            }
+        };
         let mut shared = Vec::new();
         let mut alternate = Vec::new();
         let mut input_bytes = 0usize;
@@ -562,7 +614,10 @@ pub fn run_diagnostic(
             if report["first_original_group_mismatch"].is_null()
                 && (a["group_matches"] != true || b["group_matches"] != true)
             {
-                report["first_original_group_mismatch"] = json!({"call":i+1,"original":a["expected_group"],"source_progress_off":a["actual_group"],"source_progress_on":b["actual_group"]});
+                let mut mismatch = json!({"call":i+1,"original":a["expected_group"]});
+                mismatch[left_label] = a["actual_group"].clone();
+                mismatch[right_label] = b["actual_group"].clone();
+                report["first_original_group_mismatch"] = mismatch;
             }
             if report["first_input_difference"].is_null()
                 && let Some(d) = first_difference(&a, &b, "input")
@@ -593,10 +648,13 @@ pub fn run_diagnostic(
                 }
             }
             if i + 1 >= 24 {
+                let mut evidence = json!({"call":i+1});
+                evidence[left_label] = a.clone();
+                evidence[right_label] = b.clone();
                 report["input_evidence"]
                     .as_array_mut()
                     .unwrap()
-                    .push(json!({"call":i+1,"source_progress_off":a,"source_progress_on":b}));
+                    .push(evidence);
             }
             let mut row = rows[i].clone();
             row["sampling_seed"] = json!(account.sampling_seed);
@@ -606,16 +664,25 @@ pub fn run_diagnostic(
             shared.push(x);
             alternate.push(y);
         }
+        report["model_public_input"] = json!({"contract":crate::public_input::contract(),"mode":config.input_pair,"legacy_reference":"原v1轨迹只读反例，不是v2学习事务恢复"});
         report["input_memory"] = json!({"unique_serialized_bytes":input_bytes,"shared_components":shared_components,"scope":"必要Value结构驻留；字节为唯一payload的JSON大小，不等于allocator RSS"});
         if !valid {
             report["status"] = json!("input_identity_mismatch_model_unknown");
             return Ok(());
         }
+        if config.input_pair == DiagnosticInputPair::CurrentConsumerReplay
+            && (!report["first_projection_difference"].is_null()
+                || !report["first_token_difference"].is_null())
+        {
+            report["status"] = json!("production_input_mismatch_model_unknown");
+            return Ok(());
+        }
         if mode == DiagnosticMode::Model {
-            let differs = shared
-                .iter()
-                .zip(&alternate)
-                .any(|(a, b)| a.global != b.global || a.markets != b.markets);
+            let differs = config.input_pair == DiagnosticInputPair::LegacyOffOn
+                && shared
+                    .iter()
+                    .zip(&alternate)
+                    .any(|(a, b)| a.global != b.global || a.markets != b.markets);
             model_branches(config, &shared, &alternate, differs, &budget, &mut report)?;
         }
         Ok(())
@@ -683,6 +750,7 @@ mod tests {
             sha256: "0".repeat(64),
         };
         DiagnosticConfig {
+            input_pair: DiagnosticInputPair::LegacyOffOn,
             completed_collection: missing.clone(),
             trajectory: missing,
             worker: WorkerConfig {
@@ -709,6 +777,50 @@ mod tests {
             stop_file: temp.join("stop"),
             output_directory: temp.join("output"),
         }
+    }
+    #[test]
+    fn current_profile_reuses_actual_production_learning_replay_and_labels_both_off() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("input");
+        fs::create_dir(&input).unwrap();
+        let (consumer, rules, mut rows, _) =
+            crate::learning::public_input_tests::collect(&input, false);
+        rows.truncate(26);
+        let binding = crate::FrozenRuleBindingV1::from_sealed(&rules, rules.access_mode());
+        let consumer = crate::rules::bind_consumer(&consumer, &binding);
+        let mut c = config(temp.path());
+        c.input_pair = DiagnosticInputPair::CurrentConsumerReplay;
+        c.through_call = 26;
+        c.max_forwards = 52;
+        fs::create_dir(&c.output_directory).unwrap();
+        let budget = Budget {
+            config: &c,
+            started: Instant::now(),
+        };
+        let mut report = json!({"public_streams":[],"forwards_started":0});
+        let left = rebuild(
+            &c,
+            &consumer,
+            &rows,
+            rules.clone(),
+            false,
+            &budget,
+            &mut report,
+        )
+        .unwrap();
+        let right = rebuild(&c, &consumer, &rows, rules, true, &budget, &mut report).unwrap();
+        assert_eq!(left, right);
+        assert_eq!(report["public_streams"][0]["source_progress"], false);
+        assert_eq!(report["public_streams"][1]["source_progress"], false);
+        assert_eq!(
+            report["public_streams"][0]["production_learning_replay"],
+            false
+        );
+        assert_eq!(
+            report["public_streams"][1]["production_learning_replay"],
+            true
+        );
+        assert_eq!(report["forwards_started"], 0);
     }
     #[test]
     fn no_torch_protocol_three_independent_branches_and_limit_preserve_in_flight() {
