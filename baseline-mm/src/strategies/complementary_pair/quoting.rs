@@ -186,6 +186,23 @@ impl ComplementaryPairV1 {
                     .public_entry
                     .as_ref()
                     .is_none_or(PublicEntryEvaluationV4::allows_new_pair);
+                let entry_allowed = entry_allowed
+                    && match self.initial_pair_low_price_veto {
+                        Some(enabled) => {
+                            let evaluation = public_entry::evaluate_low_price(
+                                prices,
+                                diag.pair_entry
+                                    .public_entry
+                                    .as_ref()
+                                    .expect("V5已通过同冻结公共C0"),
+                                enabled,
+                            );
+                            let allowed = evaluation.allows_new_pair();
+                            diag.pair_entry.low_price_entry = Some(evaluation);
+                            allowed
+                        }
+                        None => true,
+                    };
                 if entry_allowed {
                     let legs = vec![
                         (

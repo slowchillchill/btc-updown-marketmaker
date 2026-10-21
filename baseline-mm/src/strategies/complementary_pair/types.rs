@@ -11,6 +11,12 @@ pub struct StrategyContinuityV2 {
     pub unresolved_profit_allocations: BTreeMap<String, ProfitAllocationV2>,
 }
 impl StrategyContinuityV2 {
+    pub fn new_low_price_account() -> Self {
+        Self {
+            rule_version: LOW_PRICE_RULE_VERSION.into(),
+            ..Self::new_account()
+        }
+    }
     pub fn new_public_account() -> Self {
         Self {
             rule_version: PUBLIC_RULE_VERSION.into(),
@@ -211,6 +217,8 @@ impl EntryMarketRangeV1 {
 pub struct PairEntryEvaluationV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_entry: Option<PublicEntryEvaluationV4>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_price_entry: Option<InitialPairLowPriceEvaluationV5>,
     pub market_eligible: bool,
     pub evaluated: bool,
     pub price_reference: Option<InitialPairPriceReferenceV1>,

@@ -11,6 +11,11 @@ fn main() {
     let root = PathBuf::from(args.next().expect("output directory"));
     let count: u64 = args.next().expect("finite points").parse().unwrap();
     assert!(count > 0);
+    let low_price = match args.next().as_deref() {
+        None => false,
+        Some("low-price") => true,
+        _ => panic!("optional mode: low-price"),
+    };
     std::fs::create_dir(&root).unwrap();
     let (mut run, rules) = fixture::common::setup(&root);
     // PM按一个正式源头序列生成，不能把较早时间追加到基础文件未来源序之后。
@@ -57,14 +62,23 @@ fn main() {
         let at = fixture::common::BASE + 2200 + (n * 7000 / count) as i64;
         let id = n + 1;
         for (leg, token) in ["20", "3"].into_iter().enumerate() {
-            pm.push(fixture::common::book(
+            let mut row = fixture::common::book(
                 fixture::common::FIRST,
                 token,
                 at,
                 at,
                 5 + n * 2 + leg as u64,
                 "0.6",
-            ));
+            );
+            if low_price && at >= base + 5000 {
+                if let data_collect::polymarket_orderbook_v3::PolymarketOrderbookV3Event::Book(
+                    book,
+                ) = &mut row.event
+                {
+                    book.bids[0].price = if token == "20" { "0.45" } else { "0.35" }.into();
+                }
+            }
+            pm.push(row);
         }
         depths.push(BinanceDepthSnapshotHourlyRow {
             timestamp_received: at,
@@ -225,7 +239,51 @@ fn main() {
     ))
     .unwrap();
     run.public_statistics = Some(statistics);
-    let candidates=[("c0",include_str!("../../baseline-mm/configs/strategies/complementary_pair/public-c0.json")),("c1",include_str!("../../baseline-mm/configs/strategies/complementary_pair/public-c1.json"))].map(|(name,parameters)| {let mut r=HistoricalPreparedRunConfigV1::from(&run);r.session.account_id=name.into();r.session.session_id=name.into();r.session.run_id=name.into();let out=root.join(name);std::fs::create_dir(&out).unwrap();r.sim_log=out.join("sim.jsonl");r.noe_root=out.join("noe");r.ledger_root=out.join("ledger");r.metadata_path=out.join("metadata.json");r.result_path=out.join("result.json");r.research_evidence_path=Some(out.join("decisions.jsonl"));r.strategy.strategy_rule_version="candidate_v4_public_c0_c1".into();json!({"run":r,"strategy":serde_json::from_str::<serde_json::Value>(parameters).unwrap(),"request_namespace":format!("finite-{name}")})});
+    let (version, configurations) = if low_price {
+        (
+            "candidate_v5_public_low_price",
+            [
+                (
+                    "off",
+                    include_str!(
+                        "../../baseline-mm/configs/strategies/complementary_pair/public-low-price-off.json"
+                    ),
+                ),
+                (
+                    "on",
+                    include_str!(
+                        "../../baseline-mm/configs/strategies/complementary_pair/public-low-price-on.json"
+                    ),
+                ),
+            ],
+        )
+    } else {
+        (
+            "candidate_v4_public_c0_c1",
+            [
+                (
+                    "c0",
+                    include_str!(
+                        "../../baseline-mm/configs/strategies/complementary_pair/public-c0.json"
+                    ),
+                ),
+                (
+                    "c1",
+                    include_str!(
+                        "../../baseline-mm/configs/strategies/complementary_pair/public-c1.json"
+                    ),
+                ),
+            ],
+        )
+    };
+    let candidates=configurations.map(|(name,parameters)| {
+        let mut r=HistoricalPreparedRunConfigV1::from(&run);
+        r.session.account_id=name.into();r.session.session_id=name.into();r.session.run_id=name.into();
+        let out=root.join(name);std::fs::create_dir(&out).unwrap();
+        r.sim_log=out.join("sim.jsonl");r.noe_root=out.join("noe");r.ledger_root=out.join("ledger");r.metadata_path=out.join("metadata.json");r.result_path=out.join("result.json");r.research_evidence_path=Some(out.join("decisions.jsonl"));
+        r.strategy.strategy_rule_version=version.into();
+        json!({"run":r,"strategy":serde_json::from_str::<serde_json::Value>(parameters).unwrap(),"request_namespace":format!("finite-{name}")})
+    });
     let value = json!({"rules":{"snapshot_path":rules.path(),"expected_file_sha256":rules.file_sha256(),"replay_causal_start_utc_ms":run.preparation.scope.received_start_utc_ms},"parallel_dates":1,"days":[{"preparation":run.preparation,"producer_lead_groups":32,"candidates":candidates}]});
     std::fs::write(
         root.join("day.json"),

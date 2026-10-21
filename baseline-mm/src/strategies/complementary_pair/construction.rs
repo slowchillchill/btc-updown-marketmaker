@@ -7,7 +7,7 @@ impl ComplementaryPairV1 {
         request_namespace: String,
         continuity: StrategyContinuityV2,
     ) -> Result<Self, StrategyErrorV1> {
-        Self::build(config, None, rules, request_namespace, continuity)
+        Self::build(config, None, None, rules, request_namespace, continuity)
     }
     pub fn new_public(
         config: ComplementaryPairConfigV4,
@@ -18,6 +18,22 @@ impl ComplementaryPairV1 {
         Self::build(
             config.parameters,
             Some(config.blb_decrease_veto),
+            None,
+            rules,
+            request_namespace,
+            continuity,
+        )
+    }
+    pub fn new_low_price(
+        config: ComplementaryPairConfigV5,
+        rules: Arc<SealedProcessRuleSnapshotV3>,
+        request_namespace: String,
+        continuity: StrategyContinuityV2,
+    ) -> Result<Self, StrategyErrorV1> {
+        Self::build(
+            config.parameters,
+            Some(false),
+            Some(config.initial_pair_low_price_veto),
             rules,
             request_namespace,
             continuity,
@@ -26,6 +42,7 @@ impl ComplementaryPairV1 {
     fn build(
         config: ComplementaryPairConfigV3,
         public_entry_veto: Option<bool>,
+        initial_pair_low_price_veto: Option<bool>,
         rules: Arc<SealedProcessRuleSnapshotV3>,
         request_namespace: String,
         continuity: StrategyContinuityV2,
@@ -91,7 +108,9 @@ impl ComplementaryPairV1 {
                 "统计系数不在其数学定义域".into(),
             ));
         }
-        let version = if public_entry_veto.is_some() {
+        let version = if initial_pair_low_price_veto.is_some() {
+            LOW_PRICE_RULE_VERSION
+        } else if public_entry_veto.is_some() {
             PUBLIC_RULE_VERSION
         } else {
             RULE_VERSION
@@ -106,6 +125,7 @@ impl ComplementaryPairV1 {
         Ok(Self {
             config,
             public_entry_veto,
+            initial_pair_low_price_veto,
             entry_market_range: None,
             rules,
             namespace: request_namespace,
@@ -181,7 +201,17 @@ impl shared_run::CheckpointStrategyV1 for ComplementaryPairV1 {
         reader: &mut dyn std::io::Read,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let saved: ComplementaryPairCheckpointV2 = ciborium::de::from_reader(reader)?;
-        *self = if let Some(blb_decrease_veto) = self.public_entry_veto {
+        *self = if let Some(initial_pair_low_price_veto) = self.initial_pair_low_price_veto {
+            Self::new_low_price(
+                ComplementaryPairConfigV5 {
+                    parameters: self.config.clone(),
+                    initial_pair_low_price_veto,
+                },
+                self.rules.clone(),
+                saved.namespace,
+                saved.continuity,
+            )?
+        } else if let Some(blb_decrease_veto) = self.public_entry_veto {
             Self::new_public(
                 ComplementaryPairConfigV4 {
                     parameters: self.config.clone(),

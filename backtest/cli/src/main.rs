@@ -8,12 +8,14 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 enum StrategyParameters {
+    LowPrice(ComplementaryPairConfigV5),
     Public(ComplementaryPairConfigV4),
     Legacy(ComplementaryPairConfigV3),
 }
 impl StrategyParameters {
     fn version(&self) -> &'static str {
         match self {
+            Self::LowPrice(_) => LOW_PRICE_RULE_VERSION,
             Self::Public(_) => PUBLIC_RULE_VERSION,
             Self::Legacy(_) => RULE_VERSION,
         }
@@ -24,6 +26,12 @@ impl StrategyParameters {
         namespace: String,
     ) -> Result<ComplementaryPairV1, StrategyErrorV1> {
         match self {
+            Self::LowPrice(config) => ComplementaryPairV1::new_low_price(
+                config,
+                rules,
+                namespace,
+                StrategyContinuityV2::new_low_price_account(),
+            ),
             Self::Public(config) => ComplementaryPairV1::new_public(
                 config,
                 rules,
@@ -97,8 +105,11 @@ fn require_current_rule(run: &serde_json::Value) -> Result<(), CommandError> {
         .get("strategy")
         .and_then(|s| s.get("strategy_rule_version"))
     {
-        if !matches!(version.as_str(), Some(RULE_VERSION | PUBLIC_RULE_VERSION)) {
-            return Err(format!("策略版本{version}不能由当前{RULE_VERSION}运行；请生成新版本材料，不能覆盖旧candidate_v1/candidate_v2历史包").into());
+        if !matches!(
+            version.as_str(),
+            Some(RULE_VERSION | PUBLIC_RULE_VERSION | LOW_PRICE_RULE_VERSION)
+        ) {
+            return Err(format!("策略版本{version}不受当前入口支持；请生成准确版本材料，不能覆盖旧candidate_v1/candidate_v2历史包").into());
         }
     }
     Ok(())
@@ -125,7 +136,10 @@ fn load_days_command(mut value: serde_json::Value) -> Result<DaysCommand, Comman
                     .and_then(serde_json::Value::as_object_mut)
                     .ok_or("候选缺少完整strategy")?;
                 for (section, fields) in overrides.as_object().ok_or("策略覆盖不是对象")? {
-                    if section == "blb_decrease_veto" {
+                    if matches!(
+                        section.as_str(),
+                        "blb_decrease_veto" | "initial_pair_low_price_veto"
+                    ) {
                         strategy.insert(section.clone(), fields.clone());
                         continue;
                     }
@@ -278,8 +292,17 @@ fn load_value(args: impl IntoIterator<Item = String>) -> Result<serde_json::Valu
     let mut config_file = None;
     let mut overrides = BTreeMap::new();
     let mut blb_override = None;
+    let mut low_price_override = None;
     let mut entry_overrides = BTreeMap::<String, u64>::new();
     while let Some(option) = args.next() {
+        if option == "--initial-pair-low-price-veto" {
+            low_price_override = Some(
+                args.next()
+                    .ok_or("初始批低价否决缺少显式布尔值")?
+                    .parse::<bool>()?,
+            );
+            continue;
+        }
         if option == "--blb-decrease-veto" {
             blb_override = Some(
                 args.next()
@@ -332,6 +355,16 @@ fn load_value(args: impl IntoIterator<Item = String>) -> Result<serde_json::Valu
             .as_object_mut()
             .ok_or("策略配置不是对象")?
             .insert("blb_decrease_veto".into(), veto.into());
+    }
+    if let Some(veto) = low_price_override {
+        value
+            .as_object_mut()
+            .ok_or("启动配置不是对象")?
+            .entry("strategy")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or("策略配置不是对象")?
+            .insert("initial_pair_low_price_veto".into(), veto.into());
     }
     if !entry_overrides.is_empty() {
         apply_entry_overrides(&mut value, &entry_overrides)?;
@@ -506,7 +539,7 @@ fn write_day_failure_json(value: &serde_json::Value) -> std::io::Result<()> {
 async fn main() {
     if std::env::args().any(|arg| arg == "--help") {
         println!(
-            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，每次从头运行，不保存或恢复检查点\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--summary-reserve-seconds <秒>（默认900）\nday可选--entry-market-start-offset-ms <非负毫秒>、--entry-market-end-margin-ms <非负毫秒>：声明输入[S,E)上的S+a≤market.start<E-b；无配置不限制，显式0/0限制；单端沿文件补值后缺值取0。\nday可选--research-evidence-root <新目录>，同次公共生产输出BLB/PM与真实决策，失败返回部分结果。\n公共候选 candidate_v4_public_c0_c1 使用parameters内完整42参数及blb_decrease_veto；--blb-decrease-veto true|false覆盖新候选唯一开关。\n全部原策略字段可覆盖（day对各候选显式覆盖）：\n{}",
+            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，每次从头运行，不保存或恢复检查点\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--summary-reserve-seconds <秒>（默认900）\nday可选--entry-market-start-offset-ms <非负毫秒>、--entry-market-end-margin-ms <非负毫秒>：声明输入[S,E)上的S+a≤market.start<E-b；无配置不限制，显式0/0限制；单端沿文件补值后缺值取0。\nday可选--research-evidence-root <新目录>，同次公共生产输出BLB/PM与真实决策，失败返回部分结果。\n公共候选 candidate_v4_public_c0_c1 使用parameters内完整42参数及blb_decrease_veto；--blb-decrease-veto true|false覆盖新候选唯一开关。\n低价候选 candidate_v5_public_low_price 使用parameters内原42参数和initial_pair_low_price_veto；--initial-pair-low-price-veto true|false覆盖唯一开关，固定沿C0不叠BLB。\n全部原策略字段可覆盖（day对各候选显式覆盖）：\n{}",
             PARAMETERS
                 .iter()
                 .map(|(field, _)| *field)
@@ -813,6 +846,57 @@ mod public_candidate_tests {
         assert_eq!(
             parsed.parameters.quote.base_pair_shares,
             rust_decimal::Decimal::from(12)
+        );
+    }
+}
+
+#[cfg(test)]
+mod low_price_candidate_tests {
+    use super::*;
+    #[test]
+    fn low_price_config_roundtrip_versions_and_explicit_cli_override() {
+        let c: ComplementaryPairConfigV5 = serde_json::from_str(include_str!(
+            "../../../baseline-mm/configs/strategies/complementary_pair/public-low-price-off.json"
+        ))
+        .unwrap();
+        let parsed: StrategyParameters =
+            serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
+        assert_eq!(parsed.version(), LOW_PRICE_RULE_VERSION);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            serde_json::to_vec(&serde_json::json!({"strategy":c})).unwrap(),
+        )
+        .unwrap();
+        let value = load_value([
+            "--config".into(),
+            file.path().display().to_string(),
+            "--initial-pair-low-price-veto".into(),
+            "true".into(),
+            "--strategy.quote.base_pair_shares".into(),
+            "12".into(),
+        ])
+        .unwrap();
+        let parsed: ComplementaryPairConfigV5 =
+            serde_json::from_value(value["strategy"].clone()).unwrap();
+        assert!(parsed.initial_pair_low_price_veto);
+        assert_eq!(
+            parsed.parameters.quote.base_pair_shares,
+            rust_decimal::Decimal::from(12)
+        );
+        let roundtrip: ComplementaryPairConfigV5 =
+            serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
+        assert_eq!(roundtrip.parameters, parsed.parameters);
+        assert_eq!(
+            roundtrip.initial_pair_low_price_veto,
+            parsed.initial_pair_low_price_veto
+        );
+        assert!(
+            require_parameter_version(
+                &serde_json::json!({"strategy":{"strategy_rule_version":PUBLIC_RULE_VERSION}}),
+                &StrategyParameters::LowPrice(parsed)
+            )
+            .is_err()
         );
     }
 }

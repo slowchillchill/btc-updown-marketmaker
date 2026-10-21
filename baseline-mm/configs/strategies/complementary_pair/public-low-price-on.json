@@ -1,0 +1,62 @@
+{
+  "parameters": {
+    "health": {
+      "polymarket_silence_normal_ms": 100,
+      "polymarket_silence_ms": 400,
+      "polymarket_event_delay_normal_ms": 100,
+      "polymarket_event_delay_ms": 400,
+      "chainlink_silence_normal_ms": 1100,
+      "chainlink_silence_ms": 4400,
+      "chainlink_event_delay_normal_ms": 2600,
+      "chainlink_event_delay_ms": 10400,
+      "binance_trade_silence_normal_ms": 1000,
+      "binance_trade_silence_ms": 4000,
+      "binance_trade_event_delay_normal_ms": 1100,
+      "binance_trade_event_delay_ms": 4400,
+      "binance_depth_silence_normal_ms": 100,
+      "binance_depth_silence_ms": 400,
+      "binance_depth_event_delay_normal_ms": 200,
+      "binance_depth_event_delay_ms": 800
+    },
+    "probability": {
+      "volatility_window_ms": 300000,
+      "initial_sigma_usd_per_sqrt_second": 7.33489262319592,
+      "estimation_error_usd": 0.0,
+      "binance_innovation_weight": 0.5,
+      "binance_pressure_weight_usd": 0.0,
+      "binance_trade_pressure_weight_usd": 0.0
+    },
+    "quote": {
+      "initial_pair_price_reference": "best_bid",
+      "base_pair_shares": "50",
+      "base_half_spread": "0",
+      "inventory_shift_per_pusd": "0.00005",
+      "uncertainty_spread_weight": "0",
+      "signal_spread_weight": "0",
+      "joint_fill_scenario_weights": [
+        0.25,
+        0.25,
+        0.25,
+        0.25
+      ],
+      "minimum_business_result_per_share": "0",
+      "execution_path_ms": 0
+    },
+    "repair": {
+      "base_loss_allowance_per_share": "0.0050",
+      "time_loss_allowance_per_share": "0.0050",
+      "inventory_loss_allowance_per_share": "0.0050",
+      "maker_fill_weight": 0.5,
+      "wait_price_improvement_per_share": "0",
+      "residual_risk_weight": "1",
+      "maker_path_ms": 0,
+      "active_path_ms": 0,
+      "enable_active_repair": false
+    },
+    "risk": {
+      "per_market_orphan_limit_pusd": "100",
+      "account_orphan_limit_pusd": "400"
+    }
+  },
+  "initial_pair_low_price_veto": true
+}

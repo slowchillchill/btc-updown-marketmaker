@@ -134,6 +134,14 @@ fn material(root: &Path) -> Material {
     material_with_path(root, false)
 }
 fn material_with_path(root: &Path, path: bool) -> Material {
+    material_custom(root, path, None, None)
+}
+fn material_custom(
+    root: &Path,
+    path: bool,
+    late_bid: Option<&str>,
+    empty_leg: Option<&str>,
+) -> Material {
     let mut c = fixture_input::core();
     c.enable_source_progress();
     let mut writer =
@@ -184,7 +192,15 @@ fn material_with_path(root: &Path, path: bool) -> Material {
             let mut event = fixture_input::book("100");
             if let PolymarketOrderbookEvent::Book { asset_id, bids, .. } = &mut event {
                 *asset_id = token.into();
-                bids[0].price = "0.45".into();
+                bids[0].price = if at >= T + 4000 {
+                    late_bid.unwrap_or("0.45")
+                } else {
+                    "0.45"
+                }
+                .into();
+                if at >= T + 200 && empty_leg == Some(token) {
+                    bids.clear();
+                }
             }
             rows.push((
                 at,
@@ -192,6 +208,24 @@ fn material_with_path(root: &Path, path: bool) -> Material {
                     "epoch-a", seq, at, at, event,
                 ))),
             ));
+            if at >= T + 200 && empty_leg == Some(token) {
+                seq += 1;
+                rows.push((
+                    at,
+                    TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(fixture_input::row(
+                        "epoch-a",
+                        seq,
+                        at,
+                        at,
+                        PolymarketOrderbookEvent::BestBidAsk {
+                            asset_id: token.into(),
+                            best_bid: Some("0.45".into()),
+                            best_ask: Some("0.6".into()),
+                            spread: Some("0.15".into()),
+                        },
+                    ))),
+                ));
+            }
         }
         rows.push((at, spot(at, "100000")));
         rows.push((at, trade(at, i as u64 + 1)));
@@ -278,8 +312,24 @@ fn setup_public(
     Arc<SealedProcessRuleSnapshotV3>,
     Material,
 ) {
+    setup_public_custom(root, None, None)
+}
+fn setup_public_custom(
+    root: &Path,
+    late_bid: Option<&str>,
+    empty_leg: Option<&str>,
+) -> (
+    SharedExecutionV2,
+    PublicDriver,
+    Arc<SealedProcessRuleSnapshotV3>,
+    Material,
+) {
     let dpt = root.join("dpt");
-    let m = material(&dpt);
+    let m = if late_bid.is_none() && empty_leg.is_none() {
+        material(&dpt)
+    } else {
+        material_custom(&dpt, false, late_bid, empty_leg)
+    };
     let (mut execution, observation, rules) = execution_with_rules_v4(
         &root.join("sim.jsonl"),
         &m.core,
@@ -905,3 +955,6 @@ async fn public_v4_borrowed_frame_and_veto_preserve_old_order_cancellation() {
     );
     driver.stop_and_drain().unwrap();
 }
+
+#[path = "low_price_candidate.rs"]
+mod low_price_candidate;

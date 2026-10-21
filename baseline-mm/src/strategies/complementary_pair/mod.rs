@@ -37,6 +37,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 pub const STRATEGY_ID: &str = "complementary_pair";
 pub const RULE_VERSION: &str = "candidate_v3";
 pub const PUBLIC_RULE_VERSION: &str = "candidate_v4_public_c0_c1";
+pub const LOW_PRICE_RULE_VERSION: &str = "candidate_v5_public_low_price";
 
 #[derive(Debug)]
 pub enum StrategyErrorV1 {
@@ -132,6 +133,7 @@ struct RemainingRepairEstimate {
 pub struct ComplementaryPairV1 {
     config: ComplementaryPairConfigV3,
     public_entry_veto: Option<bool>,
+    initial_pair_low_price_veto: Option<bool>,
     entry_market_range: Option<EntryMarketRangeV1>,
     rules: Arc<SealedProcessRuleSnapshotV3>,
     namespace: String,
