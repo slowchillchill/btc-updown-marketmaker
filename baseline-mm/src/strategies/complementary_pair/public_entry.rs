@@ -195,3 +195,41 @@ pub(super) fn evaluate(
     }
     d
 }
+
+/// 未到后置分支时整个字段为None；报价、最终价和请求id复用原诊断。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InitialPairLowPriceEvaluationV5 {
+    Disabled,
+    NotBelowBestBid,
+    VetoBelowBestBid,
+    UnknownComparison,
+}
+impl InitialPairLowPriceEvaluationV5 {
+    pub fn allows_new_pair(&self) -> bool {
+        *self != Self::VetoBelowBestBid
+    }
+}
+pub(super) fn evaluate_low_price(
+    prices: [Decimal; 2],
+    c0: &PublicEntryEvaluationV4,
+    enabled: bool,
+) -> InitialPairLowPriceEvaluationV5 {
+    if !enabled {
+        return InitialPairLowPriceEvaluationV5::Disabled;
+    }
+    // 真簿报价来自刚通过的同冻结C0，不再查询行情；最终prices已完成旧价复用。
+    let below = [0, 1].map(|i| {
+        c0.pm_quotes
+            .get(i)
+            .and_then(|q| q[0])
+            .map(|bid| prices[i] < bid)
+    });
+    if below.contains(&Some(true)) {
+        InitialPairLowPriceEvaluationV5::VetoBelowBestBid
+    } else if below.contains(&None) {
+        InitialPairLowPriceEvaluationV5::UnknownComparison
+    } else {
+        InitialPairLowPriceEvaluationV5::NotBelowBestBid
+    }
+}

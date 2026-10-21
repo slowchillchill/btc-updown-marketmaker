@@ -183,3 +183,11 @@ pub struct ComplementaryPairConfigV4 {
     pub parameters: ComplementaryPairConfigV3,
     pub blb_decrease_veto: bool,
 }
+
+/// 同版本C0/低价初始批否决对照；不叠加BLB门，原42参数继续复用V3。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComplementaryPairConfigV5 {
+    pub parameters: ComplementaryPairConfigV3,
+    pub initial_pair_low_price_veto: bool,
+}
