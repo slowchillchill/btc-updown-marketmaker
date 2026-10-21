@@ -314,3 +314,52 @@ fn two_accounts_two_public_replays_share_sealed_rules_and_do_not_requery() {
     .unwrap();
     assert_eq!(queries.get(), 1);
 }
+
+#[test]
+fn completed_collection_reuses_original_binding_when_only_checkpoint_directory_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut config, source, log) = prepared(root.path());
+    let queries = Cell::new(0);
+    let opened = injected(&config.consumer, source, &queries);
+    config.consumer = bind_consumer(&config.consumer, &opened.binding);
+    let result = run_learning_job_with_opener(&config, |_| Ok(opened)).unwrap();
+    assert_eq!(result["no_actor_samples"], true);
+    let complete = config.output_directory.join("completed-collection.json");
+    let original = std::fs::read(&complete).unwrap();
+    let before = std::fs::read_to_string(&log).unwrap();
+    config.parameters.checkpoint_directory = root.path().join("relocated-checkpoint");
+    config.attempt_report = root.path().join("relocated-report.json");
+    let result = run_learning_job_with_opener(&config, |c| {
+        open_rules_with(c, |_| panic!("仅目录改变不得重新查询规则"))
+    })
+    .unwrap();
+    assert_eq!(result["no_actor_samples"], true);
+    assert_eq!(std::fs::read(&complete).unwrap(), original);
+    let after = std::fs::read_to_string(&log).unwrap();
+    let additional = &after[before.len()..];
+    assert!(!additional.contains("\"phase\": \"begin\""));
+    assert!(!additional.contains("learn_epoch"));
+    assert!(!additional.contains("learn_commit"));
+    assert_eq!(queries.get(), 1);
+    for numeric in [true, false] {
+        let mut bad = config.clone();
+        bad.attempt_report = root.path().join(format!("changed-{numeric}.json"));
+        if numeric {
+            bad.parameters.learning_rate *= 2.0;
+        } else {
+            bad.consumer.days[0].candidates[0]
+                .strategy
+                .effective_parameters["model_consumer"]["account_key"] = json!("different-account");
+        }
+        assert!(
+            run_learning_job_with_opener(&bad, |c| open_rules_with(c, |_| panic!(
+                "拒绝路径不能查询"
+            )))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("已完成轨迹与消费配置不同")
+        );
+        assert_eq!(std::fs::read(&complete).unwrap(), original);
+    }
+}

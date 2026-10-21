@@ -12,6 +12,24 @@ def gradient_norm(parameters):
     return float(torch.stack(values).sum().sqrt()) if values else 0.0
 
 
+def learning_config_semantics(config):
+    """仅检查点存放位置不属于数值兼容性；保留其他键和原记录。"""
+    return {key: value for key, value in config.items() if key != "checkpoint_directory"}
+
+
+def learning_group_semantics(group):
+    """仅投影binding.parameters的同一位置字段，不递归忽略其他路径。"""
+    result = dict(group)
+    binding = group.get("binding")
+    if isinstance(binding, dict):
+        binding = dict(binding)
+        parameters = binding.get("parameters")
+        if isinstance(parameters, dict):
+            binding["parameters"] = learning_config_semantics(parameters)
+        result["binding"] = binding
+    return result
+
+
 class LearningEngine:
     def __init__(self, service):
         self.service = service
@@ -172,7 +190,7 @@ class LearningEngine:
                         return sum(tensor_bytes(v) for v in value)
                     return 0
                 self.meter("checkpoint_load_h2d_tensor_bytes", tensor_bytes(checkpoint))
-                if (checkpoint["config"] != config or checkpoint["model_version"] != self.service.identity["version"]
+                if (learning_config_semantics(checkpoint["config"]) != learning_config_semantics(config) or checkpoint["model_version"] != self.service.identity["version"]
                         or checkpoint["version"] != "ppo-group-transaction-v1"
                         or checkpoint["encoding_version"] != "b-public-token-log1p-v1"
                         or checkpoint["target_version"] != request["group"]["target_version"]
@@ -192,7 +210,7 @@ class LearningEngine:
         self.weights = request["account_weights"]
         existing = self.consumed.get(self.group["id"])
         if existing is not None:
-            if existing != self.group:
+            if learning_group_semantics(existing) != learning_group_semantics(self.group):
                 raise ValueError("同一消费身份对应不同轨迹/目标")
             return {"already_committed": True, "sequence": self.sequence}
         return {"already_committed": False, "sequence": self.sequence}

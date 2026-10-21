@@ -240,3 +240,28 @@ fn mixed_n0_completed_entry_preserves_only_real_samples_and_missing_nonempty_is_
             .contains("实际调用计数")
     );
 }
+
+#[test]
+fn completed_binding_excludes_only_exact_checkpoint_parameter_location() {
+    let a = json!({"parameters":{"checkpoint_directory":"A","epsilon":0.2},"consumer":{"trajectory_path":"T","checkpoint_directory":"unrelated"},"checkpoint_directory":"outer"});
+    let mut b = a.clone();
+    b["parameters"]["checkpoint_directory"] = json!("B");
+    assert_eq!(
+        collection_binding_semantics(&a),
+        collection_binding_semantics(&b)
+    );
+    for path in [
+        "/parameters/epsilon",
+        "/consumer/trajectory_path",
+        "/consumer/checkpoint_directory",
+        "/checkpoint_directory",
+    ] {
+        let mut changed = b.clone();
+        *changed.pointer_mut(path).unwrap() = json!("changed");
+        assert_ne!(
+            collection_binding_semantics(&a),
+            collection_binding_semantics(&changed)
+        );
+    }
+    assert_eq!(a["parameters"]["checkpoint_directory"], "A");
+}

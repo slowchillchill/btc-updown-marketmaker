@@ -91,6 +91,16 @@ cargo build -p model-train --release --bins --examples --locked --offline -j <�
 完整标签、实际版本及消费身份同事务使用；没有scheduler时显式记录None。
 必要随机状态是全局Torch/CUDA与本进程存在的采样账户状态；完整采集在新进程复用时无需恢复已结束账户的环境/采样续跑。
 
+新进程可仅改变检查点存放目录：将原 `A/checkpoint.pt` 的字节复制到新目录 `B/checkpoint.pt`，
+配置 `parameters.checkpoint_directory=B`，随后沿原学习入口打开B、向B提交。没有新增源目录字段，
+不修改原检查点或消费历史；现有同版本格式直接兼容，不升级旧v1状态。数值兼容比较只排除 `checkpoint.config.checkpoint_directory`，
+已消费组比较只排除 `group.binding.parameters.checkpoint_directory`，完成采集绑定比较只排除
+`completed-collection.binding.parameters.checkpoint_directory`。没有递归忽略其他路径或同名字段，
+学习参数、版本、模型严格状态、输入/账户/时间/规则和轨迹身份仍按原判定。
+已消费同组保持既有提交序号与确认语义，不重复采集、再生、更新或提交；未提交的原完成采集按同一语义绑定复用。
+同一存活学习器内切目录仍不支持，原配置保护保持。轨迹、规则封存及其他consumer路径必须仍在原处可读；
+这不是全套研究目录搬迁或准确日内环境续接接口。
+
 原子替换/目录fsync不能替代存储设备的持久性保证；本段测试覆盖三处逻辑故障，不宣称断电或分布式事务验收。
 本段首个工程checkpoint曾把`torch.__version__`的TorchVersion子类落盘，weights_only读取失败。
 新版本存原生str；仅为这份已生成工程产物局部允许官方TorchVersion类，仍用weights_only=True。
