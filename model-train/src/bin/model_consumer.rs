@@ -10,7 +10,10 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let config: ConsumerRunConfig = serde_json::from_slice(&std::fs::read(&arguments[2])?)?;
     if arguments[1] == "print-config" {
-        println!("{}", serde_json::to_string_pretty(&config)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&model_train::public_input::bind(&config))?
+        );
         return Ok(());
     }
     if arguments[1] != "run" || arguments.len() != 4 {

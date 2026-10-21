@@ -390,7 +390,11 @@ pub fn export_continuous_public_v1(
         &mut sink,
         progress,
         should_stop,
-        true,
+        ExportOptions {
+            compact: true,
+            requirements: PublicObservationRequirementsV1::FULL,
+            source_progress: true,
+        },
         |_, _, _| Ok(()),
     )
 }
@@ -410,7 +414,11 @@ pub fn visit_continuous_public_frames_v1(
         |_| Ok(()),
         progress,
         || false,
-        false,
+        ExportOptions {
+            compact: false,
+            requirements: PublicObservationRequirementsV1::FULL,
+            source_progress: true,
+        },
         frame_sink,
     )
 }
@@ -431,24 +439,67 @@ pub fn visit_continuous_public_frames_with_rules_v1(
         |_| Ok(()),
         progress,
         || false,
-        false,
+        ExportOptions {
+            compact: false,
+            requirements: PublicObservationRequirementsV1::FULL,
+            source_progress: true,
+        },
         frame_sink,
     )
 }
 
+/// 显式诊断需求；与原公共core共用，不隐含observer/健康政策。
+pub fn visit_continuous_public_frames_with_requirements_v1(
+    config: &ContinuousPublicExportConfigV1,
+    rules: Arc<SealedProcessRuleSnapshotV3>,
+    requirements: PublicObservationRequirementsV1,
+    source_progress: bool,
+    frame_sink: impl FnMut(
+        i64,
+        &PublicGroupReferenceV1,
+        Vec<shared_run::FrozenMarketReadV1>,
+    ) -> Result<(), MaterialError>,
+    progress: impl Fn(&ContinuousPublicExportProgressV1) + Sync,
+    should_stop: impl Fn() -> bool + Sync,
+) -> Result<ContinuousPublicExportProgressV1, MaterialError> {
+    export_with_frames(
+        config,
+        Some(rules),
+        |_| Ok(()),
+        progress,
+        should_stop,
+        ExportOptions {
+            compact: false,
+            requirements,
+            source_progress,
+        },
+        frame_sink,
+    )
+}
+
+struct ExportOptions {
+    compact: bool,
+    requirements: PublicObservationRequirementsV1,
+    source_progress: bool,
+}
 fn export_with_frames(
     config: &ContinuousPublicExportConfigV1,
     sealed_rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
     mut sink: impl FnMut(Value) -> Result<(), MaterialError>,
     progress: impl Fn(&ContinuousPublicExportProgressV1) + Sync,
     should_stop: impl Fn() -> bool + Sync,
-    compact: bool,
+    options: ExportOptions,
     mut frame_sink: impl FnMut(
         i64,
         &PublicGroupReferenceV1,
         Vec<shared_run::FrozenMarketReadV1>,
     ) -> Result<(), MaterialError>,
 ) -> Result<ContinuousPublicExportProgressV1, MaterialError> {
+    let ExportOptions {
+        compact,
+        requirements,
+        source_progress,
+    } = options;
     let started = Instant::now();
     let mut state = ContinuousPublicExportProgressV1::default();
     let mut report = |stage| {
@@ -618,10 +669,10 @@ fn export_with_frames(
     }
     let stream = PublicStatisticsStreamV1::new(identity, config.statistics.clone())?;
     let mut producer = DayProducerV1::new_public_only(ingress, header, source_identity)?;
-    producer
-        .core
-        .set_observation_requirements(PublicObservationRequirementsV1::FULL);
-    producer.core.enable_source_progress();
+    producer.core.set_observation_requirements(requirements);
+    if source_progress {
+        producer.core.enable_source_progress();
+    }
     let mut times = DeliveryTimes {
         delays: config.public_delivery_delay_ms.clone(),
         last: None,

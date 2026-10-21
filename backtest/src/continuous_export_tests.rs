@@ -524,3 +524,75 @@ fn explicit_typed_frames_preserve_visible_prestart_market_while_compact_keeps_it
     let (_, compact) = run(&c);
     assert!(!compact.iter().any(|r| r["record_type"] == "query"));
 }
+
+#[test]
+fn explicit_typed_requirements_share_core_without_observer_and_stop() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut c = fixture::build(temp.path(), 4);
+    c.query_times_utc_ms = vec![BASE + 1201];
+    let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+        snapshot_path: c.rules.snapshot_path.clone(),
+        expected_file_sha256: c.rules.expected_file_sha256.clone(),
+        replay_causal_start_utc_ms: BASE,
+    })
+    .unwrap();
+    let mut paths = Vec::new();
+    for progress in [false, true] {
+        let mut frames = Vec::new();
+        let state = visit_continuous_public_frames_with_requirements_v1(
+            &c,
+            rules.clone(),
+            PublicObservationRequirementsV1::FULL,
+            progress,
+            |at, g, f| {
+                frames.push((at, g.clone(), f));
+                Ok(())
+            },
+            |_| {},
+            || false,
+        )
+        .unwrap();
+        assert!(state.natural_end);
+        assert_eq!(frames.len(), 1);
+        if !progress {
+            assert!(
+                frames[0]
+                    .2
+                    .iter()
+                    .all(|f| f.observation.source_progress.is_empty())
+            );
+        }
+        paths.push(frames);
+    }
+    assert_eq!(paths[0][0].0, paths[1][0].0);
+    let mut old = Vec::new();
+    visit_continuous_public_frames_with_rules_v1(
+        &c,
+        rules.clone(),
+        |at, g, f| {
+            old.push((at, g.clone(), f));
+            Ok(())
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(&old[0].1).unwrap(),
+        serde_json::to_value(&paths[1][0].1).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&old[0].2[0].observation).unwrap(),
+        serde_json::to_value(&paths[1][0].2[0].observation).unwrap()
+    );
+    let stopped = visit_continuous_public_frames_with_requirements_v1(
+        &c,
+        rules,
+        PublicObservationRequirementsV1::FULL,
+        false,
+        |_, _, _| panic!("停止后不交帧"),
+        |_| {},
+        || true,
+    )
+    .unwrap();
+    assert!(stopped.stopped);
+}

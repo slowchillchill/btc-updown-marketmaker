@@ -1,0 +1,33 @@
+{
+  "completed_collection": {
+    "path": "inputs/completed-collection.json",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "trajectory": {
+    "path": "inputs/trajectory.jsonl",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "worker": {
+    "python": "dependencies/venv/bin/python",
+    "script": "artifacts/model_diagnostic.py",
+    "model": "inputs/original-initial-model.pt",
+    "device": "cuda:0",
+    "torch_threads": 4,
+    "max_batch": 1,
+    "encoding": {
+      "field_buckets": 4096,
+      "category_buckets": 4096
+    }
+  },
+  "initial_model_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "day_index": 0,
+  "candidate_index": 0,
+  "through_call": 26,
+  "max_public_streams": 2,
+  "max_forwards": 78,
+  "max_wall_seconds": 300,
+  "progress_interval_ms": 2000,
+  "stop_file": "outputs/diagnostic.stop",
+  "output_directory": "outputs/new-diagnostic",
+  "input_pair": "legacy_off_on"
+}

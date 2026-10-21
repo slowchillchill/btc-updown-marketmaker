@@ -24,6 +24,8 @@ pub(crate) fn run_consumer_with_opener(
     config: &ConsumerRunConfig,
     open: impl FnOnce(&ConsumerRunConfig) -> Result<crate::rules::OpenedRulesV1, MaterialError>,
 ) -> Result<Value, MaterialError> {
+    let current = crate::public_input::bind(config);
+    let config = &current;
     let started = Instant::now();
     for day in &config.days {
         for candidate in &day.candidates {
@@ -61,6 +63,8 @@ pub fn run_with_worker(
         );
         &canonical
     };
+    let current = crate::public_input::bind(config);
+    let config = &current;
     let before = ProcessCountersV1::read().ok();
     let mut days = config.days.clone();
     for day in &mut days {

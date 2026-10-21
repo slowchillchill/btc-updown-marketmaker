@@ -19,3 +19,7 @@ pub use rules::{
     ConsumerRulesV1, FrozenRuleBindingV1, OpenedRulesV1, QueriedSourceV1, RuleOpenV1,
     open_consumer_rules,
 };
+
+pub mod diagnostic;
+
+pub mod public_input;

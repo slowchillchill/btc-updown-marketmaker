@@ -139,7 +139,7 @@ class LearningEngine:
             return value
         return {"version": "ppo-group-transaction-v1", "model_version": self.service.identity["version"],
                 "encoding_version": "b-public-token-log1p-v1", "target_version": "confirmed-finite-j-v1",
-                "trajectory_version": "learning-trajectory-v1", "model": cpu(self.model.state_dict()),
+                "trajectory_version": self.group["trajectory_version"], "model": cpu(self.model.state_dict()),
                 "optimizer": cpu(self.optimizer.state_dict()), "config": self.config,
                 "consumed": self.consumed, "sequence": self.sequence,
                 "torch_rng": torch.get_rng_state(),
