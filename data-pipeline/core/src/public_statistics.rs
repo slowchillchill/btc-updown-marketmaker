@@ -145,6 +145,8 @@ pub struct PublicStatisticsHistoryV1 {
     pub group: PublicGroupReferenceV1,
     pub applied_at_utc_ms: i64,
     midpoint: Vector<Point>,
+    #[serde(default)]
+    blb_endpoints: imbl::OrdMap<String, Vector<Arc<PublicBlbEndpointV1>>>,
     active_integral_markets: imbl::OrdMap<String, MarketIdentityV2>,
     completed_integrals: imbl::OrdMap<String, Vec<PublicSpotIntegralV1>>,
     spot: Vector<Point>,
@@ -301,6 +303,133 @@ impl PublicStatisticsHistoryV1 {
         }
         self.evidence = current;
     }
+    fn retain_blb_endpoint(
+        &mut self,
+        market: &MarketIdentityV2,
+        anchor: &ObservedFactV1<MarketPriceAnchorV1>,
+        depth: &Arc<ObservedFactV1<BinanceDepthObservationV1>>,
+    ) {
+        let Some(window) = self.config.blb_lookback_windows_ms.iter().max().copied() else {
+            return;
+        };
+        // 本声明的消费者是市场存续期内的新开仓；结束市场不再展开F2。
+        // 旧冻结持有其原持久节点；当前流不保留整日历史市场副本。
+        if market.window.end_at_utc_ms < self.applied_at_utc_ms {
+            self.blb_endpoints.remove(&market.condition_id.0);
+            return;
+        }
+        let id = &market.condition_id.0;
+        let unchanged = self
+            .blb_endpoints
+            .get(id)
+            .and_then(|v| v.back())
+            .is_some_and(|old| {
+                old.market == *market
+                    && old.official_anchor == *anchor
+                    && old.depth_anchors == depth.direct_anchors
+                    && old.depth_quality == depth.quality
+            });
+        if !unchanged {
+            let value = self
+                .prepared_depth
+                .as_ref()
+                .expect("advance已准备深度")
+                .evaluate(anchor, false);
+            let f1 = self.depth.as_ref().expect("advance已准备F1");
+            let next = Arc::new(PublicBlbEndpointV1 {
+                definition_version: value.definition_version.into(),
+                identity: self.identity.clone(),
+                config: self.config.clone(),
+                market: market.clone(),
+                group: self.group.clone(),
+                applied_at_utc_ms: self.applied_at_utc_ms,
+                status: value.status.into(),
+                unknown_reason: value.unknown_reason.map(str::to_owned),
+                midpoint_usdt_per_btc: value.midpoint_usdt_per_btc,
+                official_k_usd_per_btc: value.official_k_usd_per_btc,
+                side: value.side.map(str::to_owned),
+                at_anchor: value.at_anchor,
+                visible_quantity_btc: value.visible_quantity_btc,
+                official_anchor: anchor.clone(),
+                best_bid_usdt_per_btc: f1.best_bid_usdt_per_btc.clone(),
+                best_ask_usdt_per_btc: f1.best_ask_usdt_per_btc.clone(),
+                depth_quality: depth.quality,
+                depth_anchors: depth.direct_anchors.clone(),
+            });
+            let points = self.blb_endpoints.entry(id.clone()).or_default();
+            if points
+                .back()
+                .is_some_and(|p| p.applied_at_utc_ms == next.applied_at_utc_ms)
+            {
+                points.pop_back();
+            }
+            points.push_back(next);
+        }
+        if let Some(points) = self.blb_endpoints.get_mut(id) {
+            let from = self.applied_at_utc_ms.saturating_sub(window as i64);
+            // 保留左端最后asof支撑；持久容器裁剪不修改任何旧冻结前缀。
+            while points.len() > 1 && points[1].applied_at_utc_ms <= from {
+                points.pop_front();
+            }
+        }
+    }
+    fn retain_blb(&mut self, observations: &MarketObservationSetV1) {
+        if self.config.blb_lookback_windows_ms.is_empty() {
+            return;
+        }
+        if let Some((markets, common)) = observations.shared_parts() {
+            for market in markets.values() {
+                self.retain_blb_endpoint(
+                    &market.market,
+                    &market.official_anchor,
+                    &common.binance_depth,
+                );
+            }
+        } else {
+            for market in observations.iter() {
+                self.retain_blb_endpoint(
+                    &market.market,
+                    &market.official_anchor,
+                    &market.binance_depth,
+                );
+            }
+        }
+    }
+    fn blb_lookbacks(&self, market: &MarketIdentityV2, t: i64) -> Vec<PublicBlbLookbackV1> {
+        let point = |at| {
+            (t <= market.window.end_at_utc_ms)
+                .then_some(())
+                .and_then(|_| {
+                    self.blb_endpoints
+                        .get(&market.condition_id.0)
+                        .and_then(|points| {
+                            let (mut lo, mut hi) = (0, points.len());
+                            while lo < hi {
+                                let mid = (lo + hi) / 2;
+                                if points[mid].applied_at_utc_ms <= at {
+                                    lo = mid + 1;
+                                } else {
+                                    hi = mid;
+                                }
+                            }
+                            lo.checked_sub(1).map(|n| points[n].clone())
+                        })
+                })
+        };
+        self.config
+            .blb_lookback_windows_ms
+            .iter()
+            .map(|window_ms| {
+                let left_query_at_utc_ms = t.saturating_sub(*window_ms as i64);
+                PublicBlbLookbackV1 {
+                    window_ms: *window_ms,
+                    left_query_at_utc_ms,
+                    left: point(left_query_at_utc_ms),
+                    right: point(t),
+                }
+            })
+            .collect()
+    }
     fn integrals(&self, market: &MarketIdentityV2, t: i64) -> Vec<PublicSpotIntegralV1> {
         self.config
             .terminal_integral_windows_ms
@@ -448,6 +577,7 @@ impl PublicStatisticsHistoryV1 {
             since_market_start_ms: t - o.market.window.start_at_utc_ms,
             until_market_end_ms: o.market.window.end_at_utc_ms - t,
             depth,
+            blb_lookbacks: self.blb_lookbacks(&o.market, t),
             blb: self.prepared_depth.as_ref().map_or_else(
                 || {
                     PreparedBlbDepthV1::new(o.binance_depth.clone())
@@ -539,6 +669,7 @@ impl PublicStatisticsStreamV1 {
             .iter()
             .chain(&config.spot_variance_windows_ms)
             .chain(&config.terminal_integral_windows_ms)
+            .chain(&config.blb_lookback_windows_ms)
             .any(|h| *h == 0 || *h > i64::MAX as u64)
         {
             return Err("公共统计窗口必须是正 i64 毫秒".into());
@@ -606,6 +737,7 @@ impl PreparedPublicStatisticsV1 {
                 group: group.clone(),
                 applied_at_utc_ms: at,
                 midpoint: Vector::new(),
+                blb_endpoints: Default::default(),
                 active_integral_markets: Default::default(),
                 completed_integrals: Default::default(),
                 spot: Vector::new(),
@@ -617,6 +749,7 @@ impl PreparedPublicStatisticsV1 {
                 cache: Default::default(),
             });
         next.advance(group, at, &o, &prepared_group.records);
+        next.retain_blb(&prepared_group.observations);
         let next = Arc::new(next);
         *latest = Some(next.clone());
         cache.retain(|(s, _)| s.strong_count() > 0);

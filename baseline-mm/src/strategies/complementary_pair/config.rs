@@ -175,3 +175,11 @@ pub enum InitialPairPriceReferenceV1 {
     FairValue,
     BestBid,
 }
+
+/// C0/C1 共同采用公共统计；42个原经营参数保持正式旧类型，唯一附加差别是BLB否决。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComplementaryPairConfigV4 {
+    pub parameters: ComplementaryPairConfigV3,
+    pub blb_decrease_veto: bool,
+}

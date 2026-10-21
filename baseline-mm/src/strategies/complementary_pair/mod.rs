@@ -12,8 +12,12 @@ mod config;
 mod spot_statistics;
 pub use spot_statistics::*;
 mod probability;
+mod public_entry;
+mod public_probability;
 pub use config::*;
 pub use probability::*;
+pub use public_entry::*;
+pub use public_probability::*;
 
 use ::execution_normalization::MemoryIdentityKeyV1;
 use ::execution_normalization::SourceNeutralEntityKeyV1;
@@ -32,6 +36,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 pub const STRATEGY_ID: &str = "complementary_pair";
 pub const RULE_VERSION: &str = "candidate_v3";
+pub const PUBLIC_RULE_VERSION: &str = "candidate_v4_public_c0_c1";
 
 #[derive(Debug)]
 pub enum StrategyErrorV1 {
@@ -126,6 +131,7 @@ struct RemainingRepairEstimate {
 /// 只保存信号、高水位、终止与未决增量占用；库存/费用/订单每轮重新读取公共事实。
 pub struct ComplementaryPairV1 {
     config: ComplementaryPairConfigV3,
+    public_entry_veto: Option<bool>,
     entry_market_range: Option<EntryMarketRangeV1>,
     rules: Arc<SealedProcessRuleSnapshotV3>,
     namespace: String,
@@ -191,6 +197,7 @@ impl std::ops::Deref for PairObservation<'_> {
 struct PairMarketRead<'a> {
     observation: PairObservation<'a>,
     rule_context: &'a PublicTradingRuleContextV1,
+    statistics: Option<&'a PublicMarketStatisticsV1>,
 }
 impl<'a> PairMarketRead<'a> {
     fn from_read(f: &'a impl StrategyMarketReadV1) -> Result<Self, StrategyErrorV1> {
@@ -216,6 +223,7 @@ impl<'a> PairMarketRead<'a> {
                 top_asks: Default::default(),
             },
             rule_context: f.rule_context(),
+            statistics: f.statistics(),
         })
     }
 }
@@ -502,7 +510,7 @@ impl ComplementaryPairV1 {
         let mut cash = input.action_before.cash_available().max(Decimal::ZERO);
         let mut diagnostic = ComplementaryPairDiagnosticV1 {
             strategy_id: STRATEGY_ID.into(),
-            rule_version: RULE_VERSION.into(),
+            rule_version: self.continuity.rule_version.clone(),
             risk_equity_pusd: equity.clone(),
             high_water_pusd: high.public(),
             terminating: self.continuity.terminating,
@@ -562,21 +570,35 @@ impl ComplementaryPairV1 {
                 .source_health_state(o, &spot_scope, now)
                 .failure()
                 .is_none();
-            let price = if probability_healthy || spot_healthy {
-                self.signals
-                    .entry(o.market.condition_id.0.clone())
-                    .or_default()
-                    .maintain_history(o, now, &self.config.probability, spot_healthy)?
+            let (p, public_inputs) = if self.public_entry_veto.is_some() {
+                if probability_healthy {
+                    let (p, evidence) =
+                        public_probability::estimate(o, f.statistics, &self.config.probability)?;
+                    (p, Some(evidence))
+                } else {
+                    (
+                        ProbabilityEstimateV1::Unavailable(EstimateUnavailableV1::UnhealthySource),
+                        None,
+                    )
+                }
             } else {
-                None
-            };
-            let p = if probability_healthy {
-                self.signals
-                    .get_mut(&o.market.condition_id.0)
-                    .expect("合格概率已维护信号记忆")
-                    .estimate(o, now, &self.config.probability, price)?
-            } else {
-                ProbabilityEstimateV1::Unavailable(EstimateUnavailableV1::UnhealthySource)
+                let price = if probability_healthy || spot_healthy {
+                    self.signals
+                        .entry(o.market.condition_id.0.clone())
+                        .or_default()
+                        .maintain_history(o, now, &self.config.probability, spot_healthy)?
+                } else {
+                    None
+                };
+                let p = if probability_healthy {
+                    self.signals
+                        .get_mut(&o.market.condition_id.0)
+                        .expect("合格概率已维护信号记忆")
+                        .estimate(o, now, &self.config.probability, price)?
+                } else {
+                    ProbabilityEstimateV1::Unavailable(EstimateUnavailableV1::UnhealthySource)
+                };
+                (p, None)
             };
             let missing = s
                 .orphan
@@ -594,6 +616,7 @@ impl ComplementaryPairV1 {
                     ..Default::default()
                 },
                 probability: p.clone(),
+                public_inputs,
                 urgency,
                 choice: MarketChoiceV1::Wait,
                 unavailable: vec![],

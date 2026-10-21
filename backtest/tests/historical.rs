@@ -1925,6 +1925,7 @@ fn original_day_quantity_demand_union_preserves_complete_and_quantity_free_candi
                 momentum_windows_ms: vec![1000],
                 spot_variance_windows_ms: vec![1000],
                 terminal_integral_windows_ms: vec![1000],
+                blb_lookback_windows_ms: vec![],
             });
         }
         second.session.run_id = "quantity-second".into();
@@ -2801,6 +2802,7 @@ fn fifo_model_train_setup(
         momentum_windows_ms: vec![100, 1000],
         spot_variance_windows_ms: vec![1000],
         terminal_integral_windows_ms: vec![1000],
+        blb_lookback_windows_ms: vec![],
     });
     config.session.caller_role = SimCallerRoleV1::ModelTrain;
     config.session.input_lifecycle_policy =

@@ -106,3 +106,11 @@ BLB 原有手算、正式锚缺失、`at_anchor`、未物化和可见空区间�
 EOF 后再追加元素不符合此有限夹具的输入方式；测试先预取未来合法组，再读取更早静默截止，
 遵循 [Rust 1.95.0 Peekable 源码](https://github.com/rust-lang/rust/blob/1.95.0/library/core/src/iter/adapters/peekable.rs)
 的缓存语义，不修改生产有限 EOF 行为。
+
+## 显式 F2 端点回看
+
+[#350](https://github.com/slowchillchill/btc-updown-marketmaker/issues/350) 为 C0/C1 消费者增加可选 `PublicStatisticsConfigV1.blb_lookback_windows_ms`，本次声明 `[200]`，空集合不物化。`PublicMarketStatisticsV1.blb_lookbacks` 提供声明左查询时点及该前缀的 left/right asof 端点。它不是任意过去时点读取接口。
+
+`PublicBlbEndpointV1` 保存同一合法应用组的 F2 必要标量、F1 正量最佳价、正式 `official_anchor`（含 `direct_anchors`）、深度质量／事实引用及市场／输入／参数身份。只有真实消费推进历史；纯查询不新增点。相同 Q 的状态、锚或 F1／来源变化仍保留，不把组身份当锚身份。同毫秒替换新前缀末点而不污染旧冻结。迟到 K 不回填旧端点。持久节点裁剪到最长声明回看及左支撑，旧冻结仍可读自己的节点。
+
+该有限消费者只在市场存续期建立 F2 端点；市场结束后当前流释放该市场节点，结束外回看返回缺失。旧冻结不受释放影响。没有完整盘口、档位数组或整日观察副本。C0/C1 的字段映射、不可比行为和库／CLI 使用见[候选说明](../baseline-mm/docs/strategies/complementary-pair-public-candidates.md)。

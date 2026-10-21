@@ -47,9 +47,15 @@ pub struct FrozenMarketReadV1 {
 }
 pub trait StrategyMarketReadV1 {
     fn observation(&self) -> &MarketBusinessObservationV1;
+    fn statistics(&self) -> Option<&PublicMarketStatisticsV1> {
+        None
+    }
     fn rule_context(&self) -> &Arc<PublicTradingRuleContextV1>;
 }
 impl StrategyMarketReadV1 for FrozenMarketReadV1 {
+    fn statistics(&self) -> Option<&PublicMarketStatisticsV1> {
+        self.statistics.as_deref()
+    }
     fn observation(&self) -> &MarketBusinessObservationV1 {
         &self.observation
     }
@@ -58,6 +64,9 @@ impl StrategyMarketReadV1 for FrozenMarketReadV1 {
     }
 }
 impl StrategyMarketReadV1 for PublicObservationFrameV1<'_> {
+    fn statistics(&self) -> Option<&PublicMarketStatisticsV1> {
+        self.statistics.as_deref()
+    }
     fn observation(&self) -> &MarketBusinessObservationV1 {
         self.observation
     }

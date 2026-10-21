@@ -177,22 +177,37 @@ impl ComplementaryPairV1 {
             let budget_passed = self.limit_budget(*cash, s, &cost);
             diag.pair_entry.limit_budget_passed = Some(budget_passed);
             if budget_passed {
-                let legs = vec![
-                    (
-                        self.maker_leg(o.assets[0], q, prices[0]),
-                        costs[0].clone(),
-                        R::zero(),
-                    ),
-                    (
-                        self.maker_leg(o.assets[1], q, prices[1]),
-                        costs[1].clone(),
-                        R::zero(),
-                    ),
-                ];
-                intents.push(self.order_item(&o.market.condition_id, legs)?);
-                *cash -= floor_decimal(&cost, 6)?;
-                *account_exposure = account_exposure.add(&r(q * max_leg));
-                diag.choice = MarketChoiceV1::NewPair;
+                if let Some(veto) = self.public_entry_veto {
+                    diag.pair_entry.public_entry =
+                        Some(public_entry::evaluate(o, f.statistics, veto));
+                }
+                let entry_allowed = diag
+                    .pair_entry
+                    .public_entry
+                    .as_ref()
+                    .is_none_or(PublicEntryEvaluationV4::allows_new_pair);
+                if entry_allowed {
+                    let legs = vec![
+                        (
+                            self.maker_leg(o.assets[0], q, prices[0]),
+                            costs[0].clone(),
+                            R::zero(),
+                        ),
+                        (
+                            self.maker_leg(o.assets[1], q, prices[1]),
+                            costs[1].clone(),
+                            R::zero(),
+                        ),
+                    ];
+                    let item = self.order_item(&o.market.condition_id, legs)?;
+                    if let Some(entry) = &mut diag.pair_entry.public_entry {
+                        entry.new_pair_request_id = Some(item.context.global_request_id.clone());
+                    }
+                    intents.push(item);
+                    *cash -= floor_decimal(&cost, 6)?;
+                    *account_exposure = account_exposure.add(&r(q * max_leg));
+                    diag.choice = MarketChoiceV1::NewPair;
+                }
             }
         } else if no_new_needed {
             diag.choice = MarketChoiceV1::Maintain;

@@ -6,11 +6,59 @@ use sim_system::platform_rules::*;
 use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum StrategyParameters {
+    Public(ComplementaryPairConfigV4),
+    Legacy(ComplementaryPairConfigV3),
+}
+impl StrategyParameters {
+    fn version(&self) -> &'static str {
+        match self {
+            Self::Public(_) => PUBLIC_RULE_VERSION,
+            Self::Legacy(_) => RULE_VERSION,
+        }
+    }
+    fn build(
+        self,
+        rules: std::sync::Arc<SealedProcessRuleSnapshotV3>,
+        namespace: String,
+    ) -> Result<ComplementaryPairV1, StrategyErrorV1> {
+        match self {
+            Self::Public(config) => ComplementaryPairV1::new_public(
+                config,
+                rules,
+                namespace,
+                StrategyContinuityV2::new_public_account(),
+            ),
+            Self::Legacy(config) => ComplementaryPairV1::new(
+                config,
+                rules,
+                namespace,
+                StrategyContinuityV2::new_account(),
+            ),
+        }
+    }
+}
+fn require_parameter_version(
+    run: &serde_json::Value,
+    parameters: &StrategyParameters,
+) -> Result<(), CommandError> {
+    if let Some(version) = run
+        .get("strategy")
+        .and_then(|s| s.get("strategy_rule_version"))
+    {
+        if version.as_str() != Some(parameters.version()) {
+            return Err("策略参数类型与声明的正式版本不同".into());
+        }
+    }
+    Ok(())
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommandConfig<R = HistoricalRunConfigV1> {
     run: R,
     rules: HistoricalProcessSnapshotRequestConfig,
-    strategy: ComplementaryPairConfigV3,
+    strategy: StrategyParameters,
     request_namespace: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25,7 +73,7 @@ type CommandError = Box<dyn std::error::Error + Send + Sync>;
 #[serde(deny_unknown_fields)]
 struct DayCandidateCommand {
     run: HistoricalPreparedRunConfigV1,
-    strategy: ComplementaryPairConfigV3,
+    strategy: StrategyParameters,
     request_namespace: String,
 }
 #[derive(Deserialize)]
@@ -49,7 +97,7 @@ fn require_current_rule(run: &serde_json::Value) -> Result<(), CommandError> {
         .get("strategy")
         .and_then(|s| s.get("strategy_rule_version"))
     {
-        if version.as_str() != Some(RULE_VERSION) {
+        if !matches!(version.as_str(), Some(RULE_VERSION | PUBLIC_RULE_VERSION)) {
             return Err(format!("策略版本{version}不能由当前{RULE_VERSION}运行；请生成新版本材料，不能覆盖旧candidate_v1/candidate_v2历史包").into());
         }
     }
@@ -77,6 +125,18 @@ fn load_days_command(mut value: serde_json::Value) -> Result<DaysCommand, Comman
                     .and_then(serde_json::Value::as_object_mut)
                     .ok_or("候选缺少完整strategy")?;
                 for (section, fields) in overrides.as_object().ok_or("策略覆盖不是对象")? {
+                    if section == "blb_decrease_veto" {
+                        strategy.insert(section.clone(), fields.clone());
+                        continue;
+                    }
+                    let strategy = if strategy.contains_key("parameters") {
+                        strategy
+                            .get_mut("parameters")
+                            .and_then(serde_json::Value::as_object_mut)
+                            .ok_or("公共策略parameters不是对象")?
+                    } else {
+                        &mut *strategy
+                    };
                     let target = strategy
                         .get_mut(section)
                         .and_then(serde_json::Value::as_object_mut)
@@ -87,14 +147,15 @@ fn load_days_command(mut value: serde_json::Value) -> Result<DaysCommand, Comman
                     }
                 }
             }
-            let strategy: ComplementaryPairConfigV3 = serde_json::from_value(
+            let strategy: StrategyParameters = serde_json::from_value(
                 candidate
                     .get("strategy")
                     .cloned()
                     .ok_or("候选缺少完整strategy")?,
             )?;
+            require_parameter_version(candidate.get("run").ok_or("候选缺少run")?, &strategy)?;
             candidate.get_mut("run").and_then(serde_json::Value::as_object_mut).ok_or("候选缺少宿主run")?
-                .insert("strategy".into(),serde_json::json!({"strategy_id":STRATEGY_ID,"strategy_rule_version":RULE_VERSION,"effective_parameters":strategy}));
+                .insert("strategy".into(),serde_json::json!({"strategy_id":STRATEGY_ID,"strategy_rule_version":strategy.version(),"effective_parameters":strategy}));
         }
     }
     Ok(serde_json::from_value(value)?)
@@ -216,8 +277,17 @@ fn load_value(args: impl IntoIterator<Item = String>) -> Result<serde_json::Valu
     let mut args = args.into_iter();
     let mut config_file = None;
     let mut overrides = BTreeMap::new();
+    let mut blb_override = None;
     let mut entry_overrides = BTreeMap::<String, u64>::new();
     while let Some(option) = args.next() {
+        if option == "--blb-decrease-veto" {
+            blb_override = Some(
+                args.next()
+                    .ok_or("BLB否决缺少显式布尔值")?
+                    .parse::<bool>()?,
+            );
+            continue;
+        }
         if option == "--config" {
             config_file = Some(args.next().ok_or("--config 缺少文件路径")?);
             continue;
@@ -253,6 +323,16 @@ fn load_value(args: impl IntoIterator<Item = String>) -> Result<serde_json::Valu
     } else {
         serde_json::to_value(toml::from_str::<toml::Value>(&content)?)?
     };
+    if let Some(veto) = blb_override {
+        value
+            .as_object_mut()
+            .ok_or("启动配置不是对象")?
+            .entry("strategy")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or("策略配置不是对象")?
+            .insert("blb_decrease_veto".into(), veto.into());
+    }
     if !entry_overrides.is_empty() {
         apply_entry_overrides(&mut value, &entry_overrides)?;
     }
@@ -265,6 +345,14 @@ fn load_value(args: impl IntoIterator<Item = String>) -> Result<serde_json::Valu
             .or_insert_with(|| serde_json::json!({}))
             .as_object_mut()
             .ok_or("策略配置不是对象")?;
+        let strategy = if strategy.contains_key("parameters") {
+            strategy
+                .get_mut("parameters")
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or("公共策略parameters不是对象")?
+        } else {
+            strategy
+        };
         let section = strategy
             .entry(section)
             .or_insert_with(|| serde_json::json!({}))
@@ -318,11 +406,12 @@ fn load_config<R: serde::de::DeserializeOwned>(
 ) -> Result<CommandConfig<R>, CommandError> {
     let mut value = load_value(args)?;
     require_current_rule(value.get("run").ok_or("配置缺少run")?)?;
-    let strategy: ComplementaryPairConfigV3 =
+    let strategy: StrategyParameters =
         serde_json::from_value(value.get("strategy").cloned().ok_or("配置缺少策略参数")?)?;
+    require_parameter_version(value.get("run").ok_or("配置缺少run")?, &strategy)?;
     let descriptor = StrategyDescriptorV1 {
         strategy_id: STRATEGY_ID.into(),
-        strategy_rule_version: RULE_VERSION.into(),
+        strategy_rule_version: strategy.version().into(),
         effective_parameters: serde_json::to_value(&strategy)?,
     };
     value
@@ -417,7 +506,7 @@ fn write_day_failure_json(value: &serde_json::Value) -> std::io::Result<()> {
 async fn main() {
     if std::env::args().any(|arg| arg == "--help") {
         println!(
-            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，每次从头运行，不保存或恢复检查点\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--summary-reserve-seconds <秒>（默认900）\nday可选--entry-market-start-offset-ms <非负毫秒>、--entry-market-end-margin-ms <非负毫秒>：声明输入[S,E)上的S+a≤market.start<E-b；无配置不限制，显式0/0限制；单端沿文件补值后缺值取0。\nday可选--research-evidence-root <新目录>，同次公共生产输出BLB/PM与真实决策，失败返回部分结果。\n全部策略字段可覆盖（day对各候选显式覆盖）：\n{}",
+            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，每次从头运行，不保存或恢复检查点\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--summary-reserve-seconds <秒>（默认900）\nday可选--entry-market-start-offset-ms <非负毫秒>、--entry-market-end-margin-ms <非负毫秒>：声明输入[S,E)上的S+a≤market.start<E-b；无配置不限制，显式0/0限制；单端沿文件补值后缺值取0。\nday可选--research-evidence-root <新目录>，同次公共生产输出BLB/PM与真实决策，失败返回部分结果。\n公共候选 candidate_v4_public_c0_c1 使用parameters内完整42参数及blb_decrease_veto；--blb-decrease-veto true|false覆盖新候选唯一开关。\n全部原策略字段可覆盖（day对各候选显式覆盖）：\n{}",
             PARAMETERS
                 .iter()
                 .map(|(field, _)| *field)
@@ -459,7 +548,7 @@ async fn main() {
                 let mut candidates=Vec::new();
                 for candidate in day.candidates {
                     let mut run=candidate.run;
-                    run.strategy=StrategyDescriptorV1 {strategy_id:STRATEGY_ID.into(),strategy_rule_version:RULE_VERSION.into(),effective_parameters:serde_json::to_value(&candidate.strategy)?};
+                    run.strategy=StrategyDescriptorV1 {strategy_id:STRATEGY_ID.into(),strategy_rule_version:candidate.strategy.version().into(),effective_parameters:serde_json::to_value(&candidate.strategy)?};
                     run.effective_entry_market_scope=run.entry_market_scope.as_ref().map(|p| p.expand(day.preparation.scope.received_start_utc_ms,day.preparation.scope.received_end_utc_ms)).transpose()?;
                     if let Some(root) = &research.evidence_root {
                         run.research_evidence_path=Some(root.join(format!("candidate-{}-{}.jsonl",days.len(),candidates.len())));
@@ -471,9 +560,9 @@ async fn main() {
                 days.push(HistoricalDayConfigV1 {preparation:day.preparation,candidates,progress_interval_seconds:interval,producer_lead_groups:day.producer_lead_groups});
             }
             let factory=|run:&HistoricalPreparedRunConfigV1|->Result<ComplementaryPairV1,MaterialError> {
-                let strategy=serde_json::from_value(run.strategy.effective_parameters.clone())?;
+                let strategy: StrategyParameters=serde_json::from_value(run.strategy.effective_parameters.clone())?;
                 let namespace=run.strategy_request_namespace.as_ref().ok_or("候选请求命名空间缺失")?.clone();
-                Ok(ComplementaryPairV1::new(strategy,rules.clone(),namespace,StrategyContinuityV2::new_account())?.with_entry_market_range(run.effective_entry_market_scope.as_ref().map(|e| EntryMarketRangeV1 { start_at_utc_ms:e.market_start_inclusive_utc_ms,end_at_utc_ms:e.market_start_exclusive_utc_ms })))
+                Ok(strategy.build(rules.clone(),namespace)?.with_entry_market_range(run.effective_entry_market_scope.as_ref().map(|e| EntryMarketRangeV1 { start_at_utc_ms:e.market_start_inclusive_utc_ms,end_at_utc_ms:e.market_start_exclusive_utc_ms })))
             };
             let options=HistoricalDayRunOptionsV1 { research_summary:research.summary, started, public_observer:observer.map(|o| std::sync::Arc::new(o) as std::sync::Arc<dyn HistoricalPublicObserverV1>),
                 budget_stop_after:research.budget_seconds.map(|budget| std::time::Duration::from_secs(budget-research.reserve_seconds.unwrap_or(900))) };
@@ -513,7 +602,7 @@ async fn main() {
             let path = description.ok_or("reuse模式必须提供--prepared描述路径")?;
             let material = PreparedHistoricalMaterialV1::read(&path)?;
             config.run.effective_entry_market_scope = config.run.entry_market_scope.as_ref().map(|p| p.expand(material.preparation.scope.received_start_utc_ms,material.preparation.scope.received_end_utc_ms)).transpose()?;
-            let mut strategy = ComplementaryPairV1::new(config.strategy, rules.clone(), config.request_namespace, StrategyContinuityV2::new_account())?.with_entry_market_range(config.run.effective_entry_market_scope.as_ref().map(entry_range));
+            let mut strategy = config.strategy.build(rules.clone(), config.request_namespace)?.with_entry_market_range(config.run.effective_entry_market_scope.as_ref().map(entry_range));
             let started = std::time::Instant::now();
             let output_ok = interval != 0 && emit_stage(&serde_json::json!({"stage":"opening_prepared_run", "processed_groups":null, "elapsed_seconds":started.elapsed().as_secs_f64(), "total":null, "eta":null}));
             let result = run_prepared_historical_v1(&path, &config.run, rules, &mut strategy).await;
@@ -523,7 +612,7 @@ async fn main() {
         let config: CommandConfig = load_config(args)?;
         let rules = load_rules(config.rules)?;
         let scope = config.run.entry_market_scope.as_ref().map(|p| p.expand(config.run.preparation.scope.received_start_utc_ms,config.run.preparation.scope.received_end_utc_ms)).transpose()?;
-        let mut strategy = ComplementaryPairV1::new(config.strategy, rules.clone(), config.request_namespace, StrategyContinuityV2::new_account())?.with_entry_market_range(scope.as_ref().map(entry_range));
+        let mut strategy = config.strategy.build(rules.clone(), config.request_namespace)?.with_entry_market_range(scope.as_ref().map(entry_range));
         print_result(run_historical_v1(&config.run, rules, &mut strategy).await)
     }.await;
     if let Err(error) = outcome as Result<(), CommandError> {
@@ -677,5 +766,53 @@ mod entry_scope_tests {
         ])
         .unwrap();
         assert!(explicit["days"][0]["candidates"][0]["run"]["entry_market_scope"].is_object());
+    }
+}
+
+#[cfg(test)]
+mod public_candidate_tests {
+    use super::*;
+    #[test]
+    fn public_and_legacy_parameter_versions_and_switch_override() {
+        let public: StrategyParameters = serde_json::from_str(include_str!(
+            "../../../baseline-mm/configs/strategies/complementary_pair/public-c0.json"
+        ))
+        .unwrap();
+        assert_eq!(public.version(), PUBLIC_RULE_VERSION);
+        let StrategyParameters::Public(c) = public else {
+            panic!()
+        };
+        let legacy: StrategyParameters =
+            serde_json::from_value(serde_json::to_value(&c.parameters).unwrap()).unwrap();
+        assert_eq!(legacy.version(), RULE_VERSION);
+        assert!(
+            require_parameter_version(
+                &serde_json::json!({"strategy":{"strategy_rule_version":RULE_VERSION}}),
+                &StrategyParameters::Public(c.clone())
+            )
+            .is_err()
+        );
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            serde_json::to_vec(&serde_json::json!({"strategy":c})).unwrap(),
+        )
+        .unwrap();
+        let value = load_value([
+            "--config".into(),
+            file.path().display().to_string(),
+            "--blb-decrease-veto".into(),
+            "true".into(),
+            "--strategy.quote.base_pair_shares".into(),
+            "12".into(),
+        ])
+        .unwrap();
+        let parsed: ComplementaryPairConfigV4 =
+            serde_json::from_value(value["strategy"].clone()).unwrap();
+        assert!(parsed.blb_decrease_veto);
+        assert_eq!(
+            parsed.parameters.quote.base_pair_shares,
+            rust_decimal::Decimal::from(12)
+        );
     }
 }

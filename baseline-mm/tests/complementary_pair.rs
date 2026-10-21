@@ -2418,3 +2418,6 @@ async fn startup_scope_only_blocks_new_pairs_and_keeps_real_probability_sampling
 
 #[path = "support/initial_best_bid.rs"]
 mod initial_best_bid;
+
+#[path = "support/public_candidate.rs"]
+mod public_candidate;
