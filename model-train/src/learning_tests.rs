@@ -204,7 +204,13 @@ fn all_n0_completed_entry_reports_objectives_without_samples_or_commit() {
     let root = tempfile::tempdir().unwrap();
     let (config, complete) = collection(root.path(), false);
     let targets = prepare_collected_targets(&config, &complete).unwrap();
-    let result = finish_without_actor(&config, &targets).unwrap().unwrap();
+    let result = finish_without_actor(
+        &config,
+        &targets,
+        &crate::first_observation::FirstObservation::new(std::time::Instant::now()),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(result["committed"], false);
     assert_eq!(result["no_actor_samples"], true);
     assert!(!config.parameters.checkpoint_directory.exists());
@@ -224,7 +230,15 @@ fn mixed_n0_completed_entry_preserves_only_real_samples_and_missing_nonempty_is_
     let root = tempfile::tempdir().unwrap();
     let (config, complete) = collection(root.path(), true);
     let targets = prepare_collected_targets(&config, &complete).unwrap();
-    assert!(finish_without_actor(&config, &targets).unwrap().is_none());
+    assert!(
+        finish_without_actor(
+            &config,
+            &targets,
+            &crate::first_observation::FirstObservation::new(std::time::Instant::now())
+        )
+        .unwrap()
+        .is_none()
+    );
     assert_eq!(targets.rows["b"].meta.len(), 1);
     assert!(targets.rows["a"].meta.is_empty());
     assert_eq!(targets.labels["b"].len(), 1);

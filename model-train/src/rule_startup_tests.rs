@@ -93,6 +93,7 @@ fn rules_precede_worker_and_sim_completed_collection_and_consumed_recovery_do_no
     let binding = opened.binding.clone();
     let result = run_learning_job_with_opener(&config, |_| Ok(opened)).unwrap();
     assert_eq!(result["no_actor_samples"], true);
+    assert!(result["first_observation"].is_null());
     assert_eq!(queries.get(), 1);
     let records = std::fs::read_to_string(&log)
         .unwrap()
@@ -145,6 +146,7 @@ fn rules_precede_worker_and_sim_completed_collection_and_consumed_recovery_do_no
     assert_eq!(reopened.opened_via, SnapshotAccessMode::Recovery);
     let result = run_learning_job_with_opener(&config, |_| Ok(reopened)).unwrap();
     assert_eq!(result["no_actor_samples"], true);
+    assert!(result["first_observation"].is_null());
     assert_eq!(std::fs::read(&complete).unwrap(), bytes);
     // 假worker仅模拟已消费回执，核对原group协议，绝不执行optimizer/提交。
     std::fs::write(&config.consumer.worker.model,serde_json::to_vec(&json!({"log":log,"sealed_rules":binding.snapshot_path,"already_committed":true,"expected_group":group})).unwrap()).unwrap();
@@ -154,6 +156,7 @@ fn rules_precede_worker_and_sim_completed_collection_and_consumed_recovery_do_no
     })
     .unwrap();
     assert_eq!(result["already_committed"], true);
+    assert!(result["first_observation"].is_null());
     assert_eq!(std::fs::read(&complete).unwrap(), bytes);
     let before = std::fs::read(&log).unwrap();
     for implementation in [false, true] {
@@ -216,6 +219,7 @@ fn failed_query_has_no_worker_or_sim_and_consumer_root_uses_same_startup() {
             .unwrap();
     assert_eq!(queries.get(), 1);
     assert_eq!(result["model"]["forwards"], 0);
+    assert!(result["first_observation"].is_null());
 }
 
 #[test]
@@ -324,6 +328,7 @@ fn completed_collection_reuses_original_binding_when_only_checkpoint_directory_c
     config.consumer = bind_consumer(&config.consumer, &opened.binding);
     let result = run_learning_job_with_opener(&config, |_| Ok(opened)).unwrap();
     assert_eq!(result["no_actor_samples"], true);
+    assert!(result["first_observation"].is_null());
     let complete = config.output_directory.join("completed-collection.json");
     let original = std::fs::read(&complete).unwrap();
     let before = std::fs::read_to_string(&log).unwrap();
@@ -334,6 +339,7 @@ fn completed_collection_reuses_original_binding_when_only_checkpoint_directory_c
     })
     .unwrap();
     assert_eq!(result["no_actor_samples"], true);
+    assert!(result["first_observation"].is_null());
     assert_eq!(std::fs::read(&complete).unwrap(), original);
     let after = std::fs::read_to_string(&log).unwrap();
     let additional = &after[before.len()..];
@@ -362,4 +368,191 @@ fn completed_collection_reuses_original_binding_when_only_checkpoint_directory_c
         );
         assert_eq!(std::fs::read(&complete).unwrap(), original);
     }
+}
+
+#[test]
+fn first_observation_uses_root_clock_and_survives_later_failures_without_stale_reuse() {
+    use std::{thread::sleep, time::Duration};
+    for phase in [
+        "consumer",
+        "success",
+        "begin",
+        "learn_end_epoch",
+        "learn_commit",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let (mut config, source, log) = prepared(root.path());
+        let start = config.consumer.days[0]
+            .preparation
+            .scope
+            .received_start_utc_ms;
+        config.active_end_utc_ms = start + 5000;
+        // 一个小合成公共流、两个账户；原FIFO/截止和真实消费者不变。
+        if phase == "consumer" {
+            for (i, c) in config.consumer.days[0].candidates.iter_mut().enumerate() {
+                c.strategy.effective_parameters["model_consumer"]["learning"] =
+                    json!(CollectionConfig {
+                        group_id: "consumer-timing".into(),
+                        active_end_utc_ms: config.active_end_utc_ms,
+                        evidence_end_utc_ms: start + 12000,
+                        trajectory_path: root.path().join(format!("consumer-{i}.jsonl")),
+                        collection_fault_after_call: None
+                    });
+            }
+        }
+        let mut control: Value =
+            serde_json::from_slice(&std::fs::read(&config.consumer.worker.model).unwrap()).unwrap();
+        control["timing_protocol"] = json!(true);
+        control["handshake_delay_ms"] = json!(30);
+        control["learn_open_delay_ms"] = json!(30);
+        control["first_begin_delay_ms"] = json!(120);
+        if !["consumer", "success"].contains(&phase) {
+            control["fail_phase"] = json!(phase);
+        }
+        std::fs::write(
+            &config.consumer.worker.model,
+            serde_json::to_vec(&control).unwrap(),
+        )
+        .unwrap();
+        let queries = Cell::new(0);
+        let opener = |c: &crate::ConsumerRunConfig| {
+            sleep(Duration::from_millis(30));
+            Ok(injected(c, source, &queries))
+        };
+        let result = if phase == "consumer" {
+            crate::run::run_consumer_with_opener(&config.consumer, opener)
+        } else {
+            run_learning_job_with_opener(&config, opener)
+        };
+        let report = if ["consumer", "success"].contains(&phase) {
+            result.unwrap()
+        } else {
+            assert!(result.is_err());
+            let value: Value =
+                serde_json::from_slice(&std::fs::read(&config.attempt_report).unwrap()).unwrap();
+            assert_eq!(
+                value[match phase {
+                    "begin" => "failed_collection",
+                    "learn_commit" => "commit_reply_failed",
+                    _ => "failed_learning",
+                }],
+                true
+            );
+            value
+        };
+        let first = &report["first_observation"];
+        assert!(first.is_object(), "{phase}: {report}");
+        assert_eq!(first["call"], 1);
+        assert!(["a", "b"].contains(&first["account_key"].as_str().unwrap()));
+        assert!(first["market_frame"]["market_cutoff"].is_object());
+        let elapsed = first["elapsed_seconds"].as_f64().unwrap();
+        assert!(
+            elapsed >= if phase == "consumer" { 0.06 } else { 0.09 },
+            "起点必须包含规则、握手及适用learn_open: {report}"
+        );
+        assert!(
+            report["elapsed_seconds"].as_f64().unwrap() - elapsed >= 0.12,
+            "首事件必须在受控120ms begin响应前: {report}"
+        );
+        eprintln!("首观察CPU边界 {phase}: {}", report["first_observation"]);
+        if phase == "success" {
+            let complete = config.output_directory.join("completed-collection.json");
+            let original = std::fs::read(&complete).unwrap();
+            let stored: Value = serde_json::from_slice(&original).unwrap();
+            assert_eq!(stored["summary"]["first_observation"], *first);
+            let frozen = stored["consumer"]["rules"].clone();
+            config.consumer.rules = serde_json::from_value(frozen).unwrap();
+            config.attempt_report = root.path().join("reuse-report.json");
+            let reuse = run_learning_job_with_opener(&config, |c| {
+                open_rules_with(c, |_| panic!("复用不查询"))
+            })
+            .unwrap();
+            assert!(reuse["first_observation"].is_null());
+            assert_eq!(std::fs::read(&complete).unwrap(), original);
+            let records = std::fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str::<Value>(l).unwrap())
+                .collect::<Vec<_>>();
+            control["already_committed"] = json!(true);
+            control["expected_group"] =
+                records.iter().find(|r| r["phase"] == "learn_open").unwrap()["group"].clone();
+            std::fs::write(
+                &config.consumer.worker.model,
+                serde_json::to_vec(&control).unwrap(),
+            )
+            .unwrap();
+            config.attempt_report = root.path().join("already-report.json");
+            let already = run_learning_job_with_opener(&config, |c| {
+                open_rules_with(c, |_| panic!("已消费不查询"))
+            })
+            .unwrap();
+            assert_eq!(already["already_committed"], true);
+            assert!(already["first_observation"].is_null());
+            assert_eq!(std::fs::read(&complete).unwrap(), original);
+        }
+    }
+}
+
+#[test]
+fn first_observation_exists_before_worker_response_is_released() {
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let (mut config, source, _) = prepared(root.path());
+    config.consumer.days[0].candidates.truncate(1);
+    let start = config.consumer.days[0]
+        .preparation
+        .scope
+        .received_start_utc_ms;
+    config.consumer.days[0].candidates[0]
+        .strategy
+        .effective_parameters["model_consumer"]["learning"] = json!(CollectionConfig {
+        group_id: "endpoint-only".into(),
+        active_end_utc_ms: start + 5000,
+        evidence_end_utc_ms: start + 12000,
+        trajectory_path: root.path().join("endpoint-trajectory.jsonl"),
+        collection_fault_after_call: None
+    });
+    let queries = Cell::new(0);
+    let opened = injected(&config.consumer, source, &queries);
+    let consumer = bind_consumer(&config.consumer, &opened.binding);
+    let received = root.path().join("begin-received");
+    let release = root.path().join("begin-release");
+    let mut control: Value =
+        serde_json::from_slice(&std::fs::read(&consumer.worker.model).unwrap()).unwrap();
+    control["timing_protocol"] = json!(true);
+    control["first_begin_received"] = json!(received);
+    control["first_begin_release"] = json!(release);
+    std::fs::write(
+        &consumer.worker.model,
+        serde_json::to_vec(&control).unwrap(),
+    )
+    .unwrap();
+    let worker = crate::worker::ModelWorker::start(consumer.worker.clone()).unwrap();
+    let started = Instant::now();
+    let first = Arc::new(crate::first_observation::FirstObservation::new(started));
+    let captured = first.clone();
+    thread::scope(|scope| {
+        let run = scope.spawn(move || {
+            crate::run::run_with_worker_observed(&consumer, worker, opened.rules, started, captured)
+        });
+        while !received.exists() && !run.is_finished() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let while_blocked = first.snapshot();
+        let response_pending = !run.is_finished();
+        // 先释放替身再断言；即使反例失败也不让被测线程停在测试屏障。
+        std::fs::write(&release, "释放协议响应").unwrap();
+        let result = run.join().unwrap().unwrap();
+        assert!(received.exists() && response_pending);
+        assert!(
+            while_blocked.is_object(),
+            "worker尚无响应时，真实decide入口必须已有首事件"
+        );
+        assert_eq!(result["first_observation"], while_blocked);
+        eprintln!("CPU协议屏障证明：begin响应未释放时已有 {}", while_blocked);
+    });
 }

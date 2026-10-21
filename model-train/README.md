@@ -171,3 +171,32 @@ IPC请求/响应为5,912,429/355,720B和59,069,624/3,545,186B；
 采集与正式学习再生共用该定义；必要F9仍来自原事实和统计。新轨迹版本为
 `learning-trajectory-v2`，旧学习事务不会自动迁移，详见[学习接口](LEARNING.md#公共输入与旧身份)。
 [当前需求诊断示例](examples/diagnostic-current-consumer.json)只提供未执行入口，不构成真实作业授权。
+
+## 首观察物理耗时
+
+`run_consumer` 和 `run_learning_job` 的结果新增 `first_observation`：对象中的
+`elapsed_seconds` 是从本次组合入口、配置绑定之前的单调物理起点，到第一次合法
+`StrategyInputV1` 进入 `ModelConsumer::decide` 的秒数。终点在编码和worker请求之前；
+即使后续编码或模型请求失败，这次交付也已发生。对象同时保留原 `account_key`、`call`、
+`processing_start_utc_ms` 和紧凑 `market_frame` 引用，不保存完整观察。
+
+这一点值包含本次规则打开、worker握手及输入准备，learner还包含采集之前的 `learn_open`。
+CLI参数/JSON读取发生在组合入口之前，外部进程启动、监督和准备也不包含；这些成本仍用外部完整墙钟。
+原 `elapsed_seconds` 和吞吐分母保持原区间：consumer原起点在公共输入配置绑定之后，
+learner原起点在配置复制/绑定之后，learner内部collection原计时另从采集装配前开始。
+新首事件始终共用顶层起点，不把这些原区间改名或拼接。
+低层 `run_with_worker(..., started)` 使用调用者显式给定的 `started`，不能推断其之前的启动成本。
+
+同一次运行的所有日期和账户共享一份 `OnceLock`；先进入首事件初始化的实际调用记录一次，
+不按配置顺序或完成顺序挑选。它不承诺并发调度的确定性。后续调用只读取初始化状态，
+本观测不额外逐帧取时、复制观察或写日志；初次记录才取时、构造紧凑对象并向原stderr进度流写一条
+`{"event":"first_observation","first_observation":{...}}`。原summary/attempt报告携带同一快照。
+没有调用（包括N0）、本次仅复用完成采集、或已消费确认时，本次字段为 `null`，不能把0当作实测。
+历史 `completed-collection.json.summary.first_observation` 若存在，仍只属于原采集；本次不复制它。
+consumer无正常summary的错误可查已经输出的一次进度事件；learner现有failed_collection、
+failed_learning、commit_reply_failed及成功/N0落盘报告按本次实际路径保留该字段。
+在事件之前退出时没有首事件；强杀或原报告写入失败不保证存在最终报告。
+
+此观测不进入配置、组、轨迹或checkpoint身份，不改SIM时间、FIFO、双截止、动作或经济事实，
+不新增超时/停止门，也不依赖 `stage-timing` feature。额外成本是一份共享记录、每次调用一次初始化状态读取，
+以及首次紧凑JSON/日志和报告中的常数大小引用；未把这一开销外推为完整负载容量或100ms服务保证。

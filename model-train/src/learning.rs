@@ -577,11 +577,12 @@ fn prepare_collected_targets(
 fn finish_without_actor(
     config: &LearningJobConfig,
     targets: &CollectedTargets,
+    first_observation: &crate::first_observation::FirstObservation,
 ) -> Result<Option<Value>, backtest::MaterialError> {
     if targets.rows.values().any(|r| !r.meta.is_empty()) {
         return Ok(None);
     }
-    let result = json!({"group":config.group_id,"no_actor_samples":true,"committed":false,"unit_objectives":config.output_directory.join("unit-objectives.json"),"model_work":{"collected":0,"recomputed":0,"optimizer_steps":0,"commits":0}});
+    let result = json!({"first_observation":first_observation.snapshot(),"group":config.group_id,"no_actor_samples":true,"committed":false,"unit_objectives":config.output_directory.join("unit-objectives.json"),"model_work":{"collected":0,"recomputed":0,"optimizer_steps":0,"commits":0}});
     write_new(&config.attempt_report, &result)?;
     Ok(Some(result))
 }
@@ -595,13 +596,16 @@ fn run_learning_job_with_opener(
         &crate::ConsumerRunConfig,
     ) -> Result<crate::rules::OpenedRulesV1, backtest::MaterialError>,
 ) -> Result<Value, backtest::MaterialError> {
+    let first_observation = std::sync::Arc::new(crate::first_observation::FirstObservation::new(
+        std::time::Instant::now(),
+    ));
     let mut current = config.clone();
     current.consumer = crate::public_input::bind(&current.consumer);
     let config = &current;
     let started = std::time::Instant::now();
     let opened = open(&config.consumer)?;
     let mode = opened.opened_via;
-    let mut result = run_learning_job_opened(config, opened, started)?;
+    let mut result = run_learning_job_opened(config, opened, started, first_observation)?;
     result["rules_opened_via"] = serde_json::to_value(mode)?;
     Ok(result)
 }
@@ -620,8 +624,9 @@ fn run_learning_job_opened(
     original: &LearningJobConfig,
     opened: crate::rules::OpenedRulesV1,
     started: std::time::Instant,
+    first_observation: std::sync::Arc<crate::first_observation::FirstObservation>,
 ) -> Result<Value, backtest::MaterialError> {
-    use crate::{run_with_worker, worker::ModelWorker};
+    use crate::{run::run_with_worker_observed, worker::ModelWorker};
     use std::{collections::BTreeMap, time::Instant};
     let mut effective_config = original.clone();
     effective_config.consumer = crate::rules::bind_consumer(&original.consumer, &opened.binding);
@@ -672,7 +677,7 @@ fn run_learning_job_opened(
     let outcome = (|| -> Result<Value, backtest::MaterialError> {
         let transaction=worker.request(json!({"phase":"learn_open","config":config.parameters,"group":group,"account_weights":weights}))?;
         if transaction["already_committed"] == true {
-            let result = json!({"already_committed":true,"group":group,"result":transaction,"model":worker.request(json!({"phase":"metrics"}))?,"elapsed_seconds":started.elapsed().as_secs_f64()});
+            let result = json!({"first_observation":first_observation.snapshot(),"already_committed":true,"group":group,"result":transaction,"model":worker.request(json!({"phase":"metrics"}))?,"elapsed_seconds":started.elapsed().as_secs_f64()});
             write_new(&config.attempt_report, &result)?;
             return Ok(result);
         }
@@ -726,16 +731,17 @@ fn run_learning_job_opened(
             }
             value
         } else {
-            let outcome = run_with_worker(
+            let outcome = run_with_worker_observed(
                 &effective,
                 worker.clone(),
                 opened.rules.clone(),
                 Instant::now(),
+                first_observation.clone(),
             );
             let summary = match outcome {
                 Ok(s) => s,
                 Err(e) => {
-                    let result = json!({"failed_collection":true,"error":e.to_string(),"group":group,"model":worker.request(json!({"phase":"metrics"}))?,"worker_ipc":worker.io_metrics(),"elapsed_seconds":started.elapsed().as_secs_f64()});
+                    let result = json!({"first_observation":first_observation.snapshot(),"failed_collection":true,"error":e.to_string(),"group":group,"model":worker.request(json!({"phase":"metrics"}))?,"worker_ipc":worker.io_metrics(),"elapsed_seconds":started.elapsed().as_secs_f64()});
                     write_new(&config.attempt_report, &result)?;
                     return Err(e);
                 }
@@ -755,7 +761,7 @@ fn run_learning_job_opened(
             rows,
             labels,
         };
-        if let Some(result) = finish_without_actor(config, &targets)? {
+        if let Some(result) = finish_without_actor(config, &targets, &first_observation)? {
             return Ok(result);
         }
         let CollectedTargets {
@@ -868,10 +874,10 @@ fn run_learning_job_opened(
         let committed=worker.request(json!({"phase":"learn_commit","fault":config.fault,"witness":config.attempt_report.with_extension("fault.json")}));
         let result = match committed {
             Ok(c) => {
-                json!({"committed":c,"group":group,"model":worker.request(json!({"phase":"metrics"}))?,"worker_ipc":worker.io_metrics(),"elapsed_seconds":started.elapsed().as_secs_f64()})
+                json!({"first_observation":first_observation.snapshot(),"committed":c,"group":group,"model":worker.request(json!({"phase":"metrics"}))?,"worker_ipc":worker.io_metrics(),"elapsed_seconds":started.elapsed().as_secs_f64()})
             }
             Err(e) => {
-                let result = json!({"commit_reply_failed":true,"error":e,"group":group,"elapsed_seconds":started.elapsed().as_secs_f64()});
+                let result = json!({"first_observation":first_observation.snapshot(),"commit_reply_failed":true,"error":e,"group":group,"elapsed_seconds":started.elapsed().as_secs_f64()});
                 write_new(&config.attempt_report, &result)?;
                 return Err("学习提交回执失败；按原事务恢复".into());
             }
@@ -883,7 +889,7 @@ fn run_learning_job_opened(
         && !config.attempt_report.exists()
     {
         let metrics = worker.request(json!({"phase":"metrics"}));
-        let partial = json!({"failed_learning":true,"error":error.to_string(),"model":metrics.as_ref().ok(),"metrics_error":metrics.err(),"worker_ipc":worker.io_metrics(),"elapsed_seconds":started.elapsed().as_secs_f64()});
+        let partial = json!({"first_observation":first_observation.snapshot(),"failed_learning":true,"error":error.to_string(),"model":metrics.as_ref().ok(),"metrics_error":metrics.err(),"worker_ipc":worker.io_metrics(),"elapsed_seconds":started.elapsed().as_secs_f64()});
         write_new(&config.attempt_report, &partial)?;
     }
     outcome

@@ -24,6 +24,9 @@ pub(crate) fn run_consumer_with_opener(
     config: &ConsumerRunConfig,
     open: impl FnOnce(&ConsumerRunConfig) -> Result<crate::rules::OpenedRulesV1, MaterialError>,
 ) -> Result<Value, MaterialError> {
+    let first_observation = std::sync::Arc::new(crate::first_observation::FirstObservation::new(
+        Instant::now(),
+    ));
     let current = crate::public_input::bind(config);
     let config = &current;
     let started = Instant::now();
@@ -43,7 +46,8 @@ pub(crate) fn run_consumer_with_opener(
     let opened = open(config)?;
     let effective = crate::rules::bind_consumer(config, &opened.binding);
     let worker = ModelWorker::start(config.worker.clone())?;
-    let mut summary = run_with_worker(&effective, worker, opened.rules, started)?;
+    let mut summary =
+        run_with_worker_observed(&effective, worker, opened.rules, started, first_observation)?;
     summary["rules_opened_via"] = serde_json::to_value(opened.opened_via)?;
     Ok(summary)
 }
@@ -52,6 +56,17 @@ pub fn run_with_worker(
     worker: ModelWorker,
     rules: std::sync::Arc<SealedProcessRuleSnapshotV3>,
     started: Instant,
+) -> Result<Value, MaterialError> {
+    let first_observation =
+        std::sync::Arc::new(crate::first_observation::FirstObservation::new(started));
+    run_with_worker_observed(config, worker, rules, started, first_observation)
+}
+pub(crate) fn run_with_worker_observed(
+    config: &ConsumerRunConfig,
+    worker: ModelWorker,
+    rules: std::sync::Arc<SealedProcessRuleSnapshotV3>,
+    started: Instant,
+    first_observation: std::sync::Arc<crate::first_observation::FirstObservation>,
 ) -> Result<Value, MaterialError> {
     let canonical;
     let config = if config.rules.frozen().is_some() {
@@ -90,6 +105,7 @@ pub fn run_with_worker(
                     .ok_or("原day未展开声明市场范围")?,
                 config.rules.frozen().ok_or("缺已解析规则绑定")?,
             )
+            .map(|consumer| consumer.with_first_observation(first_observation.clone()))
             .map_err(Into::into)
         },
         config.parallel_dates,
@@ -97,6 +113,6 @@ pub fn run_with_worker(
     let metrics = worker.request(json!({"phase":"metrics"}))?;
     let elapsed = started.elapsed().as_secs_f64();
     Ok(
-        json!({"consumer_version":"b-model-consumer-v1","effective_config":config,"days":result,"model":metrics,"worker_ipc":worker.io_metrics(),"elapsed_seconds":elapsed,"calls_per_second":metrics["forwards"].as_u64().unwrap_or(0) as f64/elapsed,"rust_process":process_measurement_v1(before.as_ref(),ProcessCountersV1::read().ok().as_ref(),process_clock_ticks_per_second_v1(),elapsed),"limits":"仅接线/推理，无学习或容量结论"}),
+        json!({"first_observation":first_observation.snapshot(),"consumer_version":"b-model-consumer-v1","effective_config":config,"days":result,"model":metrics,"worker_ipc":worker.io_metrics(),"elapsed_seconds":elapsed,"calls_per_second":metrics["forwards"].as_u64().unwrap_or(0) as f64/elapsed,"rust_process":process_measurement_v1(before.as_ref(),ProcessCountersV1::read().ok().as_ref(),process_clock_ticks_per_second_v1(),elapsed),"limits":"仅接线/推理，无学习或容量结论"}),
     )
 }
