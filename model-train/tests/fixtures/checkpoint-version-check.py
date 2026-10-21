@@ -26,7 +26,8 @@ version.TorchVersion = str
 sys.modules["torch"] = torch
 sys.modules["torch.torch_version"] = version
 namespace = {"torch": torch, "Path": Path}
-exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), "production-open", "exec"), namespace)
+helpers = [node for node in source.body if isinstance(node, ast.FunctionDef) and node.name in ("learning_config_semantics", "learning_group_semantics")]
+exec(compile(ast.fix_missing_locations(ast.Module(body=helpers + [method], type_ignores=[])), "production-open", "exec"), namespace)
 with tempfile.TemporaryDirectory() as root:
     config["checkpoint_directory"] = root
     Path(root, "checkpoint.pt").write_text("仅元数据替身，不是模型")

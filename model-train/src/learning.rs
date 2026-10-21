@@ -605,6 +605,17 @@ fn run_learning_job_with_opener(
     result["rules_opened_via"] = serde_json::to_value(mode)?;
     Ok(result)
 }
+/// 检查点存放位置不改变完成采集身份；只投影准确字段，原记录保持不变。
+fn collection_binding_semantics(binding: &Value) -> Value {
+    let mut semantic = binding.clone();
+    if let Some(parameters) = semantic
+        .get_mut("parameters")
+        .and_then(Value::as_object_mut)
+    {
+        parameters.remove("checkpoint_directory");
+    }
+    semantic
+}
 fn run_learning_job_opened(
     original: &LearningJobConfig,
     opened: crate::rules::OpenedRulesV1,
@@ -708,7 +719,9 @@ fn run_learning_job_opened(
         }
         let collection = if complete.exists() {
             let value: Value = serde_json::from_slice(&std::fs::read(&complete)?)?;
-            if value["binding"] != binding {
+            if collection_binding_semantics(&value["binding"])
+                != collection_binding_semantics(&binding)
+            {
                 return Err("已完成轨迹与消费配置不同".into());
             }
             value
