@@ -450,7 +450,7 @@ fn explicit_old_rule_is_rejected_before_any_run_in_both_command_loaders() {
             assert!(!output.status.success());
             let error = String::from_utf8_lossy(&output.stderr);
             assert!(
-                error.contains(version) && error.contains("candidate_v3"),
+                error.contains(version) && error.contains("不受当前入口支持"),
                 "{error}"
             );
         }

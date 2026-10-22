@@ -7826,6 +7826,43 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn historical_maker_v2_saved_state_keeps_model_and_existing_rule_identity() {
+        let (_directory, actor) = active_market_actor_with_maker_version(
+            SimCallerRoleV1::HistoricalBacktest,
+            "v2-saved-state",
+            successful_policy_v2_for_tests(),
+            true,
+            true,
+        )
+        .await;
+        let original = actor.state.as_ref().unwrap();
+        // 日作业检查点内原样保存BusinessReducerStateV2，沿相同CBOR表示核对模型。
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(original, &mut bytes).unwrap();
+        let restored: BusinessReducerStateV2 = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(
+            restored.session.as_ref().unwrap().execution_state,
+            original.session.as_ref().unwrap().execution_state
+        );
+        assert_eq!(
+            serde_json::to_value(&restored.session.as_ref().unwrap().execution_state).unwrap()["maker_model"],
+            "PublicTradeConservativeFifoV2"
+        );
+        let (_old_dir, old) =
+            active_market_actor(SimCallerRoleV1::HistoricalBacktest, "v1-saved-state").await;
+        assert!(matches!(
+            validate_run_dependencies_v2(
+                &old.opened,
+                &actor._rule_snapshot,
+                &old._finality_policy,
+                &old.scenario,
+                &old._latency_profile
+            ),
+            Err(SimRunActorErrorV2::RuleSnapshotIdentityMismatch)
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn historical_maker_role_dispatch_keeps_paper_and_training_legacy() {
         for (role, expected) in [
             (
@@ -8012,6 +8049,15 @@ mod tests {
         finality_policy: Arc<TradeFinalityPolicyV2>,
         explicit: bool,
     ) -> (tempfile::TempDir, SimRunActorV2) {
+        active_market_actor_with_maker_version(role, run_id, finality_policy, explicit, false).await
+    }
+    async fn active_market_actor_with_maker_version(
+        role: SimCallerRoleV1,
+        run_id: &str,
+        finality_policy: Arc<TradeFinalityPolicyV2>,
+        explicit: bool,
+        v2: bool,
+    ) -> (tempfile::TempDir, SimRunActorV2) {
         let directory = tempfile::tempdir().expect("创建市场事件测试目录");
         let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
         let original = successful_snapshot_v3_for_sim_tests().await;
@@ -8021,21 +8067,32 @@ mod tests {
             let bytes = serde_json::to_vec(original.snapshot()).unwrap();
             std::fs::write(&source, &bytes).unwrap();
             use sha2::Digest;
-            crate::platform_rules::derive_public_maker_snapshot_v3(
-                crate::platform_rules::HistoricalProcessSnapshotRequestV1 {
-                    snapshot_path: source,
-                    expected_file_sha256: Sha256Hex(format!("{:x}", sha2::Sha256::digest(&bytes))),
-                    replay_causal_start_utc_ms: i64::MAX,
-                },
-                directory.path().join("explicit-rules.json"),
-                ImplementationIdentityV1 {
-                    git_commit: "a".repeat(40),
-                    source_identity_sha256: sha('5'),
-                    cargo_lock_sha256: sha('6'),
-                },
-                &[role],
-            )
-            .unwrap()
+            let request = crate::platform_rules::HistoricalProcessSnapshotRequestV1 {
+                snapshot_path: source,
+                expected_file_sha256: Sha256Hex(format!("{:x}", sha2::Sha256::digest(&bytes))),
+                replay_causal_start_utc_ms: i64::MAX,
+            };
+            let identity = ImplementationIdentityV1 {
+                git_commit: "a".repeat(40),
+                source_identity_sha256: sha('5'),
+                cargo_lock_sha256: sha('6'),
+            };
+            if v2 {
+                crate::platform_rules::derive_historical_maker_v2_snapshot_v3(
+                    request,
+                    directory.path().join("explicit-rules.json"),
+                    identity,
+                )
+                .unwrap()
+            } else {
+                crate::platform_rules::derive_public_maker_snapshot_v3(
+                    request,
+                    directory.path().join("explicit-rules.json"),
+                    identity,
+                    &[role],
+                )
+                .unwrap()
+            }
         } else {
             original
         };
@@ -14852,17 +14909,204 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn historical_maker_trade_reaches_original_lifecycle_without_initial_l2_dependency() {
-        for role in [
+    async fn historical_maker_v2_cross_price_trade_spends_external_tail_before_lower_order() {
+        let policy = Arc::new(TradeFinalityPolicyV2::decode_and_seal(
+            br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10},{"state":"CONFIRMED","offset_ms":20}],"economic_application_ordinal":0},"failure_overrides":[]}"#,
+        ).unwrap());
+        let (_directory, mut actor) = active_market_actor_with_maker_version(
             SimCallerRoleV1::HistoricalBacktest,
-            SimCallerRoleV1::ModelTrain,
-            SimCallerRoleV1::OfflineEvaluation,
+            "v2-cross-price-consumer",
+            policy,
+            true,
+            true,
+        )
+        .await;
+        let mut initial = Vec::new();
+        for (token, index, label, bid, ask, sequence) in [
+            ("1", 0, "Up", "0.6", "0.8", 1),
+            ("2", 1, "Down", "0.1", "0.9", 2),
         ] {
-            let (_dir, mut actor) = active_market_actor_with_explicit_rules(
+            let mut event = crate::task21_tests::initial_snapshot_event(
+                token, index, label, 1100, 1110, sequence, "100",
+            );
+            let ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) = &mut event.payload
+            else {
+                unreachable!("合法初始快照夹具");
+            };
+            snapshot.bids[0].price_pusd_per_share = ExactDecimal(bid.into());
+            snapshot.asks[0].price_pusd_per_share = ExactDecimal(ask.into());
+            event.event_id =
+                data_pipeline_core::derive_execution_market_event_v3_id(&event).unwrap();
+            initial.push(
+                data_pipeline_core::decode_execution_market_event_v3(
+                    &data_pipeline_core::encode_execution_market_event_v3(&event).unwrap(),
+                )
+                .unwrap(),
+            );
+        }
+        let condition = initial[0].market.condition_id.clone();
+        let rules = actor._rule_snapshot.snapshot();
+        assert_eq!(
+            actor
+                ._rule_snapshot
+                .maker_model_version_for(SimCallerRoleV1::HistoricalBacktest),
+            "PUBLIC_TRADE_CONSERVATIVE_FIFO_V2"
+        );
+        let (state, _) = reduce_market_event_slice_v2(
+            actor.state.take().unwrap(),
+            MarketEventPathV1::HiddenPlatform,
+            1100,
+            &initial,
+            rules,
+            &actor._finality_policy,
+        )
+        .unwrap_or_else(|_| panic!("唯一合法初始快照"));
+        let order = |id: &str, price: &str, quote, at| BuyOrderActionV2 {
+            global_request_id: id.into(),
+            batch_item_ordinal: 0,
+            item_id: id.into(),
+            condition_id: condition.clone(),
+            token_id: TokenId("1".into()),
+            effective_processing_at_utc_ms: at,
+            terms: BuyOrderTermsV2::Gtc {
+                limit_price_pusd_per_share: price.parse().unwrap(),
+                accepted_base_units: 5_000_000,
+                accepted_quote_units: quote,
+                post_only: true,
+            },
+        };
+        let (state, high) = apply_buy_to_candidate(
+            state,
+            order("high", "0.6", 3_000_000, 1200),
+            rules,
+            &actor._finality_policy,
+        );
+        assert_eq!(high.platform_order_id, "sim-1");
+        assert_eq!(high.initial_finality_count_for_tests(), 0);
+        let growth = decoded_maker_level_event(BookSide::Bid, "0.6", "100", "190", 1250, 1260, 3);
+        let (state, effects) = reduce_market_event_slice_v2(
+            state,
+            MarketEventPathV1::HiddenPlatform,
+            1250,
+            &[growth],
+            rules,
+            &actor._finality_policy,
+        )
+        .unwrap_or_else(|_| panic!("真实正增在高价账户后补90份外部尾"));
+        assert_eq!(
+            effects
+                .execution
+                .iter()
+                .map(ExecutionMarketEventEffectsV2::initial_finality_count_for_tests)
+                .sum::<usize>(),
+            0
+        );
+        let (state, low) = apply_buy_to_candidate(
+            state,
+            order("low", "0.5", 2_500_000, 1260),
+            rules,
+            &actor._finality_policy,
+        );
+        assert_eq!(low.platform_order_id, "sim-2");
+        assert_eq!(low.initial_finality_count_for_tests(), 0);
+        let trade = crate::task21_tests::sealed_event(
+            ExecutionMarketEventPayloadV3::PublicTrade(contracts::PublicTradeV2 {
+                asset: crate::task21_tests::asset("1", 0, "Up"),
+                trade_id: "cross-price-110".into(),
+                trade_id_source: PublicTradeIdSourceV1::DerivedSourceEvidence,
+                price_pusd_per_share: ExactDecimal("0.5".into()),
+                quantity_shares: ExactDecimal("110".into()),
+                aggressor_side: contracts::TradeSide::Sell,
+                fee_rate_bps: None,
+            }),
+            crate::task21_tests::orderbook_evidence(1300, 1400, 4),
+            crate::task21_tests::fresh_quality(),
+        );
+        let trade = data_pipeline_core::decode_execution_market_event_v3(
+            &data_pipeline_core::encode_execution_market_event_v3(&trade).unwrap(),
+        )
+        .unwrap();
+        let (state, effects) = reduce_market_event_slice_v2(
+            state,
+            MarketEventPathV1::HiddenPlatform,
+            1300,
+            &[trade],
+            rules,
+            &actor._finality_policy,
+        )
+        .unwrap_or_else(|_| panic!("跨价成交沿原正式消费者进入生命周期和经济出口"));
+        let feedback = effects
+            .execution
+            .into_iter()
+            .map(ExecutionMarketEventEffectsV2::into_lifecycle_feedback)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let [LifecycleFeedbackEffectV2::Trade(fill)] = feedback.as_slice() else {
+            panic!("只允许高价Maker一笔成交")
+        };
+        // 手算：110先花高价E100，A成5，再花其后外部尾5；低价B没有剩余预算。
+        // 若省略高价外部尾，低价B会错误获得5；若跳过高价排位，也会违背数量期望。
+        assert_eq!(fill.platform_order_id, "sim-1");
+        assert_eq!(fill.base_quantity_shares.0, "5");
+        assert_eq!(fill.source_price_pusd_per_share.0, "0.6");
+        assert_eq!(fill.quote_amount_pusd.0, "3");
+        assert_eq!(fill.immediate_taker_fee_pusd.0, "0");
+        assert_eq!(fill.matched_at_utc_ms, 1300);
+        assert_eq!(
+            fill.liquidity_role,
+            contracts::TradeLiquidityRoleV2::MakerInferred
+        );
+        assert_eq!(
+            fill.economic_disposition,
+            contracts::TradeEconomicDispositionV2::PendingApplied
+        );
+        let delta = fill.account_delta.as_ref().expect("真实经济应用增量");
+        assert_eq!(delta.balance_delta.cash_pusd_delta.0, "-3");
+        assert_eq!(delta.balance_delta.principal_encumbrance_pusd_delta.0, "-3");
+        let execution = &state.session.as_ref().unwrap().execution_state;
+        assert_eq!(
+            execution.base_order_quantities_for_tests("sim-1"),
+            Some((5_000_000, 0, 0, 3_000_000, 0))
+        );
+        assert_eq!(
+            execution.base_order_quantities_for_tests("sim-2"),
+            Some((0, 0, 5_000_000, 0, 2_500_000))
+        );
+        assert_eq!(
+            execution.account_balances_for_tests(),
+            ("4.5".parse().unwrap(), "2.5".parse().unwrap())
+        );
+        println!(
+            "cross_price_consumer {}",
+            serde_json::json!({
+                "rules_file_sha256":actor._rule_snapshot.file_sha256(),
+                "maker_model_version":actor._rule_snapshot.maker_model_version_for(SimCallerRoleV1::HistoricalBacktest),
+                "market_events":4,"actual_effective_orders":2,"canonical_trade_quantity_shares":"110",
+                "high_order_quantities":execution.base_order_quantities_for_tests("sim-1"),
+                "low_order_quantities":execution.base_order_quantities_for_tests("sim-2"),
+                "account_balances":execution.account_balances_for_tests(),
+                "maker_quantity":fill.base_quantity_shares,"maker_principal":fill.quote_amount_pusd,
+                "immediate_taker_fee":fill.immediate_taker_fee_pusd,"account_delta":delta,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn historical_maker_trade_reaches_original_lifecycle_without_initial_l2_dependency() {
+        for (role, v2) in [
+            (SimCallerRoleV1::HistoricalBacktest, false),
+            (SimCallerRoleV1::HistoricalBacktest, true),
+            (SimCallerRoleV1::ModelTrain, false),
+            (SimCallerRoleV1::OfflineEvaluation, false),
+        ] {
+            let (_dir, mut actor) = active_market_actor_with_maker_version(
             role, "historical-maker-chain",
             Arc::new(TradeFinalityPolicyV2::decode_and_seal(
                 br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10},{"state":"CONFIRMED","offset_ms":20}],"economic_application_ordinal":0},"failure_overrides":[]}"#).unwrap()),
-        true).await;
+        true,v2).await;
             let trade = |source, received, seq| {
                 let event = crate::task21_tests::sealed_event(
                     ExecutionMarketEventPayloadV3::PublicTrade(contracts::PublicTradeV2 {
@@ -14932,7 +15176,11 @@ mod tests {
             );
             assert_eq!(
                 actor._rule_snapshot.maker_model_version_for(role),
-                "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1"
+                if v2 {
+                    "PUBLIC_TRADE_CONSERVATIVE_FIFO_V2"
+                } else {
+                    "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1"
+                }
             );
             let removal = decoded_maker_level_event(BookSide::Bid, "0.4", "2", "0", 1250, 1260, 12);
             let (state, removed) = reduce_market_event_slice_v2(
