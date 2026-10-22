@@ -428,6 +428,8 @@ pub struct L2QueueModelRuleV1 {
 pub enum HistoricalMakerModelV1 {
     #[serde(rename = "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1")]
     PublicTradeConservativeFifoV1,
+    #[serde(rename = "PUBLIC_TRADE_CONSERVATIVE_FIFO_V2")]
+    PublicTradeConservativeFifoV2,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -589,6 +591,7 @@ pub(crate) const GTD_EFFECTIVE_EXPIRY_VERSION: &str = "POLYMARKET_GTD_EFFECTIVE_
 pub(crate) enum SelectedMakerModelV1<'a> {
     L2BookDeltaFifoEstimateV1(&'a str),
     PublicTradeConservativeFifoV1,
+    PublicTradeConservativeFifoV2,
 }
 impl PlatformRuleSnapshotV3 {
     /// 同一进程的双模型由冻结快照和实际调用方共同选定。
@@ -596,6 +599,9 @@ impl PlatformRuleSnapshotV3 {
         match self.maker_model_for(role) {
             SelectedMakerModelV1::PublicTradeConservativeFifoV1 => {
                 "PUBLIC_TRADE_CONSERVATIVE_FIFO_V1"
+            }
+            SelectedMakerModelV1::PublicTradeConservativeFifoV2 => {
+                "PUBLIC_TRADE_CONSERVATIVE_FIFO_V2"
             }
             SelectedMakerModelV1::L2BookDeltaFifoEstimateV1(version) => version,
         }
@@ -614,6 +620,9 @@ impl PlatformRuleSnapshotV3 {
         match selected {
             Some(HistoricalMakerModelV1::PublicTradeConservativeFifoV1) => {
                 SelectedMakerModelV1::PublicTradeConservativeFifoV1
+            }
+            Some(HistoricalMakerModelV1::PublicTradeConservativeFifoV2) => {
+                SelectedMakerModelV1::PublicTradeConservativeFifoV2
             }
             None => SelectedMakerModelV1::L2BookDeltaFifoEstimateV1(&rule.model_version),
         }
@@ -1163,6 +1172,36 @@ pub fn derive_historical_maker_snapshot_v3(
             "; frozen-platform-source-sha256:{}",
             loaded.file_sha256().0
         ));
+    snapshot.provenance.implementation_identity = implementation_identity;
+    let (file_sha256, path, _) = seal_snapshot(&target_path, &snapshot, MAX_RULE_SNAPSHOT_BYTES)?;
+    Ok(Arc::new(SealedProcessRuleSnapshotV3 {
+        path,
+        file_sha256,
+        access_mode: SnapshotAccessMode::HistoricalAsOf,
+        snapshot,
+    }))
+}
+
+/// D-0374：只为显式A历史新运行采用V2；其他角色及平台/经济/时序值来自源冻结快照。
+pub fn derive_historical_maker_v2_snapshot_v3(
+    source: HistoricalProcessSnapshotRequestV1,
+    target_path: PathBuf,
+    implementation_identity: ImplementationIdentityV1,
+) -> Result<Arc<SealedProcessRuleSnapshotV3>, RuleSnapshotError> {
+    let loaded = load_historical_process_snapshot_v3(source)?;
+    validate_implementation_identity(&implementation_identity)?;
+    let mut snapshot = loaded.snapshot().clone();
+    let rule = &mut snapshot.project_account_rules.l2_queue_model;
+    rule.value.historical_backtest_model =
+        Some(HistoricalMakerModelV1::PublicTradeConservativeFifoV2);
+    rule.evidence.version = "PUBLIC_TRADE_CONSERVATIVE_FIFO_V2".into();
+    rule.evidence.reviewed_on_utc_date = "2026-10-22".into();
+    rule.evidence.scope =
+        "D-0374：仅HistoricalBacktest显式采用绝对缺口补尾；其他角色及冻结规则保持源值".into();
+    rule.evidence.source.push_str(&format!(
+        "; D-0374; frozen-platform-source-sha256:{}; https://github.com/slowchillchill/btc-updown-marketmaker/issues/327#issuecomment-6332743060",
+        loaded.file_sha256().0
+    ));
     snapshot.provenance.implementation_identity = implementation_identity;
     let (file_sha256, path, _) = seal_snapshot(&target_path, &snapshot, MAX_RULE_SNAPSHOT_BYTES)?;
     Ok(Arc::new(SealedProcessRuleSnapshotV3 {
@@ -3160,6 +3199,88 @@ pub(crate) mod tests {
         })
         .unwrap();
         assert_eq!(new, reloaded);
+    }
+
+    #[test]
+    fn historical_maker_v2_derivation_preserves_frozen_roles_and_recovery_identity() {
+        use contracts::SimCallerRoleV1 as R;
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = include_bytes!("../tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
+        let mut original: PlatformRuleSnapshotV3 = serde_json::from_slice(bytes).unwrap();
+        // 明确与静态配置不同，能识别误用旧整份l2_queue_model替换。
+        original
+            .project_account_rules
+            .l2_queue_model
+            .value
+            .model_train_model = Some(HistoricalMakerModelV1::PublicTradeConservativeFifoV1);
+        original
+            .project_account_rules
+            .l2_queue_model
+            .value
+            .model_version = "legacy-frozen-model".into();
+        let source = directory.path().join("old.json");
+        let (sha, _, _) = seal_snapshot(&source, &original, MAX_RULE_SNAPSHOT_BYTES).unwrap();
+        let new = derive_historical_maker_v2_snapshot_v3(
+            HistoricalProcessSnapshotRequestV1 {
+                snapshot_path: source.clone(),
+                expected_file_sha256: sha.clone(),
+                replay_causal_start_utc_ms: original.provenance.rules_observed_at_utc_ms,
+            },
+            directory.path().join("v2.json"),
+            test_implementation_identity(),
+        )
+        .unwrap();
+        assert_eq!(
+            new.maker_model_version_for(R::HistoricalBacktest),
+            "PUBLIC_TRADE_CONSERVATIVE_FIFO_V2"
+        );
+        for role in [R::ModelTrain, R::OfflineEvaluation, R::Paper] {
+            assert_eq!(
+                new.maker_model_version_for(role),
+                original.maker_model_version_for(role)
+            );
+        }
+        let mut expected = original.clone();
+        expected
+            .project_account_rules
+            .l2_queue_model
+            .value
+            .historical_backtest_model =
+            Some(HistoricalMakerModelV1::PublicTradeConservativeFifoV2);
+        expected.project_account_rules.l2_queue_model.evidence = new
+            .snapshot
+            .project_account_rules
+            .l2_queue_model
+            .evidence
+            .clone();
+        expected.provenance.implementation_identity = test_implementation_identity();
+        assert_eq!(
+            *new.snapshot(),
+            expected,
+            "除选择/对应证据/实现身份外完整冻结值保持"
+        );
+        let recovered = recover_process_snapshot_v3(RecoveryProcessSnapshotRequestV1 {
+            snapshot_path: new.path().into(),
+            expected_file_sha256: new.file_sha256().clone(),
+            expected_implementation_identity: test_implementation_identity(),
+        })
+        .unwrap();
+        assert_eq!(recovered.snapshot(), new.snapshot());
+        assert!(
+            recover_process_snapshot_v3(RecoveryProcessSnapshotRequestV1 {
+                snapshot_path: new.path().into(),
+                expected_file_sha256: sha.clone(),
+                expected_implementation_identity: test_implementation_identity(),
+            })
+            .is_err()
+        );
+        let old = recover_process_snapshot_v3(RecoveryProcessSnapshotRequestV1 {
+            snapshot_path: source,
+            expected_file_sha256: sha,
+            expected_implementation_identity: original.provenance.implementation_identity.clone(),
+        })
+        .unwrap();
+        assert_eq!(old.snapshot(), &original);
     }
 
     #[test]

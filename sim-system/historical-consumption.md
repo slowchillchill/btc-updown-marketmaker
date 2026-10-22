@@ -47,6 +47,59 @@ cargo run -p sim-system --example derive_historical_maker_rules --locked --offli
 `cargo_lock_sha256`。命令输出新规则SHA及历史/PAPER各自模型身份。将新路径和SHA交给原backtest入口；
 旧规则文件、旧结果和旧检查点原样保留。该命令不重置或授权研究预算。
 
+## A历史显式绝对缺口模型（D-0374）
+
+`PUBLIC_TRADE_CONSERVATIVE_FIFO_V2`只在新规则文件中显式采用。此派生入口
+`derive_historical_maker_v2_snapshot_v3`只改变源快照的`historical_backtest_model`、对应模型证据和
+实现身份。其他角色选择、原`model_version`、费用、tick、平台观测和全部经济/时序规则均保留源值。
+静态缺省仍为V1；原五参数命令和第六参数角色数组仍沿原V1行为。
+
+```bash
+cargo run -p sim-system --example derive_historical_maker_rules --release --locked --offline -- \
+  <源冻结规则JSON> <源SHA256> <输入因果开始UTC毫秒> <新规则JSON> <准确实现身份JSON> \
+  PUBLIC_TRADE_CONSERVATIVE_FIFO_V2
+```
+
+命令完整输出HistoricalBacktest、ModelTrain、OfflineEvaluation及PAPER实际模型和新文件SHA。
+把新路径及SHA交给原backtest的`rules`，新运行的实际角色为`HistoricalBacktest`。
+新文件不覆盖旧文件，不重新查询平台。目标文件系统需支持原`renameat2(RENAME_NOREPLACE)`封存发布；
+可在支持的本地工作目录生成，再将封存文件复制到归档并核验。不在运行中换模，不将旧检查点改绑新SHA。
+保存/恢复继续使用原规则SHA和执行状态内的`maker_model`；旧字段缺省与旧日志身份不变。
+
+同一会话、同一token和买价位，Q来自SIM当前实际可执行外部深度，排除账户overlay；E为该价
+Maker队列全部External段剩余量。V2只补`max(Q-E,0)`到所有旧段之后：
+
+- 原正向book分支`after>before`使用Q=after。净减、不变及纯查询不补量、不裁剪或推进Maker。
+- 每张真实新订单余量入队前，按实际生效点Q补缺口，再追加该账户段。原准入、post-only、
+  即时Taker和资金条件不变；不能获得生效前成交。
+
+遍历只访问当前价位，由Q逐段扣External剩余量、至零短路，最坏O(k)，k为该价队列段数；
+新单取Q还按原实际盘口段读取同价外部剩余量，m为这些实际段数，整次新入队最坏O(m+k)。
+没有新增缓存或全市场扫描。真实盘口净减仍减少Taker可执行深度。Maker仅由原公共成交事实有限预算
+推进；方向/互补、价格/FIFO、全部外部尾、撤单剩余量合并、末单清理及原经济链保持。
+质量中断保留原Maker排位，合法恢复只补恢复Q与剩余E的缺口，不提升账户队位。
+
+重复`100→10→100`且没有trade、可见上限不变时，E100不会重复累积90；真实增长到190仍补90。
+盘口偏旧Q100但trade已使E10时，新单前会补90，因此V2可能比V1更保守。
+它不保证E≤Q、真实FIFO、更多成交或收益。未知队前撤单、公开成交粒度/跨记录身份、偏旧更优
+深度竞争及质量缺口期间排位仍是模型局限；跨价循环不变也不意味着各价分配结果不变。
+这是新的项目估计，不将V1及旧结果重新标成违约缺陷。
+
+正常SIM消费者的跨价见证见`run_v2`测试
+`historical_maker_v2_cross_price_trade_spends_external_tail_before_lower_order`：高价0.6处E100、
+账户A5、真实增长后外部尾90，低价0.5处账户B5。SELL110的预算先花高价外部100、分给A5，
+再花高价外部尾5，不能错误给B5。断言沿真实订单生效和公共成交归约核对MakerInferred5份、
+本金3、实际现金增量-3、低价未成交及剩余预留2.5；不从内部队列形状代替经济出口。
+
+
+正式运行沿既有day CLI，配置与参数、范围、初始化、Gamma及结束政策由准确研究包冻结。
+`--progress-interval-seconds`控制原阶段、输入工作量及耗时输出；未证明总量或剩余时间仍为未知。
+该CLI没有优雅停止标志或自动续跑；对准确PID发送SIGTERM会终止本进程及其线程，可能丢失未落盘
+队列和尾部记录。日布局即使文件名为`sim.jsonl`也使用`SIMDAY01`长度帧，不能按JSONL读取；
+应按原读取器核对完整前缀。中断后仅完整已落盘记录可供现场核对，不构成完整报告或可恢复账户。
+正常`RangeEnd`沿原记录排空及结果写出，不扩大为未来经济义务全部排空。
+工程验证和构建不授权真实历史、策略研究、B/PAPER/LIVE或资金操作。
+
 ## 显式 Gamma 终态经济政策（D-0346）
 
 `GammaResolutionPolicyV1` 默认 `SourceTimeOnly`，保留旧研究、旧检查点及其他消费者的含义。
