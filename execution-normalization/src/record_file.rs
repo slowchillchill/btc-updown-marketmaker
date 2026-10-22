@@ -202,6 +202,7 @@ pub(crate) struct SequentialReader {
     reader: parquet::arrow::arrow_reader::ParquetRecordBatchReader,
     current: Option<(RecordBatch, usize)>,
     pub position: u64,
+    pub pages_read: u64,
 }
 impl SequentialReader {
     pub fn open(path: &Path, format: &str, start: u64) -> io::Result<Self> {
@@ -219,6 +220,7 @@ impl SequentialReader {
             reader: builder.build().map_err(invalid)?,
             current: None,
             position: start,
+            pages_read: 0,
         })
     }
     pub fn take(&mut self, count: u64) -> io::Result<Vec<Row>> {
@@ -238,6 +240,9 @@ impl SequentialReader {
                 ));
             }
             let (batch, i) = self.current.as_mut().unwrap();
+            if *i == 0 {
+                self.pages_read += 1;
+            }
             let seq = batch
                 .column(0)
                 .as_any()

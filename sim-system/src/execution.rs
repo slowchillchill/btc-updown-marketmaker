@@ -5,7 +5,7 @@ pub use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 pub use crate::account::PlatformAccountError;
-pub use crate::event_log::SimEventLogErrorV2;
+pub use crate::event_log::{SimEventLogErrorV2, SimLogReadSummaryV1, visit_sim_requests_v1};
 pub use crate::market::{MarketEventErrorV1, MarketEventPathV1, MillisecondBucketClosureV1};
 pub use crate::market_directory::SessionMarketDirectoryErrorV1;
 pub use crate::matching::{MatchingMathErrorV1, MatchingStateErrorV1};
