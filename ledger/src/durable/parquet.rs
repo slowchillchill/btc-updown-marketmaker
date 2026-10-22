@@ -106,66 +106,7 @@ impl ParquetLedger {
         directory: &Path,
         mut apply: impl FnMut(DurablePayloadV1) -> Result<(), LedgerDurableErrorV1>,
     ) -> Result<Self, LedgerDurableErrorV1> {
-        let path = directory.join(MANIFEST);
-        let format: String = serde_json::from_reader(
-            File::open(&path).map_err(|e| io_error("读 Ledger 清单", &path, e))?,
-        )
-        .map_err(invalid)?;
-        if format != FORMAT {
-            return Err(invalid("不支持的 Ledger 物理格式"));
-        }
-        let mut paths = fs::read_dir(directory)
-            .map_err(invalid)?
-            .map(|e| e.map(|e| e.path()))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(invalid)?;
-        paths.retain(|p| {
-            p.file_name().is_some_and(|n| {
-                n.to_string_lossy().starts_with("ledger-parquet-")
-                    && n.to_string_lossy().ends_with(".manifest.json")
-            })
-        });
-        paths.sort();
-        let segment_count = paths.len() as u64;
-        let mut expected = 1;
-        let mut entry = 1;
-        for (index, manifest_path) in paths.iter().enumerate() {
-            if manifest_path.file_name().unwrap()
-                != format!("ledger-parquet-{index:020}.manifest.json").as_str()
-            {
-                return Err(invalid("Ledger 清单序列缺口"));
-            }
-            let reference: LedgerSealedSegmentReferenceV1 =
-                serde_json::from_reader(File::open(manifest_path).map_err(invalid)?)
-                    .map_err(invalid)?;
-            let path = PathBuf::from(&reference.location);
-            if path.parent() != Some(directory) {
-                return Err(invalid("Ledger 分片不属于当前根"));
-            }
-            let mut consume =
-                |(seq, kind, body): record_file::Row| -> Result<(), LedgerDurableErrorV1> {
-                    if seq != expected {
-                        return Err(invalid("Ledger 耐久序号不连续"));
-                    }
-                    let payload = decode_payload(&kind, &body)?;
-                    if let Some(found) = payload.ledger_entry_seq() {
-                        if found != entry {
-                            return Err(invalid("Ledger 经济序号不连续"));
-                        }
-                        entry += 1;
-                    }
-                    apply(payload)?;
-                    expected += 1;
-                    Ok(())
-                };
-            let boundary = record_file::visit(&path, FORMAT, |row| {
-                consume(row).map_err(std::io::Error::other)
-            })
-            .map_err(invalid)?;
-            if boundary != "ledger_transaction_segment_v2" {
-                return Err(invalid("不支持的 Ledger 业务版本"));
-            }
-        }
+        let (segment_count, expected) = visit_committed(directory, |_, payload| apply(payload))?;
         // 只有清单提交过的分片参与恢复；删除唯一当前未提交尾部，允许沿原格式续写。
         for name in [
             format!(".ledger-parquet-{segment_count:020}.tmp"),
@@ -395,4 +336,72 @@ fn decode_payload(kind: &str, body: &[u8]) -> Result<DurablePayloadV1, LedgerDur
         }
         _ => return Err(invalid(format!("未知 Ledger 记录变体：{kind}"))),
     })
+}
+
+/// 共用原提交段顺序/业务版本检查；只读调用不会清理或修改尾部。
+pub(crate) fn visit_committed(
+    directory: &Path,
+    mut apply: impl FnMut(u64, DurablePayloadV1) -> Result<(), LedgerDurableErrorV1>,
+) -> Result<(u64, u64), LedgerDurableErrorV1> {
+    let path = directory.join(MANIFEST);
+    let format: String = serde_json::from_reader(
+        File::open(&path).map_err(|e| io_error("读 Ledger 清单", &path, e))?,
+    )
+    .map_err(invalid)?;
+    if format != FORMAT {
+        return Err(invalid("不支持的 Ledger 物理格式"));
+    }
+    let mut paths = fs::read_dir(directory)
+        .map_err(invalid)?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(invalid)?;
+    paths.retain(|p| {
+        p.file_name().is_some_and(|n| {
+            n.to_string_lossy().starts_with("ledger-parquet-")
+                && n.to_string_lossy().ends_with(".manifest.json")
+        })
+    });
+    paths.sort();
+    let segment_count = paths.len() as u64;
+    let mut expected = 1;
+    let mut entry = 1;
+    for (index, manifest_path) in paths.iter().enumerate() {
+        if manifest_path.file_name().unwrap()
+            != format!("ledger-parquet-{index:020}.manifest.json").as_str()
+        {
+            return Err(invalid("Ledger 清单序列缺口"));
+        }
+        let reference: LedgerSealedSegmentReferenceV1 =
+            serde_json::from_reader(File::open(manifest_path).map_err(invalid)?)
+                .map_err(invalid)?;
+        let path = PathBuf::from(&reference.location);
+        if path.parent() != Some(directory) {
+            return Err(invalid("Ledger 分片不属于当前根"));
+        }
+        let mut consume =
+            |(seq, kind, body): record_file::Row| -> Result<(), LedgerDurableErrorV1> {
+                if seq != expected {
+                    return Err(invalid("Ledger 耐久序号不连续"));
+                }
+                let payload = decode_payload(&kind, &body)?;
+                if let Some(found) = payload.ledger_entry_seq() {
+                    if found != entry {
+                        return Err(invalid("Ledger 经济序号不连续"));
+                    }
+                    entry += 1;
+                }
+                apply(seq, payload)?;
+                expected += 1;
+                Ok(())
+            };
+        let boundary = record_file::visit(&path, FORMAT, |row| {
+            consume(row).map_err(std::io::Error::other)
+        })
+        .map_err(invalid)?;
+        if boundary != "ledger_transaction_segment_v2" {
+            return Err(invalid("不支持的 Ledger 业务版本"));
+        }
+    }
+    Ok((segment_count, expected))
 }

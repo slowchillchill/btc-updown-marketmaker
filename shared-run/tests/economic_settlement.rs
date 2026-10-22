@@ -80,6 +80,25 @@ fn assert_necessary_economics(
         },
         report.conservative_nav_pusd
     );
+    for position in necessary.confirmed_positions_v1().iter() {
+        if let Some(market) = full
+            .market_totals()
+            .find(|m| m.condition_id == position.condition_id)
+            && market.settlement_state == EconomicSettlementStateV1::Redeemed
+        {
+            let net = EconomicRational::from_decimal(
+                Decimal::from_str_exact(&market.success_shares[0].0).unwrap(),
+            )
+            .sub(&EconomicRational::from_decimal(
+                Decimal::from_str_exact(&market.success_shares[1].0).unwrap(),
+            ));
+            assert_eq!(
+                position.net_first_asset_shares,
+                ExecutionReadValueV1::Known(net.public()),
+                "已赎回孤腿不能仍按累计官方成交持有"
+            );
+        }
+    }
     assert_eq!(
         necessary.account().committed_principal.public(),
         full.committed_principal_pusd()
@@ -1842,6 +1861,18 @@ async fn paired_receivable_precedes_loser_failure_and_compensation_barrier() {
         }
         if driver.next_group().unwrap().is_none() {
             break;
+        }
+    }
+    let necessary = shared.ledger().necessary_read_v2().unwrap();
+    for request in ["six-a", "five-b"] {
+        let trades = shared
+            .registry()
+            .request_trade_identities_v1(request)
+            .unwrap();
+        assert!(!trades.is_empty(), "闭合原请求不得从专项定向历史中丢失");
+        for (id, _) in trades {
+            let confirmation = necessary.trade_confirmation_v1(id).unwrap();
+            assert!(confirmation.first_success_anchor.is_some());
         }
     }
     assert!(saw_blocked);

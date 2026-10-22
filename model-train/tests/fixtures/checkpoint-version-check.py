@@ -49,3 +49,32 @@ except ValueError as error:
 else:
     raise AssertionError("旧消费身份被改写")
 print("原open方法：旧版本在load_state前拒绝，旧消费身份不迁移；零模型")
+# 原base/v2不能借新group id进入special；原open在state_dict前比较完整数值与目标。
+checkpoint.update(config=config, trajectory_version="learning-trajectory-v2", target_version="confirmed-finite-j-v1")
+with tempfile.TemporaryDirectory() as root:
+    config["checkpoint_directory"] = root
+    Path(root,"checkpoint.pt").write_text("元数据替身")
+    special = dict(config, special={"version":"D-0375-special-v1","alpha":1})
+    learner = types.SimpleNamespace(optimizer=None,model=model,service=types.SimpleNamespace(identity={"version":"fixture"},device=types.SimpleNamespace(type="cpu")),meter=lambda *a:None)
+    try:
+        namespace["open"](learner,{"config":special,"group":{"id":"new-special-id","target_version":"confirmed-finite-j-special-v1","trajectory_version":"learning-trajectory-special-v1"}})
+    except ValueError as error:
+        assert str(error)=="恢复配置或模型版本不同"
+    else:raise AssertionError("原base优化器被静默迁移到special")
+    assert loaded==[]
+learner=types.SimpleNamespace(optimizer=optimizer,config=config,consumed={"same":{"id":"same","target_version":"confirmed-finite-j-v1","trajectory_version":"learning-trajectory-v2"}},sequence=1)
+try:
+    namespace["open"](learner,{"config":config,"group":{"id":"same","target_version":"confirmed-finite-j-special-v1","trajectory_version":"learning-trajectory-special-v1"},"account_weights":{}})
+except ValueError as error:assert str(error)=="同一消费身份对应不同轨迹/目标"
+else:raise AssertionError("同id换专项归属/目标未拒绝")
+print("原base及同id异目标均拒绝专项热迁移；仍零模型")
+
+# 同id下改变实际数值，原消费身份比较仍拒绝；不以入口硬锁代替绑定。
+group={"id":"numeric","target_version":"confirmed-finite-j-special-v1","binding":{"parameters":{"special":{"safe_notrade_credit_pusd":"0.01"}}}}
+changed={**group,"binding":{"parameters":{"special":{"safe_notrade_credit_pusd":"0.02"}}}}
+learner=types.SimpleNamespace(optimizer=optimizer,config=config,consumed={"numeric":group},sequence=1)
+try:
+    namespace["open"](learner,{"config":config,"group":changed,"account_weights":{}})
+except ValueError as error:assert str(error)=="同一消费身份对应不同轨迹/目标"
+else:raise AssertionError("同id实际数值变化未拒绝")
+print("专项数值保留于同id完整消费身份；零模型")

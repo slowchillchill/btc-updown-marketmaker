@@ -95,6 +95,7 @@ class Service:
         package = torch.load(path, map_location="cpu", weights_only=True)
         if package["version"] != MODEL_VERSION or package["encoding_version"] != ENCODING_VERSION:
             raise ValueError("模型/编码版本不匹配")
+        self.frozen_source = package.get("frozen_source")
         self.config = package["config"]
         self.model = Policy(self.config)
         self.model.load_state_dict(package["state_dict"], strict=True)
@@ -109,7 +110,7 @@ class Service:
                         "begin_seconds": 0.0, "decode_seconds": 0.0,
                         "load_seconds": time.perf_counter() - started,
                         "model_state_h2d_bytes": sum(t.numel() * t.element_size() for t in self.model.state_dict().values()) if self.device.type == "cuda" else 0}
-        self.identity = {"model_sha256": sha256(path), "version": MODEL_VERSION,
+        self.identity = {"frozen_source": self.frozen_source, "model_sha256": sha256(path), "version": MODEL_VERSION,
                          "torch": str(torch.__version__), "device": str(self.device),
                          "cuda_arch_list": torch.cuda.get_arch_list() if self.device.type == "cuda" else [],
                          "config": self.config,

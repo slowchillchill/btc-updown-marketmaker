@@ -289,6 +289,8 @@ pub struct HistoricalRunReportV1 {
     pub learning_account_memory: Option<LearningAccountReadV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub learning_account_start: Option<LearningAccountReadV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub learning_result: Option<serde_json::Value>,
     pub conservative_nav_pusd: Option<ExecutionReadValueV1<ExactRationalV1>>,
     pub worst_case_maker_nav_pusd: Option<ExactRationalV1>,
     pub unclosed_commitments: usize,
@@ -587,6 +589,7 @@ fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         account_economics_memory: economics,
         learning_account_memory: None,
         learning_account_start: None,
+        learning_result: None,
         unclosed_commitments: shared.registry().all_commitments().count(),
         pending_noe_records: shared.pending_noe_record_count(),
         pending_calculation: pending_timing.is_some(),
@@ -1601,8 +1604,8 @@ where
                 start_at = None;
                 let calculation = if fifo_enabled {
                     let frame = fifo.pop_front().expect("已到队首处理时刻");
-                    let input = shared.strategy_input_for_market_frame_with_learning(
-                        &mut driver, frame, strategy.requires_trade_economics_details(), strategy.requires_learning_economics(),
+                    let input = shared.strategy_input_for_market_frame_with_learning_requests(
+                        &mut driver, frame, strategy.requires_trade_economics_details(), strategy.requires_learning_economics(), strategy.retained_learning_requests().as_deref(),
                     ).map_err(HistoricalFailureCauseV1::Ledger)?;
                     input.map(|input| {
                         fifo_summary.started_market_frames += 1;
@@ -1879,7 +1882,11 @@ where
                 &config.rebate_entitlement_queries,
             );
             if strategy.requires_learning_economics() {
-                result.learning_account_memory = shared.learning_account_at_v1(&driver);
+                result.learning_account_memory = shared.learning_account_with_requests_v1(
+                    &driver,
+                    strategy.retained_learning_requests().as_deref(),
+                );
+                result.learning_result = strategy.learning_result();
                 result.learning_account_start = learning_account_start.clone();
             }
             result.fifo = fifo_enabled.then_some(fifo_summary);
@@ -1940,7 +1947,11 @@ where
                 &config.rebate_entitlement_queries,
             );
             if strategy.requires_learning_economics() {
-                failure_report.learning_account_memory = shared.learning_account_at_v1(&driver);
+                failure_report.learning_account_memory = shared.learning_account_with_requests_v1(
+                    &driver,
+                    strategy.retained_learning_requests().as_deref(),
+                );
+                failure_report.learning_result = strategy.learning_result();
                 failure_report.learning_account_start = learning_account_start.clone();
             }
             let dispatch_effects = failed_dispatch_effects.or_else(|| match &cause {

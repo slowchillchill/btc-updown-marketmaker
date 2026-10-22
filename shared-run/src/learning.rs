@@ -16,6 +16,8 @@ pub struct LearningAccountReadV1 {
     pub obligations: Vec<ObligationPrincipalReadV1>,
     pub pending_noe_record_count: usize,
     pub qualified_rebates: Vec<QualifiedRebateReadV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directed_confirmations: Option<DirectedConfirmationsReadV1>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QualifiedRebateReadV1 {
@@ -63,6 +65,100 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             obligations,
             pending_noe_record_count: self.pending_noe_record_count(),
             qualified_rebates: Vec::new(),
+            directed_confirmations: None,
         })
+    }
+}
+
+/// 仅显式学习消费者取得的原公共事实；不会进入普通账户观察DTO。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectedConfirmationsReadV1 {
+    pub positions: std::sync::Arc<Vec<ConfirmedPositionReadV1>>,
+    pub commitments: Vec<DirectedCommitmentReadV1>,
+    pub unattributed_active_orders: bool,
+    pub requests: std::collections::BTreeMap<String, Option<Vec<DirectedTradeReadV1>>>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectedCommitmentReadV1 {
+    pub condition_id: ConditionId,
+    pub token_id: TokenId,
+    pub original_order: BuyOrderIntentV1,
+    pub minimum_shares: Option<ExactDecimal>,
+    pub remaining_target_shares: ExecutionReadValueV1<ExactDecimal>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectedTradeReadV1 {
+    pub trade_identity: ::execution_normalization::MemoryLogicalIdentityV1,
+    pub reported_final_success: bool,
+    pub applied: Option<std::sync::Arc<TradeConfirmationReadV1>>,
+}
+impl<P: SharedOrderEvidence> SharedExecution<P> {
+    pub fn learning_account_with_requests_v1(
+        &self,
+        driver: &sim_system::execution::PublicConsumptionStateV1,
+        requests: Option<&[String]>,
+    ) -> Option<LearningAccountReadV1> {
+        let mut read = self.learning_account_at_v1(driver)?;
+        if let Some(requests) = requests {
+            let necessary = self.ledger().necessary_read_v2()?;
+            read.directed_confirmations = Some(DirectedConfirmationsReadV1 {
+                positions: necessary.confirmed_positions_v1(),
+                unattributed_active_orders: self
+                    .registry()
+                    .unfinished_orders()
+                    .any(|o| o.origin.is_none()),
+                commitments: self
+                    .registry()
+                    .all_commitments()
+                    .filter_map(|c| {
+                        let (condition, leg) = match c.origin.intent.intent() {
+                            ModelIntentV1::SubmitSingleBuy {
+                                condition_id,
+                                order,
+                            } => (condition_id, order),
+                            ModelIntentV1::SubmitPairedBuy {
+                                condition_id,
+                                orders,
+                            } => (
+                                condition_id,
+                                orders.get(usize::from(c.origin.batch_item_ordinal))?,
+                            ),
+                            _ => return None,
+                        };
+                        Some(DirectedCommitmentReadV1 {
+                            condition_id: condition.clone(),
+                            token_id: leg.token_id.clone(),
+                            original_order: leg.order.clone(),
+                            minimum_shares: self
+                                .registry()
+                                .observed_rule_context(condition)
+                                .map(|r| r.limit_min_quantity_shares.clone()),
+                            remaining_target_shares: c.remaining_target_shares,
+                        })
+                    })
+                    .collect(),
+                requests: requests
+                    .iter()
+                    .map(|request| {
+                        (
+                            request.clone(),
+                            self.registry()
+                                .request_trade_identities_v1(request)
+                                .map(|trades| {
+                                    trades
+                                        .into_iter()
+                                        .map(|(id, reported_final_success)| DirectedTradeReadV1 {
+                                            trade_identity: id.clone(),
+                                            reported_final_success,
+                                            applied: necessary.trade_confirmation_v1(id),
+                                        })
+                                        .collect()
+                                }),
+                        )
+                    })
+                    .collect(),
+            });
+        }
+        Some(read)
     }
 }

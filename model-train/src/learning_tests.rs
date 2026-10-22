@@ -132,6 +132,7 @@ fn zero_read() -> LearningAccountReadV1 {
         obligations: vec![],
         pending_noe_record_count: 0,
         qualified_rebates: vec![],
+        directed_confirmations: None,
     }
 }
 pub(super) fn collection(root: &std::path::Path, mixed: bool) -> (LearningJobConfig, Value) {
@@ -170,6 +171,7 @@ pub(super) fn collection(root: &std::path::Path, mixed: bool) -> (LearningJobCon
     }
     let consumer=crate::ConsumerRunConfig {rules:rules.into(),days:vec![day],parallel_dates:1,worker:serde_json::from_value(json!({"python":"unused","script":"unused","model":"unused","device":"cuda:0","torch_threads":4,"max_batch":2,"encoding":{"field_buckets":4096,"category_buckets":4096}})).unwrap()};
     let parameters = LearningParameters {
+        special: None,
         learning_rate: 0.0003,
         epsilon: 0.15,
         value_weight: 1.0,
@@ -278,4 +280,17 @@ fn completed_binding_excludes_only_exact_checkpoint_parameter_location() {
         );
     }
     assert_eq!(a["parameters"]["checkpoint_directory"], "A");
+}
+
+#[test]
+fn special_numeric_parameters_remain_in_completed_collection_binding() {
+    let policy = crate::special::SpecialPolicyV1::adopted(1);
+    let a = json!({"parameters":{"checkpoint_directory":"A","special":policy},"consumer":{"learning":{"special":policy}}});
+    let mut changed = a.clone();
+    changed["parameters"]["special"]["safe_notrade_credit_pusd"] = json!("0.02");
+    changed["consumer"]["learning"]["special"]["safe_notrade_credit_pusd"] = json!("0.02");
+    assert_ne!(
+        collection_binding_semantics(&a),
+        collection_binding_semantics(&changed)
+    );
 }

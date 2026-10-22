@@ -1,0 +1,21 @@
+{
+  "learning_rate": 0.0003,
+  "epsilon": 0.15,
+  "value_weight": 1.0,
+  "money_scale_pusd": 2000.0,
+  "tau_gae_s": 300.0,
+  "tbptt_steps": 4,
+  "ppo_epochs": 2,
+  "checkpoint_directory": "runs/special-treatment/checkpoint",
+  "trajectory_page_rows": 4,
+  "trajectory_cached_pages": 2,
+  "training_sequence_batch": 2,
+  "special": {
+    "version": "D-0375-special-v1",
+    "alpha": 1,
+    "frame_age_threshold_ms": 100,
+    "safe_notrade_credit_pusd": "0.01",
+    "repair_credit_per_share_pusd": "0.01",
+    "credit_bound_pusd": "0.10"
+  }
+}
