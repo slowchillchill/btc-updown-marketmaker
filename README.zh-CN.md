@@ -20,7 +20,7 @@
 
 将金融策略研究推进到可复现的工程实践：保留市场数据的时间顺序，在模拟执行与账户约束下比较策略，记录训练过程，并验证模型交付后的行为一致性。
 
-端侧 AI 在本项目中指**交易节点上的本地模型推理**。新模型路线将基于人工策略已使用的公共数据、回测和账户能力设计。训练与推理方案仍待 [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181) 明确。
+端侧 AI 在本项目中指**交易节点上的本地模型推理**。B 模型路线复用人工策略已使用的公共数据、回测、执行和账户能力，已按 [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181) 实现真实模型消费者与整组学习接口。[模型接口及证据边界](model-train/README.md)
 
 ## 工程成果
 
@@ -28,7 +28,7 @@
 | --- | --- |
 | 金融数据工程 | 完成 **18 天、约 7.62 亿行原始数据**的来源健康研究，覆盖 2,864 个输入文件；通过按文件汇总控制中间数据规模。[研究记录](baseline-mm/docs/research/complementary-pair-source-health-18d-20260909-20260926.md) |
 
-旧模型实现及其验证文件已退出当前源码树。新 B 路线从公共实现重新设计，模型训练与部署仍待完成。[当前规划](model-train/README.md)
+B 路线已实现 GRU Actor/Critic 消费者、整组 PPO/TBPTT 学习、有限时域经济目标及学习检查点事务恢复。[原工程交付](model-train/LEARNING.md)记录有限合成验证。后继研究分别获准并完成了[最小真实数据链](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6305408177)和[有限两臂机制研究](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6339458665)。这些结果不证明完整 PPO 正确性、独立留出表现、全日容量或盈利；模型及专项奖励机制尚未采用。
 
 ## 人工策略回测
 
@@ -50,7 +50,7 @@
 
 ## 模块关系与决策流
 
-下图展示人工策略的历史回测闭环。`backtest` 组织整个运行，`shared-run` 协调观察、决策、提交与账户更新；模型训练仍待 [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181) 明确方案。
+下图展示人工策略的历史回测闭环。`backtest` 组织整个运行，`shared-run` 协调观察、决策、提交与账户更新。B 模型消费者和学习器复用这条公共链；具体接口另见 [model-train 说明](model-train/README.md)。
 
 ![模块关系与行情、决策、执行反馈的循环](assets/readme/architecture-flow.gif)
 
@@ -79,11 +79,11 @@
 | --- | --- | --- |
 | 系统与执行 | Rust · Tokio · Polymarket Rust SDK | 异步行情、交易接口与公共运行能力 |
 | 数据工程 | Arrow · Parquet · Rayon · DuckDB | 列式存储、并行处理与研究查询 |
-| 模型训练与推理 | 待 [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181) 明确方案 | 模型开发与产物交付 |
+| 模型训练与推理 | Rust · Python · PyTorch · GRU · PPO/TBPTT | 模型消费者、整组学习及检查点接口；[当前实现](model-train/README.md) |
 | 研究可视化 | Rust · React · TypeScript · ECharts | 读取与浏览研究证据 |
 
 ## 当前阶段与合作
 
-项目处于策略研究阶段。旧模型实现已退出当前源码树，新 B 路线待基于 A/公共实现重设计。正式长跑训练、新版模型推理接线及完整实盘部署尚未完成；各项成果以链接中的版本、样本和验证范围为准。
+项目处于策略研究阶段。B 路线已在公共实现上接入模型推理、整组学习及显式规则加载与恢复接口，并完成上文所列的有限真实数据研究。正式训练、独立留出评价、全日容量验证及完整实盘部署仍为后续事项，须分别取得相应授权和预算；各项成果以链接中的版本、样本和验证范围为准，已完成运行不授权新作业。[规则加载与恢复接口](model-train/RULES.md)
 
 关注金融场景 AI、GPU 训练流水线、Rust 交易基础设施与本地模型推理。欢迎相关技术岗位与项目合作交流：[GitHub · slowchillchill](https://github.com/slowchillchill)。

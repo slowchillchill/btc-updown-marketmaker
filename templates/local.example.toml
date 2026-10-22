@@ -1,0 +1,19 @@
+# 项目执行环境的仓库外私有绑定模板；占位值不构成可执行配置或运行授权。
+# 保存到 ${XDG_CONFIG_HOME:-$HOME/.config}/btc-updown-marketmaker/local.toml，
+# 或通过当前任务的私有交接明确指定其他仓库外位置。
+# 按实际环境填写绝对路径；原远端主目录缩写须在准确远端环境解析，不在本机展开。
+# 本文件不保存 GitHub 身份、认证材料、任务状态、预算或执行进度。
+
+[environments.local]
+main_worktree = "<LOCAL_MAIN_WORKTREE>"
+
+[environments.training]
+ssh_argv = ["ssh", "-p", "<SSH_PORT>", "<SSH_USER>@<SSH_HOST>"]
+main_worktree = "<TRAINING_MAIN_WORKTREE>"
+data_root = "<TRAINING_DATA_ROOT>"
+
+[environments.remote]
+source_worktree = "<REMOTE_SOURCE_WORKTREE>"
+
+[environments.live]
+artifact_root = "<LIVE_ARTIFACT_ROOT>"

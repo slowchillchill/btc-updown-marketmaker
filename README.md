@@ -20,7 +20,7 @@ The video shows an earlier two-hour demo; it is a different backtest from the se
 
 Turn financial strategy research into reproducible engineering: preserve market event order, compare strategies under simulated execution and account constraints, track training, and verify model behavior across runtimes.
 
-Here, **edge AI means local model inference on a trading node**. The new model route will build on the shared data, backtesting and accounting components used by human-designed strategies. Its training and inference design remains pending in [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181).
+Here, **edge AI means local model inference on a trading node**. The B model route reuses the shared data, backtesting, execution and accounting components used by human-designed strategies. It implements a real model consumer and a grouped learning interface under [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181). [Model interfaces and evidence limits (in Chinese)](model-train/README.md)
 
 ## Engineering results
 
@@ -28,7 +28,7 @@ Here, **edge AI means local model inference on a trading node**. The new model r
 | --- | --- |
 | Financial data engineering | Completed a source-health study covering **18 days, approximately 762 million raw rows and 2,864 input files**. Per-file aggregation limits intermediate data volume. [Study (in Chinese)](baseline-mm/docs/research/complementary-pair-source-health-18d-20260909-20260926.md) |
 
-The old model implementation and its validation files have been retired from the current tree. The new B route starts from the shared implementation; model training and deployment remain pending. [Current planning (in Chinese)](model-train/README.md)
+The B route implements a GRU actor–critic consumer, grouped PPO/TBPTT learning, finite-horizon economic targets and transactional learning checkpoints. The [original engineering delivery (in Chinese)](model-train/LEARNING.md) records limited synthetic validation. Subsequent, separately authorized studies completed a [minimal real-data chain](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6305408177) and a [bounded two-arm mechanism study](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6339458665). These results do not establish complete PPO correctness, independent holdout performance, full-day capacity or profitability. The model and experimental reward mechanism have not been adopted.
 
 ## Rule-based strategy backtest
 
@@ -50,7 +50,7 @@ These results come from the historical version before the shared funds-policy re
 
 ## Modules and decision flow
 
-The animation shows the historical backtest loop for human-designed strategies. `backtest` assembles the run; `shared-run` coordinates observations, decisions, submission and account updates. Model training remains planned under [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181).
+The animation shows the historical backtest loop for human-designed strategies. `backtest` assembles the run; `shared-run` coordinates observations, decisions, submission and account updates. The B model consumer and learner reuse this public chain; their interfaces are documented separately in [model-train (in Chinese)](model-train/README.md).
 
 ![Module relationships and the market data, decision and execution feedback loop](assets/readme/architecture-flow-en.gif)
 
@@ -79,11 +79,11 @@ Collection and preparation turn market data into public observations. The strate
 | --- | --- | --- |
 | Systems and execution | Rust · Tokio · Polymarket Rust SDK | Async market data, trading interfaces and shared runtime components |
 | Data engineering | Arrow · Parquet · Rayon · DuckDB | Columnar storage, parallel processing and research queries |
-| Model training and inference | Pending design in [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181) | Model development and delivery |
+| Model training and inference | Rust · Python · PyTorch · GRU · PPO/TBPTT | Model consumer, grouped learning and checkpoint interfaces; [current implementation (in Chinese)](model-train/README.md) |
 | Research visualization | Rust · React · TypeScript · ECharts | Read and explore research evidence |
 
 ## Status and collaboration
 
-The project is in strategy research. The old model implementation has been retired; the new B route awaits design on the A/shared implementation. Full-length training, integration of the new model’s inference path and complete live deployment remain unfinished. Each result is bounded by the version, sample and validation scope in its linked evidence.
+The project is in strategy research. The B route has implemented model inference, grouped learning and explicit rule-loading and recovery interfaces on the shared implementation, and completed the bounded real-data studies linked above. Formal training, independent holdout evaluation, full-day capacity validation and complete live deployment remain separate work requiring their applicable authorization and budgets. Each result is bounded by the version, sample and validation scope in its linked evidence; completed runs do not authorize new work. [Rule-loading and recovery interfaces (in Chinese)](model-train/RULES.md)
 
 Open to technical roles and collaboration in financial AI, GPU training pipelines, Rust trading infrastructure and local model inference. [GitHub · slowchillchill](https://github.com/slowchillchill)

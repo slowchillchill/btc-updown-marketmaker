@@ -4,7 +4,7 @@
 
 首个设计为 BTC 五分钟 Up/Down 的 BUY-only 互补配对做市。其[候选计算规格与研究方案](docs/strategies/complementary-pair-v1.md)说明费用归属、修复利润占用、报价与数量、FAK、风险和生命周期调用需求。当前 workspace 成员提供可调用 Rust 候选库，已交付配置解析、构造与公共策略适配；未提供已校准参数、盈利证据或三环境宿主。候选计算方法不等于正式运行参数。
 
-任务范围、批准状态和推进位置维护在 [策略合同 #185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)，公共历史调用边界与运行装配维护在 [公共回测 #186](https://github.com/slowchillchill/btc-updown-marketmaker/issues/186)。完整业务合同以 #185 为准，本目录不保存本地任务镜像。A 内部按[总体合同 #1](https://github.com/slowchillchill/btc-updown-marketmaker/issues/1)的串行任务交接推进。
+任务范围、批准状态和推进位置维护在 [策略合同 #185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)，公共历史调用边界与运行装配维护在 [公共回测 #186](https://github.com/slowchillchill/btc-updown-marketmaker/issues/186)。完整业务合同以 #185 为准，本目录不保存本地任务镜像。A 路线按任务真实依赖与当前授权推进；总体范围见[总体合同 #1](https://github.com/slowchillchill/btc-updown-marketmaker/issues/1)，三组及跨路线协作见[仓库指南](../AGENTS.md)。
 
 策略按具体业务名组织，导出策略构造、参数定义及必要适配；不预建三环境消费循环或另一层 CLI 配置覆盖。参数选择由所属上层入口按“显式 CLI > 配置文件 > 策略默认值”合并，布尔开关区分未指定与显式关闭。运行元数据记录策略身份、规则版本、代码版本和完整生效参数。不同策略和对照运行使用各自实例与独立账户状态，同账户多策略隔离不属于首版能力。
 
@@ -104,9 +104,11 @@ Chainlink 与两个资产盘口是新增配对的依赖。Binance 只按实际�
 
 ### 当前直接概率与跨来源研究
 
-`research/research_probability_direct.py` 按原始 Parquet 必要列准备紧凑目标采样，复用公共参考、终局及深度数量状态，再按四折和最后开发窗做75次顺序拟合、冻结评价。准确查询、公式、候选、资源与一次运行命令见[方法及配置](docs/research/complementary-pair-probability-direct.md)。三次实际十八日prepare均已失败：身份前态、TWAP跨单元SQL和公共深度拼接状态分别保留独立记录；study均未启动。[第三次失败及窄范围公共修复](docs/research/complementary-pair-probability-run-20261007-repair2.md)保存准确运行身份、目录分母、深度边界及验证。修复不恢复所有未持久化reset；正式参数与完整经营比较仍未完成。
+`research/research_probability_direct.py` 按原始 Parquet 必要列准备紧凑目标采样，复用公共参考、终局及深度数量状态，再按四折和最后开发窗做75次顺序拟合、冻结评价。准确查询、公式、候选、资源与原运行命令见[方法及配置](docs/research/complementary-pair-probability-direct.md)。前三次实际十八日prepare分别因身份前态、TWAP跨单元SQL和公共深度拼接状态失败，study均未启动；这些失败保留独立记录。[第三次失败及窄范围公共修复](docs/research/complementary-pair-probability-run-20261007-repair2.md)保存准确运行身份、目录分母、深度边界及验证。
 
-依[#318](https://github.com/slowchillchill/btc-updown-marketmaker/issues/318)，当前V2删除两个额外overfill字段；旧字段、旧接续与明确candidate_v1材料须独立迁移，旧历史材料保留。未决金额单的原时点估计随已发送或效果未知请求登记，不随更乐观盘口释放；利润只占预计新增配平亏损。此修复不提供新盈利证据，也不授权重跑旧研究。
+后继另获批准并成功完成prepare和study，四折及最终冻结开发窗的结果、实际成本和复用范围见[十八日概率结果](docs/research/complementary-pair-probability-results-20261007.md)。原修复不恢复所有未持久化reset，概率改善不等于经营盈利或正式参数采用；当前经营候选、结果及后继授权见[#327](https://github.com/slowchillchill/btc-updown-marketmaker/issues/327)和[#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。
+
+依[#318](https://github.com/slowchillchill/btc-updown-marketmaker/issues/318)，历史V2删除两个额外overfill字段；当前V3基础配置显式提供42字段，V4/V5各保留后继版本和独立开关。旧字段、旧接续与candidate_v1/v2材料保留原身份，不能无提示交新入口运行。未决金额单的原时点估计随已发送或效果未知请求登记，不随更乐观盘口释放；利润只占预计新增配平亏损。此修复不提供新盈利证据，也不授权重跑旧研究。
 
 受控研究候选 `candidate_v4_public_c0_c1` 的完整配置、公共 F0—F8 映射、200ms 端点规则及正式库／CLI 入口见[公共统计 C0/C1 候选说明](docs/strategies/complementary-pair-public-candidates.md)。它不改变旧 `candidate_v3` 的身份和实现路径。
 
