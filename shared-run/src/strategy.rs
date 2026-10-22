@@ -207,6 +207,14 @@ pub trait StrategyV1 {
         false
     }
 
+    /// 显式保留的原请求身份；Some空集合也请求全账户原终局净量。
+    fn retained_learning_requests(&self) -> Option<Vec<String>> {
+        None
+    }
+    /// 消费者自己的学习归属元数据，不放入Actor观察。
+    fn learning_result(&self) -> Option<serde_json::Value> {
+        None
+    }
     /// 只序列化真实诊断；默认消费者没有研究诊断。
     fn research_diagnostics(&self, _diagnostics: &Self::Diagnostics) -> serde_json::Value {
         serde_json::Value::Null
@@ -578,6 +586,18 @@ impl SharedExecutionV2 {
         details: bool,
         learning: bool,
     ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+        self.strategy_input_for_market_frame_with_learning_requests(
+            driver, frame, details, learning, None,
+        )
+    }
+    pub fn strategy_input_for_market_frame_with_learning_requests(
+        &mut self,
+        driver: &mut PublicConsumptionStateV1,
+        frame: FrozenStrategyMarketFrameV1,
+        details: bool,
+        learning: bool,
+        requests: Option<&[String]>,
+    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
         self.apply_closed()?;
         let Some(cutoff) = driver.observation_cutoff() else {
             return Ok(None);
@@ -588,7 +608,8 @@ impl SharedExecutionV2 {
             return Ok(None);
         };
         if learning {
-            action_before.account.learning = self.learning_account_at_v1(driver);
+            action_before.account.learning =
+                self.learning_account_with_requests_v1(driver, requests);
         }
         Ok(Some(StrategyInputV1 {
             market_frame_timing: Some(frame.timing),

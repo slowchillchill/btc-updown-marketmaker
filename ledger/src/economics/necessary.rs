@@ -117,7 +117,7 @@ impl AccountIndex {
     }
 }
 pub struct LedgerNecessaryReadV2<'a> {
-    writer: &'a LedgerWriterV1,
+    pub(super) writer: &'a LedgerWriterV1,
 }
 impl LedgerWriterV1 {
     pub fn necessary_read_v2(&self) -> Option<LedgerNecessaryReadV2<'_>> {

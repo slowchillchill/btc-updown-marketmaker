@@ -42,3 +42,7 @@ pub use core::economics::{
 pub use core::economics::{
     ConfirmedComponentKindV1, ConfirmedComponentReadV1, ConfirmedEconomicsReadV1,
 };
+
+pub use core::economics::{ConfirmedPositionReadV1, FinalSuccessAnchorV1, TradeConfirmationReadV1};
+
+pub use core::economics::{TradeConfirmationChangeReadV1, visit_trade_confirmation_changes_v1};

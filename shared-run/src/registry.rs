@@ -126,6 +126,12 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
     pub(crate) fn context(&self) -> &ExecutionNormalizationContextV1 {
         &self.context
     }
+    pub fn observed_rule_context(
+        &self,
+        condition: &ConditionId,
+    ) -> Option<&PublicTradingRuleContextV1> {
+        self.markets.get(&condition.0).map(AsRef::as_ref)
+    }
     pub(crate) fn observed_market_count(&self) -> usize {
         self.markets.len()
     }
@@ -558,6 +564,36 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             .get(id)
             .into_iter()
             .flat_map(|o| o.trades.keys())
+    }
+    /// 按原请求的订单关联定向保留已闭合成交；不依赖活动订单集合。
+    pub fn request_trade_identities_v1(&self, request: &str) -> Option<Vec<(&Identity, bool)>> {
+        let submitted = self.intents.get(request)?;
+        Some(
+            submitted
+                .outcomes
+                .values()
+                .filter_map(Option::as_ref)
+                .filter_map(|id| self.orders.get(id))
+                .flat_map(|o| o.trades.iter())
+                .map(|(id, record)| {
+                    let final_success = match record.record() {
+                        NormalizationRecord::Evidence { evidence, .. } => match evidence {
+                            SourceNeutralEvidenceKind::TradeLifecycle { result } => {
+                                result.economic_disposition
+                                    == SourceNeutralTradeEconomicDispositionV1::FinalSuccess
+                            }
+                            SourceNeutralEvidenceKind::TradeLifecycleV3 { result } => {
+                                result.result.economic_disposition
+                                    == SourceNeutralTradeEconomicDispositionV1::FinalSuccess
+                            }
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+                    (id, final_success)
+                })
+                .collect(),
+        )
     }
     pub fn order_trades(&self, id: &Identity) -> impl Iterator<Item = &Ref<R>> {
         self.orders

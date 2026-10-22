@@ -14,6 +14,8 @@ pub struct CollectionConfig {
     pub trajectory_path: PathBuf,
     #[serde(default)]
     pub collection_fault_after_call: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub special: Option<crate::special::SpecialPolicyV1>,
 }
 pub fn confirmed_k(read: &LearningAccountReadV1) -> Result<R, String> {
     let mut overrides = std::collections::BTreeMap::new();
@@ -158,6 +160,8 @@ pub struct LearningParameters {
     pub trajectory_page_rows: usize,
     pub trajectory_cached_pages: usize,
     pub training_sequence_batch: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub special: Option<crate::special::SpecialPolicyV1>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -238,6 +242,10 @@ struct StoredFrame {
     old_joint_logp: f64,
     k_exact: ExactRationalV1,
     market_frame: StoredMarketFrame,
+    #[serde(default)]
+    special_credit: Value,
+    #[serde(default)]
+    economic: Value,
 }
 struct Trajectory {
     file: std::io::BufReader<std::fs::File>,
@@ -248,10 +256,24 @@ struct Trajectory {
     pages: std::collections::VecDeque<(usize, Vec<Value>)>,
 }
 impl Trajectory {
+    #[cfg(test)]
     fn open(
         path: &std::path::Path,
         page_rows: usize,
         max_pages: usize,
+    ) -> Result<Self, backtest::MaterialError> {
+        Self::open_version(
+            path,
+            page_rows,
+            max_pages,
+            crate::public_input::TRAJECTORY_VERSION,
+        )
+    }
+    fn open_version(
+        path: &std::path::Path,
+        page_rows: usize,
+        max_pages: usize,
+        version: &str,
     ) -> Result<Self, backtest::MaterialError> {
         use std::io::{BufRead, Seek};
         let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
@@ -270,13 +292,13 @@ impl Trajectory {
                 continue;
             }
             let typed: StoredFrame = serde_json::from_value(value)?;
-            if typed.version != crate::public_input::TRAJECTORY_VERSION {
+            if typed.version != version {
                 return Err("未知轨迹版本".into());
             }
             let _ = &typed.market_frame.market_cutoff.receipt.group;
             R::try_from(&typed.k_exact)?;
             offsets.push(offset);
-            meta.push(json!({"k_exact":typed.k_exact,"processing_start_utc_ms":typed.processing_start_utc_ms,"old_value":typed.old_value,"old_joint_logp":typed.old_joint_logp,"cutoff":typed.market_frame.market_cutoff.decision_time.logical_time_utc_ms}));
+            meta.push(json!({"ledger_entry_seq":typed.economic["ledger_entry_seq"],"special_credit":typed.special_credit,"k_exact":typed.k_exact,"processing_start_utc_ms":typed.processing_start_utc_ms,"old_value":typed.old_value,"old_joint_logp":typed.old_joint_logp,"cutoff":typed.market_frame.market_cutoff.decision_time.logical_time_utc_ms}));
         }
         Ok(Self {
             file,
@@ -515,10 +537,11 @@ fn prepare_collected_targets(
                     .as_str()
                     .ok_or("完整采集记录缺私有轨迹路径")?,
             );
-            let records = Trajectory::open(
+            let records = Trajectory::open_version(
                 &trajectory,
                 config.parameters.trajectory_page_rows,
                 config.parameters.trajectory_cached_pages,
+                trajectory_version(config.parameters.special.as_ref()),
             )?;
             let expected =
                 collection["summary"]["days"][di]["candidates"][ai]["report"]["calculation_count"]
@@ -528,8 +551,82 @@ fn prepare_collected_targets(
                 return Err("完整私有轨迹与实际调用计数不符".into());
             }
             let end:LearningAccountReadV1=serde_json::from_value(collection["summary"]["days"][di]["candidates"][ai]["report"]["learning_account_memory"].clone())?;
+            let mut special_h = Value::Null;
             let frozen = if labels_exist {
                 Vec::new()
+            } else if let Some(policy) = &config.parameters.special {
+                let mut state:crate::special::SpecialStateV1 = serde_json::from_value(collection["summary"]["days"][di]["candidates"][ai]["report"]["learning_result"].clone())?;
+                let facts = end
+                    .directed_confirmations
+                    .as_ref()
+                    .ok_or("H缺专项定向公共事实")?;
+                state.update(facts)?;
+                // H前解释未知不进入r_last或完整剩余目标；不将未知raw补零。
+                // 真实P_i的必要信用未知仍由freeze_special_labels拒绝。
+                let terminal_credit = special_terminal_credit(&state, policy);
+                let ids = facts
+                    .requests
+                    .values()
+                    .filter_map(Option::as_ref)
+                    .flatten()
+                    .map(|t| t.trade_identity.clone())
+                    .collect();
+                let trace = trajectory
+                    .parent()
+                    .ok_or("轨迹无父目录")?
+                    .join("special-confirmation-changes.jsonl");
+                let mut event_count = 0u64;
+                {
+                    use std::io::{BufRead, Write};
+                    let exists = trace.exists();
+                    let mut previous = if exists {
+                        Some(std::io::BufReader::new(std::fs::File::open(&trace)?))
+                    } else {
+                        None
+                    };
+                    let mut file = if exists {
+                        None
+                    } else {
+                        Some(std::io::BufWriter::new(
+                            std::fs::OpenOptions::new()
+                                .create_new(true)
+                                .write(true)
+                                .open(&trace)?,
+                        ))
+                    };
+                    ledger::visit_trade_confirmation_changes_v1(&c.ledger_root, &ids, |event| {
+                        let invalid = |e: String| ledger::LedgerDurableErrorV1::InvalidStructure(e);
+                        if let Some(previous) = &mut previous {
+                            let mut line = String::new();
+                            previous
+                                .read_line(&mut line)
+                                .map_err(|e| invalid(e.to_string()))?;
+                            let saved: ledger::TradeConfirmationChangeReadV1 =
+                                serde_json::from_str(&line)
+                                    .map_err(|e| invalid(format!("原专项引用不完整/损坏:{e}")))?;
+                            if saved != event {
+                                return Err(invalid("原专项事件引用与同一原提交段不一致".into()));
+                            }
+                        } else if let Some(file) = &mut file {
+                            serde_json::to_writer(&mut *file, &event)
+                                .map_err(|e| invalid(e.to_string()))?;
+                            file.write_all(b"\n").map_err(|e| invalid(e.to_string()))?;
+                        }
+                        event_count += 1;
+                        Ok(())
+                    })?;
+                    if let Some(file) = &mut file {
+                        file.flush()?;
+                    }
+                    if let Some(previous) = &mut previous {
+                        let mut extra = String::new();
+                        if previous.read_line(&mut extra)? != 0 {
+                            return Err("原专项引用多出未归属事件".into());
+                        }
+                    }
+                }
+                special_h = json!({"state":state,"credit":terminal_credit,"confirmation_changes":trace,"event_count":event_count,"original_noe_root":c.noe_root,"original_ledger_root":c.ledger_root,"trajectory":trajectory,"last_actor_index":records.meta.len().checked_sub(1),"last_processing_start_utc_ms":records.meta.last().map(|r|&r["processing_start_utc_ms"]),"last_account_ledger_entry_seq":records.meta.last().map(|r|&r["ledger_entry_seq"]),"evidence_end_utc_ms":params["learning"]["evidence_end_utc_ms"]});
+                freeze_special_labels(&records.meta, &end, config.parameters.tau_gae_s, policy)?
             } else {
                 freeze_labels(&records.meta, &end, config.parameters.tau_gae_s)?
             };
@@ -545,7 +642,7 @@ fn prepare_collected_targets(
                         .and_then(|v| R::try_from(&v).map_err(|e| e.to_string()))
                 })
                 .transpose()?;
-            units.insert(key.clone(),json!({"p_start":pstart.public(),"b_pre":first.as_ref().map(|v|v.sub(&pstart).public()),"j_end":j.public(),"j_from_start":j.sub(&pstart).public(),"n0":records.meta.is_empty(),"actor_samples":records.meta.len()}));
+            units.insert(key.clone(),json!({"p_start":pstart.public(),"b_pre":first.as_ref().map(|v|v.sub(&pstart).public()),"j_end":j.public(),"j_from_start":j.sub(&pstart).public(),"n0":records.meta.is_empty(),"actor_samples":records.meta.len(),"special_h":special_h}));
             labels.insert(key.clone(), frozen);
             rows.insert(key, records);
         }
@@ -638,6 +735,9 @@ fn run_learning_job_opened(
     {
         return Err("页/批/梯度块配置须为正整数".into());
     }
+    if let Some(policy) = &config.parameters.special {
+        policy.validate()?;
+    }
     let active_ends = match &config.active_end_by_day_utc_ms {
         Some(v) if v.len() == config.consumer.days.len() => v.clone(),
         None if config.consumer.days.len() == 1 => vec![config.active_end_utc_ms],
@@ -647,7 +747,7 @@ fn run_learning_job_opened(
     if let Some(ends) = &config.active_end_by_day_utc_ms {
         binding["active_end_by_day_utc_ms"] = json!(ends);
     }
-    let group = json!({"id":config.group_id,"binding":binding,"target_version":"confirmed-finite-j-v1","trajectory_version":crate::public_input::TRAJECTORY_VERSION});
+    let group = json!({"id":config.group_id,"binding":binding,"target_version":target_version(config.parameters.special.as_ref()),"trajectory_version":trajectory_version(config.parameters.special.as_ref())});
     for (di, day) in config.consumer.days.iter().enumerate() {
         for c in &day.candidates {
             if c.session.caller_role != SimCallerRoleV1::ModelTrain
@@ -702,6 +802,7 @@ fn run_learning_job_opened(
                     c.strategy.effective_parameters["model_consumer"].clone(),
                 )?;
                 consumer.learning = Some(CollectionConfig {
+                    special: config.parameters.special.clone(),
                     group_id: config.group_id.clone(),
                     active_end_utc_ms: active_ends[di],
                     evidence_end_utc_ms: day.preparation.scope.received_end_utc_ms,
@@ -711,7 +812,11 @@ fn run_learning_job_opened(
                 });
                 c.strategy.effective_parameters["model_consumer"] = serde_json::to_value(consumer)?;
                 c.strategy.effective_parameters["purpose"] =
-                    json!("D-0371 ModelTrain采集及外层整组学习消费者");
+                    json!(if config.parameters.special.is_some() {
+                        "D-0375专项ModelTrain采集及外层整组学习消费者"
+                    } else {
+                        "D-0371 ModelTrain采集及外层整组学习消费者"
+                    });
                 c.strategy.effective_parameters["learning_group"] = json!(config.group_id);
                 c.strategy.effective_parameters["rules_binding"] = json!(opened.binding);
                 c.sim_log = out.join("sim.jsonl");
@@ -914,6 +1019,7 @@ mod target_tests {
             obligations: vec![],
             pending_noe_record_count: 0,
             qualified_rebates: Vec::new(),
+            directed_confirmations: None,
         }
     }
     #[test]
@@ -1107,3 +1213,193 @@ pub(crate) fn compose_trajectory_frame(
 #[cfg(test)]
 #[path = "public_input_tests.rs"]
 pub(crate) mod public_input_tests;
+
+pub fn target_version(policy: Option<&crate::special::SpecialPolicyV1>) -> &'static str {
+    if policy.is_some() {
+        crate::special::TARGET
+    } else {
+        "confirmed-finite-j-v1"
+    }
+}
+pub fn trajectory_version(policy: Option<&crate::special::SpecialPolicyV1>) -> &'static str {
+    if policy.is_some() {
+        crate::special::TRAJECTORY
+    } else {
+        crate::public_input::TRAJECTORY_VERSION
+    }
+}
+fn special_terminal_credit(
+    state: &crate::special::SpecialStateV1,
+    policy: &crate::special::SpecialPolicyV1,
+) -> Value {
+    match state.credit(policy) {
+        Ok((raw, clipped)) => {
+            json!({"raw_before_terminal_pusd":raw.public(),"clipped_before_terminal_pusd":clipped.public(),"terminal_credit_pusd":R::zero().public(),"necessary_unknown":[]})
+        }
+        Err(_) => {
+            json!({"raw_before_terminal_pusd":null,"clipped_before_terminal_pusd":null,"terminal_credit_pusd":R::zero().public(),"necessary_unknown":state.unknown_reasons(),"scope":"仅H前解释未知；真实P_i信用及base J仍须已知，原来源读取失败不忽略"})
+        }
+    }
+}
+/// 对同一组已冻结的信用前缀作势差变换，再沿原GAE递推；不生成末端动作。
+pub fn freeze_special_labels(
+    rows: &[Value],
+    end: &LearningAccountReadV1,
+    tau: f64,
+    policy: &crate::special::SpecialPolicyV1,
+) -> Result<Vec<Value>, String> {
+    policy.validate()?;
+    let mut labels = freeze_labels(rows, end, tau)?;
+    let mut credits = Vec::new();
+    for row in rows {
+        let credit = &row["special_credit"];
+        if credit["necessary_unknown"]
+            .as_array()
+            .is_none_or(|a| !a.is_empty())
+        {
+            return Err("专项信用前缀必要事实待定".into());
+        }
+        let c: ExactRationalV1 =
+            serde_json::from_value(credit["clipped_pusd"].clone()).map_err(|e| e.to_string())?;
+        credits.push(R::try_from(&c).map_err(|e| e.to_string())?);
+    }
+    let alpha = R::from_decimal(rust_decimal::Decimal::from(policy.alpha));
+    let j = finite_j(end)?;
+    for i in 0..labels.len() {
+        let following = credits.get(i + 1).cloned().unwrap_or_else(R::zero);
+        let shaping = following.sub(&credits[i]);
+        let k: ExactRationalV1 =
+            serde_json::from_value(rows[i]["k_exact"].clone()).map_err(|e| e.to_string())?;
+        let k = R::try_from(&k).map_err(|e| e.to_string())?;
+        let next_k = if let Some(row) = rows.get(i + 1) {
+            let value: ExactRationalV1 =
+                serde_json::from_value(row["k_exact"].clone()).map_err(|e| e.to_string())?;
+            R::try_from(&value).map_err(|e| e.to_string())?
+        } else {
+            j.clone()
+        };
+        let base = number(&next_k.sub(&k))?;
+        let reward_exact = next_k.sub(&k).add(&alpha.mul(&shaping));
+        let target_exact = j.sub(&k).sub(&alpha.mul(&credits[i]));
+        labels[i]["base_reward"] = base.into();
+        labels[i]["credit_pusd"] =
+            serde_json::to_value(credits[i].public()).map_err(|e| e.to_string())?;
+        labels[i]["credit_delta_pusd"] =
+            serde_json::to_value(shaping.public()).map_err(|e| e.to_string())?;
+        labels[i]["reward"] = number(&reward_exact)?.into();
+        labels[i]["reward_exact"] =
+            serde_json::to_value(reward_exact.public()).map_err(|e| e.to_string())?;
+        labels[i]["critic_target"] = number(&target_exact)?.into();
+        labels[i]["critic_target_exact"] =
+            serde_json::to_value(target_exact.public()).map_err(|e| e.to_string())?;
+    }
+    let mut next_adv = 0.0;
+    for i in (0..labels.len()).rev() {
+        let value = labels[i]["old_value"].as_f64().ok_or("缺旧价值")?;
+        let next_value = labels
+            .get(i + 1)
+            .and_then(|v| v["old_value"].as_f64())
+            .unwrap_or(0.0);
+        let adv = labels[i]["reward"].as_f64().ok_or("缺奖励")? + next_value - value
+            + labels[i]["lambda"].as_f64().ok_or("缺lambda")? * next_adv;
+        labels[i]["advantage"] = adv.into();
+        next_adv = adv;
+    }
+    Ok(labels)
+}
+
+#[cfg(test)]
+mod special_label_tests {
+    use super::*;
+    #[test]
+    fn special_credit_telescopes_with_h_reversal_and_uses_same_gae_and_complete_target() {
+        let end:LearningAccountReadV1=serde_json::from_value(json!({"confirmed":{"version":"confirmed_economics_v1","components":[],"unresolved_position_principal_pusd":R::zero().public(),"unknown_negative_cost_identities":[],"covered_unapportioned_negative_cost_identities":[]},"obligations":[],"pending_noe_record_count":0,"qualified_rebates":[]})).unwrap();
+        let make = |credit: i64, t: i64| json!({"k_exact":R::zero().public(),"old_value":0.0,"old_joint_logp":-0.5,"processing_start_utc_ms":t,"special_credit":{"raw_pusd":R::from_decimal(rust_decimal::Decimal::new(credit,2)).public(),"clipped_pusd":R::from_decimal(rust_decimal::Decimal::new(credit,2)).public(),"necessary_unknown":[]}});
+        let mut h_unknown = crate::special::SpecialStateV1::default();
+        h_unknown
+            .necessary_unknown
+            .push("last到H才出现的原归属缺口".into());
+        let explanation =
+            special_terminal_credit(&h_unknown, &crate::special::SpecialPolicyV1::adopted(1));
+        assert!(explanation["raw_before_terminal_pusd"].is_null());
+        assert_eq!(
+            explanation["terminal_credit_pusd"],
+            json!(R::zero().public())
+        );
+        let rows = vec![make(0, 10), make(1, 260), make(-2, 280)];
+        let labels = freeze_special_labels(
+            &rows,
+            &end,
+            300.0,
+            &crate::special::SpecialPolicyV1::adopted(1),
+        )
+        .unwrap();
+        for (row, (reward, target)) in
+            labels
+                .iter()
+                .zip([(0.01, 0.0), (-0.03, -0.01), (0.02, 0.02)])
+        {
+            assert!((row["reward"].as_f64().unwrap() - reward).abs() < 1e-12);
+            assert!((row["critic_target"].as_f64().unwrap() - target).abs() < 1e-12);
+        }
+        assert!(
+            (labels
+                .iter()
+                .map(|r| r["reward"].as_f64().unwrap())
+                .sum::<f64>())
+            .abs()
+                < 1e-12
+        );
+        assert_eq!(
+            freeze_special_labels(
+                &[make(0, 10)],
+                &end,
+                300.0,
+                &crate::special::SpecialPolicyV1::adopted(1)
+            )
+            .unwrap()[0]["reward"],
+            0.0
+        );
+        assert!(
+            freeze_special_labels(
+                &[],
+                &end,
+                300.0,
+                &crate::special::SpecialPolicyV1::adopted(1)
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let control = freeze_special_labels(
+            &rows,
+            &end,
+            300.0,
+            &crate::special::SpecialPolicyV1::adopted(0),
+        )
+        .unwrap();
+        assert!(
+            control
+                .iter()
+                .all(|r| r["reward"] == 0.0 && r["critic_target"] == 0.0)
+        );
+    }
+    #[test]
+    fn no_special_keeps_original_missing_field_binding_and_target() {
+        let parameters: LearningParameters =
+            serde_json::from_str(include_str!("../examples/learning-parameters.json")).unwrap();
+        assert!(
+            serde_json::to_value(&parameters)
+                .unwrap()
+                .get("special")
+                .is_none()
+        );
+        assert_eq!(
+            target_version(parameters.special.as_ref()),
+            "confirmed-finite-j-v1"
+        );
+        assert_eq!(
+            trajectory_version(parameters.special.as_ref()),
+            crate::public_input::TRAJECTORY_VERSION
+        );
+    }
+}

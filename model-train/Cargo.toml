@@ -8,6 +8,7 @@ publish = false
 contracts = { path = "../contracts" }
 backtest = { path = "../backtest" }
 shared-run = { path = "../shared-run" }
+execution-normalization = { path = "../execution-normalization" }
 ledger = { path = "../ledger" }
 sim-system = { path = "../sim-system", features = ["shared-execution"] }
 rust_decimal = { version = "=1.42.1", default-features = false, features = ["std"] }
@@ -20,7 +21,6 @@ tokio = { version = "=1.52.3", default-features = false, features = ["rt", "time
 
 [dev-dependencies]
 polymarket_client_sdk_v2 = { version = "=0.7.0", default-features = false, features = ["clob"] }
-execution-normalization = { path = "../execution-normalization" }
 data-pipeline-core = { path = "../data-pipeline/core" }
 data-collect = { path = "../data-collect" }
 data-pipeline-training = { path = "../data-pipeline/training" }

@@ -156,9 +156,10 @@ class LearningEngine:
                 return type(value)(cpu(v) for v in value)
             return value
         return {"version": "ppo-group-transaction-v1", "model_version": self.service.identity["version"],
-                "encoding_version": "b-public-token-log1p-v1", "target_version": "confirmed-finite-j-v1",
+                "encoding_version": "b-public-token-log1p-v1", "target_version": self.group["target_version"],
                 "trajectory_version": self.group["trajectory_version"], "model": cpu(self.model.state_dict()),
                 "optimizer": cpu(self.optimizer.state_dict()), "config": self.config,
+                "source_implementations": [candidate["implementation_identity"] for day in self.group.get("binding", {}).get("consumer", {}).get("days", []) for candidate in day["candidates"]],
                 "consumed": self.consumed, "sequence": self.sequence,
                 "torch_rng": torch.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state_all() if self.service.device.type == "cuda" else [],

@@ -11,6 +11,7 @@ fn read(value: &Value) -> LearningAccountReadV1 {
         obligations: vec![],
         pending_noe_record_count: 0,
         qualified_rebates: vec![],
+        directed_confirmations: None,
     }
 }
 fn row(k: &R, v: f64, t: i64) -> Value {
@@ -66,4 +67,34 @@ fn original_partial_maker_pair_confirmation_and_remaining_principal_connect_to_l
     close(&l[0]["critic_target"], -0.2);
     close(&l[1]["critic_target"], -0.5);
     close(&l[0]["advantage"], 1.3 - 2.5 * (-1.0_f64 / 300.0).exp());
+}
+
+#[test]
+fn original_negative_economic_target_and_special_credit_join_before_float_and_h_reversal() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/confirmed-original-noe-v1.json")).unwrap();
+    let before = read(&fixture["negative"]["before_details"]);
+    let end = read(&fixture["negative"]["detailed"]);
+    let k = confirmed_k(&before).unwrap();
+    let mut rows = vec![row(&R::zero(), 0.0, 10), row(&k, 0.0, 260)];
+    for (r, c) in rows.iter_mut().zip([0, 1]) {
+        r["special_credit"] = json!({"clipped_pusd":R::from_decimal(rust_decimal::Decimal::new(c,2)).public(),"necessary_unknown":[]});
+    }
+    let labels = model_train::learning::freeze_special_labels(
+        &rows,
+        &end,
+        300.0,
+        &model_train::special::SpecialPolicyV1::adopted(1),
+    )
+    .unwrap();
+    // 原真实NOE确认费-.084及持仓本金终值-3；信用+.01随后H冲回-.01。
+    close(&labels[0]["reward"], -0.074);
+    close(&labels[1]["reward"], -3.01);
+    close(&labels[1]["critic_target"], -3.01);
+    let reward_exact: contracts::economics::ExactRationalV1 =
+        serde_json::from_value(labels[1]["reward_exact"].clone()).unwrap();
+    assert_eq!(
+        R::try_from(&reward_exact).unwrap(),
+        R::from_decimal(rust_decimal::Decimal::new(-301, 2))
+    );
 }

@@ -36,6 +36,7 @@ pub struct ModelDiagnostics {
     pub time: Value,
     pub repair_eligible: Vec<[bool; 2]>,
     pub repair_evidence: Vec<Value>,
+    pub special_safe_notrade: Option<bool>,
     pub encoding_seconds: f64,
     pub model_roundtrip_seconds: f64,
     pub exact_domain_and_construction_seconds: f64,
@@ -52,6 +53,7 @@ pub struct ModelConsumer {
     last_confirmed: Option<Arc<ledger::ConfirmedEconomicsReadV1>>,
     confirmed_revision: u64,
     last_qualified: Vec<shared_run::QualifiedRebateReadV1>,
+    special_state: crate::special::SpecialStateV1,
 }
 #[derive(Clone)]
 struct MarketDomain {
@@ -191,6 +193,9 @@ impl ModelConsumer {
         entry_scope: backtest::EffectiveEntryMarketScopeV1,
         rule_binding: &crate::FrozenRuleBindingV1,
     ) -> Result<Self, String> {
+        if let Some(policy) = config.learning.as_ref().and_then(|c| c.special.as_ref()) {
+            policy.validate()?;
+        }
         let trajectory = config
             .learning
             .as_ref()
@@ -218,6 +223,7 @@ impl ModelConsumer {
             last_confirmed: None,
             confirmed_revision: 0,
             last_qualified: Vec::new(),
+            special_state: Default::default(),
         })
     }
     pub(crate) fn with_first_observation(
@@ -255,6 +261,93 @@ impl StrategyV1 for ModelConsumer {
     fn requires_learning_economics(&self) -> bool {
         self.config.learning.is_some()
     }
+    fn retained_learning_requests(&self) -> Option<Vec<String>> {
+        self.config
+            .learning
+            .as_ref()
+            .and_then(|c| c.special.as_ref())
+            .map(|_| self.special_state.repair_requests.keys().cloned().collect())
+    }
+    fn learning_result(&self) -> Option<Value> {
+        self.config
+            .learning
+            .as_ref()
+            .and_then(|c| c.special.as_ref())
+            .map(|_| json!(self.special_state))
+    }
+    fn dispatched(
+        &mut self,
+        calculation: &StrategyCalculationV1<ModelDiagnostics>,
+        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+    ) {
+        let Some(policy) = self
+            .config
+            .learning
+            .as_ref()
+            .and_then(|c| c.special.as_ref())
+        else {
+            return;
+        };
+        let StrategyOutputV1::Continue {
+            intents,
+            diagnostics,
+            ..
+        } = &calculation.output
+        else {
+            return;
+        };
+        if diagnostics.time["frame_age_ms"]
+            .as_i64()
+            .is_none_or(|age| age < policy.frame_age_threshold_ms)
+        {
+            return;
+        }
+        if diagnostics.action == "NoTrade"
+            && intents.is_empty()
+            && result.is_ok()
+            && diagnostics.special_safe_notrade == Some(true)
+            && self.special_state.safe_notrade_accepted_call.is_none()
+        {
+            self.special_state.safe_notrade_accepted_call = Some(diagnostics.call);
+        } else if diagnostics.action == "NoTrade"
+            && intents.is_empty()
+            && result.is_ok()
+            && diagnostics.special_safe_notrade.is_none()
+            && self.special_state.safe_notrade_accepted_call.is_none()
+            && self.special_state.accepted_safety_unknown_calls.is_empty()
+        {
+            self.special_state
+                .accepted_safety_unknown_calls
+                .push(diagnostics.call);
+        }
+        if diagnostics.action != "Repair" {
+            return;
+        }
+        let receipts = match result {
+            Ok(sent) => sent,
+            Err(error) => &error.sent,
+        };
+        for sent in receipts {
+            if let Some(intent) = intents
+                .iter()
+                .find(|i| i.context.global_request_id == sent.context.global_request_id)
+                && let ModelIntentV1::SubmitSingleBuy {
+                    condition_id,
+                    order,
+                } = intent.intent.as_ref()
+            {
+                self.special_state
+                    .repair_requests
+                    .entry(sent.context.global_request_id.clone())
+                    .or_insert(crate::special::SpecialRepairOriginV1 {
+                        call: diagnostics.call,
+                        sent_receipt: sent.receipt,
+                        condition_id: condition_id.clone(),
+                        token_id: order.token_id.clone(),
+                    });
+            }
+        }
+    }
     fn research_diagnostics(&self, d: &Self::Diagnostics) -> Value {
         serde_json::to_value(d).unwrap()
     }
@@ -283,6 +376,41 @@ impl StrategyV1 for ModelConsumer {
             time["active_end_utc_ms"] = c.active_end_utc_ms.into();
             time["evidence_end_utc_ms"] = c.evidence_end_utc_ms.into();
             time["until_active_end_ms"] = (c.active_end_utc_ms - at).into();
+        }
+        let mut special_credit = Value::Null;
+        let mut special_safe_notrade = None;
+        if let Some(policy) = self
+            .config
+            .learning
+            .as_ref()
+            .and_then(|c| c.special.as_ref())
+        {
+            let facts = input
+                .action_before
+                .learning_account()
+                .and_then(|a| a.directed_confirmations.as_ref())
+                .ok_or("专项消费者缺定向公共读取")?;
+            self.special_state.update(facts)?;
+            special_safe_notrade = crate::special::safely_flat(facts)?;
+            if special_safe_notrade == Some(true)
+                && !input
+                    .action_before
+                    .learning_account()
+                    .unwrap()
+                    .confirmed
+                    .covered_unapportioned_negative_cost_identities
+                    .is_empty()
+            {
+                special_safe_notrade = None;
+            }
+            special_credit = match self.special_state.credit(policy) {
+                Ok((raw, clipped)) => {
+                    json!({"raw_pusd":raw.public(),"clipped_pusd":clipped.public(),"necessary_unknown":[]})
+                }
+                Err(_) => {
+                    json!({"raw_pusd":null,"clipped_pusd":null,"necessary_unknown":self.special_state.unknown_reasons()})
+                }
+            };
         }
         let mut domains = Vec::new();
         let mut market_tokens = Vec::new();
@@ -587,7 +715,7 @@ impl StrategyV1 for ModelConsumer {
                 self.last_confirmed = Some(economic.confirmed.clone());
                 self.last_qualified = economic.qualified_rebates.clone();
             }
-            let record = json!({"version":crate::public_input::TRAJECTORY_VERSION,"rules_identity":self.rules.file_sha256(),"group":c.group_id,"account":self.config.account_key,"call":self.call,"processing_start_utc_ms":at,"market_frame":input.market_frame_timing,"account_cutoff":input.action_before.cutoff(),"market_ids":input.markets.iter().map(|m|m.observation.market.condition_id.clone()).collect::<Vec<_>>(),"global_private":global_projection,"market_private":private_markets,"options":options,"selected_option":selected,"rpc":self.rpc.borrow().clone(),"old_joint_logp":logp,"old_value":begin["value"],"behavior":begin["behavior"],"k_exact":crate::learning::confirmed_k(economic)?.public(),"economic":{"confirmed_revision":self.confirmed_revision,"obligations":economic.obligations,"pending_noe_record_count":economic.pending_noe_record_count},"actual_intents":intents,"special":{"frame_age_ms":time["frame_age_ms"],"eligible_record_threshold_ms":100,"repair_evidence":repair_evidence,"action":action,"numeric_special_reward":false}});
+            let record = json!({"version":crate::learning::trajectory_version(c.special.as_ref()),"special_credit":special_credit,"rules_identity":self.rules.file_sha256(),"group":c.group_id,"account":self.config.account_key,"call":self.call,"processing_start_utc_ms":at,"market_frame":input.market_frame_timing,"account_cutoff":input.action_before.cutoff(),"market_ids":input.markets.iter().map(|m|m.observation.market.condition_id.clone()).collect::<Vec<_>>(),"global_private":global_projection,"market_private":private_markets,"options":options,"selected_option":selected,"rpc":self.rpc.borrow().clone(),"old_joint_logp":logp,"old_value":begin["value"],"behavior":begin["behavior"],"k_exact":crate::learning::confirmed_k(economic)?.public(),"economic":{"ledger_entry_seq":input.action_before.ledger().ledger_entry_seq,"confirmed_revision":self.confirmed_revision,"obligations":economic.obligations,"pending_noe_record_count":economic.pending_noe_record_count},"actual_intents":intents,"special":{"frame_age_ms":time["frame_age_ms"],"eligible_record_threshold_ms":c.special.as_ref().map_or(100, |p| p.frame_age_threshold_ms),"repair_evidence":repair_evidence,"action":action,"numeric_special_reward":c.special.is_some()}});
             let file = self.trajectory.as_mut().unwrap();
             serde_json::to_writer(&mut *file, &record).map_err(|e| e.to_string())?;
             file.write_all(b"\n").map_err(|e| e.to_string())?;
@@ -607,6 +735,7 @@ impl StrategyV1 for ModelConsumer {
             time,
             repair_eligible: domains.iter().map(|d| d.eligible).collect(),
             repair_evidence,
+            special_safe_notrade,
             encoding_seconds,
             model_roundtrip_seconds: roundtrip,
             exact_domain_and_construction_seconds: (total - encoding_seconds - roundtrip).max(0.0),

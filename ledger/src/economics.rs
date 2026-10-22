@@ -20,6 +20,9 @@ pub use necessary::*;
 #[path = "economics/confirmed.rs"]
 mod confirmed;
 pub use confirmed::*;
+#[path = "economics/confirmation.rs"]
+mod confirmation;
+pub use confirmation::*;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Pool {
     pub quantity: Decimal,
@@ -32,6 +35,13 @@ pub(crate) struct Trade {
     pub economic_applied: bool,
     pub success_applied: bool,
     pub net_fee: Decimal,
+    // 仅首次合法FinalSuccess之前固定。旧持久记录不补造历史锚点。
+    #[serde(default)]
+    pub first_success_seen: Option<bool>,
+    #[serde(default)]
+    pub first_success_anchor: Option<FinalSuccessAnchorV1>,
+    #[serde(skip)]
+    pub confirmation_read_cache: std::sync::OnceLock<std::sync::Arc<TradeConfirmationReadV1>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Resolution {
@@ -541,7 +551,11 @@ impl EconomicsState {
             economic_applied: false,
             success_applied: false,
             net_fee: Decimal::ZERO,
+            first_success_seen: Some(false),
+            first_success_anchor: None,
+            confirmation_read_cache: Default::default(),
         });
+        trade.confirmation_read_cache.take();
         // 终局观察与经济应用分开：即使经济前驱还未到，旧 Pending 也不能覆盖成功终局。
         let terminal = |d: &SourceNeutralTradeEconomicDispositionV1| {
             matches!(
@@ -551,6 +565,18 @@ impl EconomicsState {
                     | SourceNeutralTradeEconomicDispositionV1::FinalFailureCompensated
             )
         };
+        // 此处已进入原Ledger合法事实应用；索引尚不包含本次终局量。
+        // 旧终局记录缺锚时不能用当前净量伪造历史参照。
+        if fact.economic_disposition == SourceNeutralTradeEconomicDispositionV1::FinalSuccess
+            && trade.first_success_seen == Some(false)
+        {
+            if old.is_none_or(|t| {
+                t.fact.economic_disposition != SourceNeutralTradeEconomicDispositionV1::FinalSuccess
+            }) {
+                trade.first_success_anchor = self.confirmation_anchor(&fact.condition_id.0);
+            }
+            trade.first_success_seen = Some(true);
+        }
         if !terminal(&trade.fact.economic_disposition) || terminal(&fact.economic_disposition) {
             trade.fact = fact.clone();
         }
@@ -1011,6 +1037,7 @@ impl EconomicsState {
             || patch.cash.is_some()
         {
             index.confirmed.take();
+            index.positions.take();
         }
         for (id, trade) in &patch.trades {
             index.replace_trade(id, self.trades.get(id), Some(trade));

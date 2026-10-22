@@ -205,6 +205,7 @@ fn failed_query_has_no_worker_or_sim_and_consumer_root_uses_same_startup() {
             std::fs::create_dir(&out).unwrap();
             c.strategy.effective_parameters["model_consumer"]["learning"] =
                 serde_json::to_value(CollectionConfig {
+                    special: None,
                     group_id: "consumer-n0".into(),
                     active_end_utc_ms: config.active_end_utc_ms,
                     evidence_end_utc_ms: day.preparation.scope.received_end_utc_ms,
@@ -392,6 +393,7 @@ fn first_observation_uses_root_clock_and_survives_later_failures_without_stale_r
             for (i, c) in config.consumer.days[0].candidates.iter_mut().enumerate() {
                 c.strategy.effective_parameters["model_consumer"]["learning"] =
                     json!(CollectionConfig {
+                        special: None,
                         group_id: "consumer-timing".into(),
                         active_end_utc_ms: config.active_end_utc_ms,
                         evidence_end_utc_ms: start + 12000,
@@ -510,6 +512,7 @@ fn first_observation_exists_before_worker_response_is_released() {
     config.consumer.days[0].candidates[0]
         .strategy
         .effective_parameters["model_consumer"]["learning"] = json!(CollectionConfig {
+        special: None,
         group_id: "endpoint-only".into(),
         active_end_utc_ms: start + 5000,
         evidence_end_utc_ms: start + 12000,
@@ -555,4 +558,108 @@ fn first_observation_exists_before_worker_response_is_released() {
         assert_eq!(result["first_observation"], while_blocked);
         eprintln!("CPU协议屏障证明：begin响应未释放时已有 {}", while_blocked);
     });
+}
+
+#[test]
+fn special_collection_uses_real_dispatch_once_and_does_not_change_actor_input() {
+    let mut inputs = Vec::new();
+    for special in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let (mut config, source, log) = prepared(root.path());
+        let start = config.consumer.days[0]
+            .preparation
+            .scope
+            .received_start_utc_ms;
+        config.active_end_utc_ms = start + 600;
+        config.parameters.special = special.then(|| crate::special::SpecialPolicyV1::adopted(1));
+        for (i, c) in config.consumer.days[0].candidates.iter_mut().enumerate() {
+            c.session.initial_account_state.available_pusd = ExactDecimal("0".into());
+            c.timing.calculation_start_delay_ms = backtest::DelayScheduleV1::Fixed(10);
+            c.timing.dispatch_delay_ms = backtest::DelayScheduleV1::Fixed(0);
+            c.timing.calculation_duration_ms = if i == 0 {
+                backtest::DelayScheduleV1::Sequence(
+                    std::iter::once(250)
+                        .chain(std::iter::repeat_n(20, 60))
+                        .collect(),
+                )
+            } else {
+                backtest::DelayScheduleV1::Fixed(20)
+            };
+        }
+        let mut control: Value =
+            serde_json::from_slice(&std::fs::read(&config.consumer.worker.model).unwrap()).unwrap();
+        control["timing_protocol"] = json!(true);
+        std::fs::write(
+            &config.consumer.worker.model,
+            serde_json::to_vec(&control).unwrap(),
+        )
+        .unwrap();
+        let queries = Cell::new(0);
+        let result =
+            run_learning_job_with_opener(&config, |c| Ok(injected(c, source, &queries))).unwrap();
+        let complete: Value = serde_json::from_slice(
+            &std::fs::read(config.output_directory.join("completed-collection.json")).unwrap(),
+        )
+        .unwrap();
+        let reports = &complete["summary"]["days"][0]["candidates"];
+        for report in reports.as_array().unwrap() {
+            assert_eq!(report["report"]["calculation_count"], 4);
+        }
+        if special {
+            assert!(
+                reports[0]["report"]["learning_result"]["safe_notrade_accepted_call"]
+                    .as_u64()
+                    .is_some()
+            );
+            assert!(
+                reports[1]["report"]["learning_result"]["safe_notrade_accepted_call"].is_null()
+            );
+            assert!(
+                reports[0]["report"]["learning_result"]["repair_requests"]
+                    .as_object()
+                    .unwrap()
+                    .is_empty()
+            );
+            let labels: Value = serde_json::from_slice(
+                &std::fs::read(config.output_directory.join("frozen-labels.json")).unwrap(),
+            )
+            .unwrap();
+            assert!(labels.as_object().unwrap().values().any(|rows| {
+                rows.as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["credit_delta_pusd"]["numerator"] != "0")
+            }));
+            let collection = &complete["consumer"]["days"][0]["candidates"][0]["strategy"]["effective_parameters"]
+                ["model_consumer"]["learning"];
+            let trajectory =
+                std::fs::read_to_string(collection["trajectory_path"].as_str().unwrap()).unwrap();
+            let first: Value = trajectory
+                .lines()
+                .map(|l| serde_json::from_str::<Value>(l).unwrap())
+                .find(|r| r.get("call").is_some())
+                .unwrap();
+            println!(
+                "专项CPU协议实际首帧cutoff={} start={} calls={} grant={}",
+                first["market_frame"]["market_cutoff"]["decision_time"]["logical_time_utc_ms"],
+                first["processing_start_utc_ms"],
+                reports[0]["report"]["calculation_count"],
+                reports[0]["report"]["learning_result"]["safe_notrade_accepted_call"]
+            );
+            assert_eq!(first["version"], crate::special::TRAJECTORY);
+        }
+        assert_eq!(result["model"]["forwards"], 0);
+        let mut requests=std::fs::read_to_string(log).unwrap().lines().map(|l|serde_json::from_str::<Value>(l).unwrap()).filter(|r|r["phase"]=="begin").map(|r|json!({"account":r["account"],"call":r["call"],"global":r["global"],"markets":r["markets"],"options":r["options"]})).collect::<Vec<_>>();
+        requests.sort_by_key(|r| {
+            (
+                r["account"].as_str().unwrap().to_owned(),
+                r["call"].as_u64().unwrap(),
+            )
+        });
+        inputs.push(requests);
+    }
+    assert_eq!(
+        inputs[0], inputs[1],
+        "专项信用、锚、身份不进入真实采集请求的Actor token/动作域"
+    );
 }

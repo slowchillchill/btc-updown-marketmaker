@@ -1273,3 +1273,179 @@ fn early_applied_negative_is_known_once_before_details_and_after_compensation() 
         .unwrap()
     );
 }
+
+#[test]
+fn first_legal_final_success_anchors_before_index_and_quantity_revisions_keep_it() {
+    use SourceNeutralTradeEconomicDispositionV1::*;
+    use contracts::economics::SourceNeutralInitialMarketV1;
+    let temp = tempfile::tempdir().unwrap();
+    // 工程验证可显式保留这一份小型原NOE/Ledger材料；普通测试仍自动回收。
+    let retained = std::env::var_os("CONFIRMATION_FIXTURE_ROOT").map(std::path::PathBuf::from);
+    let root = retained.as_deref().unwrap_or(temp.path());
+    if retained.is_some() {
+        std::fs::create_dir(root).unwrap();
+    }
+    let mut source = Source::new(&root.join("noe"), "confirmation-anchor");
+    source.accept(Kind::Economic {
+        evidence: SourceNeutralEconomicEvidenceV1::AccountOpening {
+            opening_evidence_identity: "opening".into(),
+            available_pusd: number("100"),
+        },
+    });
+    source.accept(Kind::InitialMarket {
+        result: SourceNeutralInitialMarketV1 {
+            market: MarketIdentityV2 {
+                condition_id: ConditionId("condition".into()),
+                clob_market_id: ClobMarketId("market".into()),
+                window: MarketWindowV2 {
+                    start_at_utc_ms: 0,
+                    end_at_utc_ms: 300000,
+                },
+            },
+            assets: std::array::from_fn(|i| AssetIdentityV1 {
+                token_id: TokenId(if i == 0 { "up" } else { "down" }.into()),
+                outcome: OutcomeIdentityV1 {
+                    index: i as u32,
+                    label: if i == 0 { "Up" } else { "Down" }.into(),
+                },
+            }),
+        },
+    });
+    let order = order_identity(&source, "order");
+    source.accept(accepted_quantity(&order, "0", "100"));
+    for (id, q, disposition) in [
+        ("sim-1", "1", FinalSuccess),
+        ("sim-2", "2", FinalSuccess),
+        ("sim-3", "10", FinalSuccess),
+        ("sim-2", "1", FinalSuccess),
+        ("sim-2", "3", FinalSuccess),
+        ("sim-2", "3", FinalFailureCompensated),
+    ] {
+        let mut evidence = counted_trade(
+            &source,
+            &order,
+            id,
+            q,
+            TradeLiquidityRoleV2::MakerInferred,
+            disposition,
+            true,
+        );
+        if id == "sim-2"
+            && let Kind::TradeLifecycleV3 { result } = &mut evidence
+        {
+            result.result.token_id = TokenId("down".into());
+        }
+        source.accept(evidence);
+    }
+    source.stable();
+    let records = source.source.take_closed(500, 700);
+    let mut writer =
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
+    let materials = Arc::new(Mutex::new(Vec::new()));
+    let sink = materials.clone();
+    writer.bind_record_sink_v2(Box::new(move |m| sink.lock().unwrap().push(m)));
+    writer
+        .apply_noe_memory_v1(&source.source.opening_record().unwrap())
+        .unwrap();
+    let mut last_pi = 0;
+    let mut selected = std::collections::BTreeSet::new();
+    let mut before = None;
+    let mut anchored = None;
+    for record in &records {
+        writer.apply_noe_memory_v1(record).unwrap();
+        if let NormalizationRecord::Evidence {
+            evidence: Kind::TradeLifecycleV3 { result },
+            ..
+        } = record.record()
+        {
+            let read = writer.necessary_read_v2().unwrap();
+            let t = read
+                .trade_confirmation_v1(&result.result.trade_identity)
+                .unwrap();
+            // 没有经济应用前驱，仍然在原合法FinalSuccess确认时固定首锚。
+            assert!(
+                !read
+                    .trade_economics(&t.trade_identity)
+                    .unwrap()
+                    .success_applied
+            );
+            let anchor = t.first_success_anchor.clone().unwrap();
+            if result.result.token_id.0 == "up" {
+                if last_pi == 0 {
+                    assert_eq!(anchor.net_before_first_success_shares.numerator, "0");
+                    last_pi = writer.projection_v2().unwrap().ledger_entry_seq;
+                } else {
+                    assert_eq!(anchor.net_before_first_success_shares.numerator, "-1");
+                }
+            } else {
+                selected.insert(t.trade_identity.clone());
+                assert_eq!(anchor.net_before_first_success_shares.numerator, "1");
+                if let Some(old) = &anchored {
+                    assert_eq!(old, &anchor);
+                } else {
+                    anchored = Some(anchor.clone());
+                }
+                if result.result.economic_disposition == FinalSuccess
+                    && t.current_final_success_shares.0 == "1"
+                {
+                    // 普通Up10后的原Down量2→1；首锚仍+1，贡献+1而非当前净仓9→10的-1。
+                    assert_eq!(anchor.net_before_first_success_shares.numerator, "1");
+                }
+                if result.result.economic_disposition == FinalFailureCompensated {
+                    assert_eq!(t.current_final_success_shares.0, "0");
+                }
+            }
+            let positions = read.confirmed_positions_v1();
+            assert!(Arc::ptr_eq(&positions, &read.confirmed_positions_v1()));
+            before = Some(positions);
+        }
+    }
+    let positions = before.unwrap();
+    let ExecutionReadValueV1::Known(net) = &positions[0].net_first_asset_shares else {
+        panic!("真实净量")
+    };
+    assert_eq!(net.numerator, "11");
+    let ledger_root = root.join("retained-ledger");
+    let mut background = LedgerBackgroundWriterV2::new(&ledger_root);
+    for material in materials.lock().unwrap().iter() {
+        background.write(std::iter::once(material)).unwrap();
+    }
+    background.finish().unwrap();
+    let mut changes = Vec::new();
+    visit_trade_confirmation_changes_v1(&ledger_root, &selected, |change| {
+        assert!(change.ledger_entry_sequence > last_pi);
+        let original = read_durable_noe_record_v1(change.source.result()).unwrap();
+        assert_eq!(original.position(), change.position);
+        let NormalizationRecord::Evidence {
+            evidence: Kind::TradeLifecycleV3 { result },
+            ..
+        } = original.record()
+        else {
+            panic!("原成功/修正/补偿事件")
+        };
+        assert_eq!(result.result.trade_identity, change.trade.trade_identity);
+        changes.push(change);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        changes
+            .iter()
+            .map(|c| c.trade.current_final_success_shares.0.as_str())
+            .collect::<Vec<_>>(),
+        ["2", "1", "3", "0"]
+    );
+    // last→H净抵消仍保留四条原事件。仅引用保留根中的原材料，临时源无关。
+    let trace = root.join("confirmation-changes.json");
+    std::fs::write(&trace, serde_json::to_vec(&changes).unwrap()).unwrap();
+    let restored: Vec<TradeConfirmationChangeReadV1> =
+        serde_json::from_slice(&std::fs::read(trace).unwrap()).unwrap();
+    for event in restored {
+        assert_eq!(
+            read_durable_noe_record_v1(event.source.result())
+                .unwrap()
+                .position(),
+            event.position
+        );
+    }
+}

@@ -1,0 +1,23 @@
+{
+  "checkpoint": "runs/special-treatment/checkpoint/checkpoint.pt",
+  "checkpoint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "sequence": 1,
+  "source_implementation": {
+    "git_commit": "0000000000000000000000000000000000000000",
+    "source_identity_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "cargo_lock_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "model_version": "b-gru-actor-critic-gtc-v2",
+  "encoding_version": "b-public-token-log1p-v1",
+  "target_version": "confirmed-finite-j-special-v1",
+  "trajectory_version": "learning-trajectory-special-v1",
+  "shape": {
+    "width": 48,
+    "layers": 1,
+    "field_buckets": 4096,
+    "category_buckets": 4096,
+    "initialization_seed": 1810375,
+    "initialization": "random_v1"
+  },
+  "output_model": "artifacts/frozen-treatment.pt"
+}
