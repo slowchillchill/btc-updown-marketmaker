@@ -989,6 +989,76 @@ impl SimEventLogRecoveryV2 {
     }
 }
 
+/// 顺序读取原SIM日志的请求，复用原格式解码器。绝不恢复、截断或续写日志。
+/// callback坐标只说明持久请求；不是平台受理、宿主消费或Ledger应用能力。
+pub fn visit_sim_requests_v1(
+    path: &Path,
+    max_group_bytes: usize,
+    mut visit: impl FnMut(
+        u64,
+        &crate::runtime_v2::BusinessRequestV2,
+        serde_json::Value,
+    ) -> Result<(), SimEventLogErrorV2>,
+) -> Result<SimLogReadSummaryV1, SimEventLogErrorV2> {
+    let file = File::open(path).map_err(|e| io_error("只读打开SIM日志", e))?;
+    let (opened, mut reader) = SimEventLogRecoveryV2::from_file(file, max_group_bytes)?;
+    let mut groups = 0;
+    let mut inputs = 0;
+    loop {
+        let first = reader.next_input_sequence;
+        let (next, group) = reader.next_group()?;
+        reader = next;
+        let Some(group) = group else { break };
+        groups += 1;
+        for (ordinal, input) in group.iter().enumerate() {
+            let sequence = first + ordinal as u64;
+            match input {
+                LoggedBusinessInputV2::Request { cutoff, request } => {
+                    visit(
+                        sequence,
+                        request,
+                        serde_json::json!({"input":"REQUEST","cutoff":cutoff}),
+                    )?;
+                }
+                LoggedBusinessInputV2::PublicRequest {
+                    send_time,
+                    cutoff,
+                    request,
+                } => {
+                    // 保留原日志坐标，不把读出的历史坐标转成可信执行类型。
+                    visit(
+                        sequence,
+                        request,
+                        serde_json::json!({"input":"PUBLIC_REQUEST","send_time":send_time,
+                        "cutoff":{"receipt":{"session_id":cutoff.receipt.session_id,"group":cutoff.receipt.group,
+                            "actor_input_sequence":cutoff.receipt.actor_input_sequence,"execution_time":cutoff.receipt.execution_time},
+                            "decision_time":cutoff.decision_time,"private_feedback_sequence":cutoff.private_feedback_sequence}}),
+                    )?;
+                }
+                _ => {}
+            }
+        }
+        inputs += group.len() as u64;
+    }
+    Ok(SimLogReadSummaryV1 {
+        opened,
+        groups,
+        inputs,
+        complete_through_byte: reader.last_complete_offset,
+        incomplete_tail: reader.incomplete_tail,
+        saw_seal: reader.saw_seal,
+    })
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SimLogReadSummaryV1 {
+    pub opened: RunOpenedV2,
+    pub groups: u64,
+    pub inputs: u64,
+    pub complete_through_byte: u64,
+    pub incomplete_tail: bool,
+    pub saw_seal: bool,
+}
+
 fn encode_line(
     line: &SimEventLogLineRefV2<'_>,
     limit_bytes: usize,
@@ -1274,6 +1344,62 @@ mod tests {
             "readonly_sim_groups={count} bytes_through={} last_at={last_at:?}",
             reader.last_complete_offset
         );
+    }
+
+    #[test]
+    fn readonly_request_visitor_preserves_original_and_partial_day_tail() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("day.sim");
+        let header = opened(RunDurabilityRoleV2::FiniteHistorical);
+        let log =
+            SimEventLogV2::create_historical_day(&path, &header, MAX_GROUP_BYTES, day_binding())
+                .unwrap();
+        let request =
+            crate::runtime_v2::BusinessRequestV2::Order(crate::runtime_v2::OrderRequestV2 {
+                context: crate::runtime_v2::RequestContextV2 {
+                    global_request_id: "request-1".into(),
+                    caller_correlation_id: None,
+                },
+                platform_order_id: "order-1".into(),
+            });
+        let cutoff = crate::runtime_v2::TrustedDecisionCutoffV2 {
+            logical_time_utc_ms: 11,
+            public_visibility: Default::default(),
+            private_feedback_sequence: 7,
+        };
+        let (log, _) = log
+            .append_group(&[
+                input("a"),
+                BusinessInputV2::Request {
+                    cutoff: cutoff.clone(),
+                    request: request.clone(),
+                },
+            ])
+            .unwrap();
+        drop(log);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[1, 2, 3])
+            .unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let mut found = Vec::new();
+        let read = visit_sim_requests_v1(&path, MAX_GROUP_BYTES, |seq, request, coordinates| {
+            found.push((seq, request.clone(), coordinates));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, 2);
+        assert_eq!(found[0].1, request);
+        assert_eq!(found[0].2["cutoff"], serde_json::to_value(cutoff).unwrap());
+        assert_eq!(read.opened, header);
+        assert_eq!(read.groups, 1);
+        assert_eq!(read.inputs, 2);
+        assert!(read.incomplete_tail);
+        assert_eq!(read.complete_through_byte + 3, bytes.len() as u64);
+        assert_eq!(fs::read(path).unwrap(), bytes);
     }
 
     fn day_binding() -> crate::public_consumption::HistoricalDayLogBindingV1 {

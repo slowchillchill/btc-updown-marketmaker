@@ -141,6 +141,18 @@ pub fn read_durable_noe_record_v2(
 ) -> Result<NoeDurableRecordViewV2, DurableErrorV1> {
     durable_record_view(reference, read_noe_result_v4(reference)?)
 }
+/// 只读访问一个 context 的已发布批前缀。保留段与页，不恢复写入器、清理尾部或创建消费能力。
+/// prefix 是批数（durable_through），不是记录数。回调内的持久事实不证明已观察或已应用。
+pub fn visit_durable_noe_records_v2(
+    context_directory: &std::path::Path,
+    prefix: u64,
+    mut visit: impl FnMut(NoeResultReferenceV1, NoeDurableRecordViewV2) -> Result<(), DurableErrorV1>,
+) -> Result<NoeHistoryReadStatsV1, DurableErrorV1> {
+    crate::durable::visit_noe_results_v4(context_directory, prefix, |reference, resolved| {
+        let view = durable_record_view(&reference, resolved)?;
+        visit(reference, view)
+    })
+}
 fn durable_record_view<R>(
     reference: &NoeResultReferenceV1,
     resolved: ResolvedNoeResult<

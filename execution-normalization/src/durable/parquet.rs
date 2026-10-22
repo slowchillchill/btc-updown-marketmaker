@@ -587,6 +587,8 @@ pub(super) fn read_record<
 #[derive(Default)]
 pub(super) struct HistoryReader {
     segment: Option<(PathBuf, crate::record_file::SequentialReader)>,
+    pub segment_opens: u64,
+    pub pages_read: u64,
 }
 impl HistoryReader {
     pub fn read<
@@ -615,8 +617,10 @@ impl HistoryReader {
                 segment.row_start,
             )
             .map_err(|e| parquet_error(&physical, e))?;
+            self.segment_opens += 1;
             self.segment = Some((physical.clone(), reader));
         }
+        let before_pages = self.segment.as_ref().unwrap().1.pages_read;
         let rows = self
             .segment
             .as_mut()
@@ -624,6 +628,7 @@ impl HistoryReader {
             .1
             .take(segment.record_count)
             .map_err(|e| parquet_error(&physical, e))?;
+        self.pages_read += self.segment.as_ref().unwrap().1.pages_read - before_pages;
         let records = decode_rows::<T, C>(path, rows)?;
         Ok(CommitContainer {
             payload: CommitPayload {

@@ -27,3 +27,5 @@ pub mod public_input;
 mod first_observation;
 
 pub mod special;
+
+pub mod result_readout;

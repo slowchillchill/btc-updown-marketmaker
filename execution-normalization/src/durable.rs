@@ -1757,6 +1757,99 @@ impl DurableContextStoreV4 {
         self.commit_batch(input, durable_available_at_utc_ms)
     }
 }
+/// 顺序只读访问的实际工作量；页数来自原 SequentialReader。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoeHistoryReadStatsV1 {
+    pub commits: u64,
+    pub records: u64,
+    pub segment_opens: u64,
+    pub pages_read: u64,
+}
+pub(crate) fn visit_noe_results_v4(
+    directory: &Path,
+    prefix: u64,
+    mut visit: impl FnMut(NoeResultReferenceV1, ResolvedNoeResultV4) -> Result<(), DurableErrorV1>,
+) -> Result<NoeHistoryReadStatsV1, DurableErrorV1> {
+    let context_path = directory.join(CONTEXT_FILE_NAME);
+    let context: ContextContainerV1 = decode_container(&context_path)?;
+    let mut paths = published_commit_paths(&directory.join(COMMITS_DIRECTORY_NAME))?;
+    paths.sort();
+    let mut stats = NoeHistoryReadStatsV1::default();
+    let mut history = parquet::HistoryReader::default();
+    for (sequence, path) in paths.into_iter().take(prefix as usize).enumerate() {
+        let sequence = sequence as u64;
+        let found = commit_sequence_from_path(&path)?;
+        if found != sequence {
+            return Err(DurableErrorV1::CommitSequenceMismatch {
+                expected: sequence,
+                found,
+            });
+        }
+        let container: CommitContainer<
+            SourceNeutralTradeLifecycleResultV2,
+            SourceNeutralControlResultV3,
+        > = if path.extension().is_some_and(|e| e == "parquet") {
+            history.read(&path)?
+        } else {
+            read_commit_container(&path)?
+        };
+        check_container_header(
+            &path,
+            &container.payload.container_version,
+            "noe_commit_container_v4",
+            &container.payload.encoding,
+        )?;
+        if container.payload.commit_sequence != sequence {
+            return Err(DurableErrorV1::CommitSequenceMismatch {
+                expected: sequence,
+                found: container.payload.commit_sequence,
+            });
+        }
+        check_result_context(
+            &context_path,
+            &context,
+            &container.payload.boundary,
+            "noe_context_container_v4",
+        )?;
+        let watermark = &container.payload.boundary.source_watermark;
+        if watermark.run_id != context.payload.context.account_identity.run_scope
+            || watermark.projection_batch_sequence != sequence + 1
+        {
+            return Err(DurableErrorV1::SourceWatermarkBoundary {
+                expected_run_id: Some(context.payload.context.account_identity.run_scope.clone()),
+                expected_sequence: sequence + 1,
+                found: watermark.clone(),
+            });
+        }
+        for (ordinal, record) in container.payload.records.into_iter().enumerate() {
+            let reference = NoeResultReferenceV1 {
+                commit_container: NoePublishedContainerReferenceV1 {
+                    location: path.to_string_lossy().into_owned(),
+                },
+                record_ordinal: ordinal as u64,
+            };
+            visit(
+                reference,
+                ResolvedNoeResult {
+                    context: context.payload.context.clone(),
+                    boundary: container.payload.boundary.clone(),
+                    record,
+                },
+            )?;
+            stats.records += 1;
+        }
+        stats.commits += 1;
+    }
+    if stats.commits != prefix {
+        return Err(DurableErrorV1::CommitSequenceMismatch {
+            expected: prefix,
+            found: stats.commits,
+        });
+    }
+    stats.segment_opens = history.segment_opens;
+    stats.pages_read = history.pages_read;
+    Ok(stats)
+}
 pub fn read_noe_result_v4(
     reference: &NoeResultReferenceV1,
 ) -> Result<ResolvedNoeResultV4, DurableErrorV1> {
@@ -1900,6 +1993,89 @@ mod tests {
             account_opening_evidence_identity: context.source.account_opening_evidence_identity,
             implementation_identity: context.implementation_identity,
         }
+    }
+
+    #[test]
+    fn readonly_history_v4_reuses_pages_honors_prefix_and_preserves_unpublished_tail() {
+        use crate::{read_durable_noe_record_v2, visit_durable_noe_records_v2};
+        type T = SourceNeutralTradeLifecycleResultV2;
+        type C = SourceNeutralControlResultV3;
+        let root = TempDir::new().unwrap();
+        let context = sim_v2_context(seed(), "execution_normalization_v4").unwrap();
+        let mut core = NormalizationCore::<T, C>::new(context.clone());
+        let mut writer =
+            StagedNormalizationWriter::<T, C>::create_batched(root.path(), context).unwrap();
+        let batch = |seq| {
+            let original = batch(seq);
+            let source = &original.evidence[0];
+            crate::core::NormalizationBatchInput::<T,C> {
+                source_watermark: original.source_watermark,
+                evidence: vec![crate::core::SourceNeutralEvidence {
+                    source_record: source.source_record.clone(), source_ordinal: 0,
+                    logical_key: SourceNeutralLogicalKeyV1::SubmissionItem { global_request_id: format!("request-{seq}"),batch_item_ordinal: 0 },
+                    kind: crate::core::SourceNeutralEvidenceKind::Control {result: SourceNeutralControlResultV3::Submission {outcome: contracts::execution_normalization::SourceNeutralSubmissionOutcomeV2::RejectedNoEffect}},
+                }],
+            }
+        };
+        let mut commits = Vec::new();
+        for seq in 1..=3 {
+            writer
+                .stage(&core.normalize_and_accept(batch(seq)).unwrap())
+                .unwrap();
+        }
+        writer
+            .stabilize(|| 4000, |commit| commits.push(commit.clone()))
+            .unwrap();
+        for seq in 4..=5 {
+            writer
+                .stage(&core.normalize_and_accept(batch(seq)).unwrap())
+                .unwrap();
+        }
+        writer
+            .stabilize(|| 5000, |commit| commits.push(commit.clone()))
+            .unwrap();
+        let directory = writer.context_directory.clone();
+        drop(writer);
+        let tail = directory.join("commits/.unpublished.tmp");
+        fs::write(&tail, b"do not discard").unwrap();
+        let mut expected = Vec::new();
+        for commit in &commits[..4] {
+            for ordinal in 0..commit.record_count {
+                let reference = NoeResultReferenceV1 {
+                    commit_container: commit.container_reference.clone(),
+                    record_ordinal: ordinal as u64,
+                };
+                let view = read_durable_noe_record_v2(&reference).unwrap();
+                expected.push((
+                    reference,
+                    view.position(),
+                    serde_json::to_value(view.record()).unwrap(),
+                ));
+            }
+        }
+        let mut actual = Vec::new();
+        let stats = visit_durable_noe_records_v2(&directory, 4, |reference, view| {
+            actual.push((
+                reference,
+                view.position(),
+                serde_json::to_value(view.record()).unwrap(),
+            ));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(stats.commits, 4);
+        assert_eq!(stats.segment_opens, 2);
+        assert_eq!(
+            stats.pages_read, 2,
+            "同段多个逻辑批共用一页；前缀在第二段中截止"
+        );
+        assert_eq!(fs::read(&tail).unwrap(), b"do not discard");
+        let segment = directory.join("commits/segment-00000000000000000000.parquet");
+        fs::write(&segment, b"broken").unwrap();
+        assert!(visit_durable_noe_records_v2(&directory, 4, |_, _| Ok(())).is_err());
+        assert_eq!(fs::read(segment).unwrap(), b"broken", "只读入口不修复损坏");
+        assert_eq!(fs::read(&tail).unwrap(), b"do not discard");
     }
 
     fn fail_next_context_publish() {
