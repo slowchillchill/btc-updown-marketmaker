@@ -309,7 +309,7 @@ impl Trajectory {
             pages: Default::default(),
         })
     }
-    fn get(&mut self, index: usize) -> Result<Value, backtest::MaterialError> {
+    fn get(&mut self, index: usize) -> Result<&Value, backtest::MaterialError> {
         use std::io::{BufRead, Seek, SeekFrom};
         let page = index / self.page_rows;
         if let Some(i) = self.pages.iter().position(|(p, _)| *p == page) {
@@ -329,7 +329,7 @@ impl Trajectory {
             }
             self.pages.push_back((page, values));
         }
-        Ok(self.pages.back().unwrap().1[index % self.page_rows].clone())
+        Ok(&self.pages.back().unwrap().1[index % self.page_rows])
     }
     fn positions_at(&self, at: i64) -> std::ops::Range<usize> {
         self.meta
@@ -460,10 +460,16 @@ pub(crate) fn visit_day_frames_controlled(
     Ok(streams)
 }
 /// 公共部分只在调用消费者时再生，不写完整行情/观察/特征材料。
+#[derive(Clone, Copy)]
+enum GroupFrameUse {
+    Full,
+    LearnStep,
+}
 fn visit_group_frames(
     consumer: &crate::ConsumerRunConfig,
     rows: &mut std::collections::BTreeMap<String, Trajectory>,
     sealed_rules: std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
+    frame_use: GroupFrameUse,
     mut visit: impl FnMut(&str, usize, Value) -> Result<(), backtest::MaterialError>,
 ) -> Result<(), backtest::MaterialError> {
     for day in &consumer.days {
@@ -499,8 +505,15 @@ fn visit_group_frames(
                     if serde_json::to_value(group)? != *expected {
                         return Err("公共再生组与原帧可信前缀不同".into());
                     }
-                    let (payload, _) =
-                        compose_trajectory_frame(&row, frames, &consumer.worker.encoding, false)?;
+                    let payload = match frame_use {
+                        GroupFrameUse::Full => {
+                            compose_trajectory_frame(row, frames, &consumer.worker.encoding, false)?
+                                .0
+                        }
+                        GroupFrameUse::LearnStep => {
+                            compose_learn_step_frame(row, frames, &consumer.worker.encoding)?
+                        }
+                    };
                     visit(key, index, payload)?;
                 }
                 Ok(())
@@ -891,6 +904,7 @@ fn run_learning_job_opened(
                 &effective,
                 &mut rows,
                 opened.rules.clone(),
+                GroupFrameUse::Full,
                 |key, index, frame| {
                     let old = frame["old_joint_logp"].clone();
                     let response = worker.request(json!({"phase":"audit_step","frame":frame}))?;
@@ -919,6 +933,7 @@ fn run_learning_job_opened(
                 &effective,
                 &mut rows,
                 opened.rules.clone(),
+                GroupFrameUse::Full,
                 |k, _, frame| {
                     if k == key {
                         frames.push(frame);
@@ -943,6 +958,7 @@ fn run_learning_job_opened(
                 &effective,
                 &mut rows,
                 opened.rules.clone(),
+                GroupFrameUse::LearnStep,
                 |key, index, frame| {
                     if batch_keys.contains(key)
                         || batch.len() == config.parameters.training_sequence_batch
@@ -950,9 +966,7 @@ fn run_learning_job_opened(
                         worker.request_batch(std::mem::take(&mut batch))?;
                         batch_keys.clear();
                     }
-                    batch.push(
-                        json!({"phase":"learn_step","frame":frame,"label":labels[key][index]}),
-                    );
+                    batch.push(learn_step_request(frame, &labels[key][index]));
                     batch_keys.insert(key.to_owned());
                     Ok(())
                 },
@@ -1125,6 +1139,38 @@ mod float_boundary_test {
 mod trajectory_boundary_test {
     use super::*;
     #[test]
+    fn cached_row_is_borrowed_and_page_eviction_preserves_original_frames() {
+        let root = tempfile::tempdir().unwrap();
+        let _ = super::learning_tests::collection(root.path(), true);
+        let path = root.path().join("trajectory-1.jsonl");
+        let mut source: Value =
+            serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
+        let mut rows = Vec::new();
+        for call in 0..3 {
+            source["call"] = json!(call);
+            rows.push(source.clone());
+        }
+        let bytes = rows.iter().map(|r| format!("{r}\n")).collect::<String>();
+        std::fs::write(&path, &bytes).unwrap();
+        let mut trajectory = Trajectory::open(&path, 1, 1).unwrap();
+        let pointer = {
+            let row = trajectory.get(0).unwrap();
+            assert_eq!(*row, rows[0]);
+            row as *const Value
+        };
+        assert_eq!(
+            pointer,
+            &trajectory.pages.back().unwrap().1[0] as *const Value,
+            "返回原页借用，不复制完整row"
+        );
+        assert_eq!(*trajectory.get(2).unwrap(), rows[2]);
+        assert_eq!(trajectory.pages.len(), 1);
+        assert_eq!(trajectory.pages.back().unwrap().0, 2);
+        assert_eq!(*trajectory.get(0).unwrap(), rows[0]);
+        assert_eq!(trajectory.pages.back().unwrap().0, 0);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), bytes);
+    }
+    #[test]
     fn damaged_persisted_frame_returns_an_error_before_replay() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("trajectory.jsonl");
@@ -1156,19 +1202,57 @@ mod frozen_snapshot_tests {
 
 #[cfg(test)]
 #[path = "learning_tests.rs"]
-mod learning_tests;
+pub(crate) mod learning_tests;
 
 #[cfg(test)]
 #[path = "rule_startup_tests.rs"]
 mod rule_startup_tests;
 
-/// 同一轨迹私有投影与正式公开帧组合；生产重算和诊断共用。
+/// 诊断、审计与梯度参照保留完整原row；capture_projection仅控制公开投影。
 pub(crate) fn compose_trajectory_frame(
     row: &Value,
     frames: &[shared_run::FrozenMarketReadV1],
     encoding: &crate::encoding::EncodingConfig,
     capture_projection: bool,
 ) -> Result<(Value, Value), backtest::MaterialError> {
+    let (global, markets, projection) =
+        trajectory_tokens(row, frames, encoding, capture_projection)?;
+    let mut payload = row.clone();
+    payload["global"] = serde_json::to_value(global)?;
+    payload["markets"] = serde_json::to_value(markets)?;
+    Ok((payload, projection))
+}
+/// 只供生产learn_step：直接从原row组合所需字段，不先复制完整持久row。
+pub(crate) fn compose_learn_step_frame(
+    row: &Value,
+    frames: &[shared_run::FrozenMarketReadV1],
+    encoding: &crate::encoding::EncodingConfig,
+) -> Result<Value, backtest::MaterialError> {
+    let (global, markets, _) = trajectory_tokens(row, frames, encoding, false)?;
+    let mut payload = serde_json::Map::new();
+    for key in ["account", "call", "options", "selected_option", "rpc"] {
+        if let Some(value) = row.get(key) {
+            payload.insert(key.into(), value.clone());
+        }
+    }
+    payload.insert("global".into(), serde_json::to_value(global)?);
+    payload.insert("markets".into(), serde_json::to_value(markets)?);
+    Ok(Value::Object(payload))
+}
+fn learn_step_request(frame: Value, label: &Value) -> Value {
+    json!({"phase":"learn_step","frame":frame,"label":label})
+}
+type TrajectoryTokens = (
+    Vec<crate::encoding::Token>,
+    Vec<Vec<crate::encoding::Token>>,
+    Value,
+);
+fn trajectory_tokens(
+    row: &Value,
+    frames: &[shared_run::FrozenMarketReadV1],
+    encoding: &crate::encoding::EncodingConfig,
+    capture_projection: bool,
+) -> Result<TrajectoryTokens, backtest::MaterialError> {
     use crate::encoding::*;
     let started = row["processing_start_utc_ms"]
         .as_i64()
@@ -1197,11 +1281,9 @@ pub(crate) fn compose_trajectory_frame(
             projections.push(projected);
         }
     }
-    let mut payload = row.clone();
-    payload["global"] = serde_json::to_value(tokens(&row["global_private"], encoding))?;
-    payload["markets"] = serde_json::to_value(markets)?;
     Ok((
-        payload,
+        tokens(&row["global_private"], encoding),
+        markets,
         if capture_projection {
             json!({"global":row["global_private"],"markets":projections})
         } else {
@@ -1400,6 +1482,118 @@ mod special_label_tests {
         assert_eq!(
             trajectory_version(parameters.special.as_ref()),
             crate::public_input::TRAJECTORY_VERSION
+        );
+    }
+}
+
+// 成本夹具仅转调当前生产使用的帧组合入口，不重写编码或经济算法。
+#[cfg(test)]
+pub(crate) fn ipc_cost_frame(
+    row: &Value,
+    frames: &[shared_run::FrozenMarketReadV1],
+    encoding: &crate::encoding::EncodingConfig,
+) -> Result<Value, backtest::MaterialError> {
+    compose_learn_step_frame(row, frames, encoding)
+}
+
+#[cfg(test)]
+mod learn_projection_tests {
+    use super::*;
+    #[test]
+    fn minimal_epoch_frame_keeps_tokens_complete_rpc_label_and_full_diagnostic() {
+        let root = tempfile::tempdir().unwrap();
+        let frames = crate::strategy::ipc_reduction_tests::public_frames(root.path());
+        let row = crate::strategy::ipc_reduction_tests::row(&frames, 256);
+        let original = row.clone();
+        let encoding = crate::encoding::EncodingConfig {
+            field_buckets: 4096,
+            category_buckets: 4096,
+        };
+        let (full, projection) = compose_trajectory_frame(&row, &frames, &encoding, true).unwrap();
+        let (audit, no_projection) =
+            compose_trajectory_frame(&row, &frames, &encoding, false).unwrap();
+        let minimal = compose_learn_step_frame(&row, &frames, &encoding).unwrap();
+        let keys = minimal
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            [
+                "account",
+                "call",
+                "global",
+                "markets",
+                "options",
+                "selected_option",
+                "rpc"
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert_eq!(minimal["account"], "ipc-account");
+        assert_eq!(minimal["call"], 17);
+        for key in ["options", "selected_option", "rpc"] {
+            assert_eq!(minimal[key], row[key]);
+        }
+        assert_eq!(minimal["rpc"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            minimal["global"],
+            serde_json::to_value(crate::encoding::tokens(&row["global_private"], &encoding))
+                .unwrap()
+        );
+        assert_eq!(minimal["global"], full["global"]);
+        assert_eq!(minimal["markets"], full["markets"]);
+        assert_eq!(full, audit);
+        assert_eq!(full["old_joint_logp"], -0.5);
+        assert_eq!(
+            full["economic_identity"],
+            json!({"ledger_entry_seq":19,"necessary_unknown":["cost"]})
+        );
+        assert_eq!(full["economic_audit"], row["economic_audit"]);
+        assert_eq!(projection["global"], row["global_private"]);
+        assert!(projection["markets"].is_array());
+        assert!(no_projection.is_null());
+        let label = json!({"advantage":1.25,"critic_target":-2,"old_logp":-0.5,"extra":{"pending":null,"unknown":["cost"]}});
+        let request = learn_step_request(minimal.clone(), &label);
+        assert_eq!(
+            request,
+            json!({"phase":"learn_step","frame":minimal,"label":label})
+        );
+        assert_eq!(row, original);
+        let mut absent = row.clone();
+        absent.as_object_mut().unwrap().remove("rpc");
+        assert!(
+            compose_learn_step_frame(&absent, &frames, &encoding)
+                .unwrap()
+                .get("rpc")
+                .is_none()
+        );
+        assert!(
+            compose_trajectory_frame(&absent, &frames, &encoding, false)
+                .unwrap()
+                .0
+                .get("rpc")
+                .is_none()
+        );
+        absent["rpc"] = Value::Null;
+        assert_eq!(
+            compose_learn_step_frame(&absent, &frames, &encoding).unwrap()["rpc"],
+            Value::Null
+        );
+        absent
+            .as_object_mut()
+            .unwrap()
+            .remove("processing_start_utc_ms");
+        assert_eq!(
+            compose_learn_step_frame(&absent, &frames, &encoding)
+                .unwrap_err()
+                .to_string(),
+            compose_trajectory_frame(&absent, &frames, &encoding, false)
+                .unwrap_err()
+                .to_string()
         );
     }
 }

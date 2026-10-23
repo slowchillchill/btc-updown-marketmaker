@@ -187,3 +187,22 @@ Python仍在恢复模型/优化器状态之前核对原checkpoint的trajectory_v
 
 显式专项配置、原事实归属、信用差分、未知处理、版本兼容及冻结导出见[SPECIAL_V1.md](SPECIAL_V1.md)。
 无专项配置保持原base同版本恢复语义；专项两臂须同初模、各自fresh优化器。
+
+## 请求所有权与生产学习传输（#363）
+
+`ModelConsumer::exchange` 只为学习模式下的非 `begin` 请求保留一份原 RPC，请求本身移动到 `ModelWorker`。成功响应后才追加 RPC；失败不写成功记录。worker 按原 `max_batch` 顺序移动请求入队，批封装也移动拥有的 Value；JSON 内容、换行、响应关联和原错误政策保持。
+
+生产 epoch 从轨迹缓存借用原 row，直接组合 `account/call/global/markets/options/selected_option/rpc`；只对原有字段投影，缺失与显式 null 不混同。`rpc` 与 label 保留完整原对象。tokens 继续使用原编码与公共投影，不复制算法。页/LRU 及持久轨迹不变；审计、梯度参照和诊断继续调用完整 `compose_trajectory_frame`，保留 `old_joint_logp`、经济与身份元数据。`capture_projection=false` 只关闭公开投影，不选择精简帧。
+
+一次有界 CPU 合成比较使用同一 debug/test 构建模式、stdlib 假 worker 和冻结公开观测/规则，基线与候选顺序运行。成本夹具的公开统计为合法未物化状态；完整统计接线另由公开输入回归覆盖。每格固定 64 次，调用方输入生成、样例序列化和夹具准备单列。
+
+| 路径 | 实际 JSON 字节：基线 → 候选 | 64次墙钟秒：基线 → 候选 | Rust CPU秒：基线 → 候选 |
+|---|---:|---:|---:|
+| strategy → worker → 假进程，小请求 | 65529 → 65529 | 3.110024 → 1.387122 | 3.10 → 1.03 |
+| strategy → worker → 假进程，大请求 | 2097141 → 2097141 | 37.349166 → 19.738170 | 40.46 → 15.24 |
+| 原 row 组合 → worker → 假进程，小 row | 73096 → 7163 | 0.915571 → 0.345900 | 0.89 → 0.35 |
+| 原 row 组合 → worker → 假进程，大 row | 2104712 → 7163 | 10.633399 → 0.330729 | 10.24 → 0.33 |
+
+请求链逐行摘要和字节数完全相同；学习帧七字段、完整 RPC 和 label 与修改前样例逐项等值。Rust CPU 使用 `/proc/self/stat`、100 ticks/s，含 worker 线程，不含 Python CPU；内存只记录采样端点和进程累计高水位，未测分配次数或独立阶段同时峰值。假 worker 的 JSON 解析/摘要成本也进入墙钟，此单次合成结果不是完整 C 或真实模型服务提速。
+
+帧成本探针始于准备好的 row，不包含 `Trajectory::get`、分页、公共再生或完整 epoch；后继消除缓存完整 row 复制的收益未计入上述数字。实测程序在该借用修改前构建，实际被测 compose/worker/请求链保持相同，最终候选另通过必要构建、分页与公开输入回归。不把原采集 28.719 GB 当成此项节约，不据此估计重算/step、全天容量或正式训练成本。

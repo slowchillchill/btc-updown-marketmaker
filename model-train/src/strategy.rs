@@ -235,9 +235,16 @@ impl ModelConsumer {
     }
     fn exchange(&self, v: Value, elapsed: &mut f64) -> Result<Value, String> {
         let s = Instant::now();
-        let r = self.worker.request(v.clone())?;
-        if self.config.learning.is_some() && v["phase"] != "begin" {
-            self.rpc.borrow_mut().push(json!({"request":v,"response":{"post_only":r["post_only"],"index":r["index"],"rank":r["rank"]}}));
+        let retained = (self.config.learning.is_some() && v["phase"] != "begin").then(|| v.clone());
+        let r = self.worker.request(v)?;
+        if let Some(request) = retained {
+            let mut record = serde_json::Map::new();
+            record.insert("request".into(), request);
+            record.insert(
+                "response".into(),
+                json!({"post_only":r["post_only"],"index":r["index"],"rank":r["rank"]}),
+            );
+            self.rpc.borrow_mut().push(Value::Object(record));
         }
         *elapsed += s.elapsed().as_secs_f64();
         Ok(r)
@@ -843,3 +850,7 @@ mod entry_scope_tests {
         assert!(!pair_start_allowed(86_100_000, &s));
     }
 }
+
+#[cfg(test)]
+#[path = "ipc_reduction_tests.rs"]
+pub(crate) mod ipc_reduction_tests;

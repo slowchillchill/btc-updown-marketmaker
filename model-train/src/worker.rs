@@ -140,26 +140,30 @@ impl ModelWorker {
                 }
                 let n = queued.len().min(max_batch);
                 let pending = queued.drain(..n).collect::<Vec<_>>();
-                let request = json!({"batch":pending.iter().map(|r|&r.value).collect::<Vec<_>>()});
+                let (replies, values): (Vec<_>, Vec<_>) =
+                    pending.into_iter().map(|r| (r.reply, r.value)).unzip();
+                let mut envelope = serde_json::Map::new();
+                envelope.insert("batch".into(), Value::Array(values));
+                let request = Value::Object(envelope);
                 match process.exchange(&request) {
                     Ok(response) => {
                         if let Some(values) = response
                             .get("batch")
                             .and_then(Value::as_array)
-                            .filter(|v| v.len() == pending.len())
+                            .filter(|v| v.len() == replies.len())
                         {
-                            for (r, v) in pending.into_iter().zip(values) {
-                                let _ = r.reply.send(Ok(v.clone()));
+                            for (reply, v) in replies.into_iter().zip(values) {
+                                let _ = reply.send(Ok(v.clone()));
                             }
                         } else {
-                            for r in pending {
-                                let _ = r.reply.send(Err(format!("模型批响应不匹配: {response}")));
+                            for reply in replies {
+                                let _ = reply.send(Err(format!("模型批响应不匹配: {response}")));
                             }
                         }
                     }
                     Err(e) => {
-                        for r in pending {
-                            let _ = r.reply.send(Err(e.clone()));
+                        for reply in replies {
+                            let _ = reply.send(Err(e.clone()));
                         }
                         break;
                     }
@@ -177,14 +181,12 @@ impl ModelWorker {
     /// 调用方已就绪的独立账户请求；按配置上限分批，不推进同账户未来输入。
     pub fn request_batch(&self, values: Vec<Value>) -> Result<Vec<Value>, String> {
         let mut receivers = Vec::new();
-        for chunk in values.chunks(self.config.max_batch) {
+        let mut values = values.into_iter();
+        while values.len() > 0 {
             let mut requests = Vec::new();
-            for value in chunk {
+            for value in values.by_ref().take(self.config.max_batch) {
                 let (reply, receive) = mpsc::channel();
-                requests.push(Request {
-                    value: value.clone(),
-                    reply,
-                });
+                requests.push(Request { value, reply });
                 receivers.push(receive);
             }
             self.sender.send(requests).map_err(|e| e.to_string())?;
