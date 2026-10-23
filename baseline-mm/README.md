@@ -115,3 +115,5 @@ Chainlink 与两个资产盘口是新增配对的依赖。Binance 只按实际�
 相对C0的单一低价初始批否决研究版本 `candidate_v5_public_low_price` 及同版本off/on配置见[低价候选说明](docs/strategies/complementary-pair-low-price-candidate.md)。它保持原42参数与公共C0，不叠加BLB，不改旧V3/V4身份。
 
 持续库存候选使用独立身份，参数迁移、完整义务和累计经营字段见[持续库存候选 v1](docs/strategies/continuous-inventory-v1.md)。同一 `backtest-cli` 可显式选择旧V5/off及新候选；工程交付不启动真实研究。
+
+持续库存的D-0380控制量为 `extra_quote_space_ticks: u32`（缺省0，非负整数共同额外tick数）。零值保持v1；正值使用独立 `candidate_v2_continuous_inventory_quote_space`，公式、cap/取档联动和准确构造见[持续库存说明](docs/strategies/continuous-inventory-v1.md)。这不批准真实研究或在线采用。

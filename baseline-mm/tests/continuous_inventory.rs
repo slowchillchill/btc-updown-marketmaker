@@ -538,13 +538,9 @@ impl InventoryFixture {
                 break;
             }
         }
-        let strategy = ContinuousInventoryV1::new(
-            config,
-            rules,
-            "inventory".into(),
-            ContinuousInventoryContinuityV1::new_account(Decimal::from(2000)),
-        )
-        .unwrap();
+        let continuity = ContinuousInventoryContinuityV1::new_account_for_config(&config);
+        let strategy =
+            ContinuousInventoryV1::new(config, rules, "inventory".into(), continuity).unwrap();
         let temp = if forensic_root.is_some() {
             let _ = temp.keep();
             None
@@ -1142,145 +1138,164 @@ async fn actual_profit_fixed_fifty_price_cap_final_coverage_and_support_occupanc
         (26_000, trade(UP, "0.80", "10")),
         (27_000, quoted_book(UP, "0.50", "0.60")),
     ];
-    let mut f = InventoryFixture::new(events, engineering_config());
-    f.shared
-        .execute_batch_reserved(
-            &mut f.driver.decision().unwrap(),
-            &[
-                limit("cheap-up", UP, "10", "0.20"),
-                limit("cheap-down", DOWN, "10", "0.20"),
-            ],
-        )
-        .await
-        .unwrap();
-    f.advance(25_000);
-    let read = f
-        .shared
-        .strategy_observation_input(&mut f.driver)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        read.action_before.profit_and_equity().0,
-        contracts::economics::EconomicRational::from_decimal(dec("6")),
-        "原Ledger跨批成功配对10份、成本4，实际已确认配对毛额6；未当作现金6到账"
-    );
-    assert_eq!(read.action_before.cash_available(), dec("1996"));
-    let cutoff = f.driver.observation_cutoff().unwrap();
-    let at = cutoff.decision_time().logical_time_utc_ms();
-    f.shared
-        .execute_batch_reserved(
-            &mut f.driver.send_decision_at(cutoff, at).unwrap(),
-            &[
-                limit("costly-up", UP, "10", "0.80"),
-                limit("old-down", DOWN, "40", "0.32"),
-            ],
-        )
-        .await
-        .unwrap();
-    f.advance(28_000);
-    let c = f.calculation();
-    let (_, d) = details(&c);
-    let m = &d.markets[0];
-    assert_eq!(m.h, [ExactDecimal("10".into()), ExactDecimal("0".into())]);
-    assert_eq!(
-        d.available_profit,
-        contracts::economics::EconomicRational::from_decimal(dec("6")).public()
-    );
-    // 原10秒有限窗口此刻允许小亏<0.01。1+allowance-.8+6/50在[.32,.33)，最终价.32。
-    // 若错误地以本次缺口10为分母，则不会从原.45下压到.32。
-    assert_eq!(m.prices[1], Some(ExactDecimal("0.32".into())));
-    assert_eq!(
-        m.coverage[1],
-        ExactDecimal("40".into()),
-        "按成本下压后的最终价重算C"
-    );
-    assert_eq!(m.deficit[1], ExactDecimal("10".into()));
-    assert_eq!(m.quantities[1], ExactDecimal("10".into()));
-    assert_eq!(d.profit_allocations.len(), 1);
-    let original = f
-        .shared
-        .ledger()
-        .economic_read()
-        .unwrap()
-        .market_totals()
-        .next()
-        .unwrap();
-    assert_eq!(original.cumulative_paired_shares.0, "10");
-    assert_eq!(
-        original.cumulative_paired_actual_trade_fee_pusd,
-        ExecutionReadValueV1::Known(contracts::economics::EconomicRational::zero().public())
-    );
-    assert_eq!(
-        original.cumulative_paired_spread_after_trade_fee_pusd,
-        ExecutionReadValueV1::Known(
+    for w in [0, 1] {
+        let mut config = engineering_config();
+        config.extra_quote_space_ticks = w;
+        let mut f = InventoryFixture::new(events.clone(), config);
+        f.shared
+            .execute_batch_reserved(
+                &mut f.driver.decision().unwrap(),
+                &[
+                    limit("cheap-up", UP, "10", "0.20"),
+                    limit("cheap-down", DOWN, "10", "0.20"),
+                ],
+            )
+            .await
+            .unwrap();
+        f.advance(25_000);
+        let read = f
+            .shared
+            .strategy_observation_input(&mut f.driver)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            read.action_before.profit_and_equity().0,
+            contracts::economics::EconomicRational::from_decimal(dec("6")),
+            "原Ledger跨批成功配对10份、成本4，实际已确认配对毛额6；未当作现金6到账"
+        );
+        assert_eq!(read.action_before.cash_available(), dec("1996"));
+        let cutoff = f.driver.observation_cutoff().unwrap();
+        let at = cutoff.decision_time().logical_time_utc_ms();
+        f.shared
+            .execute_batch_reserved(
+                &mut f.driver.send_decision_at(cutoff, at).unwrap(),
+                &[
+                    limit("costly-up", UP, "10", "0.80"),
+                    limit("old-down", DOWN, "40", "0.32"),
+                ],
+            )
+            .await
+            .unwrap();
+        f.advance(28_000);
+        let c = f.calculation();
+        let (_, d) = details(&c);
+        let m = &d.markets[0];
+        assert_eq!(m.h, [ExactDecimal("10".into()), ExactDecimal("0".into())]);
+        assert_eq!(
+            d.available_profit,
             contracts::economics::EconomicRational::from_decimal(dec("6")).public()
-        )
-    );
-    // 真实归约生成的原checkpoint，按正式serde(default)旧版本缺字段边界恢复；不构造矛盾经济状态。
-    let mut saved = Vec::new();
-    f.shared.ledger().write_checkpoint(&mut saved).unwrap();
-    let mut value: ciborium::Value = ciborium::from_reader(saved.as_slice()).unwrap();
-    fn remove_old_fields(v: &mut ciborium::Value) -> usize {
-        match v {
-            ciborium::Value::Map(fields) => {
-                let before = fields.len();
-                fields.retain(|(key,_)|!matches!(key,ciborium::Value::Text(key) if key=="orphan_fee"||key=="pool_contribution_shares"));
-                before - fields.len()
-                    + fields
-                        .iter_mut()
-                        .map(|(_, v)| remove_old_fields(v))
-                        .sum::<usize>()
+        );
+        // 原10秒有限窗口此刻允许小亏<0.01。1+allowance-.8+6/50在[.32,.33)，最终价.32。
+        // 若错误地以本次缺口10为分母，则不会从原.45下压到.32。
+        assert_eq!(
+            m.half_spread,
+            Some(
+                contracts::economics::EconomicRational::from_decimal(dec(if w == 0 {
+                    "0.05"
+                } else {
+                    "0.06"
+                }))
+                .public()
+            )
+        );
+        assert_eq!(
+            m.prices[1],
+            Some(ExactDecimal("0.32".into())),
+            "w=0/1的共同空间变化被原成本cap吸收，不能强减最终价"
+        );
+        assert_eq!(
+            m.coverage[1],
+            ExactDecimal("40".into()),
+            "按成本下压后的最终价重算C"
+        );
+        assert_eq!(m.deficit[1], ExactDecimal("10".into()));
+        assert_eq!(m.quantities[1], ExactDecimal("10".into()));
+        assert_eq!(d.profit_allocations.len(), 1);
+        let original = f
+            .shared
+            .ledger()
+            .economic_read()
+            .unwrap()
+            .market_totals()
+            .next()
+            .unwrap();
+        assert_eq!(original.cumulative_paired_shares.0, "10");
+        assert_eq!(
+            original.cumulative_paired_actual_trade_fee_pusd,
+            ExecutionReadValueV1::Known(contracts::economics::EconomicRational::zero().public())
+        );
+        assert_eq!(
+            original.cumulative_paired_spread_after_trade_fee_pusd,
+            ExecutionReadValueV1::Known(
+                contracts::economics::EconomicRational::from_decimal(dec("6")).public()
+            )
+        );
+        // 真实归约生成的原checkpoint，按正式serde(default)旧版本缺字段边界恢复；不构造矛盾经济状态。
+        let mut saved = Vec::new();
+        f.shared.ledger().write_checkpoint(&mut saved).unwrap();
+        let mut value: ciborium::Value = ciborium::from_reader(saved.as_slice()).unwrap();
+        fn remove_old_fields(v: &mut ciborium::Value) -> usize {
+            match v {
+                ciborium::Value::Map(fields) => {
+                    let before = fields.len();
+                    fields.retain(|(key,_)|!matches!(key,ciborium::Value::Text(key) if key=="orphan_fee"||key=="pool_contribution_shares"));
+                    before - fields.len()
+                        + fields
+                            .iter_mut()
+                            .map(|(_, v)| remove_old_fields(v))
+                            .sum::<usize>()
+                }
+                ciborium::Value::Array(values) => values.iter_mut().map(remove_old_fields).sum(),
+                _ => 0,
             }
-            ciborium::Value::Array(values) => values.iter_mut().map(remove_old_fields).sum(),
-            _ => 0,
         }
+        assert!(remove_old_fields(&mut value) > 0);
+        let mut legacy = Vec::new();
+        ciborium::into_writer(&value, &mut legacy).unwrap();
+        let restored = LedgerWriterV1::restore_checkpoint(legacy.as_slice()).unwrap();
+        let old = restored
+            .economic_read()
+            .unwrap()
+            .market_totals()
+            .next()
+            .unwrap();
+        assert_eq!(
+            old.cumulative_paired_shares,
+            original.cumulative_paired_shares
+        );
+        assert_eq!(
+            old.cumulative_paired_principal_cost_pusd,
+            original.cumulative_paired_principal_cost_pusd
+        );
+        assert_eq!(
+            old.cumulative_paired_actual_trade_fee_pusd,
+            ExecutionReadValueV1::Unavailable
+        );
+        assert_eq!(
+            old.cumulative_paired_spread_after_trade_fee_pusd,
+            ExecutionReadValueV1::Unavailable
+        );
+        assert_eq!(
+            d.profit_allocations[0].allocated_profit_pusd,
+            contracts::economics::EconomicRational::from_decimal(dec("1.2")).public(),
+            "只有新增10份真实H可配部分产生本金增量1.2；既有未成交单不能免除支持占用"
+        );
+        f.dispatch(c).await;
+        let repeated = f.calculation();
+        let (_, d) = details(&repeated);
+        assert_eq!(
+            d.available_profit,
+            contracts::economics::EconomicRational::from_decimal(dec("4.8")).public(),
+            "已发未回执占用不能重复借"
+        );
+        assert!(
+            d.markets[0].prices[1]
+                .as_ref()
+                .is_some_and(|p| dec(&p.0) <= dec("0.30")),
+            "缩量不抬价；固定50分母继续使用剩余支持"
+        );
+        f.driver.stop_and_drain().unwrap();
     }
-    assert!(remove_old_fields(&mut value) > 0);
-    let mut legacy = Vec::new();
-    ciborium::into_writer(&value, &mut legacy).unwrap();
-    let restored = LedgerWriterV1::restore_checkpoint(legacy.as_slice()).unwrap();
-    let old = restored
-        .economic_read()
-        .unwrap()
-        .market_totals()
-        .next()
-        .unwrap();
-    assert_eq!(
-        old.cumulative_paired_shares,
-        original.cumulative_paired_shares
-    );
-    assert_eq!(
-        old.cumulative_paired_principal_cost_pusd,
-        original.cumulative_paired_principal_cost_pusd
-    );
-    assert_eq!(
-        old.cumulative_paired_actual_trade_fee_pusd,
-        ExecutionReadValueV1::Unavailable
-    );
-    assert_eq!(
-        old.cumulative_paired_spread_after_trade_fee_pusd,
-        ExecutionReadValueV1::Unavailable
-    );
-    assert_eq!(
-        d.profit_allocations[0].allocated_profit_pusd,
-        contracts::economics::EconomicRational::from_decimal(dec("1.2")).public(),
-        "只有新增10份真实H可配部分产生本金增量1.2；既有未成交单不能免除支持占用"
-    );
-    f.dispatch(c).await;
-    let repeated = f.calculation();
-    let (_, d) = details(&repeated);
-    assert_eq!(
-        d.available_profit,
-        contracts::economics::EconomicRational::from_decimal(dec("4.8")).public(),
-        "已发未回执占用不能重复借"
-    );
-    assert!(
-        d.markets[0].prices[1]
-            .as_ref()
-            .is_some_and(|p| dec(&p.0) <= dec("0.30")),
-        "缩量不抬价；固定50分母继续使用剩余支持"
-    );
-    f.driver.stop_and_drain().unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1736,4 +1751,172 @@ async fn mixed_buy_profit_support_uses_own_leg_and_current_average_pool() {
 #[tokio::test(flavor = "current_thread")]
 async fn shared_h_profit_requests_keep_separate_capped_overlapping_scenarios() {
     mixed_profit_case(true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn quote_space_keeps_exact_price_coverage_old_obligations_and_independent_repair() {
+    use fixture_input::{DOWN_TOKEN_ID as DOWN, UP_TOKEN_ID as UP};
+    let config = engineering_config();
+    let mut missing = serde_json::to_value(&config).unwrap();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("extra_quote_space_ticks");
+    let implicit: ContinuousInventoryConfigV1 = serde_json::from_value(missing).unwrap();
+    let mut f = InventoryFixture::new(vec![], implicit);
+    let zero = f.calculation();
+    let (_, original) = details(&zero);
+    assert_eq!(original.rule_version, CONTINUOUS_INVENTORY_RULE_VERSION);
+    f.driver.stop_and_drain().unwrap();
+    let mut explicit = InventoryFixture::new(vec![], config.clone());
+    assert_eq!(
+        serde_json::to_value(&zero.output).unwrap(),
+        serde_json::to_value(&explicit.calculation().output).unwrap(),
+        "同一正式冻结状态的缺省/显式0动作与诊断一致"
+    );
+    explicit.driver.stop_and_drain().unwrap();
+
+    let mut extra = config.clone();
+    extra.extra_quote_space_ticks = 1;
+    extra.inventory_skew_ticks_per_capacity = Decimal::ZERO;
+    let mut f = InventoryFixture::new(vec![], extra.clone());
+    f.shared
+        .execute_batch_reserved(
+            &mut f.driver.decision().unwrap(),
+            &[
+                limit("old-price", UP, "30", "0.45"),
+                limit("new-price", UP, "10", "0.44"),
+            ],
+        )
+        .await
+        .unwrap();
+    let c = f.calculation();
+    let (intents, d) = details(&c);
+    assert_eq!(
+        d.rule_version,
+        CONTINUOUS_INVENTORY_QUOTE_SPACE_RULE_VERSION
+    );
+    assert_eq!(
+        d.markets[0].half_spread,
+        Some(contracts::economics::EconomicRational::from_decimal(dec("0.06")).public())
+    );
+    assert_eq!(
+        d.markets[0].prices,
+        [
+            Some(ExactDecimal("0.44".into())),
+            Some(ExactDecimal("0.44".into()))
+        ]
+    );
+    assert_eq!(
+        d.markets[0].coverage,
+        [ExactDecimal("10".into()), ExactDecimal("0".into())]
+    );
+    assert_eq!(
+        d.markets[0].deficit,
+        [ExactDecimal("40".into()), ExactDecimal("50".into())]
+    );
+    assert_eq!(intents.len(), 1, "普通异价旧单保留，不自动取消/重挂");
+    assert!(matches!(
+        intents[0].intent.as_ref(),
+        ModelIntentV1::SubmitPairedBuy { .. }
+    ));
+    assert_eq!(d.markets[0].obligation_count, 2);
+    let compact = f.strategy.research_compact_diagnostics(d);
+    assert_eq!(
+        compact["definition"]["rule_version"],
+        CONTINUOUS_INVENTORY_QUOTE_SPACE_RULE_VERSION
+    );
+    f.dispatch(c).await;
+    let repeated = f.calculation();
+    assert_eq!(
+        details(&repeated).1.markets[0].coverage,
+        [ExactDecimal("50".into()), ExactDecimal("50".into())]
+    );
+    assert!(details(&repeated).0.is_empty());
+    f.driver.stop_and_drain().unwrap();
+
+    // 原真实V2 Maker链形成H，再由原风险责任进入受限独立补足。
+    extra.per_market_orphan_limit_pusd = dec("1");
+    let mut f = InventoryFixture::new(
+        vec![
+            (24_000, trade(UP, "0.45", "130")),
+            (
+                26_000,
+                PolymarketOrderbookEvent::LastTradePrice {
+                    asset_id: UP.into(),
+                    price: "0.45".into(),
+                    size: None,
+                    side: None,
+                    fee_rate_bps: None,
+                },
+            ),
+        ],
+        extra,
+    );
+    f.shared
+        .execute_batch_reserved(
+            &mut f.driver.decision().unwrap(),
+            &[limit("held-original", UP, "30", "0.45")],
+        )
+        .await
+        .unwrap();
+    loop {
+        next_combined(&mut f.driver, &mut f.hidden, &mut f.next_hidden);
+        let c = f.calculation();
+        if details(&c).1.markets[0].h[0] == ExactDecimal("30".into()) {
+            break;
+        }
+        assert!(
+            f.driver
+                .observation_cutoff()
+                .unwrap()
+                .decision_time()
+                .logical_time_utc_ms()
+                < BASE + 30_000
+        );
+    }
+    f.shared
+        .execute_batch_reserved(
+            &mut f.driver.decision().unwrap(),
+            &[limit("old-repair-price", DOWN, "5", "0.45")],
+        )
+        .await
+        .unwrap();
+    let c = f.calculation();
+    let (intents, d) = details(&c);
+    assert_eq!(
+        d.markets[0].h,
+        [ExactDecimal("30".into()), ExactDecimal("0".into())]
+    );
+    assert_eq!(d.markets[0].prices[1], Some(ExactDecimal("0.44".into())));
+    assert_eq!(
+        d.markets[0].coverage[1],
+        ExactDecimal("0".into()),
+        "异价旧补腿不冒充新价coverage"
+    );
+    assert_eq!(
+        d.markets[0].quantities[1],
+        ExactDecimal("25".into()),
+        "原5份旧责任仍扣独立补足上限"
+    );
+    let buy = intents
+        .iter()
+        .find(|i| matches!(i.intent.as_ref(), ModelIntentV1::SubmitSingleBuy { .. }))
+        .expect("受限H原独立补足");
+    let ModelIntentV1::SubmitSingleBuy { order, .. } = buy.intent.as_ref() else {
+        unreachable!()
+    };
+    assert!(
+        matches!(order.order, BuyOrderIntentV1::GtcLimit { limit_price_pusd_per_share, .. } if limit_price_pusd_per_share == dec("0.44"))
+    );
+    assert_eq!(
+        d.action_dependencies
+            .iter()
+            .find(|a| a.request_id == buy.context.global_request_id)
+            .unwrap()
+            .independent_held_token,
+        Some(TokenId(UP.into()))
+    );
+    f.dispatch(c).await;
+    f.driver.stop_and_drain().unwrap();
 }

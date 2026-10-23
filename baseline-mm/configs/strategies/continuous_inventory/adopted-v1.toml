@@ -1,6 +1,7 @@
 # D-0376 完整参数示例。启动配置由宿主另行提供；不签发真实历史运行。
 capacity_shares = "50"
 inventory_skew_ticks_per_capacity = "1"
+extra_quote_space_ticks = 0
 initial_cash_pusd = "2000"
 market_investment_limit_pusd = "1000"
 per_market_orphan_limit_pusd = "100"

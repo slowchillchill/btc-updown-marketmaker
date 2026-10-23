@@ -9,11 +9,11 @@ use sim_system::platform_rules::ImplementationIdentityV1;
 use std::path::{Path, PathBuf};
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    assert_eq!(
-        args.len(),
-        3,
-        "用法: inventory_candidate_fixture <新输出目录> <每日期点数> <准确ImplementationJSON>"
+    assert!(
+        (3..=4).contains(&args.len()),
+        "用法: inventory_candidate_fixture <新输出目录> <每日期点数> <准确ImplementationJSON> [extra_quote_space_ticks]"
     );
+    let extra_quote_space_ticks: u32 = args.get(3).map(|n| n.parse().unwrap()).unwrap_or(0);
     let root = PathBuf::from(&args[0]);
     let count: u64 = args[1].parse().unwrap();
     assert!(count > 0);
@@ -26,6 +26,7 @@ fn main() {
             count,
             fixture::common::BASE + index as i64 * 86_400_000,
             date,
+            extra_quote_space_ticks,
         );
         rules.get_or_insert(value["rules"].clone());
         days.push(value["days"][0].clone());
@@ -58,7 +59,13 @@ fn main() {
     .unwrap();
     println!("{}", root.join("days.json").display());
 }
-fn build_day(root: &Path, count: u64, base: i64, utc_day: &str) -> serde_json::Value {
+fn build_day(
+    root: &Path,
+    count: u64,
+    base: i64,
+    utc_day: &str,
+    extra_quote_space_ticks: u32,
+) -> serde_json::Value {
     std::fs::create_dir(&root).unwrap();
     let (mut run, rules) =
         fixture::common::setup_day_with_embedded_rules(root, base, utc_day, false);
@@ -316,6 +323,7 @@ fn build_day(root: &Path, count: u64, base: i64, utc_day: &str) -> serde_json::V
         .unwrap(),
     )
     .unwrap();
+    new["extra_quote_space_ticks"] = json!(extra_quote_space_ticks);
     // 工程小窗的全部生效值单独保存；不冒充研究完整八小时参数。
     new["probability_reference"]["binance_innovation_weight"] = json!(0.0);
     for (key, value) in new["health"].as_object_mut().unwrap() {
@@ -348,7 +356,9 @@ fn build_day(root: &Path, count: u64, base: i64, utc_day: &str) -> serde_json::V
         }
         .into();
         r.strategy.strategy_rule_version = if name == "continuous" {
-            baseline_mm::CONTINUOUS_INVENTORY_RULE_VERSION
+            serde_json::from_value::<baseline_mm::ContinuousInventoryConfigV1>(parameters.clone())
+                .unwrap()
+                .rule_version()
         } else {
             version
         }

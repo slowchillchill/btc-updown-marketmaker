@@ -53,7 +53,7 @@ async fn run_paper_trade_inner_v1(
         config.strategy.clone(),
         rules.clone(),
         config.request_namespace.clone(),
-        ContinuousInventoryContinuityV1::new_account(config.strategy.initial_cash_pusd),
+        ContinuousInventoryContinuityV1::new_account_for_config(&config.strategy),
     )?;
     match process_exit {
         Some(exit) => {

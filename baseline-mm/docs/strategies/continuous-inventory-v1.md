@@ -1,10 +1,10 @@
-# 持续库存候选 v1
+# 持续库存候选
 
 本候选按同一市场的成功孤腿、已观察未成功应用成交及全部未闭合义务，持续补充当前精确价位的容量。采用依据为 [#360](https://github.com/slowchillchill/btc-updown-marketmaker/issues/360) 与 D-0376。它与旧 V5/off 并存；工程合成验证不签发真实历史运行。
 
 ## 身份和入口
 
-库入口是 `ContinuousInventoryV1`、`ContinuousInventoryConfigV1` 与独立的 `ContinuousInventoryContinuityV1`。正式身份分别为 `continuous_inventory`、`candidate_v1_continuous_inventory`。新命名空间及接续版本独立保存，旧候选记忆不能换标签后接入。
+库入口是 `ContinuousInventoryV1`、`ContinuousInventoryConfigV1` 与独立的 `ContinuousInventoryContinuityV1`。策略身份为 `continuous_inventory`；`extra_quote_space_ticks=0` 使用 `candidate_v1_continuous_inventory`，正值使用 `candidate_v2_continuous_inventory_quote_space`。新命名空间及接续版本独立保存，旧候选记忆不能换标签后接入。
 
 `backtest-cli --mode day --config <完整日期配置> --progress-interval-seconds <秒>` 在每个候选的 `strategy` 中接收完整参数。`run.strategy.strategy_id` 与 `strategy_rule_version` 若声明，必须与参数类型一致。新旧候选可放入同一日期的 `candidates`，每日公共输入只消费一次，账户、请求命名空间、seed和输出位置分别声明。旧 V5/off 仍使用 `complementary_pair` / `candidate_v5_public_low_price` 及原 `parameters`、`initial_pair_low_price_veto=false`，不自动改用新候选。
 
@@ -12,9 +12,21 @@
 
 规则继续由正式 `derive_historical_maker_rules` 以显式 V2 方式派生。使用准确实现JSON、原规则SHA和因果起点；不将测试 a/b/c 占位身份作为正式程序身份。`HistoricalBacktest` 使用 `PUBLIC_TRADE_CONSERVATIVE_FIFO_V2`，其他角色不因此改变。
 
+## D-0380 共同额外报价空间
+
+`extra_quote_space_ticks: u32` 是非负整数共同额外tick数，JSON/TOML省略时默认0。完整序列化始终记录实际值，包括0；表示域为0..=4294967295，不接受负数、小数或越界值，也不限制为0/1。
+
+令 τ=max(tickUp,tickDown)，原真簿中心c、半价差h和库存偏移s保持。唯一报价函数先用精确有理数计算 h_w=h+wτ，再计算 rawUp=c−h_w−s、rawDown=1−c−h_w+s。普通Maker和受限独立Maker补足都消费这组目标。原成本cap、ask/tick及价格上限、向下取档、post-only、量和资金风险顺序不变。cap/取档可吸收变化，非正目标不抬价；最终精确价决定原coverage/deficit。旧异价单及其全部责任保留，不统一撤旧或自动重挂。
+
+既有 `half_spread` 在正值候选中记录实际h_w；旧输出仍保留原身份。未增加诊断数据模式或全流快照，原变化式标量和义务连接继续使用。w=0兼容本源码下原v1定义；这不证明不同二进制、命名空间或真实执行的逐轨迹等价。
+
+CLI覆盖为 `--strategy.extra_quote_space_ticks 1`，仍须让所有已声明的 `run.strategy.strategy_rule_version` 与实际配置一致。缺省/0声明原v1；正值声明上述v2。`config.rule_version()` 是统一实际身份入口。库新账户使用 `ContinuousInventoryContinuityV1::new_account_for_config(&config)`；旧 `new_account(initial_cash)` 保持零值v1语义，不能把旧接续记忆换标签后用于正值候选。PAPER组合根只机械采用该构造，不表示在线采用授权。
+
+本轮工程允许研究候选w=1的准备，未批准真实历史运行、正式默认采用或盈利声明。
+
 ## 原42参数迁移
 
-旧候选的42项及语义保留。新候选有38个显式叶字段，迁移如下。
+旧候选的42项及语义保留。原v1有38个显式叶字段；D-0380新增一个有默认值的字段，完整生效配置共39个叶字段。原字段迁移如下。
 
 | 旧字段 | 新字段及处理 |
 | --- | --- |
