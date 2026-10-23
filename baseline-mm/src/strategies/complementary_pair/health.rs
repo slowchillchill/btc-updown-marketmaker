@@ -20,15 +20,7 @@ impl ComplementaryPairV1 {
     ) -> Vec<SourceStreamScopeV1> {
         super::super::common::probability_sources(&self.config.probability, o)
     }
-    pub(super) fn pair_sources(&self, o: &MarketBusinessObservationV1) -> Vec<SourceStreamScopeV1> {
-        let mut sources = self.probability_sources(o);
-        sources.extend(
-            o.assets
-                .iter()
-                .map(|a| Self::book_scope(o, &a.asset.token_id)),
-        );
-        sources
-    }
+
     pub(super) fn source_health_state(
         &self,
         o: &MarketBusinessObservationV1,
@@ -76,6 +68,18 @@ impl ComplementaryPairV1 {
         calculation: Option<&StrategyCalculationV1<ComplementaryPairDiagnosticV1>>,
         at: i64,
     ) -> Option<i64> {
+        self.public_health_deadline(
+            &input.iter().map(|f| f.observation).collect::<Vec<_>>(),
+            calculation,
+            at,
+        )
+    }
+    pub(super) fn public_health_deadline(
+        &self,
+        input: &[&MarketBusinessObservationV1],
+        calculation: Option<&StrategyCalculationV1<ComplementaryPairDiagnosticV1>>,
+        at: i64,
+    ) -> Option<i64> {
         let frozen_dependencies = calculation
             .and_then(|c| match &c.output {
                 StrategyOutputV1::Continue { diagnostics, .. } => {
@@ -84,46 +88,17 @@ impl ComplementaryPairV1 {
                 _ => None,
             })
             .unwrap_or(&[]);
-        input
-            .iter()
-            .filter(|f| f.observation.market.window.end_at_utc_ms > at)
-            .flat_map(|f| {
-                let mut sources = self.pair_sources(f.observation);
-                // 新现价可改变当前估计选源，但不能遮蔽待发决定的原TWAP期限。
-                for dependency in frozen_dependencies
-                    .iter()
-                    .filter(|d| d.condition_id == f.observation.market.condition_id)
-                {
-                    for scope in &dependency.sources {
-                        if !sources.contains(scope) {
-                            sources.push(scope.clone());
-                        }
-                    }
-                }
-                sources.into_iter().flat_map(|scope| {
-                    let h = self.config.health.limits(scope.source);
-                    f.observation
-                        .source_progress
-                        .get_scope(&scope)
-                        .and_then(|p| p.last_valid_business_message.as_ref())
-                        .map(|e| {
-                            [
-                                Some(e.received_at_utc_ms.saturating_add(h.silence_normal_ms)),
-                                e.source_event_at_utc_ms
-                                    .map(|t| t.saturating_add(h.event_normal_ms)),
-                                Some(e.received_at_utc_ms.saturating_add(h.silence_max_ms)),
-                                e.source_event_at_utc_ms
-                                    .map(|t| t.saturating_add(h.event_max_ms)),
-                            ]
-                        })
-                        .unwrap_or([None, None, None, None])
-                        .into_iter()
-                        .flatten()
-                })
-            })
-            .filter(|deadline| *deadline > at)
-            .min()
+        super::super::common::public_health_deadline(
+            &self.config.health,
+            &self.config.probability,
+            input,
+            frozen_dependencies
+                .iter()
+                .map(|d| (&d.condition_id, d.sources.as_slice())),
+            at,
+        )
     }
+
     pub(super) fn business_dependency(
         read: &ActionBeforeReadV2<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,

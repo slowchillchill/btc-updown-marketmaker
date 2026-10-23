@@ -222,3 +222,79 @@ pub fn source_health_state_v1(
         }
     }
 }
+
+/// 在线计算期间只移交健康与选源参数；不复制策略记忆或账户。
+pub(crate) struct PublicHealthSchedule {
+    pub health: SourceHealthConfigV1,
+    pub probability: super::ProbabilityConfigV1,
+}
+impl shared_run::StrategyPublicHealthScheduleV1 for PublicHealthSchedule {
+    fn next_evaluation_at(&self, markets: &[&MarketBusinessObservationV1], at: i64) -> Option<i64> {
+        public_health_deadline(
+            &self.health,
+            &self.probability,
+            markets,
+            std::iter::empty(),
+            at,
+        )
+    }
+}
+pub(crate) fn normal_health_sources(
+    probability: &super::ProbabilityConfigV1,
+    observation: &MarketBusinessObservationV1,
+) -> Vec<SourceStreamScopeV1> {
+    let mut sources = super::probability_sources(probability, observation);
+    sources.extend(observation.assets.iter().map(|a| SourceStreamScopeV1 {
+        source: SourceStreamKindV1::PolymarketBook,
+        condition_id: Some(observation.market.condition_id.clone()),
+        asset_or_symbol: a.asset.token_id.0.clone(),
+    }));
+    sources
+}
+/// 两个候选共用原四个严格未来期限；冻结动作所用来源不能被新选源遮蔽。
+pub(crate) fn public_health_deadline<'a>(
+    health: &SourceHealthConfigV1,
+    probability: &super::ProbabilityConfigV1,
+    markets: &[&MarketBusinessObservationV1],
+    dependencies: impl IntoIterator<Item = (&'a ConditionId, &'a [SourceStreamScopeV1])>,
+    at: i64,
+) -> Option<i64> {
+    let dependencies: Vec<_> = dependencies.into_iter().collect();
+    markets
+        .iter()
+        .filter(|o| o.market.window.end_at_utc_ms > at)
+        .flat_map(|o| {
+            let mut sources = normal_health_sources(probability, o);
+            for (_, scopes) in dependencies
+                .iter()
+                .filter(|(id, _)| **id == o.market.condition_id)
+            {
+                for scope in *scopes {
+                    if !sources.contains(scope) {
+                        sources.push(scope.clone());
+                    }
+                }
+            }
+            sources.into_iter().flat_map(|scope| {
+                let h = health.limits(scope.source);
+                o.source_progress
+                    .get_scope(&scope)
+                    .and_then(|p| p.last_valid_business_message.as_ref())
+                    .map(|e| {
+                        [
+                            Some(e.received_at_utc_ms.saturating_add(h.silence_normal_ms)),
+                            e.source_event_at_utc_ms
+                                .map(|t| t.saturating_add(h.event_normal_ms)),
+                            Some(e.received_at_utc_ms.saturating_add(h.silence_max_ms)),
+                            e.source_event_at_utc_ms
+                                .map(|t| t.saturating_add(h.event_max_ms)),
+                        ]
+                    })
+                    .unwrap_or([None; 4])
+                    .into_iter()
+                    .flatten()
+            })
+        })
+        .filter(|deadline| *deadline > at)
+        .min()
+}

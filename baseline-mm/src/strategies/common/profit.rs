@@ -49,7 +49,7 @@ pub(crate) fn limit_leg(
 pub(crate) fn remaining_estimate(
     read: &ActionBeforeReadV2<
         impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-        impl ActionAccountReadV2,
+        impl NecessaryActionAccountReadV2,
     >,
     a: &ProfitAllocationV2,
 ) -> Result<Option<RemainingRepairEstimate>, StrategyErrorV1> {
@@ -60,7 +60,7 @@ pub(crate) fn remaining_estimate(
 pub(crate) fn remaining_inventory_estimate(
     read: &ActionBeforeReadV2<
         impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-        impl ActionAccountReadV2,
+        impl NecessaryActionAccountReadV2,
     >,
     a: &ProfitAllocationV2,
 ) -> Result<Option<RemainingRepairEstimate>, StrategyErrorV1> {
@@ -69,7 +69,7 @@ pub(crate) fn remaining_inventory_estimate(
 fn remaining_estimate_policy(
     read: &ActionBeforeReadV2<
         impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-        impl ActionAccountReadV2,
+        impl NecessaryActionAccountReadV2,
     >,
     a: &ProfitAllocationV2,
     inventory_policy: bool,
@@ -309,7 +309,7 @@ fn remaining_estimate_policy(
 pub(crate) fn remaining_profit_occupancy(
     read: &ActionBeforeReadV2<
         impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-        impl ActionAccountReadV2,
+        impl NecessaryActionAccountReadV2,
     >,
     allocations: &mut BTreeMap<String, ProfitAllocationV2>,
 ) -> Result<R, StrategyErrorV1> {
@@ -318,7 +318,7 @@ pub(crate) fn remaining_profit_occupancy(
 pub(crate) fn remaining_inventory_profit_occupancy(
     read: &ActionBeforeReadV2<
         impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-        impl ActionAccountReadV2,
+        impl NecessaryActionAccountReadV2,
     >,
     allocations: &mut BTreeMap<String, ProfitAllocationV2>,
 ) -> Result<R, StrategyErrorV1> {
@@ -327,7 +327,7 @@ pub(crate) fn remaining_inventory_profit_occupancy(
 fn remaining_profit_occupancy_policy(
     read: &ActionBeforeReadV2<
         impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-        impl ActionAccountReadV2,
+        impl NecessaryActionAccountReadV2,
     >,
     allocations: &mut BTreeMap<String, ProfitAllocationV2>,
     inventory_policy: bool,

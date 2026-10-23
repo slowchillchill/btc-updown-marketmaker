@@ -240,6 +240,20 @@ impl StrategyV1 for ComplementaryPairV1 {
     fn uses_source_health(&self) -> bool {
         true
     }
+    fn public_health_schedule(&self) -> Option<Box<dyn StrategyPublicHealthScheduleV1>> {
+        Some(Box::new(super::common::PublicHealthSchedule {
+            health: self.config.health.clone(),
+            probability: self.config.probability.clone(),
+        }))
+    }
+    fn next_public_health_evaluation_at(
+        &self,
+        input: &[&MarketBusinessObservationV1],
+        calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        at: i64,
+    ) -> Option<i64> {
+        self.public_health_deadline(input, calculation, at)
+    }
     fn next_health_evaluation_at(
         &self,
         input: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],

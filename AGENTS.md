@@ -46,7 +46,7 @@ baseline-mm/              # 人工盈利策略、参数与业务研究
 backtest/                 # 公共历史回测入口、运行装配与通用结果汇总
 model-train/              # 新 B 模型消费者、整组学习接口与模型产物；正式训练仍需授权
 offline-evaluation/       # 冻结模型的独立留出评价与晋级（规划）
-paper-trade/              # PAPER 上层运行入口与在线模拟装配（规划）
+paper-trade/              # StrategyV1 PAPER 上层运行入口与在线模拟装配
 live-trade/               # LIVE 上层运行入口与真实账户装配（规划）
 ```
 
@@ -55,7 +55,8 @@ live-trade/               # LIVE 上层运行入口与真实账户装配（规�
 - 人工策略回测、模型开发比较与独立评价复用 `backtest`；模型开发竞赛仍归 `model-train`，独立留出评价仍归
   `offline-evaluation`。行情、模拟、NOE 和账本继续复用所属模块，不在消费者内复制。
 - 并行任务明确公共能力的交付归属，缺口回到所属模块补齐；审查沿实际调用链核对复用。
-  当前 PAPER 验收脚本仍在 `shared-run`，不代表上述完整 PAPER 宿主已交付。
+  `shared-run` 保留原有限 PAPER 验收脚本及公共策略宿主；`paper-trade` 组合正式持续库存策略，
+  接口见 [PAPER 入口说明](paper-trade/README.md)。工程交付不代替真实在线运行与完整 PAPER 验收。
 
 ## 代码定位与项目上下文
 

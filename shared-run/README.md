@@ -201,3 +201,17 @@ LIVE Bridge的`prepare`返回原签名正文和基础Order hash；配对两腿�
 ### 本地整批资金拒绝
 
 `BatchExecutionErrorV1::is_local_funds_rejection()` 只接受至少一个 `InsufficientGlobalAvailableFunds` 且其余仅为 `Reserved` 或同类不足的预留结果，同时要求零发送、没有尝试发送项、没有失败请求效果及释放错误。宿主可据此正常停止本批并等待新观察；`strategy.dispatched`仍先收到原结果。混合拒绝、真实账本错误、释放失败、已发或未知效果继续沿原错误路径，不靠字符串匹配。只释放本批新建且明确未发送的预留，旧义务保持，不自动改价、缩单或重试。
+
+
+## StrategyV1 在线宿主
+
+`paper_strategy` 提供单一策略实例的必要输入冻结、后台计算、真实来源健康期限和逐项发送资格。
+旧完整读取端口保持；必要冻结只承诺其实际读取能力，不实现完整账户读取。
+新宿主仅在真实公共输入或必要策略/来源/原义务/原V4待反馈接收时点唤醒，不增加固定行情供给节拍。
+计算完成与逐项分派过程中实际领取的新反馈，也会触发最早合法重算。
+
+程序组合、完整配置、进度、停止、SourceTimeOnly 结算和中断限制见
+[paper-trade](../paper-trade/README.md)。普通库返回与程序立即 Exit 的承诺分别说明。
+`PaperStrategyReportV1.ledger_consumed` 仅在普通返回时保存一次原 Ledger 投影；
+计算期间不复制完整账户历史。幂等回执的原发送时点与本次读取 cutoff 不表示同一历史冻结。
+受控验证证明接口及因果边界，不证明真实在线吞吐或策略经营效果。

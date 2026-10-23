@@ -36,18 +36,15 @@ pub struct ActionBeforeRead<R, G = SharedExecutionRegistry<R>, A = OwnedActionAc
     requests: Vec<RequestFunds>,
     orders: Vec<OrderFunds>,
 }
-impl<R: Clone + std::fmt::Debug + Eq, G: Borrow<SharedExecutionRegistry<R>>, A: ActionAccountReadV2>
-    ActionBeforeRead<R, G, A>
+impl<
+    R: Clone + std::fmt::Debug + Eq,
+    G: Borrow<SharedExecutionRegistry<R>>,
+    A: NecessaryActionAccountReadV2,
+> ActionBeforeRead<R, G, A>
 {
     /// 已领取、因依赖未满足而尚待 Ledger 应用的原记录数；零不证明未来事实已齐。
     pub fn pending_noe_record_count(&self) -> usize {
         self.pending_noe_record_count
-    }
-    pub fn learning_account(&self) -> Option<&crate::LearningAccountReadV1> {
-        self.account.full().learning.as_ref()
-    }
-    pub fn economics(&self) -> &AccountEconomicsReadV3 {
-        &self.account.full().economics
     }
     pub fn cash_available(&self) -> rust_decimal::Decimal {
         self.account.cash_available()
@@ -96,9 +93,6 @@ impl<R: Clone + std::fmt::Debug + Eq, G: Borrow<SharedExecutionRegistry<R>>, A: 
     pub fn cutoff(&self) -> &TrustedGroupDecisionCutoffV1 {
         &self.cutoff
     }
-    pub fn ledger(&self) -> &LedgerProjectionV2 {
-        &self.account.full().ledger
-    }
     pub fn orders(&self) -> impl Iterator<Item = ExecutionOrderRead<'_, R>> {
         self.registry.borrow().unfinished_orders()
     }
@@ -143,23 +137,6 @@ impl<R: Clone + std::fmt::Debug + Eq, G: Borrow<SharedExecutionRegistry<R>>, A: 
             immediate_fee_encumbrance_pusd: r.fee.clone(),
             last_ledger_entry_seq: r.seq,
         })
-    }
-    /// 默认拥有式消费者仍取得完整独立冻结；借用计算不调用此转换。
-    pub fn to_owned_read(&self) -> ActionBeforeRead<R> {
-        ActionBeforeRead {
-            account: self.account.full().clone(),
-            pending_noe_record_count: self.pending_noe_record_count,
-            cutoff: self.cutoff.clone(),
-            registry: self
-                .registry
-                .borrow()
-                .action_snapshot_with_orders(&self.obligation_orders),
-            obligation_orders: self.obligation_orders.clone(),
-            obligation_trades: self.obligation_trades.clone(),
-            requests: self.requests.clone(),
-            orders: self.orders.clone(),
-            completion: PhantomData,
-        }
     }
 }
 /// 保留缺直接前驱的原领取引用；没有第二业务归约或跳号/超时政策。
@@ -660,7 +637,9 @@ pub type ActionBeforeReadV1 =
 pub type ActionBeforeReadV2<G = SharedExecutionRegistryV2, A = OwnedActionAccountV2> =
     ActionBeforeRead<contracts::execution_normalization::CancellationRequestCompletedV1, G, A>;
 
-impl<G: Borrow<SharedExecutionRegistryV2>, A: ActionAccountReadV2> ActionBeforeReadV2<G, A> {
+impl<G: Borrow<SharedExecutionRegistryV2>, A: NecessaryActionAccountReadV2>
+    ActionBeforeReadV2<G, A>
+{
     pub fn pending_cancellation_count(
         &self,
         scope: Option<&CancellationScopeV1<'_>>,
@@ -756,6 +735,74 @@ where
     }
 }
 
+impl<R: Clone + std::fmt::Debug + Eq, G: Borrow<SharedExecutionRegistry<R>>, A: ActionAccountReadV2>
+    ActionBeforeRead<R, G, A>
+{
+    pub fn learning_account(&self) -> Option<&crate::LearningAccountReadV1> {
+        self.account.full().learning.as_ref()
+    }
+    pub fn economics(&self) -> &AccountEconomicsReadV3 {
+        &self.account.full().economics
+    }
+    pub fn ledger(&self) -> &LedgerProjectionV2 {
+        &self.account.full().ledger
+    }
+    /// 默认拥有式消费者仍取得完整独立冻结；借用计算不调用此转换。
+    pub fn to_owned_read(&self) -> ActionBeforeRead<R> {
+        ActionBeforeRead {
+            account: self.account.full().clone(),
+            pending_noe_record_count: self.pending_noe_record_count,
+            cutoff: self.cutoff.clone(),
+            registry: self
+                .registry
+                .borrow()
+                .action_snapshot_with_orders(&self.obligation_orders),
+            obligation_orders: self.obligation_orders.clone(),
+            obligation_trades: self.obligation_trades.clone(),
+            requests: self.requests.clone(),
+            orders: self.orders.clone(),
+            completion: PhantomData,
+        }
+    }
+}
+impl<R: Clone + std::fmt::Debug + Eq, G: Borrow<SharedExecutionRegistry<R>>>
+    ActionBeforeRead<R, G, BorrowedActionAccountV2<'_>>
+{
+    pub fn freeze_necessary(
+        &self,
+        markets: impl Iterator<Item = ConditionId>,
+    ) -> ActionBeforeRead<R, SharedExecutionRegistry<R>, FrozenNecessaryActionAccountV2> {
+        ActionBeforeRead {
+            account: self.account.freeze_necessary(markets),
+            pending_noe_record_count: self.pending_noe_record_count,
+            cutoff: self.cutoff.clone(),
+            registry: self
+                .registry
+                .borrow()
+                .action_snapshot_with_orders(&self.obligation_orders),
+            obligation_orders: self.obligation_orders.clone(),
+            obligation_trades: self.obligation_trades.clone(),
+            requests: self.requests.clone(),
+            orders: self.orders.clone(),
+            completion: PhantomData,
+        }
+    }
+}
+
+impl<R, G> ActionBeforeRead<R, G, FrozenNecessaryActionAccountV2> {
+    /// 原owner账户全局索引值，包含旧市场贡献；不以选中市场求和近似。
+    pub fn account_economic_numbers(&self) -> &ledger::AccountEconomicNumbersV1 {
+        &self.account.totals
+    }
+}
+
 #[cfg(test)]
 #[path = "../tests/support/obligation_gap.rs"]
 mod obligation_gap;
+
+impl SharedExecution<sim_system::execution::MeasuredCancellationEvidence> {
+    /// V4原NOE源待领取接收时刻；仍须真实关闭前缀并观察后才能读取。
+    pub fn next_pending_feedback_received_at_utc_ms(&self) -> Option<i64> {
+        self.observation.next_pending_feedback_received_at_utc_ms()
+    }
+}

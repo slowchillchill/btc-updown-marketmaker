@@ -2360,6 +2360,7 @@ async fn online_same_input_handoff_serves_timers_then_enrolls_and_executes_once(
 
 fn online_config() -> data_pipeline_training::public_online::PublicOnlineConfigV1 {
     data_pipeline_training::public_online::PublicOnlineConfigV1 {
+        source_progress: false,
         header: core().header().clone(),
         recording: config(),
         recording_in_flight_inputs: 1.try_into().unwrap(),

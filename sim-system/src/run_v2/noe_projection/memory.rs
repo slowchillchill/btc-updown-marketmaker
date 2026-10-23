@@ -755,3 +755,14 @@ impl<P: MemoryOrderEvidence> MemoryNoeProjectionPort<P> {
         })
     }
 }
+
+impl MemoryNoeObservation<MeasuredCancellationEvidence> {
+    /// V4正式消费源的最早未领取接收时刻；不推进前沿或公开可见性。
+    pub fn next_pending_feedback_received_at_utc_ms(&self) -> Option<i64> {
+        self.0
+            .lock()
+            .unwrap()
+            .consumption
+            .next_pending_feedback_received_at_utc_ms()
+    }
+}

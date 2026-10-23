@@ -73,7 +73,7 @@ impl InventoryState {
 pub(super) fn inventory(
     read: &ActionBeforeReadV2<
         impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-        impl ActionAccountReadV2,
+        impl NecessaryActionAccountReadV2,
     >,
     condition: &ConditionId,
     tokens: &[TokenId; 2],

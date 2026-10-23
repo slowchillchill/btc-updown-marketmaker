@@ -431,6 +431,10 @@ fn quoted_book(token: &str, bid: &str, ask: &str) -> PolymarketOrderbookEvent {
         last_trade_price: None,
     }
 }
+fn inventory_forensic_root() -> Option<std::ffi::OsString> {
+    std::env::var_os("PAPER_HOST_TEST_OUTPUT_ROOT")
+        .or_else(|| std::env::var_os("ISSUE360_FORENSIC_ROOT"))
+}
 type Driver = FinitePublicConsumptionV1<RecordedPublicGroupSourceV1<TradingTimes>>;
 struct InventoryFixture {
     _temp: Option<tempfile::TempDir>,
@@ -460,7 +464,11 @@ impl InventoryFixture {
         policy: &[u8],
         terminal: bool,
     ) -> Self {
-        let temp = if let Some(root) = std::env::var_os("ISSUE360_FORENSIC_ROOT") {
+        let forensic_root = inventory_forensic_root();
+        if let Some(root) = &forensic_root {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        let temp = if let Some(root) = &forensic_root {
             tempfile::Builder::new()
                 .prefix("same-maker-example-")
                 .tempdir_in(root)
@@ -469,7 +477,7 @@ impl InventoryFixture {
             tempfile::tempdir().unwrap()
         };
         let root = temp.path().join("dpt");
-        if std::env::var_os("ISSUE360_FORENSIC_ROOT").is_some() {
+        if forensic_root.is_some() {
             println!("forensic_material_root {}", temp.path().display());
             std::fs::write(temp.path().join("finality.json"), policy).unwrap();
             std::fs::write(
@@ -537,8 +545,8 @@ impl InventoryFixture {
             ContinuousInventoryContinuityV1::new_account(Decimal::from(2000)),
         )
         .unwrap();
-        let temp = if std::env::var_os("ISSUE360_FORENSIC_ROOT").is_some() {
-            temp.keep();
+        let temp = if forensic_root.is_some() {
+            let _ = temp.keep();
             None
         } else {
             Some(temp)
@@ -550,6 +558,26 @@ impl InventoryFixture {
             strategy,
             hidden,
             next_hidden,
+        }
+    }
+    fn detached_calculation(&mut self) -> StrategyCalculationV1<ContinuousInventoryDiagnosticV1> {
+        let input = self
+            .shared
+            .strategy_borrowed_observation_input(&mut self.driver, false)
+            .unwrap()
+            .unwrap()
+            .freeze_for_detached();
+        let at = input
+            .action_before
+            .cutoff()
+            .decision_time()
+            .logical_time_utc_ms();
+        let output = self.strategy.decide_detached(&input, at).unwrap();
+        StrategyCalculationV1 {
+            market_frame_timing: input.market_frame_timing,
+            input_cutoff: input.action_before.cutoff().clone(),
+            calculation_started_at_utc_ms: at,
+            output,
         }
     }
     fn calculation(&mut self) -> StrategyCalculationV1<ContinuousInventoryDiagnosticV1> {
@@ -623,7 +651,7 @@ fn next_combined(
     }
     if hidden_at == Some(at) {
         let bucket = next.take().unwrap();
-        if std::env::var_os("ISSUE360_FORENSIC_ROOT").is_some() {
+        if inventory_forensic_root().is_some() {
             println!(
                 "forensic_hidden {}",
                 serde_json::to_string(&bucket).unwrap()
@@ -636,7 +664,7 @@ fn next_combined(
     if required == Some(at) {
         driver.advance_before(at.checked_add(1).unwrap()).unwrap();
     }
-    if std::env::var_os("ISSUE360_FORENSIC_ROOT").is_some() {
+    if inventory_forensic_root().is_some() {
         println!(
             "forensic_step at={at} public={public:?} hidden={hidden_at:?} required={required:?} next_required={:?}",
             driver.next_required_logical_drive()
@@ -804,7 +832,7 @@ async fn real_v2_maker_trade_moves_pending_to_successful_inventory_without_doubl
     let mut pending = None;
     let applied = loop {
         next_combined(&mut f.driver, &mut f.hidden, &mut f.next_hidden);
-        let c = f.calculation();
+        let c = f.detached_calculation();
         let d = details(&c).1;
         println!("maker_legal_freeze {}", serde_json::to_string(&c).unwrap());
         if d.markets[0].t[0] == ExactDecimal("30".into()) && pending.is_none() {

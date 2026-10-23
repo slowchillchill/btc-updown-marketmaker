@@ -250,6 +250,10 @@ impl<R: Clone + std::fmt::Debug + PartialEq> NoeConsumptionSource<R> {
     pub fn opening_record(&self) -> Option<NoeConsumedRecordRef<R>> {
         self.opening.clone()
     }
+    /// 原待领取反馈的最早接收时刻；只读，不证明已闭合或可见。
+    pub fn next_pending_feedback_received_at_utc_ms(&self) -> Option<i64> {
+        self.pending.first_key_value().map(|(key, _)| key.0)
+    }
     pub fn delivered_through(&self) -> u64 {
         self.delivered
     }

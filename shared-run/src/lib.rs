@@ -16,9 +16,12 @@ pub use strategy::*;
 
 mod necessary;
 pub use necessary::{
-    ActionAccountReadV2, BorrowedActionAccountV2, ObservedTradeApplicationV1, OwnedActionAccountV2,
+    ActionAccountReadV2, BorrowedActionAccountV2, FrozenNecessaryActionAccountV2,
+    NecessaryActionAccountReadV2, ObservedTradeApplicationV1, OwnedActionAccountV2,
     conservative_nav,
 };
 
 mod learning;
 pub use learning::*;
+
+pub mod paper_strategy;

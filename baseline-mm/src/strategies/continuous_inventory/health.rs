@@ -13,14 +13,9 @@ impl ContinuousInventoryV1 {
         &self,
         o: &MarketBusinessObservationV1,
     ) -> Vec<SourceStreamScopeV1> {
-        let mut sources = probability_sources(&self.config.probability_reference, o);
-        sources.extend(o.assets.iter().map(|a| SourceStreamScopeV1 {
-            source: SourceStreamKindV1::PolymarketBook,
-            condition_id: Some(o.market.condition_id.clone()),
-            asset_or_symbol: a.asset.token_id.0.clone(),
-        }));
-        sources
+        normal_health_sources(&self.config.probability_reference, o)
     }
+
     pub(super) fn repair_sources(
         &self,
         o: &MarketBusinessObservationV1,
@@ -132,7 +127,7 @@ impl ContinuousInventoryV1 {
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
-            impl ActionAccountReadV2,
+            impl NecessaryActionAccountReadV2,
         >,
         o: &MarketBusinessObservationV1,
         state: &InventoryState,
@@ -350,7 +345,7 @@ impl ContinuousInventoryV1 {
         input: &StrategyCurrentReadV1<
             '_,
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
-            impl ActionAccountReadV2,
+            impl NecessaryActionAccountReadV2,
         >,
         calculation: &StrategyCalculationV1<ContinuousInventoryDiagnosticV1>,
         index: usize,
@@ -660,9 +655,27 @@ impl StrategyV1 for ContinuousInventoryV1 {
             _ => vec![],
         }
     }
+    fn public_health_schedule(&self) -> Option<Box<dyn StrategyPublicHealthScheduleV1>> {
+        Some(Box::new(PublicHealthSchedule {
+            health: self.config.health.clone(),
+            probability: self.config.probability_reference.clone(),
+        }))
+    }
     fn next_health_evaluation_at(
         &self,
         frames: &[PublicObservationFrameV1<'_>],
+        calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        at: i64,
+    ) -> Option<i64> {
+        self.next_public_health_evaluation_at(
+            &frames.iter().map(|f| f.observation).collect::<Vec<_>>(),
+            calculation,
+            at,
+        )
+    }
+    fn next_public_health_evaluation_at(
+        &self,
+        markets: &[&MarketBusinessObservationV1],
         calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
         at: i64,
     ) -> Option<i64> {
@@ -674,44 +687,15 @@ impl StrategyV1 for ContinuousInventoryV1 {
                 _ => None,
             })
             .unwrap_or(&[]);
-        frames
-            .iter()
-            .filter(|f| f.observation.market.window.end_at_utc_ms > at)
-            .flat_map(|f| {
-                let mut sources = self.normal_sources(f.observation);
-                for d in dependencies
-                    .iter()
-                    .filter(|d| d.condition_id == f.observation.market.condition_id)
-                {
-                    for scope in &d.sources {
-                        if !sources.contains(scope) {
-                            sources.push(scope.clone());
-                        }
-                    }
-                }
-                sources.into_iter().flat_map(|scope| {
-                    let h = self.config.health.limits(scope.source);
-                    f.observation
-                        .source_progress
-                        .get_scope(&scope)
-                        .and_then(|p| p.last_valid_business_message.as_ref())
-                        .map(|e| {
-                            [
-                                Some(e.received_at_utc_ms.saturating_add(h.silence_normal_ms)),
-                                e.source_event_at_utc_ms
-                                    .map(|t| t.saturating_add(h.event_normal_ms)),
-                                Some(e.received_at_utc_ms.saturating_add(h.silence_max_ms)),
-                                e.source_event_at_utc_ms
-                                    .map(|t| t.saturating_add(h.event_max_ms)),
-                            ]
-                        })
-                        .unwrap_or([None; 4])
-                        .into_iter()
-                        .flatten()
-                })
-            })
-            .filter(|deadline| *deadline > at)
-            .min()
+        public_health_deadline(
+            &self.config.health,
+            &self.config.probability_reference,
+            markets,
+            dependencies
+                .iter()
+                .map(|d| (&d.condition_id, d.sources.as_slice())),
+            at,
+        )
     }
     fn qualify_intent_public(
         &self,
@@ -896,5 +880,15 @@ impl CheckpointStrategyV1 for ContinuousInventoryV1 {
         )?
         .with_entry_market_range(self.entry_market_range);
         Ok(())
+    }
+}
+
+impl DetachedStrategyV1 for ContinuousInventoryV1 {
+    fn decide_detached(
+        &mut self,
+        input: &DetachedStrategyInputV1,
+        at: i64,
+    ) -> Result<StrategyOutputV1<Self::Diagnostics>, Self::Error> {
+        self.decide_input(input, at)
     }
 }

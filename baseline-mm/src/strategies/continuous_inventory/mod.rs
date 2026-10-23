@@ -258,7 +258,7 @@ impl ContinuousInventoryV1 {
         input: &StrategyInputV1<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl StrategyMarketReadV1,
-            impl ActionAccountReadV2,
+            impl NecessaryActionAccountReadV2,
         >,
         now: i64,
     ) -> Result<StrategyOutputV1<ContinuousInventoryDiagnosticV1>, StrategyErrorV1> {
