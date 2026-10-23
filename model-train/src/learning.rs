@@ -1274,11 +1274,18 @@ fn trajectory_tokens(
                     == Some(id)
             })
             .ok_or("公共再生缺原可见市场")?;
-        let mut projected = row["market_private"][i].clone();
-        projected["public"] = market_projection(f, started);
-        markets.push(tokens(&projected, encoding));
+        let public = market_projection(f, started);
         if capture_projection {
+            let mut projected = row["market_private"][i].clone();
+            projected["public"] = public;
+            markets.push(tokens(&projected, encoding));
             projections.push(projected);
+        } else {
+            markets.push(tokens_with_public(
+                &row["market_private"][i],
+                &public,
+                encoding,
+            ));
         }
     }
     Ok((
@@ -1547,6 +1554,23 @@ mod learn_projection_tests {
         assert_eq!(minimal["global"], full["global"]);
         assert_eq!(minimal["markets"], full["markets"]);
         assert_eq!(full, audit);
+        let mut later = row.clone();
+        later["processing_start_utc_ms"] =
+            (row["processing_start_utc_ms"].as_i64().unwrap() + 100).into();
+        let (later_full, later_projection) =
+            compose_trajectory_frame(&later, &frames, &encoding, true).unwrap();
+        let (later_audit, none) =
+            compose_trajectory_frame(&later, &frames, &encoding, false).unwrap();
+        let later_minimal = compose_learn_step_frame(&later, &frames, &encoding).unwrap();
+        assert_eq!(later_full, later_audit);
+        assert_eq!(later_full["markets"], later_minimal["markets"]);
+        assert!(none.is_null());
+        assert_ne!(
+            later_projection["markets"], projection["markets"],
+            "同帧本次年龄必须重新计算"
+        );
+        assert_ne!(later_minimal["markets"], minimal["markets"]);
+
         assert_eq!(full["old_joint_logp"], -0.5);
         assert_eq!(
             full["economic_identity"],
@@ -1556,7 +1580,7 @@ mod learn_projection_tests {
         assert_eq!(projection["global"], row["global_private"]);
         assert!(projection["markets"].is_array());
         assert!(no_projection.is_null());
-        let label = json!({"advantage":1.25,"critic_target":-2,"old_logp":-0.5,"extra":{"pending":null,"unknown":["cost"]}});
+        let label = json!({"advantage":1.25,"critic_target":-2,"old_joint_logp":-0.5,"extra":{"pending":null,"unknown":["cost"]}});
         let request = learn_step_request(minimal.clone(), &label);
         assert_eq!(
             request,
