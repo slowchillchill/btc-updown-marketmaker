@@ -97,21 +97,6 @@ pub struct MarketDecisionDiagnosticV1 {
     pub source_health: Vec<SourceHealthIssueV1>,
     pub source_health_states: Vec<SourceHealthStatusV1>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceHealthFailureV1 {
-    UnknownBusinessProgress,
-    ReceiveSilence,
-    EventDelay,
-    UnknownEventTime,
-    TimeInconsistent,
-    SynchronizationRequired,
-    Unavailable,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceHealthIssueV1 {
-    pub scope: SourceStreamScopeV1,
-    pub failure: SourceHealthFailureV1,
-}
 /// 与冻结请求关联的最小来源依赖；不保存另一份行情。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionHealthDependencyV1 {
@@ -140,24 +125,7 @@ pub struct ActionCommitmentDependencyV1 {
     pub leg_ordinal: u16,
     pub remaining_shares: ExecutionReadValueV1<ExactDecimal>,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ProfitAllocationV2 {
-    pub global_request_id: String,
-    pub reserve_identity: LedgerRequestIdentityV1,
-    pub condition_id: ConditionId,
-    pub token_id: TokenId,
-    pub estimated_principal_pusd: ExactRationalV1,
-    pub estimated_fee_pusd: ExactRationalV1,
-    /// 只冻结决策场景，不能当作已成交数量。
-    pub estimated_shares: ExactRationalV1,
-    /// 原截止可配对孤腿场景；不能由后续别单池变化重估释放。
-    pub original_orphan_shares: ExactRationalV1,
-    pub original_orphan_principal_per_share: ExactRationalV1,
-    #[serde(with = "sim_system::public_consumption::checkpoint::cutoff")]
-    pub estimate_cutoff: sim_system::public_consumption::TrustedGroupDecisionCutoffV1,
-    /// 首次分配的利润资源，不是当前预计损失或风险上界。
-    pub allocated_profit_pusd: ExactRationalV1,
-}
+pub use super::super::common::ProfitAllocationV2;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ComplementaryPairDiagnosticV1 {
     pub strategy_id: String,
@@ -172,27 +140,6 @@ pub struct ComplementaryPairDiagnosticV1 {
     pub action_health_dependencies: Vec<ActionHealthDependencyV1>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceHealthStateV1 {
-    Normal,
-    Elevated,
-    Exceeded(SourceHealthFailureV1),
-    Unavailable(SourceHealthFailureV1),
-}
-impl SourceHealthStateV1 {
-    pub fn failure(&self) -> Option<SourceHealthFailureV1> {
-        match self {
-            Self::Exceeded(f) | Self::Unavailable(f) => Some(f.clone()),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceHealthStatusV1 {
-    pub scope: SourceStreamScopeV1,
-    pub state: SourceHealthStateV1,
-}
-
 /// 同一日原策略实例的完整私有记忆，不包含公共账户投影。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComplementaryPairCheckpointV2 {
@@ -202,16 +149,7 @@ pub struct ComplementaryPairCheckpointV2 {
 }
 
 /// 不改变市场事实的不可变半开开始时间范围。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EntryMarketRangeV1 {
-    pub start_at_utc_ms: i64,
-    pub end_at_utc_ms: i64,
-}
-impl EntryMarketRangeV1 {
-    pub fn contains(&self, market_start: i64) -> bool {
-        self.start_at_utc_ms <= market_start && market_start < self.end_at_utc_ms
-    }
-}
+pub use super::super::common::EntryMarketRangeV1;
 /// None 表示该分支未评估，不把未执行的检查写成失败。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PairEntryEvaluationV1 {
@@ -254,3 +192,7 @@ impl PairEntryEvaluationV1 {
         self.target_unavailable = Some((*targets).map(Result::err));
     }
 }
+
+pub use super::super::common::{
+    SourceHealthFailureV1, SourceHealthIssueV1, SourceHealthStateV1, SourceHealthStatusV1,
+};

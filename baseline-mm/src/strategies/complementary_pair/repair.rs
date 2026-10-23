@@ -145,28 +145,19 @@ impl ComplementaryPairV1 {
             diag.unavailable.push(ActionUnavailableV1::EstimateRequired);
             return Ok(());
         };
-        let duration =
-            (o.market.window.end_at_utc_ms - o.market.window.start_at_utc_ms).max(1) as f64;
-        let time_pressure =
-            ((now - o.market.window.start_at_utc_ms) as f64 / duration).clamp(0.0, 1.0);
-        let cost_per_share = float(&floor_decimal(&old_all, 16)?)?;
-        let inventory_pressure = if self.config.risk.per_market_orphan_limit_pusd > Decimal::ZERO {
-            float(&floor_decimal(&s.orphan_principal.add(&s.orphan_fee), 16)?)?
-                / float(&self.config.risk.per_market_orphan_limit_pusd)?
-        } else {
-            0.0
-        };
-        // 各可行性门独立；比较只评价风险减少的经营价值，不允许时间覆盖未知/资金。
-        let risk = float(&self.config.repair.residual_risk_weight)?
-            * cost_per_share
-            * (time_pressure + inventory_pressure);
-        let retain = -risk;
+        let (retain, wait, maker_score) = super::super::common::maker_repair_values_v1(
+            &self.config.repair,
+            basis,
+            maker,
+            &old_all,
+            &s.orphan_principal.add(&s.orphan_fee),
+            self.config.risk.per_market_orphan_limit_pusd,
+            o.market.window.start_at_utc_ms,
+            o.market.window.end_at_utc_ms,
+            now,
+        )?;
         let remaining = o.market.window.end_at_utc_ms - now;
         let weight = self.config.repair.maker_fill_weight;
-        let maker_score =
-            maker.map(|mp| weight * (basis - float(&mp).unwrap_or(0.0)) + (1.0 - weight) * retain);
-        let wait = retain
-            + float(&self.config.repair.wait_price_improvement_per_share)? * (1.0 - time_pressure);
         let mut active = None;
         let mut active_fee = R::zero();
         let mut active_spend = Decimal::ZERO;

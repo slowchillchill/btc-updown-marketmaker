@@ -9,21 +9,25 @@ mod repair;
 mod types;
 pub use types::*;
 mod config;
-mod spot_statistics;
-pub use spot_statistics::*;
-mod probability;
+use super::common::SignalMemory;
+use super::common::probability;
+pub use super::common::{
+    SpotSampleAcceptanceV1, SpotVariancePairV1, SpotVarianceStatisticsV1, direct_received_time_v1,
+    eligible_chainlink_spot_v1, spot_price_number_v1, spot_sample_acceptance_v1,
+    spot_variance_pair_v1, spot_variance_statistics_v1,
+};
 mod public_entry;
-mod public_probability;
+pub use super::common::PublicProbabilityInputsV4;
+use super::common::public_probability;
+pub use super::common::{EstimateUnavailableV1, ProbabilityEstimateV1};
 pub use config::*;
-pub use probability::*;
 pub use public_entry::*;
-pub use public_probability::*;
 
 use ::execution_normalization::MemoryIdentityKeyV1;
 use ::execution_normalization::SourceNeutralEntityKeyV1;
 use contracts::{economics::EconomicRational as R, *};
 use ledger::*;
-use num_bigint::{BigInt, BigUint};
+use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -32,86 +36,18 @@ use sim_system::{
     execution::{RequestContextV2, RequestEffectV1},
     platform_rules::SealedProcessRuleSnapshotV3,
 };
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 pub const STRATEGY_ID: &str = "complementary_pair";
 pub const RULE_VERSION: &str = "candidate_v3";
 pub const PUBLIC_RULE_VERSION: &str = "candidate_v4_public_c0_c1";
 pub const LOW_PRICE_RULE_VERSION: &str = "candidate_v5_public_low_price";
 
-#[derive(Debug)]
-pub enum StrategyErrorV1 {
-    Configuration(String),
-    Arithmetic(&'static str),
-    Cost(String),
-}
-impl fmt::Display for StrategyErrorV1 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Configuration(s) => write!(f, "策略配置：{s}"),
-            Self::Arithmetic(s) => write!(f, "策略计算：{s}"),
-            Self::Cost(s) => write!(f, "公共成本：{s}"),
-        }
-    }
-}
-impl std::error::Error for StrategyErrorV1 {}
-fn decimal(v: &ExactDecimal) -> Result<Decimal, StrategyErrorV1> {
-    Decimal::from_str_exact(&v.0).map_err(|_| StrategyErrorV1::Arithmetic("非规范公共金额"))
-}
-fn r(v: Decimal) -> R {
-    R::from_decimal(v)
-}
-fn rational(v: &ExactRationalV1) -> Result<R, StrategyErrorV1> {
-    R::try_from(v).map_err(|_| StrategyErrorV1::Arithmetic("非规范公共分数"))
-}
-fn float(v: &Decimal) -> Result<f64, StrategyErrorV1> {
-    v.to_f64()
-        .ok_or(StrategyErrorV1::Arithmetic("浮点映射溢出"))
-}
-fn fd(v: f64) -> Result<Decimal, StrategyErrorV1> {
-    Decimal::from_f64_retain(v).ok_or(StrategyErrorV1::Arithmetic("统计值无法映射合法报价"))
-}
-fn exact(v: Decimal) -> ExactDecimal {
-    ExactDecimal(v.normalize().to_string())
-}
-fn value<T>(f: &ObservedFactV1<T>) -> Option<&T> {
-    matches!(
-        f.quality,
-        MarketDataQuality::Fresh | MarketDataQuality::Stale
-    )
-    .then_some(f.value.as_ref())
-    .flatten()
-}
-fn known<T>(v: &ExecutionReadValueV1<T>) -> Option<&T> {
-    match v {
-        ExecutionReadValueV1::Known(v) => Some(v),
-        _ => None,
-    }
-}
-fn fraction_units(n: &BigUint, places: u32) -> R {
-    R::ratio(BigInt::from(n.clone()), BigInt::from(10_u32).pow(places))
-}
-fn floor_decimal(v: &R, places: u32) -> Result<Decimal, StrategyErrorV1> {
-    let n = v.numerator() * BigInt::from(10_u32).pow(places) / v.denominator();
-    let n = n
-        .to_i128()
-        .ok_or(StrategyErrorV1::Arithmetic("精确金额不能编码为Decimal"))?;
-    Decimal::try_from_i128_with_scale(n, places)
-        .map_err(|_| StrategyErrorV1::Arithmetic("编码金额溢出"))
-}
-fn limit_leg(i: &ModelIntentV1, ordinal: u16) -> Option<(&ConditionId, &BuyLegIntentV1)> {
-    match i {
-        ModelIntentV1::SubmitSingleBuy {
-            condition_id,
-            order,
-        } if ordinal == 0 => Some((condition_id, order)),
-        ModelIntentV1::SubmitPairedBuy {
-            condition_id,
-            orders,
-        } => orders.get(usize::from(ordinal)).map(|l| (condition_id, l)),
-        _ => None,
-    }
-}
+pub use super::common::StrategyErrorV1;
+use super::common::limit_leg;
+use super::common::{
+    decimal, exact, fd, float, floor_decimal, fraction_units, known, r, rational, value,
+};
 fn platform_id<C>(o: &ExecutionOrderRead<'_, C>) -> String {
     match &o.order_identity.key {
         MemoryIdentityKeyV1::Entity(SourceNeutralEntityKeyV1::Order { source_order_id }) => {
@@ -121,13 +57,7 @@ fn platform_id<C>(o: &ExecutionOrderRead<'_, C>) -> String {
     }
 }
 
-struct RemainingRepairEstimate {
-    shares: R,
-    principal: R,
-    fee: R,
-    loss: R,
-    unknown: bool,
-}
+use super::common::RemainingRepairEstimate;
 
 /// 只保存信号、高水位、终止与未决增量占用；库存/费用/订单每轮重新读取公共事实。
 pub struct ComplementaryPairV1 {

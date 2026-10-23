@@ -779,6 +779,25 @@ async fn real_partial_makers_fix_average_cost_and_nonterminating_fraction() {
             r(if fractional { "2" } else { "1" }, "1")
         );
         assert_eq!(m.paired_shares.0, "1");
+        assert_eq!(m.cumulative_paired_shares.0, "1");
+        assert_eq!(m.redeemed_paired_shares.0, "0");
+        assert_eq!(
+            m.cumulative_paired_principal_cost_pusd[up],
+            if fractional { r("1", "3") } else { r("1", "2") }
+        );
+        assert_eq!(m.cumulative_paired_principal_cost_pusd[1 - up], r("1", "5"));
+        assert_eq!(
+            m.cumulative_paired_actual_trade_fee_pusd,
+            ExecutionReadValueV1::Known(r("0", "1"))
+        );
+        assert_eq!(
+            m.cumulative_paired_spread_after_trade_fee_pusd,
+            ExecutionReadValueV1::Known(if fractional {
+                r("7", "15")
+            } else {
+                r("3", "10")
+            })
+        );
         assert_eq!(m.success_principal_cost_pusd[up], r("1", "1"));
         assert_eq!(m.success_principal_cost_pusd[1 - up], r("1", "5"));
         assert_eq!(
@@ -1882,6 +1901,21 @@ async fn paired_receivable_precedes_loser_failure_and_compensation_barrier() {
     assert_eq!(read.cash().actual_available_pusd.0, "99.1152");
     let market = read.market_totals().next().unwrap();
     assert_eq!(market.executed[1].actual_fee_pusd.0, "0.1848");
+    assert_eq!(market.paired_shares.0, "0", "赎回后期末配对库存已空");
+    assert_eq!(
+        market.cumulative_paired_shares.0, "5",
+        "原成功池累计形成不得随赎回倒退"
+    );
+    assert_eq!(market.redeemed_paired_shares.0, "5");
+    assert_eq!(
+        market
+            .cumulative_paired_principal_cost_pusd
+            .iter()
+            .fold(EconomicRational::zero(), |sum, p| sum
+                .add(&EconomicRational::try_from(p).unwrap()))
+            .public(),
+        r("6", "1")
+    );
     assert_eq!(market.confirmed_net_pnl_pusd, r("-553", "625"));
     assert_eq!(
         driver

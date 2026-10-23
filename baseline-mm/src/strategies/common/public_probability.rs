@@ -14,7 +14,7 @@ pub struct PublicProbabilityInputsV4 {
     pub settlement_window_ms: Option<u64>,
     pub observed_integral_usd_seconds: Option<f64>,
 }
-pub(super) fn estimate(
+pub(crate) fn estimate(
     o: &MarketBusinessObservationV1,
     statistics: Option<&PublicMarketStatisticsV1>,
     c: &ProbabilityConfigV1,

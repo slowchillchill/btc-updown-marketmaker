@@ -1,6 +1,10 @@
+mod inventory_research;
+mod selected_strategy;
 mod streaming_research;
 use backtest::*;
 use baseline_mm::strategies::complementary_pair::*;
+use baseline_mm::strategies::continuous_inventory::*;
+use selected_strategy::SelectedStrategy;
 use serde::{Deserialize, Serialize};
 use sim_system::platform_rules::*;
 use std::{collections::BTreeMap, path::PathBuf};
@@ -8,6 +12,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 enum StrategyParameters {
+    Continuous(ContinuousInventoryConfigV1),
     LowPrice(ComplementaryPairConfigV5),
     Public(ComplementaryPairConfigV4),
     Legacy(ComplementaryPairConfigV3),
@@ -15,35 +20,51 @@ enum StrategyParameters {
 impl StrategyParameters {
     fn version(&self) -> &'static str {
         match self {
+            Self::Continuous(_) => CONTINUOUS_INVENTORY_RULE_VERSION,
             Self::LowPrice(_) => LOW_PRICE_RULE_VERSION,
             Self::Public(_) => PUBLIC_RULE_VERSION,
             Self::Legacy(_) => RULE_VERSION,
+        }
+    }
+    fn identity(&self) -> &'static str {
+        match self {
+            Self::Continuous(_) => CONTINUOUS_INVENTORY_STRATEGY_ID,
+            _ => STRATEGY_ID,
         }
     }
     fn build(
         self,
         rules: std::sync::Arc<SealedProcessRuleSnapshotV3>,
         namespace: String,
-    ) -> Result<ComplementaryPairV1, StrategyErrorV1> {
+    ) -> Result<SelectedStrategy, StrategyErrorV1> {
         match self {
+            Self::Continuous(config) => {
+                let continuity =
+                    ContinuousInventoryContinuityV1::new_account(config.initial_cash_pusd);
+                ContinuousInventoryV1::new(config, rules, namespace, continuity)
+                    .map(SelectedStrategy::Inventory)
+            }
             Self::LowPrice(config) => ComplementaryPairV1::new_low_price(
                 config,
                 rules,
                 namespace,
                 StrategyContinuityV2::new_low_price_account(),
-            ),
+            )
+            .map(SelectedStrategy::Legacy),
             Self::Public(config) => ComplementaryPairV1::new_public(
                 config,
                 rules,
                 namespace,
                 StrategyContinuityV2::new_public_account(),
-            ),
+            )
+            .map(SelectedStrategy::Legacy),
             Self::Legacy(config) => ComplementaryPairV1::new(
                 config,
                 rules,
                 namespace,
                 StrategyContinuityV2::new_account(),
-            ),
+            )
+            .map(SelectedStrategy::Legacy),
         }
     }
 }
@@ -51,6 +72,11 @@ fn require_parameter_version(
     run: &serde_json::Value,
     parameters: &StrategyParameters,
 ) -> Result<(), CommandError> {
+    if let Some(identity) = run.get("strategy").and_then(|s| s.get("strategy_id")) {
+        if identity.as_str() != Some(parameters.identity()) {
+            return Err("策略身份与实际参数类型不同，不能重标旧结果".into());
+        }
+    }
     if let Some(version) = run
         .get("strategy")
         .and_then(|s| s.get("strategy_rule_version"))
@@ -107,7 +133,12 @@ fn require_current_rule(run: &serde_json::Value) -> Result<(), CommandError> {
     {
         if !matches!(
             version.as_str(),
-            Some(RULE_VERSION | PUBLIC_RULE_VERSION | LOW_PRICE_RULE_VERSION)
+            Some(
+                RULE_VERSION
+                    | PUBLIC_RULE_VERSION
+                    | LOW_PRICE_RULE_VERSION
+                    | CONTINUOUS_INVENTORY_RULE_VERSION
+            )
         ) {
             return Err(format!("策略版本{version}不受当前入口支持；请生成准确版本材料，不能覆盖旧candidate_v1/candidate_v2历史包").into());
         }
@@ -136,6 +167,29 @@ fn load_days_command(mut value: serde_json::Value) -> Result<DaysCommand, Comman
                     .and_then(serde_json::Value::as_object_mut)
                     .ok_or("候选缺少完整strategy")?;
                 for (section, fields) in overrides.as_object().ok_or("策略覆盖不是对象")? {
+                    let inventory = strategy.contains_key("probability_reference")
+                        || strategy
+                            .keys()
+                            .any(|k| INVENTORY_PARAMETERS.contains(&k.as_str()));
+                    let new_field = section == "probability_reference"
+                        || INVENTORY_PARAMETERS.contains(&section.as_str());
+                    let old_field = matches!(
+                        section.as_str(),
+                        "quote"
+                            | "probability"
+                            | "risk"
+                            | "blb_decrease_veto"
+                            | "initial_pair_low_price_veto"
+                    );
+                    // 混合对照的全局覆盖只作用于该字段所属候选，公共 health/repair 仍作用于双方。
+                    if (new_field && !inventory) || (old_field && inventory) {
+                        continue;
+                    }
+                    if new_field && !fields.is_object() {
+                        strategy.insert(section.clone(), fields.clone());
+                        continue;
+                    }
+
                     if matches!(
                         section.as_str(),
                         "blb_decrease_veto" | "initial_pair_low_price_veto"
@@ -169,7 +223,7 @@ fn load_days_command(mut value: serde_json::Value) -> Result<DaysCommand, Comman
             )?;
             require_parameter_version(candidate.get("run").ok_or("候选缺少run")?, &strategy)?;
             candidate.get_mut("run").and_then(serde_json::Value::as_object_mut).ok_or("候选缺少宿主run")?
-                .insert("strategy".into(),serde_json::json!({"strategy_id":STRATEGY_ID,"strategy_rule_version":strategy.version(),"effective_parameters":strategy}));
+                .insert("strategy".into(),serde_json::json!({"strategy_id":strategy.identity(),"strategy_rule_version":strategy.version(),"effective_parameters":strategy}));
         }
     }
     Ok(serde_json::from_value(value)?)
@@ -207,7 +261,47 @@ impl ParameterType {
     }
 }
 // 原策略字段类型决定覆盖解析，不依赖文件中的占位值或复制策略默认。
+const INVENTORY_PARAMETERS: &[&str] = &[
+    "capacity_shares",
+    "inventory_skew_ticks_per_capacity",
+    "initial_cash_pusd",
+    "market_investment_limit_pusd",
+    "per_market_orphan_limit_pusd",
+    "account_orphan_limit_pusd",
+    "drawdown_fraction",
+];
 const PARAMETERS: &[(&str, ParameterType)] = &[
+    ("capacity_shares", ParameterType::Decimal),
+    ("inventory_skew_ticks_per_capacity", ParameterType::Decimal),
+    ("initial_cash_pusd", ParameterType::Decimal),
+    ("market_investment_limit_pusd", ParameterType::Decimal),
+    ("per_market_orphan_limit_pusd", ParameterType::Decimal),
+    ("account_orphan_limit_pusd", ParameterType::Decimal),
+    ("drawdown_fraction", ParameterType::Decimal),
+    (
+        "probability_reference.volatility_window_ms",
+        ParameterType::U64,
+    ),
+    (
+        "probability_reference.initial_sigma_usd_per_sqrt_second",
+        ParameterType::F64,
+    ),
+    (
+        "probability_reference.estimation_error_usd",
+        ParameterType::F64,
+    ),
+    (
+        "probability_reference.binance_innovation_weight",
+        ParameterType::F64,
+    ),
+    (
+        "probability_reference.binance_pressure_weight_usd",
+        ParameterType::F64,
+    ),
+    (
+        "probability_reference.binance_trade_pressure_weight_usd",
+        ParameterType::F64,
+    ),
     ("health.polymarket_silence_normal_ms", ParameterType::U64),
     ("health.polymarket_silence_ms", ParameterType::U64),
     (
@@ -370,7 +464,7 @@ fn load_value(args: impl IntoIterator<Item = String>) -> Result<serde_json::Valu
         apply_entry_overrides(&mut value, &entry_overrides)?;
     }
     for (name, (kind, raw)) in overrides {
-        let (section, field) = name.split_once('.').expect("固定参数路径");
+        let path = name.split_once('.');
         let strategy = value
             .as_object_mut()
             .ok_or("启动配置不是对象")?
@@ -385,6 +479,10 @@ fn load_value(args: impl IntoIterator<Item = String>) -> Result<serde_json::Valu
                 .ok_or("公共策略parameters不是对象")?
         } else {
             strategy
+        };
+        let Some((section, field)) = path else {
+            strategy.insert(name, kind.parse(&raw)?);
+            continue;
         };
         let section = strategy
             .entry(section)
@@ -443,7 +541,7 @@ fn load_config<R: serde::de::DeserializeOwned>(
         serde_json::from_value(value.get("strategy").cloned().ok_or("配置缺少策略参数")?)?;
     require_parameter_version(value.get("run").ok_or("配置缺少run")?, &strategy)?;
     let descriptor = StrategyDescriptorV1 {
-        strategy_id: STRATEGY_ID.into(),
+        strategy_id: strategy.identity().into(),
         strategy_rule_version: strategy.version().into(),
         effective_parameters: serde_json::to_value(&strategy)?,
     };
@@ -539,7 +637,7 @@ fn write_day_failure_json(value: &serde_json::Value) -> std::io::Result<()> {
 async fn main() {
     if std::env::args().any(|arg| arg == "--help") {
         println!(
-            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，每次从头运行，不保存或恢复检查点\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--summary-reserve-seconds <秒>（默认900）\nday可选--entry-market-start-offset-ms <非负毫秒>、--entry-market-end-margin-ms <非负毫秒>：声明输入[S,E)上的S+a≤market.start<E-b；无配置不限制，显式0/0限制；单端沿文件补值后缺值取0。\nday可选--research-evidence-root <新目录>，同次公共生产输出BLB/PM与真实决策，失败返回部分结果。\n公共候选 candidate_v4_public_c0_c1 使用parameters内完整42参数及blb_decrease_veto；--blb-decrease-veto true|false覆盖新候选唯一开关。\n低价候选 candidate_v5_public_low_price 使用parameters内原42参数和initial_pair_low_price_veto；--initial-pair-low-price-veto true|false覆盖唯一开关，固定沿C0不叠BLB。\n全部原策略字段可覆盖（day对各候选显式覆盖）：\n{}",
+            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，每次从头运行，不保存或恢复检查点\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--summary-reserve-seconds <秒>（默认900）\nday可选--entry-market-start-offset-ms <非负毫秒>、--entry-market-end-margin-ms <非负毫秒>：声明输入[S,E)上的S+a≤market.start<E-b；无配置不限制，显式0/0限制；单端沿文件补值后缺值取0。\nday可选--research-evidence-root <新目录>，同次公共生产输出BLB/PM与真实决策，失败返回部分结果。\n公共候选 candidate_v4_public_c0_c1 使用parameters内完整42参数及blb_decrease_veto；--blb-decrease-veto true|false覆盖新候选唯一开关。\n低价候选 candidate_v5_public_low_price 使用parameters内原42参数和initial_pair_low_price_veto；--initial-pair-low-price-veto true|false覆盖唯一开关，固定沿C0不叠BLB。\n连续库存 candidate_v1_continuous_inventory 使用独立完整参数，strategy_id=continuous_inventory；同一day可与candidate_v5_public_low_price/off独立账户对照。新参数含capacity_shares、inventory_skew_ticks_per_capacity、初始现金/投入/风险/回撤、probability_reference及原health/repair；不恢复或重标旧记忆。\n全部策略字段可覆盖（混合day按字段所属候选覆盖，health/repair同时作用）：\n{}",
             PARAMETERS
                 .iter()
                 .map(|(field, _)| *field)
@@ -575,13 +673,17 @@ async fn main() {
         if mode==Mode::Day {
             let command=load_days_command(load_value(args)?)?;
             let rules=load_rules(command.rules)?;
-            let observer = research.evidence_root.as_ref().map(|root| streaming_research::StreamingResearchV1::open(root)).transpose()?;
+            let inventory_comparison = command.days.iter().flat_map(|day| &day.candidates).any(|candidate| matches!(candidate.strategy,StrategyParameters::Continuous(_)));
+            let observer:Option<std::sync::Arc<dyn HistoricalPublicObserverV1>> = research.evidence_root.as_ref().map(|root| ->Result<_,MaterialError> {
+                if inventory_comparison {Ok(std::sync::Arc::new(inventory_research::InventoryResearchV1::open(root)?) as std::sync::Arc<dyn HistoricalPublicObserverV1>)}
+                else {Ok(std::sync::Arc::new(streaming_research::StreamingResearchV1::open(root)?) as std::sync::Arc<dyn HistoricalPublicObserverV1>)}
+            }).transpose()?;
             let mut days=Vec::new();
             for day in command.days {
                 let mut candidates=Vec::new();
                 for candidate in day.candidates {
                     let mut run=candidate.run;
-                    run.strategy=StrategyDescriptorV1 {strategy_id:STRATEGY_ID.into(),strategy_rule_version:candidate.strategy.version().into(),effective_parameters:serde_json::to_value(&candidate.strategy)?};
+                    run.strategy=StrategyDescriptorV1 {strategy_id:candidate.strategy.identity().into(),strategy_rule_version:candidate.strategy.version().into(),effective_parameters:serde_json::to_value(&candidate.strategy)?};
                     run.effective_entry_market_scope=run.entry_market_scope.as_ref().map(|p| p.expand(day.preparation.scope.received_start_utc_ms,day.preparation.scope.received_end_utc_ms)).transpose()?;
                     if let Some(root) = &research.evidence_root {
                         run.research_evidence_path=Some(root.join(format!("candidate-{}-{}.jsonl",days.len(),candidates.len())));
@@ -592,12 +694,12 @@ async fn main() {
                 }
                 days.push(HistoricalDayConfigV1 {preparation:day.preparation,candidates,progress_interval_seconds:interval,producer_lead_groups:day.producer_lead_groups});
             }
-            let factory=|run:&HistoricalPreparedRunConfigV1|->Result<ComplementaryPairV1,MaterialError> {
+            let factory=|run:&HistoricalPreparedRunConfigV1|->Result<SelectedStrategy,MaterialError> {
                 let strategy: StrategyParameters=serde_json::from_value(run.strategy.effective_parameters.clone())?;
                 let namespace=run.strategy_request_namespace.as_ref().ok_or("候选请求命名空间缺失")?.clone();
                 Ok(strategy.build(rules.clone(),namespace)?.with_entry_market_range(run.effective_entry_market_scope.as_ref().map(|e| EntryMarketRangeV1 { start_at_utc_ms:e.market_start_inclusive_utc_ms,end_at_utc_ms:e.market_start_exclusive_utc_ms })))
             };
-            let options=HistoricalDayRunOptionsV1 { research_summary:research.summary, started, public_observer:observer.map(|o| std::sync::Arc::new(o) as std::sync::Arc<dyn HistoricalPublicObserverV1>),
+            let options=HistoricalDayRunOptionsV1 { research_summary:research.summary, started, public_observer:observer,
                 budget_stop_after:research.budget_seconds.map(|budget| std::time::Duration::from_secs(budget-research.reserve_seconds.unwrap_or(900))) };
             let result=if research.summary || research.budget_seconds.is_some() || research.evidence_root.is_some() {
                 run_historical_days_with_options_v1(&days,rules.clone(),&factory,command.parallel_dates.unwrap_or(1),&options)
@@ -705,16 +807,30 @@ mod tests {
         ))
         .unwrap();
         let value = serde_json::to_value(config).unwrap();
-        let actual = value
-            .as_object()
-            .unwrap()
-            .iter()
-            .flat_map(|(section, fields)| {
-                fields
+        let inventory = serde_json::to_value(
+            ContinuousInventoryConfigV1::parse_toml(include_str!(
+                "../../../baseline-mm/configs/strategies/continuous_inventory/adopted-v1.toml"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let actual = [&value, &inventory]
+            .into_iter()
+            .flat_map(|config| {
+                config
                     .as_object()
                     .unwrap()
-                    .keys()
-                    .map(move |field| format!("{section}.{field}"))
+                    .iter()
+                    .flat_map(|(section, fields)| {
+                        if let Some(fields) = fields.as_object() {
+                            fields
+                                .keys()
+                                .map(|field| format!("{section}.{field}"))
+                                .collect::<Vec<_>>()
+                        } else {
+                            vec![section.clone()]
+                        }
+                    })
             })
             .collect::<std::collections::BTreeSet<_>>();
         let supported = PARAMETERS
@@ -723,8 +839,11 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(actual, supported);
         for (name, kind) in PARAMETERS {
-            let (section, field) = name.split_once('.').unwrap();
-            let original = &value[section][field];
+            let pointer = format!("/{}", name.replace('.', "/"));
+            let original = value
+                .pointer(&pointer)
+                .or_else(|| inventory.pointer(&pointer))
+                .expect("已枚举实际字段");
             let raw = original
                 .as_str()
                 .map(str::to_owned)

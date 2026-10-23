@@ -1224,6 +1224,13 @@ pub struct MarketEconomicTotalsReadV1 {
     pub repair_gap_shares: [ExactDecimal; 2],
     pub settlement_state: EconomicSettlementStateV1,
     pub unpaid_taker_fee_pusd: ExactDecimal,
+    /// 原成功平均成本池累计形成量，包含已赎回配对；不是期末库存。
+    pub cumulative_paired_shares: ExactDecimal,
+    pub cumulative_paired_principal_cost_pusd: [ExactRationalV1; 2],
+    pub cumulative_paired_actual_trade_fee_pusd: ExecutionReadValueV1<ExactRationalV1>,
+    /// 扣实际成交费用，未并入返佣、孤腿结局或结算费用。
+    pub cumulative_paired_spread_after_trade_fee_pusd: ExecutionReadValueV1<ExactRationalV1>,
+    pub redeemed_paired_shares: ExactDecimal,
     pub paired_shares: ExactDecimal,
     pub orphan_shares: [ExactDecimal; 2],
     pub executed: [ExecutedEconomicsReadV1; 2],
@@ -1584,6 +1591,52 @@ impl LedgerEconomicReadV2<'_> {
                     }
                 }
             }
+            let successful_investment_pusd = if let Some(index) = &self.state.read_index {
+                index
+                    .markets
+                    .get(condition)
+                    .map_or_else(R::zero, |t| t.investment.clone())
+                    .public()
+            } else {
+                self.state
+                    .trades
+                    .values()
+                    .filter(|t| {
+                        t.fact.condition_id.0 == *condition
+                            && t.success_applied
+                            && t.economic_applied
+                    })
+                    .fold(R::zero(), |sum, t| {
+                        sum.add(&R::from_decimal(
+                            decimal(&t.fact.quote_amount_pusd).expect("原本金"),
+                        ))
+                        .add(&R::from_decimal(t.net_fee))
+                    })
+                    .public()
+            };
+            let successful_investment =
+                R::try_from(&successful_investment_pusd).expect("原成功投入");
+            let unpaired_success_fee_pusd = self.unpaired_fee(condition, m);
+            let paired_fee = match &unpaired_success_fee_pusd {
+                ExecutionReadValueV1::Known(unpaired) => ExecutionReadValueV1::Known(
+                    successful_investment
+                        .sub(&m.success_cost[0])
+                        .sub(&m.success_cost[1])
+                        .sub(&R::try_from(unpaired).expect("原孤腿费用"))
+                        .public(),
+                ),
+                _ => ExecutionReadValueV1::Unavailable,
+            };
+            let paired_spread = match &paired_fee {
+                ExecutionReadValueV1::Known(fee) => ExecutionReadValueV1::Known(
+                    R::from_decimal(m.paired)
+                        .sub(&m.paired_cost[0])
+                        .sub(&m.paired_cost[1])
+                        .sub(&R::try_from(fee).expect("原配对费用"))
+                        .public(),
+                ),
+                _ => ExecutionReadValueV1::Unavailable,
+            };
             MarketEconomicTotalsReadV1 {
                 condition_id: ConditionId(condition.clone()),
                 assets: m.assets.clone(),
@@ -1629,6 +1682,13 @@ impl LedgerEconomicReadV2<'_> {
                         None => EconomicSettlementStateV1::ResolvedNoCurrentPayout,
                     },
                 },
+                cumulative_paired_shares: exact(m.paired),
+                cumulative_paired_principal_cost_pusd: std::array::from_fn(|i| {
+                    m.paired_cost[i].public()
+                }),
+                cumulative_paired_actual_trade_fee_pusd: paired_fee,
+                cumulative_paired_spread_after_trade_fee_pusd: paired_spread,
+                redeemed_paired_shares: exact(redeemed),
                 paired_shares: exact(m.paired - redeemed),
                 orphan_shares: std::array::from_fn(|i| {
                     exact(m.pools[i].quantity - redeemed_orphan[i])
@@ -1655,30 +1715,8 @@ impl LedgerEconomicReadV2<'_> {
                 confirmed_net_pnl_pusd: m.pi.public(),
                 confirmed_net_loss_pusd: R::zero().sub(&m.pi).max(R::zero()).public(),
                 maximum_confirmed_net_loss_pusd: m.maximum_loss.public(),
-                unpaired_success_fee_pusd: self.unpaired_fee(condition, m),
-                successful_investment_pusd: if let Some(index) = &self.state.read_index {
-                    index
-                        .markets
-                        .get(condition)
-                        .map_or_else(R::zero, |t| t.investment.clone())
-                        .public()
-                } else {
-                    self.state
-                        .trades
-                        .values()
-                        .filter(|t| {
-                            t.fact.condition_id.0 == *condition
-                                && t.success_applied
-                                && t.economic_applied
-                        })
-                        .fold(R::zero(), |sum, t| {
-                            sum.add(&R::from_decimal(
-                                decimal(&t.fact.quote_amount_pusd).expect("原本金"),
-                            ))
-                            .add(&R::from_decimal(t.net_fee))
-                        })
-                        .public()
-                },
+                unpaired_success_fee_pusd,
+                successful_investment_pusd,
                 unresolved_orphan_principal_cost_pusd: if m.resolution.is_some() {
                     R::zero().public()
                 } else {

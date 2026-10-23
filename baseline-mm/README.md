@@ -113,3 +113,5 @@ Chainlink 与两个资产盘口是新增配对的依赖。Binance 只按实际�
 受控研究候选 `candidate_v4_public_c0_c1` 的完整配置、公共 F0—F8 映射、200ms 端点规则及正式库／CLI 入口见[公共统计 C0/C1 候选说明](docs/strategies/complementary-pair-public-candidates.md)。它不改变旧 `candidate_v3` 的身份和实现路径。
 
 相对C0的单一低价初始批否决研究版本 `candidate_v5_public_low_price` 及同版本off/on配置见[低价候选说明](docs/strategies/complementary-pair-low-price-candidate.md)。它保持原42参数与公共C0，不叠加BLB，不改旧V3/V4身份。
+
+持续库存候选使用独立身份，参数迁移、完整义务和累计经营字段见[持续库存候选 v1](docs/strategies/continuous-inventory-v1.md)。同一 `backtest-cli` 可显式选择旧V5/off及新候选；工程交付不启动真实研究。

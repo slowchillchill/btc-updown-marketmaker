@@ -84,6 +84,7 @@ pub fn append_pm(root: &Path, rows: &[PolymarketOrderbookV3Message], part: u64) 
     let day = root.join("inputs");
     let manifest = day.join("manifest.json");
     let mut m: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    let utc_hour = format!("{}T00", m["utc_day"].as_str().unwrap());
     let mut w = TypedParquetSegmentWriter::create_for_typed_source(
         &day,
         &format!("extra-{part}"),
@@ -96,9 +97,9 @@ pub fn append_pm(root: &Path, rows: &[PolymarketOrderbookV3Message], part: u64) 
         &mut PolymarketOrderbookV3WriteSequenceState::default(),
     )
     .unwrap();
-    w.append_key_value_metadata("data_collect_daily_file_fact_v1",json!({"source_kind":"polymarket_market","schema_version":POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,"utc_hour":"2026-08-24T00","part":part,"rows":rows.len()}).to_string()).unwrap();
+    w.append_key_value_metadata("data_collect_daily_file_fact_v1",json!({"source_kind":"polymarket_market","schema_version":POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,"utc_hour":utc_hour,"part":part,"rows":rows.len()}).to_string()).unwrap();
     let f = w.finalize().unwrap();
-    m["files"].as_array_mut().unwrap().push(json!({"path":f.final_path.file_name().unwrap().to_str().unwrap(),"source_kind":"polymarket_market","schema_version":POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,"utc_hour":"2026-08-24T00","part":part,"rows":f.row_count,"bytes":std::fs::metadata(&f.final_path).unwrap().len(),"sha256":f.sha256}));
+    m["files"].as_array_mut().unwrap().push(json!({"path":f.final_path.file_name().unwrap().to_str().unwrap(),"source_kind":"polymarket_market","schema_version":POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,"utc_hour":utc_hour,"part":part,"rows":f.row_count,"bytes":std::fs::metadata(&f.final_path).unwrap().len(),"sha256":f.sha256}));
     std::fs::write(manifest, serde_json::to_vec(&m).unwrap()).unwrap();
 }
 #[allow(dead_code)]
@@ -208,17 +209,18 @@ pub(crate) fn finish_source(
     part: u64,
     rows: usize,
 ) {
-    writer.append_key_value_metadata("data_collect_daily_file_fact_v1",json!({"source_kind":source,"schema_version":version,"utc_hour":"2026-08-24T00","part":part,"rows":rows}).to_string()).unwrap();
-    let f = writer.finalize().unwrap();
     let manifest = root.join("inputs/manifest.json");
     let mut m: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    let utc_hour = format!("{}T00", m["utc_day"].as_str().unwrap());
+    writer.append_key_value_metadata("data_collect_daily_file_fact_v1",json!({"source_kind":source,"schema_version":version,"utc_hour":utc_hour,"part":part,"rows":rows}).to_string()).unwrap();
+    let f = writer.finalize().unwrap();
     if version == "polymarket_market_metadata_v6" {
         m["writer_finalize_acks"]
             .as_array_mut()
             .unwrap()
             .push(json!("polymarket_rtds_chainlink_twap"));
     }
-    m["files"].as_array_mut().unwrap().push(json!({"path":f.final_path.file_name().unwrap().to_str().unwrap(),"source_kind":source,"schema_version":version,"utc_hour":"2026-08-24T00","part":part,"rows":f.row_count,"bytes":std::fs::metadata(&f.final_path).unwrap().len(),"sha256":f.sha256}));
+    m["files"].as_array_mut().unwrap().push(json!({"path":f.final_path.file_name().unwrap().to_str().unwrap(),"source_kind":source,"schema_version":version,"utc_hour":utc_hour,"part":part,"rows":f.row_count,"bytes":std::fs::metadata(&f.final_path).unwrap().len(),"sha256":f.sha256}));
     std::fs::write(manifest, serde_json::to_vec(&m).unwrap()).unwrap();
 }
 #[allow(dead_code)]

@@ -27,7 +27,7 @@ pub enum ProbabilityEstimateV1 {
     Unavailable(EstimateUnavailableV1),
 }
 impl ProbabilityEstimateV1 {
-    pub(super) fn up(&self) -> Option<f64> {
+    pub(crate) fn up(&self) -> Option<f64> {
         match self {
             Self::Known { up, .. } => Some(*up),
             _ => None,
@@ -35,11 +35,11 @@ impl ProbabilityEstimateV1 {
     }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub(super) struct SignalMemory {
+pub(crate) struct SignalMemory {
     chainlink: VecDeque<(i64, f64)>,
     binance_baseline: Option<(f64, f64, i64)>,
 }
-pub(super) fn window(rule: BtcSettlementReferenceV1) -> i64 {
+pub(crate) fn window(rule: BtcSettlementReferenceV1) -> i64 {
     match rule {
         BtcSettlementReferenceV1::ChainlinkSpot => 0,
         BtcSettlementReferenceV1::ChainlinkTwapThirtySeconds => 30_000,
@@ -47,7 +47,7 @@ pub(super) fn window(rule: BtcSettlementReferenceV1) -> i64 {
     }
 }
 impl SignalMemory {
-    pub(super) fn maintain_history(
+    pub(crate) fn maintain_history(
         &mut self,
         o: &MarketBusinessObservationV1,
         now: i64,
@@ -114,7 +114,7 @@ impl SignalMemory {
         }
         Ok(Some((s, time)))
     }
-    pub(super) fn estimate(
+    pub(crate) fn estimate(
         &mut self,
         o: &MarketBusinessObservationV1,
         now: i64,

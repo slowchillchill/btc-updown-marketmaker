@@ -3,3 +3,5 @@ pub mod strategies;
 pub use strategies::complementary_pair::*;
 
 pub mod blb_research;
+
+pub use strategies::continuous_inventory::*;
