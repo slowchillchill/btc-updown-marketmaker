@@ -57,16 +57,37 @@ async fn mined_partial_success_and_compensation_keep_principal_support_and_charg
         ("0.022644927536231884", "0.05"),
     ] {
         for fails in [false, true] {
-            let temp = tempfile::tempdir().unwrap();
-            let dpt = temp.path().join("dpt");
+            let temp = if let Some(parent) = std::env::var_os("ISSUE360_FORENSIC_ROOT") {
+                tempfile::Builder::new()
+                    .prefix("fee-owner-")
+                    .tempdir_in(parent)
+                    .unwrap()
+            } else {
+                tempfile::tempdir().unwrap()
+            };
+            let root = temp.path().to_owned();
+            let _temp = if std::env::var_os("ISSUE360_FORENSIC_ROOT").is_some() {
+                temp.keep();
+                None
+            } else {
+                Some(temp)
+            };
+            println!("fee_material_root {}", root.display());
+            let dpt = root.join("dpt");
             let (core, times) = recorded_repair_lifecycle(&dpt);
             let mut policy: serde_json::Value = serde_json::from_slice(SUCCESS_POLICY).unwrap();
             policy["normal_path"]["steps"][2]["offset_ms"] = serde_json::json!(1000);
             if fails {
                 policy["failure_overrides"] = serde_json::json!([{"selector":{"selector_domain":"FILL","account_instance_key":{"run_id":"shared-combination","caller_role":SimCallerRoleV1::Paper,"caller_instance_id":"shared-caller","account_id":"shared-account","platform_source":PlatformSourceV1::Simulated},"fill_sequence":3},"path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10},{"state":"FAILED","offset_ms":2000}],"economic_application_ordinal":1}}]);
             }
+            std::fs::write(
+                root.join("finality.json"),
+                serde_json::to_vec_pretty(&policy).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(root.join("fee-config.json"), serde_json::to_vec_pretty(&serde_json::json!({"fee_rate":fee_rate,"expected_fee":expected_fee,"fails":fails})).unwrap()).unwrap();
             let (mut execution, observation, _) = execution_with_fee_policy_v4(
-                &temp.path().join("sim.jsonl"),
+                &root.join("sim.jsonl"),
                 &core,
                 &serde_json::to_vec(&policy).unwrap(),
                 fee_rate,
@@ -75,7 +96,7 @@ async fn mined_partial_success_and_compensation_keep_principal_support_and_charg
                 AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
             );
             execution
-                .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
+                .bind_ledger_recording_v2(&mut ledger, &root.join("ledger"))
                 .unwrap();
             let mut shared = SharedExecutionV2::from_opening(ledger, observation)
                 .unwrap()
@@ -138,6 +159,7 @@ async fn mined_partial_success_and_compensation_keep_principal_support_and_charg
             let mut saw_partial = false;
             let mut saw_end = false;
             loop {
+                driver.stabilize_recording().unwrap();
                 let input = shared
                     .strategy_input_with_trade_details(&mut driver, false)
                     .unwrap()
@@ -177,6 +199,21 @@ async fn mined_partial_success_and_compensation_keep_principal_support_and_charg
                     assert_eq!(
                         read.profit_and_equity().0,
                         before_p.sub(&r(expected_fee.parse().unwrap()))
+                    );
+                    let inventory =
+                        crate::strategies::common::remaining_inventory_estimate(read, &a)
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(
+                        inventory.loss,
+                        r(Decimal::new(16, 1)),
+                        "D-0378当前平均池未决损失不再次加入已在P中的原H费用或本腿MINED费用"
+                    );
+                    assert!(!inventory.unknown);
+                    println!(
+                        "inventory_fee_read {}",
+                        serde_json::json!({"fee_rate":fee_rate,"fails":fails,
+                        "p":read.profit_and_equity().0.public(),"loss":inventory.loss.public(),"original_h_fee":format!("{:?}",read.market_economics(&a.condition_id).unwrap().orphan_fee)})
                     );
                     let remaining = ComplementaryPairV1::remaining_estimate(read, &a)
                         .unwrap()

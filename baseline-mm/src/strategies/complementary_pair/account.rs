@@ -260,18 +260,6 @@ impl ComplementaryPairV1 {
             .find(|a| &a.asset.token_id == token)
             .and_then(|a| value(&a.tick))
             .ok_or(StrategyErrorV1::Arithmetic("已提交LIMIT的tick读取缺失"))?;
-        let td = decimal(tick)?;
-        let index = (p / td)
-            .to_u16()
-            .ok_or(StrategyErrorV1::Arithmetic("价格索引不能编码"))?;
-        let n = (q * Decimal::from(100))
-            .to_u128()
-            .map(BigUint::from)
-            .ok_or(StrategyErrorV1::Arithmetic("份额轴不能编码"))?;
-        let b = self
-            .rules
-            .limit_buy_cost_v1(&n, index, tick, post_only)
-            .map_err(|e| StrategyErrorV1::Cost(e.to_string()))?;
-        Ok(fraction_units(&b.principal_micro, 6).add(&fraction_units(&b.fee_1e5_units, 5)))
+        super::super::common::limit_cost(&self.rules, q, p, tick, post_only)
     }
 }

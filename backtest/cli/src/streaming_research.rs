@@ -97,7 +97,7 @@ impl StreamingResearchV1 {
         })
     }
 }
-fn line(w: &mut impl Write, v: &Value) -> Result<(), MaterialError> {
+pub(super) fn line(w: &mut impl Write, v: &Value) -> Result<(), MaterialError> {
     serde_json::to_writer(&mut *w, v)?;
     w.write_all(b"\n")?;
     Ok(())
@@ -126,7 +126,7 @@ fn best(levels: &Option<Vec<PriceLevelV1>>, bid: bool) -> Option<&PriceLevelV1> 
         valid.min_by_key(|(p, _)| *p).map(|(_, l)| l)
     }
 }
-fn pm(assets: &[AssetBusinessObservationV1]) -> Value {
+pub(super) fn pm(assets: &[AssetBusinessObservationV1]) -> Value {
     json!(assets.iter().map(|a|json!({"asset":a.asset,"bid":best(&a.bids.value,true),"ask":best(&a.asks.value,false),
         "bid_quality":a.bids.quality,"ask_quality":a.asks.quality,
         "best_bid_ask":fact(&a.best_bid_ask),"tick":fact(&a.tick)})).collect::<Vec<_>>())
