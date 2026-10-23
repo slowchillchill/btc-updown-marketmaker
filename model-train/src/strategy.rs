@@ -54,6 +54,8 @@ pub struct ModelConsumer {
     confirmed_revision: u64,
     last_qualified: Vec<shared_run::QualifiedRebateReadV1>,
     special_state: crate::special::SpecialStateV1,
+    #[cfg(test)]
+    test_market_private: std::collections::VecDeque<Value>,
 }
 #[derive(Clone)]
 struct MarketDomain {
@@ -224,6 +226,8 @@ impl ModelConsumer {
             confirmed_revision: 0,
             last_qualified: Vec::new(),
             special_state: Default::default(),
+            #[cfg(test)]
+            test_market_private: Default::default(),
         })
     }
     pub(crate) fn with_first_observation(
@@ -435,10 +439,16 @@ impl StrategyV1 for ModelConsumer {
             let order_feedback=input.action_before.orders().filter(|r|r.condition_id==Some(&o.market.condition_id)).map(|r|json!({"token_id":r.token_id,"matched_shares":r.matched_shares,"active_unfilled_shares":r.active_unfilled_shares,"accepted":r.accepted.is_some(),"formed":r.formed.is_some(),"latest_lifecycle":r.latest_lifecycle.map(|x|x.record()),"latest_direct_feedback":r.latest_direct_feedback.map(|x|x.record()),"cancellable":r.cancellable})).collect::<Vec<_>>();
             let funds = input.action_before.market_funds(&o.market.condition_id);
             let private = json!({"account":account,"order_feedback":order_feedback,"funds":{"principal":funds.principal.to_string(),"fee":funds.fee.to_string(),"local_principal":funds.local_principal.to_string(),"local_fee":funds.local_fee.to_string(),"platform_pending_principal":funds.platform_pending_principal.to_string(),"platform_pending_fee":funds.platform_pending_fee.to_string(),"pending_count":funds.pending_count}});
-            let mut projection = private.clone();
-            projection["public"] = market_projection(m, at);
+            // #368实例局部夹具，预先准备的同schema值按所有权移入，发布构建不存在。
+            #[cfg(test)]
+            let private = self.test_market_private.pop_front().unwrap_or(private);
+            let public = market_projection(m, at);
+            market_tokens.push(tokens_with_public(
+                &private,
+                &public,
+                &self.worker.config.encoding,
+            ));
             private_markets.push(private);
-            market_tokens.push(tokens(&projection, &self.worker.config.encoding));
             let mut ticks = [ExactDecimal("0".into()), ExactDecimal("0".into())];
             let mut max_prices = [0u16; 2];
             if o.assets.len() == 2 {
@@ -854,3 +864,7 @@ mod entry_scope_tests {
 #[cfg(test)]
 #[path = "ipc_reduction_tests.rs"]
 pub(crate) mod ipc_reduction_tests;
+
+#[cfg(test)]
+#[path = "token_borrow_tests.rs"]
+mod token_borrow_tests;
