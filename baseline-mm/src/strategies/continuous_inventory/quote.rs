@@ -63,6 +63,7 @@ pub(super) fn targets(
     difference: Decimal,
     capacity: Decimal,
     skew_ticks: Decimal,
+    extra_quote_space_ticks: u32,
 ) -> (R, R, R, [R; 2]) {
     let two = r(Decimal::from(2));
     let c = r(books[0].bid + books[0].ask + Decimal::from(2) - books[1].bid - books[1].ask)
@@ -70,7 +71,8 @@ pub(super) fn targets(
     let delta = books[0].tick.max(books[1].tick);
     let h = r(books[0].ask - books[0].bid + books[1].ask - books[1].bid)
         .divided_by(&r(Decimal::from(4)))
-        .max(r(delta).divided_by(&two));
+        .max(r(delta).divided_by(&two))
+        .add(&r(delta).mul(&r(Decimal::from(extra_quote_space_ticks))));
     let skew = r(delta)
         .mul(&r(skew_ticks))
         .mul(&r(difference))
@@ -154,6 +156,7 @@ mod tests {
             Decimal::from(difference),
             Decimal::from(50),
             Decimal::ONE,
+            0,
         );
         [
             floor_price(&raw[0], &books[0]).unwrap(),
@@ -182,6 +185,55 @@ mod tests {
             quotes([("0.01", "0.02"), ("0.98", "0.99")], 100),
             [None, Some(d("0.98"))]
         );
+    }
+    #[test]
+    fn shared_extra_ticks_use_max_tick_before_original_caps_and_floor() {
+        let books = [
+            InventoryBookV1 {
+                bid: d("0.4"),
+                ask: d("0.6"),
+                tick: d("0.01"),
+            },
+            InventoryBookV1 {
+                bid: d("0.4"),
+                ask: d("0.6"),
+                tick: d("0.02"),
+            },
+        ];
+        for (w, half, price) in [(0, "0.1", "0.4"), (1, "0.12", "0.38"), (2, "0.14", "0.36")] {
+            let (center, h, skew, raw) = targets(&books, Decimal::ZERO, d("50"), Decimal::ZERO, w);
+            assert_eq!(center, r(d("0.5")));
+            assert_eq!(skew, R::zero());
+            assert_eq!(h, r(d(half)));
+            assert_eq!(raw, [r(d(price)), r(d(price))]);
+            assert_eq!(
+                [
+                    floor_price(&raw[0], &books[0]).unwrap(),
+                    floor_price(&raw[1], &books[1]).unwrap()
+                ],
+                [Some(d(price)); 2]
+            );
+        }
+        let (_, h, _, raw) = targets(&books, Decimal::ZERO, d("50"), Decimal::ZERO, u32::MAX);
+        assert_eq!(h, r(d("85899346.0")));
+        assert_eq!(
+            floor_price(&raw[0], &books[0]).unwrap(),
+            None,
+            "非正目标不抬价成BUY"
+        );
+        let capped = std::array::from_fn::<_, 2, _>(|_| InventoryBookV1 {
+            bid: d("0.1"),
+            ask: d("0.2"),
+            tick: d("0.01"),
+        });
+        for w in [0, 1] {
+            let (_, _, _, raw) = targets(&capped, Decimal::ZERO, d("50"), Decimal::ZERO, w);
+            assert_eq!(
+                floor_price(&raw[0], &capped[0]).unwrap(),
+                Some(d("0.19")),
+                "原ask/tick上限可吸收空间，不强减最终价"
+            );
+        }
     }
     #[test]
     fn highest_legal_vector_exact_cash_and_unequal_breakpoints() {

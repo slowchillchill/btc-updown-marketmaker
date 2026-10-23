@@ -20,7 +20,7 @@ enum StrategyParameters {
 impl StrategyParameters {
     fn version(&self) -> &'static str {
         match self {
-            Self::Continuous(_) => CONTINUOUS_INVENTORY_RULE_VERSION,
+            Self::Continuous(config) => config.rule_version(),
             Self::LowPrice(_) => LOW_PRICE_RULE_VERSION,
             Self::Public(_) => PUBLIC_RULE_VERSION,
             Self::Legacy(_) => RULE_VERSION,
@@ -39,8 +39,7 @@ impl StrategyParameters {
     ) -> Result<SelectedStrategy, StrategyErrorV1> {
         match self {
             Self::Continuous(config) => {
-                let continuity =
-                    ContinuousInventoryContinuityV1::new_account(config.initial_cash_pusd);
+                let continuity = ContinuousInventoryContinuityV1::new_account_for_config(&config);
                 ContinuousInventoryV1::new(config, rules, namespace, continuity)
                     .map(SelectedStrategy::Inventory)
             }
@@ -138,6 +137,7 @@ fn require_current_rule(run: &serde_json::Value) -> Result<(), CommandError> {
                     | PUBLIC_RULE_VERSION
                     | LOW_PRICE_RULE_VERSION
                     | CONTINUOUS_INVENTORY_RULE_VERSION
+                    | CONTINUOUS_INVENTORY_QUOTE_SPACE_RULE_VERSION
             )
         ) {
             return Err(format!("策略版本{version}不受当前入口支持；请生成准确版本材料，不能覆盖旧candidate_v1/candidate_v2历史包").into());
@@ -264,6 +264,7 @@ impl ParameterType {
 const INVENTORY_PARAMETERS: &[&str] = &[
     "capacity_shares",
     "inventory_skew_ticks_per_capacity",
+    "extra_quote_space_ticks",
     "initial_cash_pusd",
     "market_investment_limit_pusd",
     "per_market_orphan_limit_pusd",
@@ -273,6 +274,7 @@ const INVENTORY_PARAMETERS: &[&str] = &[
 const PARAMETERS: &[(&str, ParameterType)] = &[
     ("capacity_shares", ParameterType::Decimal),
     ("inventory_skew_ticks_per_capacity", ParameterType::Decimal),
+    ("extra_quote_space_ticks", ParameterType::U64),
     ("initial_cash_pusd", ParameterType::Decimal),
     ("market_investment_limit_pusd", ParameterType::Decimal),
     ("per_market_orphan_limit_pusd", ParameterType::Decimal),
@@ -637,7 +639,7 @@ fn write_day_failure_json(value: &serde_json::Value) -> std::io::Result<()> {
 async fn main() {
     if std::env::args().any(|arg| arg == "--help") {
         println!(
-            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，每次从头运行，不保存或恢复检查点\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--summary-reserve-seconds <秒>（默认900）\nday可选--entry-market-start-offset-ms <非负毫秒>、--entry-market-end-margin-ms <非负毫秒>：声明输入[S,E)上的S+a≤market.start<E-b；无配置不限制，显式0/0限制；单端沿文件补值后缺值取0。\nday可选--research-evidence-root <新目录>，同次公共生产输出BLB/PM与真实决策，失败返回部分结果。\n公共候选 candidate_v4_public_c0_c1 使用parameters内完整42参数及blb_decrease_veto；--blb-decrease-veto true|false覆盖新候选唯一开关。\n低价候选 candidate_v5_public_low_price 使用parameters内原42参数和initial_pair_low_price_veto；--initial-pair-low-price-veto true|false覆盖唯一开关，固定沿C0不叠BLB。\n连续库存 candidate_v1_continuous_inventory 使用独立完整参数，strategy_id=continuous_inventory；同一day可与candidate_v5_public_low_price/off独立账户对照。新参数含capacity_shares、inventory_skew_ticks_per_capacity、初始现金/投入/风险/回撤、probability_reference及原health/repair；不恢复或重标旧记忆。\n全部策略字段可覆盖（混合day按字段所属候选覆盖，health/repair同时作用）：\n{}",
+            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，每次从头运行，不保存或恢复检查点\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--summary-reserve-seconds <秒>（默认900）\nday可选--entry-market-start-offset-ms <非负毫秒>、--entry-market-end-margin-ms <非负毫秒>：声明输入[S,E)上的S+a≤market.start<E-b；无配置不限制，显式0/0限制；单端沿文件补值后缺值取0。\nday可选--research-evidence-root <新目录>，同次公共生产输出BLB/PM与真实决策，失败返回部分结果。\n公共候选 candidate_v4_public_c0_c1 使用parameters内完整42参数及blb_decrease_veto；--blb-decrease-veto true|false覆盖新候选唯一开关。\n低价候选 candidate_v5_public_low_price 使用parameters内原42参数和initial_pair_low_price_veto；--initial-pair-low-price-veto true|false覆盖唯一开关，固定沿C0不叠BLB。\n连续库存extra_quote_space_ticks缺省/0使用candidate_v1_continuous_inventory，正整数使用candidate_v2_continuous_inventory_quote_space；strategy_id=continuous_inventory；同一day可与candidate_v5_public_low_price/off独立账户对照。新参数含capacity_shares、inventory_skew_ticks_per_capacity、初始现金/投入/风险/回撤、probability_reference及原health/repair；不恢复或重标旧记忆。\n全部策略字段可覆盖（混合day按字段所属候选覆盖，health/repair同时作用）：\n{}",
             PARAMETERS
                 .iter()
                 .map(|(field, _)| *field)
@@ -800,6 +802,61 @@ fn print_result<E: std::fmt::Debug>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inventory_quote_space_cli_domain_and_parameter_version_follow_effective_configuration() {
+        let config = ContinuousInventoryConfigV1::parse_toml(include_str!(
+            "../../../baseline-mm/configs/strategies/continuous_inventory/adopted-v1.toml"
+        ))
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.json");
+        let mut value = serde_json::to_value(&config).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("extra_quote_space_ticks");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"strategy":value})).unwrap(),
+        )
+        .unwrap();
+        let load = |w: Option<&str>| {
+            let mut args = vec!["--config".to_owned(), path.to_str().unwrap().to_owned()];
+            if let Some(w) = w {
+                args.extend(["--strategy.extra_quote_space_ticks".into(), w.into()]);
+            }
+            let value = load_value(args)?;
+            Ok::<_, CommandError>(serde_json::from_value::<StrategyParameters>(
+                value["strategy"].clone(),
+            )?)
+        };
+        assert_eq!(
+            load(None).unwrap().version(),
+            CONTINUOUS_INVENTORY_RULE_VERSION
+        );
+        for w in ["0", "1", "2", "4294967295"] {
+            let parsed = load(Some(w)).unwrap();
+            let expected = if w == "0" {
+                CONTINUOUS_INVENTORY_RULE_VERSION
+            } else {
+                CONTINUOUS_INVENTORY_QUOTE_SPACE_RULE_VERSION
+            };
+            assert_eq!(parsed.version(), expected);
+            assert_eq!(
+                serde_json::to_value(&parsed).unwrap()["extra_quote_space_ticks"],
+                w.parse::<u64>().unwrap()
+            );
+            let declared = serde_json::json!({"strategy":{"strategy_rule_version":expected}});
+            require_current_rule(&declared).unwrap();
+            require_parameter_version(&declared, &parsed).unwrap();
+            if w != "0" {
+                assert!(require_parameter_version(&serde_json::json!({"strategy":{"strategy_rule_version":CONTINUOUS_INVENTORY_RULE_VERSION}}), &parsed).is_err());
+            }
+        }
+        for w in ["-1", "0.5", "4294967296"] {
+            assert!(load(Some(w)).is_err(), "{w}不能截断/饱和进入u32配置");
+        }
+    }
     #[test]
     fn cli_parameters_cover_actual_strategy_fields() {
         let config = ComplementaryPairConfigV3::parse_toml(include_str!(

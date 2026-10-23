@@ -468,3 +468,5 @@ D-0367 的公共环境适配复用上述原 Parquet 日供料及泛型策略入�
 显式 `timing.decision_mode = "fixed100ms_fifo"` 在原日供料和账户运行循环中启用D-0369时序；省略时仍为原 `event_driven`。每个合法市场帧按100ms生成并保留，账户/反馈按实际开始处理时的SIM截止读取，原单计算/发送槽逐帧顺序完成。配置传递、时钟、有限EOF和验证边界见[公共运行时序](runtime-timing.md)。这项公共接线没有交付模型、奖励或学习恢复，也不证明100ms服务容量。
 
 研究脚本 `scripts/run_research.sh` 可通过 `GNU_TIME_BIN=<GNU time可执行路径>` 显式选择仓库外计时产物；缺省仍为 `/usr/bin/time`。此参数不替换CLI或业务时序，原 `-v/-o` 资源输出、子程序退出码及失败后的部分报告汇总保持。运行前准备适用的GNU time依赖；不使用shell内置time充当该产物。
+
+持续库存的 `--strategy.extra_quote_space_ticks <整数>` 沿正式参数覆盖进入实际候选，JSON/TOML缺省为0，表示域0..=4294967295。完整生效配置始终输出该值。0对应原v1，正值对应 `candidate_v2_continuous_inventory_quote_space`；显式声明的候选版本须同步，不能将旧结果重标。报价及诊断half_spread语义见[持续库存接口](../baseline-mm/docs/strategies/continuous-inventory-v1.md#d-0380-共同额外报价空间)。

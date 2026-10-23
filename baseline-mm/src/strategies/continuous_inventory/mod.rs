@@ -23,6 +23,8 @@ mod health;
 
 pub const CONTINUOUS_INVENTORY_STRATEGY_ID: &str = "continuous_inventory";
 pub const CONTINUOUS_INVENTORY_RULE_VERSION: &str = "candidate_v1_continuous_inventory";
+pub const CONTINUOUS_INVENTORY_QUOTE_SPACE_RULE_VERSION: &str =
+    "candidate_v2_continuous_inventory_quote_space";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,6 +33,9 @@ pub struct ContinuousInventoryConfigV1 {
     pub probability_reference: ProbabilityConfigV1,
     pub capacity_shares: Decimal,
     pub inventory_skew_ticks_per_capacity: Decimal,
+    /// 两腿共同额外报价空间，单位为两腿最大tick的整数倍；缺省兼容原报价。
+    #[serde(default)]
+    pub extra_quote_space_ticks: u32,
     pub initial_cash_pusd: Decimal,
     pub market_investment_limit_pusd: Decimal,
     pub per_market_orphan_limit_pusd: Decimal,
@@ -39,6 +44,13 @@ pub struct ContinuousInventoryConfigV1 {
     pub repair: RepairConfigV2,
 }
 impl ContinuousInventoryConfigV1 {
+    pub fn rule_version(&self) -> &'static str {
+        if self.extra_quote_space_ticks == 0 {
+            CONTINUOUS_INVENTORY_RULE_VERSION
+        } else {
+            CONTINUOUS_INVENTORY_QUOTE_SPACE_RULE_VERSION
+        }
+    }
     pub fn parse_toml(text: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(text)
     }
@@ -53,6 +65,12 @@ pub struct ContinuousInventoryContinuityV1 {
     pub unresolved_profit_allocations: BTreeMap<String, ProfitAllocationV2>,
 }
 impl ContinuousInventoryContinuityV1 {
+    pub fn new_account_for_config(config: &ContinuousInventoryConfigV1) -> Self {
+        Self {
+            rule_version: config.rule_version().into(),
+            ..Self::new_account(config.initial_cash_pusd)
+        }
+    }
     pub fn new_account(initial_cash: Decimal) -> Self {
         Self {
             rule_version: CONTINUOUS_INVENTORY_RULE_VERSION.into(),
@@ -158,7 +176,7 @@ impl ContinuousInventoryV1 {
         if namespace.is_empty()
             || namespace.trim() != namespace
             || config.health.normal_exceeds_max()
-            || continuity.rule_version != CONTINUOUS_INVENTORY_RULE_VERSION
+            || continuity.rule_version != config.rule_version()
         {
             return Err(StrategyErrorV1::Configuration(
                 "新候选命名空间、健康边界或接续版本无效；不迁移旧策略记忆".into(),
@@ -280,7 +298,7 @@ impl ContinuousInventoryV1 {
         self.continuity.high_water_pusd = high.public();
         let mut diagnostic = ContinuousInventoryDiagnosticV1 {
             strategy_id: CONTINUOUS_INVENTORY_STRATEGY_ID.into(),
-            rule_version: CONTINUOUS_INVENTORY_RULE_VERSION.into(),
+            rule_version: self.config.rule_version().into(),
             risk_equity: match &equity {
                 ExecutionReadValueV1::Known(e) => ExecutionReadValueV1::Known(e.public()),
                 _ => ExecutionReadValueV1::Unavailable,
@@ -477,6 +495,7 @@ impl ContinuousInventoryV1 {
                     decimal(&d.difference)?,
                     self.config.capacity_shares,
                     self.config.inventory_skew_ticks_per_capacity,
+                    self.config.extra_quote_space_ticks,
                 );
                 d.center = Some(center.public());
                 d.half_spread = Some(half.public());
@@ -754,4 +773,63 @@ fn pair_assets(o: &MarketBusinessObservationV1) -> Option<[&AssetBusinessObserva
             .iter()
             .find(|a| a.asset.outcome.label.eq_ignore_ascii_case("Down"))?,
     ])
+}
+
+#[cfg(test)]
+mod configuration_tests {
+    use super::*;
+    const PARAMETERS: &str =
+        include_str!("../../../configs/strategies/continuous_inventory/adopted-v1.toml");
+    #[test]
+    fn quote_space_defaults_integer_domain_and_continuity_identity() {
+        let missing = PARAMETERS.replace("extra_quote_space_ticks = 0\n", "");
+        let legacy = ContinuousInventoryConfigV1::parse_toml(&missing).unwrap();
+        let explicit = ContinuousInventoryConfigV1::parse_toml(PARAMETERS).unwrap();
+        assert_eq!(legacy, explicit);
+        assert_eq!(legacy.rule_version(), CONTINUOUS_INVENTORY_RULE_VERSION);
+        assert_eq!(
+            ContinuousInventoryContinuityV1::new_account(legacy.initial_cash_pusd),
+            ContinuousInventoryContinuityV1::new_account_for_config(&legacy)
+        );
+        let mut json = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(json["extra_quote_space_ticks"], 0, "完整生效配置不省略零");
+        json.as_object_mut()
+            .unwrap()
+            .remove("extra_quote_space_ticks");
+        assert_eq!(
+            serde_json::from_value::<ContinuousInventoryConfigV1>(json.clone()).unwrap(),
+            legacy
+        );
+        for w in [0, 1, 2, u32::MAX] {
+            json["extra_quote_space_ticks"] = serde_json::json!(w);
+            let c: ContinuousInventoryConfigV1 = serde_json::from_value(json.clone()).unwrap();
+            let toml = PARAMETERS.replace(
+                "extra_quote_space_ticks = 0",
+                &format!("extra_quote_space_ticks = {w}"),
+            );
+            assert_eq!(ContinuousInventoryConfigV1::parse_toml(&toml).unwrap(), c);
+            assert_eq!(c.extra_quote_space_ticks, w);
+            let expected = if w == 0 {
+                CONTINUOUS_INVENTORY_RULE_VERSION
+            } else {
+                CONTINUOUS_INVENTORY_QUOTE_SPACE_RULE_VERSION
+            };
+            assert_eq!(c.rule_version(), expected);
+            assert_eq!(
+                ContinuousInventoryContinuityV1::new_account_for_config(&c).rule_version,
+                expected
+            );
+        }
+        for raw in ["-1", "0.5", "4294967296"] {
+            json["extra_quote_space_ticks"] = serde_json::from_str(raw).unwrap();
+            assert!(serde_json::from_value::<ContinuousInventoryConfigV1>(json.clone()).is_err());
+            assert!(
+                ContinuousInventoryConfigV1::parse_toml(&PARAMETERS.replace(
+                    "extra_quote_space_ticks = 0",
+                    &format!("extra_quote_space_ticks = {raw}")
+                ))
+                .is_err()
+            );
+        }
+    }
 }
