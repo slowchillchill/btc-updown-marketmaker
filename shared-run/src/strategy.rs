@@ -196,6 +196,24 @@ pub enum QualifiedBatchResultV1 {
     Sent(Vec<SentIntentReceiptV1>),
     Invalidated(Box<InvalidatedBatchV1>),
 }
+/// 策略所属的只读期限算法。只读原公开观察，不持有账户或可变策略实例。
+/// 在线宿主在唯一策略实例计算期间使用；期限是数学到期点，不是已执行事实。
+pub trait StrategyPublicHealthScheduleV1: Send {
+    fn next_evaluation_at(&self, markets: &[&MarketBusinessObservationV1], at: i64) -> Option<i64>;
+}
+
+/// 同一 StrategyV1 实例的并发宿主计算端口；只接收必要冻结能力。
+/// 完整旧读取仍由 decide 提供，不能将必要快照冒充完整账本。
+pub trait DetachedStrategyV1: StrategyV1 {
+    fn decide_detached(
+        &mut self,
+        input: &DetachedStrategyInputV1,
+        calculation_started_at_utc_ms: i64,
+    ) -> Result<StrategyOutputV1<Self::Diagnostics>, Self::Error>;
+}
+pub type DetachedStrategyInputV1 =
+    StrategyInputV1<SharedExecutionRegistryV2, FrozenMarketReadV1, FrozenNecessaryActionAccountV2>;
+
 pub trait StrategyV1 {
     type Error;
     type Diagnostics;
@@ -282,6 +300,19 @@ pub trait StrategyV1 {
     /// 默认不选用；旧调用方继续使用原回调、时序与组节奏。
     fn uses_source_health(&self) -> bool {
         false
+    }
+    /// 只移交必要不可变参数及同一期限算法，不复制策略记忆或账户。
+    fn public_health_schedule(&self) -> Option<Box<dyn StrategyPublicHealthScheduleV1>> {
+        None
+    }
+    /// 读取原不可变观察；用于补查计算期间真实组之间的静默期限。
+    fn next_public_health_evaluation_at(
+        &self,
+        _markets: &[&MarketBusinessObservationV1],
+        _calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        _at: i64,
+    ) -> Option<i64> {
+        None
     }
     /// 返回严格晚于当前时刻的必要期限；没有固定节拍或公共阈值。
     fn next_health_evaluation_at(
@@ -392,6 +423,26 @@ impl BorrowedStrategyInputV1<'_> {
             trade_economics: self.trade_economics.clone(),
         }
     }
+    pub fn freeze_for_detached(&self) -> DetachedStrategyInputV1 {
+        StrategyInputV1 {
+            market_frame_timing: self.market_frame_timing.clone(),
+            action_before: self.action_before.freeze_necessary(
+                self.markets
+                    .iter()
+                    .map(|f| f.observation.market.condition_id.clone()),
+            ),
+            markets: self
+                .markets
+                .iter()
+                .map(|f| FrozenMarketReadV1 {
+                    statistics: f.statistics.clone(),
+                    observation: f.observation.clone(),
+                    rule_context: f.rule_context.clone(),
+                })
+                .collect(),
+            trade_economics: self.trade_economics.clone(),
+        }
+    }
     pub fn calculate_borrowed<S: StrategyV1>(
         &self,
         strategy: &mut S,
@@ -407,6 +458,11 @@ impl BorrowedStrategyInputV1<'_> {
 }
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct SentIntentReceiptV1 {
+    /// 本项原owner真实发送边界；批次每项分别保存，不能沿用前项时刻。
+    pub sent_at_utc_ms: i64,
+    pub newly_registered: bool,
+    /// 当前本项资格的实际读取前缀；重读旧回执时不冒称原登记前缀。
+    pub observed_cutoff: TrustedGroupDecisionCutoffV1,
     pub context: RequestContextV2,
     pub receipt: MutationRequestReceiptV2,
 }
@@ -878,6 +934,7 @@ impl SharedExecutionV2 {
             .await;
         match result {
             Ok(QualifiedBatchResultV1::Sent(sent)) => {
+                let sent_at_utc_ms = sent.first().map_or(sent_at_utc_ms, |r| r.sent_at_utc_ms);
                 let original = Ok(sent);
                 strategy.dispatched(&calculation.calculation, &original);
                 Ok(QualifiedStrategyDispatchV1::Dispatched {
@@ -937,7 +994,7 @@ impl SharedExecutionV2 {
         &mut self,
         decision: &mut PublicGroupDecisionV1<'_>,
         intents: &[ReservedIntentV1],
-        observed_cutoff: Option<&TrustedGroupDecisionCutoffV1>,
+        _observed_cutoff: Option<&TrustedGroupDecisionCutoffV1>,
         mut qualify: impl FnMut(
             &Self,
             &PublicGroupDecisionV1<'_>,
@@ -1041,6 +1098,46 @@ impl SharedExecutionV2 {
                 }
                 .into());
             }
+            let prepared = match intent_bridge::IntentBridge::bind_sim_group(decision)
+                .prepare(item.context.clone(), &item.intent)
+            {
+                Ok(prepared) => prepared,
+                Err(failure) => {
+                    return Err(BatchExecutionErrorV1 {
+                        error: SharedActionErrorV1::Sim(failure.error),
+                        sent,
+                        attempted_intent_index: Some(index),
+                        failed_request_effect: Some(failure.effect),
+                        release_errors: self.release_unsent_intents(&intents[index..], &owned),
+                    }
+                    .into());
+                }
+            };
+            let mut send_boundary = match decision.prepare_request_boundary() {
+                Ok(boundary) => boundary,
+                Err(error) => {
+                    return Err(BatchExecutionErrorV1 {
+                        error: SharedActionErrorV1::Sim(error),
+                        sent,
+                        attempted_intent_index: Some(index),
+                        failed_request_effect: Some(RequestEffectV1::NoRequestEffect),
+                        release_errors: self.release_unsent_intents(&intents[index..], &owned),
+                    }
+                    .into());
+                }
+            };
+            let decision = &mut *send_boundary;
+            if let Err(error) = self.apply_closed() {
+                return Err(BatchExecutionErrorV1 {
+                    error: SharedActionErrorV1::Ledger(error),
+                    sent,
+                    attempted_intent_index: None,
+                    failed_request_effect: None,
+                    release_errors: self.release_unsent_intents(&intents[index..], &owned),
+                }
+                .into());
+            }
+            self.observe_group(&decision.frames_at_observation());
             let qualification = if self
                 .registry()
                 .has_sim_submission_evidence(&item.context.global_request_id)
@@ -1057,9 +1154,10 @@ impl SharedExecutionV2 {
                             sent,
                             invalidated_intent_index: index,
                             reason,
-                            observed_cutoff: observed_cutoff
-                                .expect("启用资格复核提供当前合法截止")
-                                .clone(),
+                            observed_cutoff: decision
+                                .observation_driver()
+                                .observation_cutoff()
+                                .expect("本项真实资格边界已有当前截止"),
                             detected_at_utc_ms: decision.sent_at_utc_ms(),
                             release_errors: self.release_unsent_intents(&intents[index..], &owned),
                         },
@@ -1073,21 +1171,6 @@ impl SharedExecutionV2 {
                     });
                 }
             }
-            let prepared = match intent_bridge::IntentBridge::bind_sim_group(decision)
-                .prepare(item.context.clone(), &item.intent)
-            {
-                Ok(prepared) => prepared,
-                Err(failure) => {
-                    return Err(BatchExecutionErrorV1 {
-                        error: SharedActionErrorV1::Sim(failure.error),
-                        sent,
-                        attempted_intent_index: Some(index),
-                        failed_request_effect: Some(failure.effect),
-                        release_errors: self.release_unsent_intents(&intents[index..], &owned),
-                    }
-                    .into());
-                }
-            };
             for reserve in &item.reserves {
                 let submission = LedgerSubmissionItemIdentityV1 {
                     global_request_id: item.context.global_request_id.clone(),
@@ -1140,6 +1223,9 @@ impl SharedExecutionV2 {
                     .into());
                 }
             }
+            let was_registered = decision
+                .registered_request_sent_at_utc_ms(&item.context.global_request_id)
+                .is_some();
             match self
                 .execute_prepared_with_request_effect(
                     decision,
@@ -1155,6 +1241,14 @@ impl SharedExecutionV2 {
                         owned.remove(&reserve.reserve.request_identity);
                     }
                     sent.push(SentIntentReceiptV1 {
+                        sent_at_utc_ms: decision
+                            .registered_request_sent_at_utc_ms(&item.context.global_request_id)
+                            .expect("原登记回执必有真实请求记录"),
+                        newly_registered: !was_registered,
+                        observed_cutoff: decision
+                            .observation_driver()
+                            .observation_cutoff()
+                            .expect("本项正式发送边界"),
                         context: item.context.clone(),
                         receipt,
                     });

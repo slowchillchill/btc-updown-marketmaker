@@ -1,3 +1,7 @@
+// 复用公共夹具时保持同一crate路径；仅单元测试编译，不增加运行依赖。
+#[cfg(test)]
+extern crate self as sim_system;
+
 mod account;
 pub mod buy_cost;
 

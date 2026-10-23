@@ -22,7 +22,7 @@ pub type PaperError = Box<dyn std::error::Error + Send + Sync>;
 
 /// 所有值由调用方明确提供；不包含生产资源默认值或可替换的 HTTP 端点。
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PaperConfigV1 {
+pub struct PaperRuntimeConfigV1 {
     pub socket_path: PathBuf,
     pub dpt_root: PathBuf,
     pub sim_log: PathBuf,
@@ -40,7 +40,24 @@ pub struct PaperConfigV1 {
     pub admission_policy: AccountAdmissionPolicyV3,
     pub max_group_bytes: usize,
     pub finite_in_flight_groups: usize,
+}
+/// 旧有限脚本保留相同 JSON 字段；装配参数与脚本策略分开。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaperConfigV1 {
+    #[serde(flatten)]
+    pub runtime: PaperRuntimeConfigV1,
     pub script: PaperScriptConfigV1,
+}
+impl std::ops::Deref for PaperConfigV1 {
+    type Target = PaperRuntimeConfigV1;
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+impl std::ops::DerefMut for PaperConfigV1 {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.runtime
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaperSessionV1 {
@@ -123,7 +140,7 @@ impl PaperScriptConfigV1 {
         }
     }
 }
-impl PaperConfigV1 {
+impl PaperRuntimeConfigV1 {
     pub fn snapshot_request(&self) -> CurrentProcessSnapshotRequestV1 {
         CurrentProcessSnapshotRequestV1 {
             reference_market: self.reference_market.clone(),
@@ -175,9 +192,10 @@ impl std::fmt::Display for PaperFailureV1 {
 }
 impl std::error::Error for PaperFailureV1 {}
 
-fn assemble(
-    config: &PaperConfigV1,
+pub(super) fn assemble(
+    config: &PaperRuntimeConfigV1,
     rules: Arc<SealedProcessRuleSnapshotV3>,
+    resolution_policy: Option<GammaResolutionPolicyV1>,
 ) -> Result<(ContinuousPublicConsumptionV1, SharedExecutionV2), PaperError> {
     let finality = Arc::new(TradeFinalityPolicyV2::decode_and_seal(&std::fs::read(
         &config.finality_policy_path,
@@ -261,6 +279,19 @@ fn assemble(
             result => {
                 result?;
                 break;
+            }
+        }
+    }
+    if let Some(policy) = resolution_policy {
+        loop {
+            match execution.configure_gamma_resolution_policy_v1(policy) {
+                Err(SimRunActorErrorV2::RecordingBackpressured) => {
+                    execution.wait_for_recording_capacity()?
+                }
+                result => {
+                    result?;
+                    break;
+                }
             }
         }
     }
@@ -529,6 +560,41 @@ async fn script_group(
     Ok(())
 }
 
+/// 两个正式入口复用同一次准备材料登记市场；不重新解析或选择规则。
+pub(super) fn enroll_markets(
+    driver: &mut ContinuousPublicConsumptionV1,
+    group: &PreparedPublicGroupV1,
+) -> Result<(), PaperError> {
+    for context in &group.pm_contexts {
+        if !driver.has_enrolled_market(&context.market.condition_id) {
+            let assets = context
+                .assets
+                .iter()
+                .map(|asset| asset.asset.clone())
+                .collect::<Vec<_>>()
+                .try_into()
+                .map_err(|_| "原 PM 市场不是二元市场")?;
+            let market = PlatformMarketV1::try_new(context.market.clone(), assets)?;
+            let request = MarketEnrollmentRequestV1 {
+                enrollment_request_id: context.market.condition_id.0.clone(),
+                market,
+            };
+            loop {
+                match driver.enroll_market(request.clone()) {
+                    Err(SimRunActorErrorV2::RecordingBackpressured) => {
+                        driver.wait_for_recording_capacity()?
+                    }
+                    result => {
+                        result?;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// binary 和受控 Unix 对端测试共用本入口。规则由原冷启动加载器在调用前封存。
 /// 同一个 next_applied future 跨 timer 保留；完成段和计划停止排空段不再选择 timer。
 pub async fn run_paper_v1(
@@ -536,7 +602,7 @@ pub async fn run_paper_v1(
     rules: Arc<SealedProcessRuleSnapshotV3>,
     stop: impl Future<Output = ()>,
 ) -> Result<PaperReportV1, PaperError> {
-    let (mut driver, mut shared) = assemble(config, rules.clone())?;
+    let (mut driver, mut shared) = assemble(config, rules.clone(), None)?;
     let mut progress = PublicOnlineProgressV1::default();
     let mut step = PaperScriptStepV1::default();
     let mut completed = None;
@@ -571,34 +637,7 @@ pub async fn run_paper_v1(
                 }
                 PublicOnlineNextV1::Applied(mut pending) => {
                     for group in PreparedPublicGroupV1::from_online(&mut pending) {
-                        for context in &group.pm_contexts {
-                            if !driver.has_enrolled_market(&context.market.condition_id) {
-                                let assets = context
-                                    .assets
-                                    .iter()
-                                    .map(|asset| asset.asset.clone())
-                                    .collect::<Vec<_>>()
-                                    .try_into()
-                                    .map_err(|_| "原 PM 市场不是二元市场")?;
-                                let market =
-                                    PlatformMarketV1::try_new(context.market.clone(), assets)?;
-                                let request = MarketEnrollmentRequestV1 {
-                                    enrollment_request_id: context.market.condition_id.0.clone(),
-                                    market,
-                                };
-                                loop {
-                                    match driver.enroll_market(request.clone()) {
-                                        Err(SimRunActorErrorV2::RecordingBackpressured) => {
-                                            driver.wait_for_recording_capacity()?
-                                        }
-                                        result => {
-                                            result?;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        enroll_markets(&mut driver, &group)?;
                         driver.apply_group(group)?;
                         script_group(&config.script, &rules, &mut step, &mut driver, &mut shared)
                             .await?;

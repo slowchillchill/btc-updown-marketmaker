@@ -9,6 +9,7 @@ members = [
     "ledger",
     "sim-system",
     "shared-run",
+    "paper-trade",
     "baseline-mm",
     "backtest",
     "backtest/cli",

@@ -16,8 +16,7 @@ pub struct OwnedActionAccountV2 {
     pub(crate) economics: AccountEconomicsReadV3,
     pub(crate) request_trades: BTreeMap<String, Vec<Option<FrozenTradeEconomicsV1>>>,
 }
-pub trait ActionAccountReadV2 {
-    fn full(&self) -> &OwnedActionAccountV2;
+pub trait NecessaryActionAccountReadV2 {
     fn request_trade_economics(
         &self,
         request: &str,
@@ -26,69 +25,116 @@ pub trait ActionAccountReadV2 {
     fn profit_and_equity(&self) -> (R, ExecutionReadValueV1<R>);
     fn market(&self, condition: &ConditionId) -> Option<MarketEconomicNumbersV1>;
     fn market_funds(&self, condition: &ConditionId) -> MarketFundsNumbersV1;
+    /// 账户全部仍有风险/义务的市场身份；未提供当前行情不会使旧责任消失。
+    fn risk_market_ids(&self) -> Vec<ConditionId>;
 }
+/// 完整账本/经济读取是独立能力；必要冻结不能伪造该接口。
+pub trait ActionAccountReadV2: NecessaryActionAccountReadV2 {
+    fn full(&self) -> &OwnedActionAccountV2;
+}
+
 fn amount(v: &ExactDecimal) -> Decimal {
     Decimal::from_str_exact(&v.0).expect("原精确金额")
 }
 fn rational(v: &ExactRationalV1) -> R {
     R::try_from(v).expect("原精确有理数")
 }
-// 稳态只收集未闭合owner成交所在订单与活动订单相关身份；恢复后的首次owner索引
-// 可从原trades重建身份集合一次，不复制完整历史载荷。
-pub(crate) fn request_trade_identities<R: Clone + std::fmt::Debug + Eq>(
+// 活动订单、Ledger 未闭合成交及已观察但尚待应用的原 NOE 的有界并集。
+// 查同订单所有成交才能区分成功应用量和仍占用的量；不复制全部历史。
+pub(crate) fn obligation_order_ids<R: Clone + std::fmt::Debug + Eq>(
     ledger: &LedgerWriterV1,
     registry: &SharedExecutionRegistry<R>,
-) -> BTreeMap<String, Vec<Identity>> {
+    pending: &[::execution_normalization::NoeConsumedRecordRef<R>],
+) -> BTreeSet<Identity> {
     let read = ledger.necessary_read_v2().expect("原已开户");
-    let mut ids: BTreeSet<_> = read.unclosed_trade_identities().cloned().collect();
-    let unclosed_orders: BTreeSet<_> = ids
-        .iter()
-        .filter_map(|id| {
-            read.trade_economics(id)
-                .map(|t| t.fact.order_identity.clone())
-        })
-        .collect();
-    // 订单可已被registry判为终局，但某笔经济引用仍未应用；同订单已成功
-    // 的成交量仍是未决配对容量的依据，不能只保留那一笔未闭合成交。
-    ids.extend(
-        unclosed_orders
-            .iter()
-            .flat_map(|order| registry.order_trade_identities(order))
-            .cloned(),
-    );
-    ids.extend(
-        registry
-            .unfinished_orders()
-            .flat_map(|o| registry.order_trade_identities(o.order_identity))
-            .cloned(),
-    );
+    registry
+        .unfinished_orders()
+        .map(|o| o.order_identity.clone())
+        .chain(
+            read.unclosed_trade_identities()
+                .filter_map(|id| read.trade_economics(id))
+                .map(|t| t.fact.order_identity.clone()),
+        )
+        .chain(
+            pending
+                .iter()
+                .filter_map(crate::registry::trade)
+                .map(|t| t.order_identity.clone()),
+        )
+        .collect()
+}
+pub(crate) fn request_trade_identities<R: Clone + std::fmt::Debug + Eq>(
+    registry: &SharedExecutionRegistry<R>,
+    orders: &BTreeSet<Identity>,
+) -> BTreeMap<String, Vec<Identity>> {
     let mut requests: BTreeMap<String, Vec<Identity>> = BTreeMap::new();
-    for id in ids {
-        let order = read
-            .trade_economics(&id)
-            .map(|t| t.fact.order_identity.clone())
-            .or_else(|| {
-                registry
-                    .unfinished_orders()
-                    .find(|o| {
-                        registry
-                            .order_trade_identities(o.order_identity)
-                            .any(|t| t == &id)
-                    })
-                    .map(|o| o.order_identity.clone())
-            });
-        if let Some(origin) = order
-            .as_ref()
-            .and_then(|o| registry.order(o))
-            .and_then(|o| o.origin)
-        {
+    for order in orders {
+        if let Some(origin) = registry.order(order).and_then(|o| o.origin) {
             requests
                 .entry(origin.intent.global_request_id().to_owned())
                 .or_default()
-                .push(id);
+                .extend(registry.order_trade_identities(order).cloned());
         }
     }
+    for ids in requests.values_mut() {
+        ids.sort();
+        ids.dedup();
+    }
     requests
+}
+/// 原 Registry 已观察成交与同冻结 Ledger owner 的应用状态。
+/// `ledger == None` 是完整 owner 按该身份查无记录，不是成功或已应用。
+#[derive(Clone)]
+pub struct ObservedTradeApplicationV1<R> {
+    /// Registry 已观察的原 NOE；只由 Ledger owner 提供的未闭合项没有此引用。
+    pub observed: Option<::execution_normalization::NoeConsumedRecordRef<R>>,
+    pub ledger: Option<FrozenTradeEconomicsV1>,
+}
+impl<R: Clone + std::fmt::Debug + Eq> ObservedTradeApplicationV1<R> {
+    pub fn fact(
+        &self,
+    ) -> &contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2<Identity> {
+        if let Some(record) = &self.observed {
+            crate::registry::trade(record).expect("原成交引用")
+        } else {
+            &self.ledger.as_ref().expect("原 owner 成交").fact
+        }
+    }
+    pub fn success_applied(&self) -> bool {
+        self.ledger.as_ref().is_some_and(|t| t.success_applied)
+    }
+}
+pub(crate) fn freeze_obligation_trades<R: Clone + std::fmt::Debug + Eq>(
+    ledger: &LedgerWriterV1,
+    registry: &SharedExecutionRegistry<R>,
+    orders: &BTreeSet<Identity>,
+) -> Vec<ObservedTradeApplicationV1<R>> {
+    let read = ledger.necessary_read_v2().expect("原已开户");
+    let mut trades = BTreeMap::new();
+    for record in orders.iter().flat_map(|id| registry.order_trades(id)) {
+        if let Some(fact) = crate::registry::trade(record) {
+            trades
+                .entry(fact.trade_identity.clone())
+                .or_insert_with(|| ObservedTradeApplicationV1 {
+                    observed: Some(record.clone()),
+                    ledger: read
+                        .trade_economics(&fact.trade_identity)
+                        .map(FrozenTradeEconomicsV1::from),
+                });
+        }
+    }
+    // 原 owner 已接纳而 Registry 尚无关联的成交也不能消失；由消费者按未知关联处理。
+    for id in read.unclosed_trade_identities() {
+        if let Some(t) = read.trade_economics(id) {
+            trades
+                .entry(id.clone())
+                .or_insert_with(|| ObservedTradeApplicationV1 {
+                    observed: None,
+                    ledger: Some(FrozenTradeEconomicsV1::from(t)),
+                });
+        }
+    }
+    trades.into_values().collect()
 }
 pub(crate) fn freeze_request_trades(
     ledger: &LedgerWriterV1,
@@ -106,7 +152,29 @@ pub(crate) fn freeze_request_trades(
         })
         .collect()
 }
-impl ActionAccountReadV2 for OwnedActionAccountV2 {
+impl NecessaryActionAccountReadV2 for OwnedActionAccountV2 {
+    fn risk_market_ids(&self) -> Vec<ConditionId> {
+        let full = self.full();
+        full.economics
+            .markets
+            .iter()
+            .filter(|m| {
+                m.settlement_state == EconomicSettlementStateV1::Unresolved
+                    && m.orphan_shares.iter().any(|q| amount(q) > Decimal::ZERO)
+            })
+            .map(|m| m.condition_id.clone())
+            .chain(
+                full.ledger
+                    .market_projections
+                    .iter()
+                    .filter(|m| self.market_funds(&m.condition_id).has_obligation())
+                    .map(|m| m.condition_id.clone()),
+            )
+            .map(|id| (id.0.clone(), id))
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
+            .collect()
+    }
     fn request_trade_economics(
         &self,
         request: &str,
@@ -119,9 +187,6 @@ impl ActionAccountReadV2 for OwnedActionAccountV2 {
             .collect::<Option<Vec<_>>>()
             .map(ExecutionReadValueV1::Known)
             .unwrap_or(ExecutionReadValueV1::Unavailable)
-    }
-    fn full(&self) -> &Self {
-        self
     }
     fn cash_available(&self) -> Decimal {
         amount(&self.economics.cash.actual_available_pusd)
@@ -240,7 +305,7 @@ impl<'a> BorrowedActionAccountV2<'a> {
         })
     }
 }
-impl ActionAccountReadV2 for BorrowedActionAccountV2<'_> {
+impl NecessaryActionAccountReadV2 for BorrowedActionAccountV2<'_> {
     fn request_trade_economics(
         &self,
         request: &str,
@@ -255,31 +320,20 @@ impl ActionAccountReadV2 for BorrowedActionAccountV2<'_> {
             .map(ExecutionReadValueV1::Known)
             .unwrap_or(ExecutionReadValueV1::Unavailable)
     }
-    fn full(&self) -> &OwnedActionAccountV2 {
-        self.full.get_or_init(|| {
-            let read = self.ledger.economic_read().expect("原已开户前缀");
-            let economics = if let Some(driver) = self.driver {
-                AccountEconomicsReadV3::from_ledger_and_observations(
-                    &read,
-                    driver.observations_at_current_prefix(),
-                )
-            } else {
-                AccountEconomicsReadV3::from_ledger_and_observations(
-                    &read,
-                    self.observations.iter().copied(),
-                )
-            };
-            OwnedActionAccountV2 {
-                learning: None,
-                request_trades: freeze_request_trades(self.ledger, &self.request_trade_ids),
-                ledger: read.into_base(),
-                economics,
-            }
-        })
-    }
     fn cash_available(&self) -> Decimal {
         self.ledger.necessary_read_v2().expect("原已开户").cash().0
     }
+    fn risk_market_ids(&self) -> Vec<ConditionId> {
+        let read = self.ledger.necessary_read_v2().expect("原已开户");
+        read.marked_markets()
+            .chain(read.funds_markets())
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(ConditionId)
+            .collect()
+    }
+
     fn profit_and_equity(&self) -> (R, ExecutionReadValueV1<R>) {
         let read = self.ledger.necessary_read_v2().expect("原已开户");
         let totals = read.account();
@@ -340,4 +394,107 @@ pub fn conservative_nav<'a>(
     }
     nav.map(ExecutionReadValueV1::Known)
         .unwrap_or(ExecutionReadValueV1::Unavailable)
+}
+
+impl ActionAccountReadV2 for OwnedActionAccountV2 {
+    fn full(&self) -> &Self {
+        self
+    }
+}
+impl ActionAccountReadV2 for BorrowedActionAccountV2<'_> {
+    fn full(&self) -> &OwnedActionAccountV2 {
+        self.full.get_or_init(|| {
+            let read = self.ledger.economic_read().expect("原已开户前缀");
+            let economics = if let Some(driver) = self.driver {
+                AccountEconomicsReadV3::from_ledger_and_observations(
+                    &read,
+                    driver.observations_at_current_prefix(),
+                )
+            } else {
+                AccountEconomicsReadV3::from_ledger_and_observations(
+                    &read,
+                    self.observations.iter().copied(),
+                )
+            };
+            OwnedActionAccountV2 {
+                learning: None,
+                request_trades: freeze_request_trades(self.ledger, &self.request_trade_ids),
+                ledger: read.into_base(),
+                economics,
+            }
+        })
+    }
+}
+/// 计算开始时从原 owner 读取的必要值；没有经济归约、完整账本或新账户。
+#[derive(Clone)]
+pub struct FrozenNecessaryActionAccountV2 {
+    pub(crate) totals: ledger::AccountEconomicNumbersV1,
+    cash: Decimal,
+    profit_and_equity: (R, ExecutionReadValueV1<R>),
+    markets: BTreeMap<String, MarketEconomicNumbersV1>,
+    funds: BTreeMap<String, MarketFundsNumbersV1>,
+    request_trades: BTreeMap<String, Vec<Option<FrozenTradeEconomicsV1>>>,
+    risk_market_ids: Vec<ConditionId>,
+}
+impl BorrowedActionAccountV2<'_> {
+    pub(crate) fn freeze_necessary(
+        &self,
+        selected: impl Iterator<Item = ConditionId>,
+    ) -> FrozenNecessaryActionAccountV2 {
+        let read = self.ledger.necessary_read_v2().expect("原已开户");
+        // 全部未闭合资金/估值责任参与，而不只保留当前经营市场。
+        let ids: BTreeSet<_> = selected
+            .map(|id| id.0)
+            .chain(read.marked_markets().map(str::to_owned))
+            .chain(read.funds_markets().map(str::to_owned))
+            .collect();
+        FrozenNecessaryActionAccountV2 {
+            totals: read.account().clone(),
+            risk_market_ids: self.risk_market_ids(),
+            cash: self.cash_available(),
+            profit_and_equity: self.profit_and_equity(),
+            markets: ids
+                .iter()
+                .filter_map(|id| {
+                    read.market(&ConditionId(id.clone()))
+                        .map(|v| (id.clone(), v))
+                })
+                .collect(),
+            funds: ids
+                .iter()
+                .map(|id| (id.clone(), read.market_funds(&ConditionId(id.clone()))))
+                .collect(),
+            request_trades: freeze_request_trades(self.ledger, &self.request_trade_ids),
+        }
+    }
+}
+impl NecessaryActionAccountReadV2 for FrozenNecessaryActionAccountV2 {
+    fn risk_market_ids(&self) -> Vec<ConditionId> {
+        self.risk_market_ids.clone()
+    }
+    fn cash_available(&self) -> Decimal {
+        self.cash
+    }
+    fn profit_and_equity(&self) -> (R, ExecutionReadValueV1<R>) {
+        self.profit_and_equity.clone()
+    }
+    fn market(&self, condition: &ConditionId) -> Option<MarketEconomicNumbersV1> {
+        self.markets.get(&condition.0).cloned()
+    }
+    fn market_funds(&self, condition: &ConditionId) -> MarketFundsNumbersV1 {
+        self.funds.get(&condition.0).cloned().unwrap_or_default()
+    }
+    fn request_trade_economics(
+        &self,
+        request: &str,
+    ) -> ExecutionReadValueV1<Vec<TradeEconomicReadV1<'_>>> {
+        self.request_trades
+            .get(request)
+            .into_iter()
+            .flatten()
+            .map(|t| t.as_ref().map(FrozenTradeEconomicsV1::as_read))
+            .collect::<Option<Vec<_>>>()
+            .map(ExecutionReadValueV1::Known)
+            .unwrap_or(ExecutionReadValueV1::Unavailable)
+    }
 }

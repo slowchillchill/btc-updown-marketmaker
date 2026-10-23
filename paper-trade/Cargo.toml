@@ -1,0 +1,24 @@
+[package]
+name = "paper-trade"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+baseline-mm = { path = "../baseline-mm" }
+shared-run = { path = "../shared-run" }
+sim-system = { path = "../sim-system" }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+tokio = { version = "=1.52.3", default-features = false, features = ["macros", "rt", "signal", "time"] }
+
+[dev-dependencies]
+execution-normalization = { path = "../execution-normalization" }
+ledger = { path = "../ledger" }
+contracts = { path = "../contracts" }
+data-collect = { path = "../data-collect" }
+data-pipeline-core = { path = "../data-pipeline/core" }
+data-pipeline-training = { path = "../data-pipeline/training" }
+rust_decimal = { version = "=1.42.1", default-features = false, features = ["std"] }
+sha2 = "=0.10.9"
+tempfile = "=3.27.0"

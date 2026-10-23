@@ -1,0 +1,138 @@
+{
+  "runtime": {
+    "socket_path": "/INPUT/collector.sock",
+    "dpt_root": "/OUTPUT/run/dpt",
+    "sim_log": "/OUTPUT/run/sim.jsonl",
+    "noe_root": "/OUTPUT/run/noe",
+    "ledger_root": "/OUTPUT/run/ledger",
+    "public_online": {
+      "source_progress": true,
+      "header": {
+        "input_stream_id": "DECLARED_INPUT_STREAM_ID",
+        "canonical_rule_version": "rule-v1",
+        "observation_version": "public-observation-v1",
+        "ordering_version": "original-input-v1",
+        "input_scope": "DECLARED_ONLINE_INPUT_SCOPE",
+        "max_pending_ws_terminals": 2,
+        "initial_state": "Empty"
+      },
+      "recording": {
+        "max_artifact_payload_bytes": 524288,
+        "max_capture_output_bytes": 1073741824,
+        "max_candidate_directory_bytes": 4294967296,
+        "max_observation_l2_levels": 256,
+        "sort": {
+          "max_run_rows": 4,
+          "max_run_bytes": 1048576,
+          "max_temp_run_files": 512,
+          "merge_fan_in": 4,
+          "merge_workers": 1,
+          "max_open_files": 5,
+          "batch_rows": 2,
+          "max_temp_bytes": 1073741824
+        }
+      },
+      "recording_in_flight_inputs": 1,
+      "stabilize_every_inputs": 1,
+      "read_page_rows": 1,
+      "max_read_batch_bytes": 1048576
+    },
+    "reference_market": {
+      "condition_id": "REFERENCE_CONDITION_ID",
+      "clob_market_id": "REFERENCE_CLOB_MARKET_ID",
+      "slug": "btc-updown-5m-REFERENCE_START_SECONDS",
+      "outcomes": [
+        {
+          "token_id": "REFERENCE_UP_TOKEN_ID",
+          "outcome": "UP"
+        },
+        {
+          "token_id": "REFERENCE_DOWN_TOKEN_ID",
+          "outcome": "DOWN"
+        }
+      ]
+    },
+    "rule_snapshot_path": "/OUTPUT/run/rules.json",
+    "implementation_identity": {
+      "git_commit": "BUILD_GIT_COMMIT",
+      "source_identity_sha256": "BUILD_SOURCE_SHA256",
+      "cargo_lock_sha256": "BUILD_CARGO_LOCK_SHA256"
+    },
+    "finality_policy_path": "/INPUT/finality.json",
+    "session": {
+      "run_id": "DECLARED_RUN_ID",
+      "session_id": "DECLARED_SESSION_ID",
+      "account_id": "DECLARED_ACCOUNT_ID",
+      "caller_instance_id": "DECLARED_CALLER_INSTANCE_ID",
+      "creation_request_id": "DECLARED_CREATION_REQUEST_ID",
+      "response_bridge_binding_id": "DECLARED_RESPONSE_BRIDGE_BINDING_ID",
+      "initial_account_state": {
+        "available_pusd": "2000"
+      },
+      "session_seed": "SESSION_32_BYTE_HEX"
+    },
+    "activation_id": "DECLARED_ACTIVATION_ID",
+    "consumption_sequence_ref": "DECLARED_CONSUMPTION_SEQUENCE",
+    "noe_implementation_identity": "DECLARED_NOE_IMPLEMENTATION",
+    "admission_policy": "ActualCashNoMarketLimit",
+    "max_group_bytes": 2097152,
+    "finite_in_flight_groups": 1,
+    "statistics_input_set_identity": "DECLARED_INPUT_SET_SHA256",
+    "statistics": {
+      "momentum_windows_ms": [],
+      "spot_variance_windows_ms": [
+        300000
+      ],
+      "terminal_integral_windows_ms": [],
+      "blb_lookback_windows_ms": []
+    }
+  },
+  "strategy": {
+    "health": {
+      "polymarket_silence_normal_ms": 100,
+      "polymarket_silence_ms": 400,
+      "polymarket_event_delay_normal_ms": 100,
+      "polymarket_event_delay_ms": 400,
+      "chainlink_silence_normal_ms": 1100,
+      "chainlink_silence_ms": 4400,
+      "chainlink_event_delay_normal_ms": 2600,
+      "chainlink_event_delay_ms": 10400,
+      "binance_trade_silence_normal_ms": 1000,
+      "binance_trade_silence_ms": 4000,
+      "binance_trade_event_delay_normal_ms": 1100,
+      "binance_trade_event_delay_ms": 4400,
+      "binance_depth_silence_normal_ms": 100,
+      "binance_depth_silence_ms": 400,
+      "binance_depth_event_delay_normal_ms": 200,
+      "binance_depth_event_delay_ms": 800
+    },
+    "probability_reference": {
+      "volatility_window_ms": 300000,
+      "initial_sigma_usd_per_sqrt_second": 7.33489262319592,
+      "estimation_error_usd": 0.0,
+      "binance_innovation_weight": 0.5,
+      "binance_pressure_weight_usd": 0.0,
+      "binance_trade_pressure_weight_usd": 0.0
+    },
+    "capacity_shares": "50",
+    "inventory_skew_ticks_per_capacity": "1",
+    "initial_cash_pusd": "2000",
+    "market_investment_limit_pusd": "1000",
+    "per_market_orphan_limit_pusd": "100",
+    "account_orphan_limit_pusd": "400",
+    "drawdown_fraction": "0.3",
+    "repair": {
+      "base_loss_allowance_per_share": "0.0050",
+      "time_loss_allowance_per_share": "0.0050",
+      "inventory_loss_allowance_per_share": "0.0050",
+      "maker_fill_weight": 0.5,
+      "wait_price_improvement_per_share": "0",
+      "residual_risk_weight": "1",
+      "maker_path_ms": 0,
+      "active_path_ms": 0,
+      "enable_active_repair": false
+    }
+  },
+  "request_namespace": "DECLARED_REQUEST_NAMESPACE",
+  "progress_every_ms": 100
+}

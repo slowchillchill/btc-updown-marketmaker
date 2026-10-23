@@ -3347,6 +3347,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "paper-trade"
+version = "0.1.0"
+dependencies = [
+ "baseline-mm",
+ "contracts",
+ "data-collect",
+ "data-pipeline-core",
+ "data-pipeline-training",
+ "execution-normalization",
+ "ledger",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shared-run",
+ "sim-system",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "parquet"
 version = "59.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -2044,6 +2044,79 @@ mod tests {
     }
 
     #[test]
+    fn request_boundary_zero_capacity_preserves_original_groups_and_write_error() {
+        for fail in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = std::env::var_os("PAPER_HOST_TEST_OUTPUT_ROOT")
+                .map(|p| std::path::PathBuf::from(p).join(format!("request-recording-{fail}")))
+                .unwrap_or_else(|| temporary.path().to_owned());
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("sim.jsonl");
+            let mut log = SimEventLogV2::create(
+                &path,
+                &opened(RunDurabilityRoleV2::CleanRun),
+                MAX_GROUP_BYTES,
+            )
+            .unwrap();
+            if fail {
+                log.inject_write_failure_for_tests();
+            }
+            let mut background = BackgroundEventLogV1::start(log, 0);
+            let release = background.pause_for_tests(false);
+            let before = std::fs::read(&path).unwrap();
+            background.begin_request_boundary();
+            for id in ["close", "observe", "request"] {
+                assert!(background.ready().unwrap());
+                background.enqueue(vec![input(id)]).unwrap();
+            }
+            background.end_request_boundary();
+            assert_eq!(background.request_boundary_peak_groups(), 3);
+            assert_eq!(background.deferred_request_groups.len(), 3);
+            assert!(background.pending.is_none());
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                before,
+                "资格段不等待后台或伪造耐久"
+            );
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+            let waiter = std::thread::spawn(move || {
+                entered_tx.send(()).unwrap();
+                let prepared = background.wait_for_capacity();
+                completed_tx.send(()).unwrap();
+                let finished = background.stop_and_drain();
+                (prepared, finished)
+            });
+            entered_rx.recv().unwrap();
+            assert!(matches!(
+                completed_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            release.send(()).unwrap();
+            let (prepared, finished) = waiter.join().unwrap();
+            if fail {
+                assert!(
+                    matches!(finished, Err(SimEventLogErrorV2::Io { .. })),
+                    "原写入错误不能变成成功/封口"
+                );
+            } else {
+                prepared.unwrap();
+                finished.unwrap();
+                let (_, reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+                let (_, groups) = read_all_groups(reader).unwrap();
+                assert_eq!(groups.len(), 3, "保留三个原group，未合成超大单组");
+                for (group, id) in groups.iter().zip(["close", "observe", "request"]) {
+                    assert_eq!(group.len(), 1);
+                    assert!(
+                        matches!(&group[0], LoggedBusinessInputV2::ActivateSession { activation_id } if activation_id == &format!("activation-{id}"))
+                    );
+                }
+            }
+            assert!(!std::fs::read_to_string(&path).unwrap().contains("RUN_SEAL"));
+        }
+    }
+
+    #[test]
     fn injected_write_or_sync_failure_consumes_the_writer_result() {
         let directory = tempfile::tempdir().expect("创建日志测试目录");
         let write_path = directory.path().join("write-failure.jsonl");
@@ -2150,7 +2223,7 @@ enum BackgroundLogCommandV1 {
         BackgroundFinishV1,
         std::sync::mpsc::SyncSender<Result<(), SimEventLogErrorV2>>,
     ),
-    #[cfg(test)]
+    #[cfg(any(test, feature = "measurement"))]
     Pause(
         std::sync::mpsc::SyncSender<()>,
         std::sync::mpsc::Receiver<()>,
@@ -2166,9 +2239,14 @@ enum BackgroundLogCommandV1 {
 pub(crate) struct BackgroundEventLogV1 {
     sender: std::sync::mpsc::SyncSender<BackgroundLogCommandV1>,
     pending: Option<BackgroundGroupV1>,
+    // 单项真实发送边界的原记录材料：空档Close、Observe和至多一个Request。
+    // 原通道仍逐组移交；不将每个队列元素扩成多组，也不新增N下限。
+    request_boundary: Option<Vec<BackgroundGroupV1>>,
+    deferred_request_groups: std::collections::VecDeque<BackgroundGroupV1>,
+    request_boundary_peak_groups: usize,
     // 有限宿主在每次尚未接纳的提交前等原交接，不重试复合业务操作。
     finite_recording_wait: bool,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "measurement"))]
     finite_wait_notice: Option<std::sync::mpsc::SyncSender<()>>,
     #[cfg(feature = "shared-execution")]
     ledger: Option<(std::path::PathBuf, LedgerIntakeV2)>,
@@ -2389,7 +2467,7 @@ impl BackgroundEventLogV1 {
                                 Ok(())
                             };
                         }
-                        #[cfg(test)]
+                        #[cfg(any(test, feature = "measurement"))]
                         Ok(BackgroundLogCommandV1::Pause(entered, release)) => {
                             entered.send(()).unwrap();
                             release.recv().unwrap();
@@ -2423,8 +2501,11 @@ impl BackgroundEventLogV1 {
         Self {
             sender,
             pending: None,
+            request_boundary: None,
+            deferred_request_groups: Default::default(),
+            request_boundary_peak_groups: 0,
             finite_recording_wait: false,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "measurement"))]
             finite_wait_notice: None,
             #[cfg(feature = "shared-execution")]
             ledger: None,
@@ -2472,6 +2553,16 @@ impl BackgroundEventLogV1 {
             materials: std::mem::take(&mut *intake.lock().unwrap()),
         })
     }
+    #[cfg(feature = "measurement")]
+    pub(crate) fn pause_recording_for_measurement(&self) -> std::sync::mpsc::SyncSender<()> {
+        let (entered, waiting) = std::sync::mpsc::sync_channel(1);
+        let (release, blocked) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .send(BackgroundLogCommandV1::Pause(entered, blocked))
+            .unwrap();
+        waiting.recv().unwrap();
+        release
+    }
     #[cfg(test)]
     pub(crate) fn pause_for_tests(&self, fail_next_write: bool) -> std::sync::mpsc::SyncSender<()> {
         if fail_next_write {
@@ -2509,7 +2600,7 @@ impl BackgroundEventLogV1 {
         drop(self.sender);
         self.worker.join().unwrap()
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "measurement"))]
     pub(crate) fn notify_finite_wait_for_tests(&mut self, notice: std::sync::mpsc::SyncSender<()>) {
         self.finite_wait_notice = Some(notice);
     }
@@ -2520,27 +2611,63 @@ impl BackgroundEventLogV1 {
         if let Some(error) = self.failure.lock().unwrap().clone() {
             return Err(error);
         }
-        if self.finite_recording_wait && self.pending.is_some() {
-            #[cfg(test)]
-            if let Some(notice) = self.finite_wait_notice.take() {
-                let _ = notice.send(());
-            }
-            self.wait_for_capacity()?;
-        } else if let Some(inputs) = self.pending.take() {
-            self.enqueue_group(inputs)?;
+        if self.request_boundary.is_some() {
+            return Ok(true);
         }
-        Ok(self.pending.is_none())
+        if self.finite_recording_wait
+            && (self.pending.is_some() || !self.deferred_request_groups.is_empty())
+        {
+            self.wait_for_capacity()?;
+        } else {
+            if let Some(inputs) = self.pending.take() {
+                self.enqueue_group(inputs)?;
+            }
+            while self.pending.is_none() {
+                let Some(inputs) = self.deferred_request_groups.pop_front() else {
+                    break;
+                };
+                self.enqueue_group(inputs)?;
+            }
+        }
+        Ok(self.pending.is_none() && self.deferred_request_groups.is_empty())
     }
+    pub(crate) fn begin_request_boundary(&mut self) {
+        self.request_boundary = Some(Vec::new());
+    }
+    pub(crate) fn end_request_boundary(&mut self) {
+        if let Some(groups) = self.request_boundary.take() {
+            self.request_boundary_peak_groups = self.request_boundary_peak_groups.max(groups.len());
+            self.deferred_request_groups.extend(groups);
+        }
+    }
+    pub(crate) fn request_boundary_peak_groups(&self) -> usize {
+        self.request_boundary_peak_groups
+    }
+
     /// 仅等待当前唯一待交接组进入原通道，不表示写入或耐久完成。
     pub(crate) fn wait_for_capacity(&mut self) -> Result<(), SimEventLogErrorV2> {
         if let Some(error) = self.failure.lock().unwrap().clone() {
             return Err(error);
         }
         if let Some(inputs) = self.pending.take() {
+            #[cfg(any(test, feature = "measurement"))]
+            if let Some(notice) = self.finite_wait_notice.take() {
+                let _ = notice.send(());
+            }
             if let Err(std::sync::mpsc::SendError(BackgroundLogCommandV1::Group(inputs))) =
                 self.sender.send(BackgroundLogCommandV1::Group(inputs))
             {
                 self.pending = Some(inputs);
+                return Err(self.failure.lock().unwrap().clone().unwrap_or(
+                    SimEventLogErrorV2::InvalidStructure("后台日志已停止，本轮未完成"),
+                ));
+            }
+        }
+        while let Some(inputs) = self.deferred_request_groups.pop_front() {
+            if let Err(std::sync::mpsc::SendError(BackgroundLogCommandV1::Group(inputs))) =
+                self.sender.send(BackgroundLogCommandV1::Group(inputs))
+            {
+                self.deferred_request_groups.push_front(inputs);
                 return Err(self.failure.lock().unwrap().clone().unwrap_or(
                     SimEventLogErrorV2::InvalidStructure("后台日志已停止，本轮未完成"),
                 ));
@@ -2599,6 +2726,10 @@ impl BackgroundEventLogV1 {
         })
     }
     fn enqueue_group(&mut self, inputs: BackgroundGroupV1) -> Result<(), SimEventLogErrorV2> {
+        if let Some(groups) = &mut self.request_boundary {
+            groups.push(inputs);
+            return Ok(());
+        }
         match self.sender.try_send(BackgroundLogCommandV1::Group(inputs)) {
             Ok(()) => Ok(()),
             Err(std::sync::mpsc::TrySendError::Full(BackgroundLogCommandV1::Group(inputs))) => {
@@ -2625,10 +2756,18 @@ impl BackgroundEventLogV1 {
     fn finish_recording(mut self, seal_clean_run: bool) -> Result<(), SimEventLogErrorV2> {
         #[cfg(feature = "shared-execution")]
         let materials = self.take_ledger();
-        let sent = match self.pending.take() {
-            Some(inputs) => self.sender.send(BackgroundLogCommandV1::Group(inputs)),
-            None => Ok(()),
-        };
+        self.end_request_boundary();
+        let mut sent = Ok(());
+        for inputs in self
+            .pending
+            .take()
+            .into_iter()
+            .chain(self.deferred_request_groups.drain(..))
+        {
+            if sent.is_ok() {
+                sent = self.sender.send(BackgroundLogCommandV1::Group(inputs));
+            }
+        }
         let sent = match sent {
             Ok(()) => self
                 .sender

@@ -33,182 +33,7 @@ impl ComplementaryPairV1 {
         >,
         a: &ProfitAllocationV2,
     ) -> Result<Option<RemainingRepairEstimate>, StrategyErrorV1> {
-        use contracts::execution_normalization::SourceNeutralTradeEconomicDispositionV1 as D;
-        let original_q = rational(&a.estimated_shares)?;
-        let original_p = rational(&a.estimated_principal_pusd)?;
-        let original_f = rational(&a.estimated_fee_pusd)?;
-        let held_q = rational(&a.original_orphan_shares)?;
-        let held_unit = rational(&a.original_orphan_principal_per_share)?;
-        let loss = |q: &R, principal: &R, fees: &R, success: &R| {
-            let paired = q.clone().min(held_q.sub(success).max(R::zero()));
-            let paired_principal = if q.is_positive() {
-                principal.mul(&paired).divided_by(q)
-            } else {
-                R::zero()
-            };
-            held_unit
-                .mul(&paired)
-                .add(&paired_principal)
-                .sub(&paired)
-                .add(fees)
-                .max(R::zero())
-        };
-        let ExecutionReadValueV1::Known(trades) =
-            read.request_trade_economics(&a.global_request_id)
-        else {
-            return Ok(Some(RemainingRepairEstimate {
-                shares: original_q.clone(),
-                principal: original_p.clone(),
-                fee: original_f.clone(),
-                loss: loss(&original_q, &original_p, &original_f, &R::zero()),
-                unknown: true,
-            }));
-        };
-        let active_local = read.request_funds().any(|f| {
-            f.request_identity == &a.reserve_identity
-                && !matches!(
-                    f.reservation_state,
-                    ReservationStatusV1::Converted | ReservationStatusV1::Released
-                )
-        });
-        let commitments: Vec<_> = read
-            .commitments()
-            .filter(|c| c.origin.intent.global_request_id() == a.global_request_id)
-            .collect();
-        let mut success = R::zero();
-        let mut pending_q = R::zero();
-        let mut pending_p = R::zero();
-        let mut pending_fee = R::zero();
-        let mut pairing_q = R::zero();
-        let mut pairing_p = R::zero();
-        let mut unapplied_fee = R::zero();
-        for t in &trades {
-            let q = r(decimal(&t.fact.base_quantity_shares)?);
-            let p = r(decimal(&t.fact.quote_amount_pusd)?);
-            if t.success_applied {
-                success = success.add(&q);
-                continue;
-            }
-            let failed = matches!(
-                t.fact.economic_disposition,
-                D::FinalFailureUnapplied | D::FinalFailureCompensated
-            );
-            if failed && !t.economic_applied {
-                continue;
-            }
-            let fee = r(decimal(if t.economic_applied {
-                &t.actual_net_fee_pusd
-            } else {
-                &t.fact.immediate_taker_fee_pusd
-            })?);
-            pending_q = pending_q.add(&q);
-            pending_p = pending_p.add(&p);
-            pending_fee = pending_fee.add(&fee);
-            if !failed {
-                pairing_q = pairing_q.add(&q);
-                pairing_p = pairing_p.add(&p);
-                if !t.economic_applied {
-                    unapplied_fee = unapplied_fee.add(&fee);
-                }
-            }
-        }
-        let mut unused_ratio = R::zero();
-        let mut unknown = false;
-        if active_local {
-            let matched = trades.iter().try_fold(R::zero(), |sum, t| {
-                Ok::<_, StrategyErrorV1>(sum.add(&r(decimal(&t.fact.quote_amount_pusd)?)))
-            })?;
-            unused_ratio = original_p
-                .sub(&matched)
-                .max(R::zero())
-                .divided_by(&original_p);
-        } else {
-            for c in commitments {
-                let amount = limit_leg(c.origin.intent.intent(), c.origin.batch_item_ordinal)
-                    .is_some_and(|(_, l)| {
-                        matches!(
-                            l.order,
-                            BuyOrderIntentV1::FakMarket { .. } | BuyOrderIntentV1::FokMarket { .. }
-                        )
-                    });
-                let related: Vec<_> = trades
-                    .iter()
-                    .filter(|t| Some(t.fact.order_identity.clone()).as_ref() == c.order_identity)
-                    .collect();
-                let nonterminal = |t: &&TradeEconomicReadV1<'_>| {
-                    !matches!(
-                        t.fact.economic_disposition,
-                        D::FinalSuccess | D::FinalFailureUnapplied | D::FinalFailureCompensated
-                    )
-                };
-                let ratio = if amount {
-                    let matched_unapplied = related
-                        .iter()
-                        .copied()
-                        .filter(nonterminal)
-                        .filter(|t| !t.economic_applied)
-                        .try_fold(R::zero(), |s, t| {
-                            Ok::<_, StrategyErrorV1>(s.add(&r(decimal(&t.fact.quote_amount_pusd)?)))
-                        })?;
-                    match c
-                        .order_identity
-                        .and_then(|id| read.order_funds().find(|f| f.order_identity == id))
-                        .and_then(|f| known(&f.principal_encumbrance_pusd).cloned())
-                    {
-                        Some(p) => r(decimal(&p)?)
-                            .sub(&matched_unapplied)
-                            .max(R::zero())
-                            .divided_by(&original_p),
-                        None => {
-                            unknown = true;
-                            r(Decimal::ONE)
-                        }
-                    }
-                } else {
-                    let pending = related.iter().copied().filter(nonterminal).try_fold(
-                        R::zero(),
-                        |s, t| {
-                            Ok::<_, StrategyErrorV1>(
-                                s.add(&r(decimal(&t.fact.base_quantity_shares)?)),
-                            )
-                        },
-                    )?;
-                    match known(&c.remaining_target_shares) {
-                        Some(q) => r(decimal(q)?)
-                            .sub(&pending)
-                            .max(R::zero())
-                            .divided_by(&original_q),
-                        None => {
-                            unknown = true;
-                            r(Decimal::ONE)
-                        }
-                    }
-                };
-                unused_ratio = unused_ratio.add(&ratio);
-            }
-        }
-        let unused_ratio = unused_ratio.min(r(Decimal::ONE)).max(R::zero());
-        let unused_q = original_q.mul(&unused_ratio);
-        let unused_p = original_p.mul(&unused_ratio);
-        let unused_f = original_f.mul(&unused_ratio);
-        let shares = unused_q.add(&pending_q);
-        let principal = unused_p.add(&pending_p);
-        let fee = unused_f.add(&pending_fee);
-        if !active_local && shares.is_zero() && principal.is_zero() && fee.is_zero() {
-            return Ok(None);
-        }
-        Ok(Some(RemainingRepairEstimate {
-            shares,
-            principal,
-            fee,
-            unknown,
-            loss: loss(
-                &unused_q.add(&pairing_q),
-                &unused_p.add(&pairing_p),
-                &unused_f.add(&unapplied_fee),
-                &success,
-            ),
-        }))
+        super::super::common::remaining_estimate(read, a)
     }
     pub(super) fn profit_occupancy(
         input: &StrategyInputV1<
@@ -431,18 +256,14 @@ impl ComplementaryPairV1 {
         now: i64,
         s: &MarketState,
     ) -> Result<Decimal, StrategyErrorV1> {
-        let duration = (o.market.window.end_at_utc_ms - o.market.window.start_at_utc_ms).max(1);
-        let elapsed = Decimal::from((now - o.market.window.start_at_utc_ms).clamp(0, duration))
-            / Decimal::from(duration);
-        let pressure = if self.config.risk.per_market_orphan_limit_pusd > Decimal::ZERO {
-            floor_decimal(&s.orphan_principal.add(&s.orphan_fee), 8)?
-                / self.config.risk.per_market_orphan_limit_pusd
-        } else {
-            Decimal::ZERO
-        };
-        Ok(self.config.repair.base_loss_allowance_per_share
-            + self.config.repair.time_loss_allowance_per_share * elapsed
-            + self.config.repair.inventory_loss_allowance_per_share * pressure)
+        super::super::common::loss_allowance_v1(
+            &self.config.repair,
+            self.config.risk.per_market_orphan_limit_pusd,
+            &s.orphan_principal.add(&s.orphan_fee),
+            o.market.window.start_at_utc_ms,
+            o.market.window.end_at_utc_ms,
+            now,
+        )
     }
     pub(super) fn cancel_available(
         &self,
@@ -468,41 +289,7 @@ impl ComplementaryPairV1 {
         condition: &ConditionId,
         legs: Vec<(BuyLegIntentV1, R, R)>,
     ) -> Result<ReservedIntentV1, StrategyErrorV1> {
-        let id = self.id()?;
-        let reserves = legs
-            .iter()
-            .enumerate()
-            .map(|(i, (_, principal, fee))| {
-                Ok(IntentReserveV1 {
-                    batch_item_ordinal: i as u16,
-                    reserve: ReserveIntentV1 {
-                        request_identity: LedgerRequestIdentityV1(format!("{id}:{i}")),
-                        condition_id: condition.clone(),
-                        requested_principal_pusd: exact(floor_decimal(principal, 6)?),
-                        immediate_fee_reserve_pusd: exact(floor_decimal(fee, 5)?),
-                    },
-                })
-            })
-            .collect::<Result<Vec<_>, StrategyErrorV1>>()?;
-        let intent = if legs.len() == 2 {
-            ModelIntentV1::SubmitPairedBuy {
-                condition_id: condition.clone(),
-                orders: [legs[0].0.clone(), legs[1].0.clone()],
-            }
-        } else {
-            ModelIntentV1::SubmitSingleBuy {
-                condition_id: condition.clone(),
-                order: legs[0].0.clone(),
-            }
-        };
-        Ok(ReservedIntentV1 {
-            context: RequestContextV2 {
-                global_request_id: id,
-                caller_correlation_id: None,
-            },
-            intent: Arc::new(intent),
-            reserves,
-        })
+        super::super::common::reserved_buy_item(self.id()?, condition, legs)
     }
     pub(super) fn maker_leg(
         &self,

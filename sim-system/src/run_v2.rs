@@ -21507,6 +21507,7 @@ impl PublicConsumptionStateV1 {
             cutoff,
             send_time: None,
             paper_clock: None,
+            request_boundary_prepared: false,
         })
     }
     pub fn hidden_bucket(
@@ -21644,6 +21645,7 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
             cutoff,
             send_time: Some(send_time),
             paper_clock: None,
+            request_boundary_prepared: false,
         })
     }
     pub fn next_group(
@@ -21870,6 +21872,10 @@ impl ContinuousPublicConsumptionV1 {
             clock: PaperExecutionClockV1::new(),
         }
     }
+    /// 同一运行UTC锚和单调时钟的只读值；不是可构造的受信执行凭据。
+    pub fn execution_clock_now_utc_ms(&self) -> i64 {
+        self.clock.now_ms()
+    }
     fn required_at(&self) -> Option<i64> {
         self.state
             .execution
@@ -21987,7 +21993,35 @@ impl ContinuousPublicConsumptionV1 {
             cutoff,
             send_time: None,
             paper_clock: Some(&self.clock),
+            request_boundary_prepared: false,
         })
+    }
+    /// 只读实际单项事务的瞬时原group峰值，供受控成本记录。
+    pub fn request_recording_peak_groups(&self) -> usize {
+        self.state
+            .execution
+            .actor
+            .background_log
+            .as_ref()
+            .map_or(0, |b| b.request_boundary_peak_groups())
+    }
+    /// 受控工程测量：只暂停本运行原记录器，并通知下一次真实容量移交等待。
+    /// release只有显式发送才解暂停；Drop不代表成功排空或释放暂停。
+    #[cfg(feature = "measurement")]
+    pub fn pause_recording_for_measurement(
+        &mut self,
+        waiting: std::sync::mpsc::SyncSender<()>,
+    ) -> std::sync::mpsc::SyncSender<()> {
+        let background = self
+            .state
+            .execution
+            .actor
+            .background_log
+            .as_mut()
+            .expect("本运行原后台");
+        let release = background.pause_recording_for_measurement();
+        background.notify_finite_wait_for_tests(waiting);
+        release
     }
     /// 原下一义务所在毫秒严格结束后的唤醒；无义务时不要求定时唤醒。
     pub fn next_wake_after(&self) -> Option<std::time::Duration> {
@@ -22069,8 +22103,108 @@ pub struct PublicGroupDecisionV1<'a> {
     cutoff: TrustedGroupDecisionCutoffV1,
     send_time: Option<TrustedActorExecutionTimeV1>,
     paper_clock: Option<&'a PaperExecutionClockV1>,
+    request_boundary_prepared: bool,
 }
-impl PublicGroupDecisionV1<'_> {
+impl<'driver> PublicGroupDecisionV1<'driver> {
+    /// 原owner在单项真正发送前分配一次时间。所有可能的容量/稳定等待先完成。
+    /// 只在没有更早义务的真实空档补Close；同刻义务保持原先行情后请求顺序。
+    pub fn prepare_request_boundary(
+        &mut self,
+    ) -> Result<PublicRequestBoundaryV1<'_, 'driver>, SimRunActorErrorV2> {
+        if let Some(clock) = self.paper_clock {
+            self.end_request_boundary();
+            loop {
+                self.driver.wait_for_recording_capacity()?;
+                let now = clock.now_ms();
+                let has_due = self
+                    .driver
+                    .next_required_logical_drive()
+                    .is_some_and(|r| r.required_at_utc_ms < now);
+                let has_unstable_end = self
+                    .driver
+                    .execution
+                    .actor
+                    .unstable_market_ends
+                    .first()
+                    .is_some_and(|end| *end < now);
+                if has_due || has_unstable_end {
+                    match self.driver.advance_before(
+                        now,
+                        PublicTimeClosureReasonV1::ExecutionClockAdvancedTo(now),
+                    ) {
+                        Ok(()) | Err(SimRunActorErrorV2::RecordingBackpressured) => continue,
+                        Err(error) => return Err(error),
+                    }
+                }
+                self.driver.execution.actor.deliver_pending_projections();
+                self.driver
+                    .execution
+                    .actor
+                    .background_log
+                    .as_mut()
+                    .ok_or(SimRunActorErrorV2::Closed)?
+                    .begin_request_boundary();
+                self.request_boundary_prepared = true;
+                let prepared = (|| {
+                    if let Some(before) = now.checked_sub(1) {
+                        let needs_close = self
+                            .driver
+                            .execution
+                            .actor
+                            .state
+                            .as_ref()
+                            .and_then(|s| s.session.as_ref())
+                            .is_some_and(|s| {
+                                s.public_visibility_frontier
+                                    .closed_through_utc_ms
+                                    .is_none_or(|closed| closed < before)
+                            });
+                        if needs_close {
+                            self.driver.close_at(
+                                before,
+                                PublicTimeClosureReasonV1::ExecutionClockAdvancedTo(now),
+                            )?;
+                        }
+                    }
+                    self.driver.observe_at(now)?;
+                    self.send_time = self
+                        .driver
+                        .last_cutoff
+                        .as_ref()
+                        .map(|c| c.decision_time.clone());
+                    Ok(())
+                })();
+                if let Err(error) = prepared {
+                    self.end_request_boundary();
+                    return Err(error);
+                }
+                break;
+            }
+        }
+        Ok(PublicRequestBoundaryV1 { decision: self })
+    }
+    fn end_request_boundary(&mut self) {
+        if self.request_boundary_prepared {
+            if let Some(background) = &mut self.driver.execution.actor.background_log {
+                background.end_request_boundary();
+            }
+            self.request_boundary_prepared = false;
+        }
+    }
+    /// 原请求登记记录中的真实发送时间；重复读取不伪造一次新发送。
+    pub fn registered_request_sent_at_utc_ms(&self, request_id: &str) -> Option<i64> {
+        self.driver
+            .execution
+            .actor
+            .state
+            .as_ref()?
+            .session
+            .as_ref()?
+            .mutation_requests
+            .requests_by_id
+            .get(request_id)
+            .map(|r| r.request_sent_at_utc_ms)
+    }
     pub fn cutoff(&self) -> &TrustedGroupDecisionCutoffV1 {
         &self.cutoff
     }
@@ -22162,7 +22296,7 @@ impl PublicGroupDecisionV1<'_> {
         &mut self,
         request: BusinessRequestV2,
     ) -> Result<MutationRequestReceiptV2, RequestFailureV1> {
-        if let Some(clock) = self.paper_clock {
+        if let Some(clock) = self.paper_clock.filter(|_| !self.request_boundary_prepared) {
             if let Some(existing) = existing_mutation_request_receipt_v2(
                 self.driver.execution.actor.state.as_ref().ok_or_else(|| {
                     RequestFailureV1::before_request_effect(SimRunActorErrorV2::Closed)
@@ -22193,6 +22327,27 @@ impl PublicGroupDecisionV1<'_> {
         self.driver
             .execution
             .request(self.cutoff.clone(), self.send_time.clone(), request)
+    }
+}
+
+/// 独占单项观察至原Bridge事务；正常、失效和错误都归还原记录后缀所有权。
+pub struct PublicRequestBoundaryV1<'decision, 'driver> {
+    decision: &'decision mut PublicGroupDecisionV1<'driver>,
+}
+impl<'driver> std::ops::Deref for PublicRequestBoundaryV1<'_, 'driver> {
+    type Target = PublicGroupDecisionV1<'driver>;
+    fn deref(&self) -> &Self::Target {
+        self.decision
+    }
+}
+impl std::ops::DerefMut for PublicRequestBoundaryV1<'_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.decision
+    }
+}
+impl Drop for PublicRequestBoundaryV1<'_, '_> {
+    fn drop(&mut self) {
+        self.decision.end_request_boundary();
     }
 }
 
@@ -22419,3 +22574,7 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         }
     }
 }
+
+#[cfg(test)]
+#[path = "run_v2/paper_request_boundary_tests.rs"]
+mod paper_request_boundary_tests;

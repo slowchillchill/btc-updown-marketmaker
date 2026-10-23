@@ -1,87 +1,7 @@
+pub use super::super::common::{
+    SourceHealthFactsV1, source_health_failure_v1, source_health_state_v1,
+};
 use super::*;
-
-/// 原来源进展的必要标量；不保存载荷，不新增公共质量或健康状态。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceHealthFactsV1 {
-    pub synchronization_required: bool,
-    pub availability: MarketDataQuality,
-    pub last_valid_message_times: Option<(i64, Option<i64>)>,
-}
-impl From<&SourceStreamProgressV1> for SourceHealthFactsV1 {
-    fn from(p: &SourceStreamProgressV1) -> Self {
-        Self {
-            synchronization_required: p.synchronization
-                == SourceSynchronizationV1::SnapshotRequired
-                || p.quality.resync == ResyncQuality::Required,
-            availability: p.quality.availability,
-            last_valid_message_times: p
-                .last_valid_business_message
-                .as_ref()
-                .map(|e| (e.received_at_utc_ms, e.source_event_at_utc_ms)),
-        }
-    }
-}
-/// 参数为原策略已转换的毫秒阈值；顺序、饱和加法及>=边界保持。
-pub fn source_health_failure_v1(
-    facts: Option<&SourceHealthFactsV1>,
-    silence_ms: i64,
-    event_delay_ms: i64,
-    at: i64,
-) -> Option<SourceHealthFailureV1> {
-    use SourceHealthFailureV1 as F;
-    let Some(f) = facts else {
-        return Some(F::UnknownBusinessProgress);
-    };
-    if f.synchronization_required {
-        return Some(F::SynchronizationRequired);
-    }
-    if !matches!(
-        f.availability,
-        MarketDataQuality::Fresh | MarketDataQuality::Stale
-    ) {
-        return Some(F::Unavailable);
-    }
-    let Some((received, event)) = f.last_valid_message_times else {
-        return Some(F::UnknownBusinessProgress);
-    };
-    if received > at || event.is_some_and(|e| e > received) {
-        Some(F::TimeInconsistent)
-    } else if at >= received.saturating_add(silence_ms) {
-        Some(F::ReceiveSilence)
-    } else if let Some(e) = event {
-        (at >= e.saturating_add(event_delay_ms)).then_some(F::EventDelay)
-    } else {
-        Some(F::UnknownEventTime)
-    }
-}
-
-/// 与研究共用的三态；独立未知/质量异常不混入年龄分布。
-pub fn source_health_state_v1(
-    facts: Option<&SourceHealthFactsV1>,
-    limits: SourceHealthLimitsV1,
-    at: i64,
-) -> SourceHealthStateV1 {
-    // 必要事实未知/独立异常先单列；它们不是已知 S/A 的超限样本。
-    if let Some(failure) = source_health_failure_v1(facts, i64::MAX, i64::MAX, at) {
-        return SourceHealthStateV1::Unavailable(failure);
-    }
-    match source_health_failure_v1(facts, limits.silence_max_ms, limits.event_max_ms, at) {
-        Some(f @ (SourceHealthFailureV1::ReceiveSilence | SourceHealthFailureV1::EventDelay)) => {
-            SourceHealthStateV1::Exceeded(f)
-        }
-        Some(f) => SourceHealthStateV1::Unavailable(f),
-        None => {
-            let (received, event) = facts.unwrap().last_valid_message_times.unwrap();
-            if at >= received.saturating_add(limits.silence_normal_ms)
-                || at >= event.unwrap().saturating_add(limits.event_normal_ms)
-            {
-                SourceHealthStateV1::Elevated
-            } else {
-                SourceHealthStateV1::Normal
-            }
-        }
-    }
-}
 
 impl ComplementaryPairV1 {
     pub(super) fn book_scope(
@@ -98,51 +18,9 @@ impl ComplementaryPairV1 {
         &self,
         o: &MarketBusinessObservationV1,
     ) -> Vec<SourceStreamScopeV1> {
-        let chainlink = if eligible_chainlink_spot_v1(&o.chainlink_spot).is_some() {
-            SourceStreamKindV1::ChainlinkSpot
-        } else {
-            match value(&o.settlement_reference) {
-                Some(BtcSettlementReferenceV1::ChainlinkTwapThirtySeconds) => {
-                    SourceStreamKindV1::ChainlinkTwapThirty
-                }
-                Some(BtcSettlementReferenceV1::ChainlinkTwapSixtySeconds) => {
-                    SourceStreamKindV1::ChainlinkTwapSixty
-                }
-                _ => SourceStreamKindV1::ChainlinkSpot,
-            }
-        };
-        let mut sources = vec![SourceStreamScopeV1 {
-            source: chainlink,
-            condition_id: None,
-            asset_or_symbol: "btc/usd".into(),
-        }];
-        let p = &self.config.probability;
-        if p.binance_innovation_weight != 0.0 || p.binance_trade_pressure_weight_usd != 0.0 {
-            sources.push(SourceStreamScopeV1 {
-                source: SourceStreamKindV1::BinanceAggregateTrade,
-                condition_id: None,
-                asset_or_symbol: "BTCUSDT".into(),
-            });
-        }
-        // 成交压力读取深度分母，即使独立深度系数为零仍参与。
-        if p.binance_pressure_weight_usd != 0.0 || p.binance_trade_pressure_weight_usd != 0.0 {
-            sources.push(SourceStreamScopeV1 {
-                source: SourceStreamKindV1::BinanceDepth,
-                condition_id: None,
-                asset_or_symbol: "BTCUSDT".into(),
-            });
-        }
-        sources
+        super::super::common::probability_sources(&self.config.probability, o)
     }
-    pub(super) fn pair_sources(&self, o: &MarketBusinessObservationV1) -> Vec<SourceStreamScopeV1> {
-        let mut sources = self.probability_sources(o);
-        sources.extend(
-            o.assets
-                .iter()
-                .map(|a| Self::book_scope(o, &a.asset.token_id)),
-        );
-        sources
-    }
+
     pub(super) fn source_health_state(
         &self,
         o: &MarketBusinessObservationV1,
@@ -190,6 +68,18 @@ impl ComplementaryPairV1 {
         calculation: Option<&StrategyCalculationV1<ComplementaryPairDiagnosticV1>>,
         at: i64,
     ) -> Option<i64> {
+        self.public_health_deadline(
+            &input.iter().map(|f| f.observation).collect::<Vec<_>>(),
+            calculation,
+            at,
+        )
+    }
+    pub(super) fn public_health_deadline(
+        &self,
+        input: &[&MarketBusinessObservationV1],
+        calculation: Option<&StrategyCalculationV1<ComplementaryPairDiagnosticV1>>,
+        at: i64,
+    ) -> Option<i64> {
         let frozen_dependencies = calculation
             .and_then(|c| match &c.output {
                 StrategyOutputV1::Continue { diagnostics, .. } => {
@@ -198,46 +88,17 @@ impl ComplementaryPairV1 {
                 _ => None,
             })
             .unwrap_or(&[]);
-        input
-            .iter()
-            .filter(|f| f.observation.market.window.end_at_utc_ms > at)
-            .flat_map(|f| {
-                let mut sources = self.pair_sources(f.observation);
-                // 新现价可改变当前估计选源，但不能遮蔽待发决定的原TWAP期限。
-                for dependency in frozen_dependencies
-                    .iter()
-                    .filter(|d| d.condition_id == f.observation.market.condition_id)
-                {
-                    for scope in &dependency.sources {
-                        if !sources.contains(scope) {
-                            sources.push(scope.clone());
-                        }
-                    }
-                }
-                sources.into_iter().flat_map(|scope| {
-                    let h = self.config.health.limits(scope.source);
-                    f.observation
-                        .source_progress
-                        .get_scope(&scope)
-                        .and_then(|p| p.last_valid_business_message.as_ref())
-                        .map(|e| {
-                            [
-                                Some(e.received_at_utc_ms.saturating_add(h.silence_normal_ms)),
-                                e.source_event_at_utc_ms
-                                    .map(|t| t.saturating_add(h.event_normal_ms)),
-                                Some(e.received_at_utc_ms.saturating_add(h.silence_max_ms)),
-                                e.source_event_at_utc_ms
-                                    .map(|t| t.saturating_add(h.event_max_ms)),
-                            ]
-                        })
-                        .unwrap_or([None, None, None, None])
-                        .into_iter()
-                        .flatten()
-                })
-            })
-            .filter(|deadline| *deadline > at)
-            .min()
+        super::super::common::public_health_deadline(
+            &self.config.health,
+            &self.config.probability,
+            input,
+            frozen_dependencies
+                .iter()
+                .map(|d| (&d.condition_id, d.sources.as_slice())),
+            at,
+        )
     }
+
     pub(super) fn business_dependency(
         read: &ActionBeforeReadV2<
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,

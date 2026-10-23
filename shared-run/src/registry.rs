@@ -145,7 +145,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             false
         }
     }
-    pub(crate) fn action_snapshot(&self) -> Self {
+    pub(crate) fn action_snapshot_with_orders(&self, retained: &BTreeSet<Identity>) -> Self {
         let mut orders: BTreeMap<_, _> = self
             .unfinished_orders()
             .map(|o| {
@@ -155,6 +155,11 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
                 )
             })
             .collect();
+        for id in retained {
+            if let Some(order) = self.orders.get(id) {
+                orders.entry(id.clone()).or_insert_with(|| order.clone());
+            }
+        }
         let mut needed: BTreeSet<_> = self
             .all_commitments()
             .map(|r| r.origin.intent.global_request_id())
@@ -1107,7 +1112,7 @@ fn quantities<R: Clone + std::fmt::Debug + Eq>(
         }
     }
 }
-fn trade<R: Clone + std::fmt::Debug + Eq>(
+pub(crate) fn trade<R: Clone + std::fmt::Debug + Eq>(
     r: &Ref<R>,
 ) -> Option<&SourceNeutralTradeLifecycleResultV2<Identity>> {
     match r.record() {

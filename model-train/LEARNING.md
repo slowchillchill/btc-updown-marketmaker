@@ -206,3 +206,13 @@ Python仍在恢复模型/优化器状态之前核对原checkpoint的trajectory_v
 请求链逐行摘要和字节数完全相同；学习帧七字段、完整 RPC 和 label 与修改前样例逐项等值。Rust CPU 使用 `/proc/self/stat`、100 ticks/s，含 worker 线程，不含 Python CPU；内存只记录采样端点和进程累计高水位，未测分配次数或独立阶段同时峰值。假 worker 的 JSON 解析/摘要成本也进入墙钟，此单次合成结果不是完整 C 或真实模型服务提速。
 
 帧成本探针始于准备好的 row，不包含 `Trajectory::get`、分页、公共再生或完整 epoch；后继消除缓存完整 row 复制的收益未计入上述数字。实测程序在该借用修改前构建，实际被测 compose/worker/请求链保持相同，最终候选另通过必要构建、分页与公开输入回归。不把原采集 28.719 GB 当成此项节约，不据此估计重算/step、全天容量或正式训练成本。
+
+## 私有市场对象与本次公开投影的借用编码（#368）
+
+采集 `ModelConsumer::decide` 和学习 `trajectory_tokens(capture_projection=false)` 直接借用私有对象的子值及本次 `market_projection`，复用原 `flatten`。根键用同类型 `serde_json::Map` 的 Null 占位安排原插入/替换顺序；已有 `public` 只编码新值。只复制少量根键，未固定假设 Map 的排序特征。Null 与非对象继续走原 clone、索引赋值和编码，保留原合法构造与 panic。路径、数组长度、FNV桶、f32位值及 token 顺序不变。
+
+`capture_projection=true` 仍完整物化投影；Full、审计、梯度参照和诊断继续取得原完整内容。每次公开投影按实际 `processing_start` 生成，原 private/轨迹、完整 RPC、冻结 label（`old_joint_logp`）、经济与恢复身份保持。没有特征缓存、新编码版本、公开配置、Trajectory/StoredFrame解析或分页改变。
+
+成本夹具显式忽略，只有授权时运行：先冻结两个合法私有对象规模及同一公共帧/时刻/身份，再对两版分别运行采集和学习两条实际路径，每档64次，原/新合计512次。采集使用真实 `decide` 加 stdlib NoTrade 假worker，实例局部且仅 `cfg(test)` 的队列在原 private 构造后移入冻结对象；同样接缝适用两版。准备/队列构造和 worker 启动单列，首个实际请求作为样例，无额外 sample 或 warmup。较大档的合法 `order_feedback` 叶子实际参与编码，不使用无关 padding。
+
+夹具包含合成宿主、原 private 构造、公开投影、token与序列化/假进程处理；不是纯clone测量或真实C分布。RSS端点/累计HWM和最大单子进程不是进程组同时峰值，未测分配数。严格请求字节、token及原始成本沿本任务证据保留；单次局部比较不保证完整C提速、模型学习正确性、全天容量或盈利。原采集28.719GB不作本项节约，真实模型和后继研究仍需独立授权。

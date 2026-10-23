@@ -62,6 +62,34 @@ pub fn tokens(v: &Value, c: &EncodingConfig) -> Vec<Token> {
     flatten(v, "", c, &mut out);
     out
 }
+/// 借用根子值并覆盖本次public；同类型Map保留原插入/替换遍历语义。
+/// Null/非对象继续走原索引赋值，保留原构造和panic边界。
+pub(crate) fn tokens_with_public(
+    private: &Value,
+    public: &Value,
+    c: &EncodingConfig,
+) -> Vec<Token> {
+    let Value::Object(values) = private else {
+        let mut projection = private.clone();
+        projection["public"] = public.clone();
+        return tokens(&projection, c);
+    };
+    let mut keys = serde_json::Map::new();
+    for key in values.keys() {
+        keys.insert(key.clone(), Value::Null);
+    }
+    keys.insert("public".into(), Value::Null);
+    let mut out = Vec::new();
+    for key in keys.keys() {
+        let value = if key == "public" {
+            public
+        } else {
+            &values[key]
+        };
+        flatten(value, &format!("/{key}"), c, &mut out);
+    }
+    out
+}
 pub fn market_projection(m: &shared_run::FrozenMarketReadV1, at: i64) -> Value {
     let o = &m.observation;
     // F0价格/深度/参考、来源质量和证据直接引用；排除原组事件载荷和全历史。
@@ -121,5 +149,87 @@ mod tests {
             serde_json::to_value(tokens(&json!({"x":"NotMaterialized"}), &c)).unwrap(),
             serde_json::to_value(tokens(&json!({"x":"Unavailable"}), &c)).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod borrow_tests {
+    use super::*;
+    fn bits(tokens: Vec<Token>) -> Vec<(u32, u32, u32, u8)> {
+        tokens
+            .into_iter()
+            .map(|Token(f, c, v, k)| (f, c, v.to_bits(), k))
+            .collect()
+    }
+    fn reference(private: &Value, public: &Value, c: &EncodingConfig) -> Vec<Token> {
+        let mut projected = private.clone();
+        projected["public"] = public.clone();
+        tokens(&projected, c)
+    }
+    #[test]
+    fn borrowed_public_matches_original_bits_order_override_and_null() {
+        let c = EncodingConfig {
+            field_buckets: 4096,
+            category_buckets: 4096,
+        };
+        let public =
+            json!({"nested":[0,"-0.125",null,true,["Unknown","Unavailable","NotMaterialized"]]});
+        for private in [
+            json!({"z":"tail","a":false,"middle":[1,2]}),
+            json!({"a":"-1.5","public":{"old":"Unavailable"},"z":null}),
+            json!({"public":false}),
+            Value::Null,
+        ] {
+            let before = private.clone();
+            assert_eq!(
+                bits(tokens_with_public(&private, &public, &c)),
+                bits(reference(&private, &public, &c))
+            );
+            assert_eq!(private, before);
+        }
+        let mut p = serde_json::Map::new();
+        p.insert("z".into(), json!(false));
+        p.insert("public".into(), json!("old"));
+        p.insert("a".into(), json!(true));
+        let mut expected = Vec::new();
+        // 独立列出根路径，按原Map插入/替换之后的次序拼接，各值原flatten复用。
+        for key in p.keys() {
+            match key.as_str() {
+                "z" => flatten(&json!(false), "/z", &c, &mut expected),
+                "a" => flatten(&json!(true), "/a", &c, &mut expected),
+                "public" => flatten(&public, "/public", &c, &mut expected),
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(
+            bits(tokens_with_public(&Value::Object(p), &public, &c)),
+            bits(expected)
+        );
+        let encoded = tokens_with_public(&json!({"a":true}), &json!([null, 0]), &c);
+        assert!(encoded.iter().any(|t| t.0 == bucket("/public/length", 4096)
+            && t.1 == 0
+            && t.2.to_bits() == (3f32.ln()).to_bits()
+            && t.3 == 0));
+        assert!(
+            encoded
+                .iter()
+                .any(|t| t.0 == bucket("/public/0", 4096) && t.2.to_bits() == 0 && t.3 == 1)
+        );
+        assert!(
+            encoded
+                .iter()
+                .any(|t| t.0 == bucket("/public/1", 4096) && t.2.to_bits() == 0 && t.3 == 0)
+        );
+    }
+    #[test]
+    fn non_object_keeps_original_index_panic() {
+        let c = EncodingConfig {
+            field_buckets: 4096,
+            category_buckets: 4096,
+        };
+        let private = json!([1, 2]);
+        let public = json!({"x":1});
+        assert!(std::panic::catch_unwind(|| reference(&private, &public, &c)).is_err());
+        assert!(std::panic::catch_unwind(|| tokens_with_public(&private, &public, &c)).is_err());
     }
 }

@@ -23,6 +23,9 @@ use tokio::{
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PublicOnlineConfigV1 {
+    /// 显式采集正式来源进展；旧消费者反序列化时保持关闭。
+    #[serde(default)]
+    pub source_progress: bool,
     pub header: PublicInputStreamHeaderV1,
     pub recording: GateAOutputConfig,
     /// 包含后台当前正在写入的对象；不是字节预算或生产默认。
@@ -251,7 +254,10 @@ where
     F: FnMut(&AppliedIngressV1) -> RecordingResult<()>,
 {
     // 保留旧启动顺序：核心/记录创建错误不进入运行错误包装，也不被 cancel 抢先。
-    let core = PublicObservationCoreV1::new(config.header.clone())?;
+    let mut core = PublicObservationCoreV1::new(config.header.clone())?;
+    if config.source_progress {
+        core.enable_source_progress();
+    }
     let background = Background::start(recording_root, &config)?;
     let mut progress = PublicOnlineProgressV1 {
         shared: Some(background.shared.clone()),
@@ -370,7 +376,10 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> PublicOnlineSessionV1<'a, S> {
         config: PublicOnlineConfigV1,
         progress: &'a mut PublicOnlineProgressV1,
     ) -> RecordingResult<Self> {
-        let core = PublicObservationCoreV1::new(config.header.clone())?;
+        let mut core = PublicObservationCoreV1::new(config.header.clone())?;
+        if config.source_progress {
+            core.enable_source_progress();
+        }
         let background = Background::start(recording_root, &config)?;
         progress.shared = Some(background.shared.clone());
         Self::start_initialized(stream, recording_root, config, progress, core, background).await

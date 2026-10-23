@@ -13,6 +13,7 @@ use tokio::net::UnixStream;
 
 fn config(interval: u64, capacity: usize) -> PublicOnlineConfigV1 {
     PublicOnlineConfigV1 {
+        source_progress: false,
         header: fixture::core().header().clone(),
         recording: fixture::config(),
         recording_in_flight_inputs: capacity.try_into().unwrap(),
