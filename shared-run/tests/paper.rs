@@ -21,7 +21,11 @@ use data_collect::handoff::{read_handoff_v2, write_handoff_v2};
 use data_pipeline_core::{public_input::*, typed_raw::*};
 use data_pipeline_training::{public_online::*, public_recording::*};
 use shared_run::paper::*;
-use sim_system::{execution::RequestContextV2, latency_profile::*, platform_rules::*};
+use sim_system::{
+    execution::{BusinessProjectionVersionV1, RequestContextV2},
+    latency_profile::*,
+    platform_rules::*,
+};
 use std::{
     path::Path,
     sync::Arc,
@@ -129,17 +133,17 @@ fn setup(root: &Path) -> (PaperConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
         activation_id: "paper-active".into(),
         consumption_sequence_ref: "paper-inputs".into(),
         noe_implementation_identity: "paper-test".into(),
-        admission_policy: ledger::AccountAdmissionPolicyV1 {
-            per_market_all_in_commitment_limit_pusd: ExactDecimal("100".into()),
-        },
+        admission_policy: ledger::AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
         max_group_bytes: 2 << 20,
         finite_in_flight_groups: 1,
-        script: PaperScriptConfigV1 {
+        script: PaperScriptConfigV1::SingleBuyThenCancel {
             condition_id: ConditionId(CONDITION_ID.into()),
-            token_id: TokenId(UP_TOKEN_ID.into()),
-            limit_price_pusd_per_share: rust_decimal::Decimal::new(2, 1),
-            size_shares: rust_decimal::Decimal::from(5),
-            post_only: true,
+            order: PaperGtcLegV1 {
+                token_id: TokenId(UP_TOKEN_ID.into()),
+                limit_price_pusd_per_share: rust_decimal::Decimal::new(2, 1),
+                size_shares: rust_decimal::Decimal::from(5),
+                post_only: true,
+            },
             submit_context: context("paper-buy"),
             cancel_context: context("paper-cancel"),
         },
@@ -244,16 +248,23 @@ fn inputs(path: &Path) -> Vec<serde_json::Value> {
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .filter(|line| line["kind"] == "ACCEPTED_INPUTS")
-        .flat_map(|line| line["body"].as_array().unwrap().clone())
+        .filter_map(|line| match line["kind"].as_str() {
+            Some("ACCEPTED_INPUTS") => Some(line["body"].as_array().unwrap().clone()),
+            Some("ACCEPTED_INPUTS_V3") => Some(line["body"]["inputs"].as_array().unwrap().clone()),
+            _ => None,
+        })
+        .flatten()
         .collect()
 }
 fn requests(path: &Path) -> Vec<serde_json::Value> {
-    inputs(path)
-        .into_iter()
-        .filter(|v| v["input"] == "PUBLIC_REQUEST")
-        .map(|v| v["body"]["request"].clone())
-        .collect()
+    let mut requests = vec![];
+    // 正式读取接口读取原请求；只说明耐久输入，平台接受另核 NOE/Ledger。
+    sim_system::execution::visit_sim_requests_v1(path, 2 << 20, |_, request, _| {
+        requests.push(serde_json::to_value(request).unwrap());
+        Ok(())
+    })
+    .unwrap();
+    requests
 }
 #[tokio::test(flavor = "current_thread")]
 async fn production_host_real_order_cancel_and_same_future_half_frame() {
@@ -539,7 +550,7 @@ async fn one_sided_market_keeps_original_unknown_and_never_invents_cancel() {
             serde_json::from_value(metadata["payload"]["context"]["context_reference"].clone())
                 .unwrap();
         let store =
-            ::execution_normalization::DurableContextStoreV3::open(&config.noe_root, &reference)
+            ::execution_normalization::DurableContextStoreV4::open(&config.noe_root, &reference)
                 .unwrap();
         for commit in store.commits() {
             for record in &commit.records {
@@ -601,5 +612,301 @@ async fn original_background_io_failure_is_not_reported_as_drained() {
         !std::fs::read_to_string(&config.sim_log)
             .unwrap()
             .contains("RunSeal")
+    );
+}
+
+fn paired_script() -> PaperScriptConfigV1 {
+    PaperScriptConfigV1::PairedBuy {
+        condition_id: ConditionId(CONDITION_ID.into()),
+        orders: [
+            PaperGtcLegV1 {
+                token_id: TokenId(UP_TOKEN_ID.into()),
+                limit_price_pusd_per_share: rust_decimal::Decimal::new(2, 1),
+                size_shares: rust_decimal::Decimal::from(5),
+                post_only: true,
+            },
+            PaperGtcLegV1 {
+                token_id: TokenId(DOWN_TOKEN_ID.into()),
+                limit_price_pusd_per_share: rust_decimal::Decimal::new(3, 1),
+                size_shares: rust_decimal::Decimal::from(7),
+                post_only: true,
+            },
+        ],
+        submit_context: context("paper-pair"),
+    }
+}
+fn down_book(seq: u64) -> TypedRawRowV2 {
+    let mut row = book_row(seq);
+    let TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(r)) = &mut row else {
+        unreachable!()
+    };
+    let PolymarketOrderbookEvent::Book { asset_id, .. } = &mut r.event else {
+        unreachable!()
+    };
+    *asset_id = DOWN_TOKEN_ID.into();
+    row
+}
+fn evidence_path(tmp: &tempfile::TempDir, name: &str) -> std::path::PathBuf {
+    if let Some(root) = std::env::var_os("PAPER_TEST_ARTIFACT_ROOT") {
+        let root = std::path::PathBuf::from(root).join(name);
+        std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        root
+    } else {
+        tmp.path().to_owned()
+    }
+}
+fn retained_report(config: &PaperConfigV1, report: &PaperReportV1) {
+    if std::env::var_os("PAPER_TEST_ARTIFACT_ROOT").is_some() {
+        let root = config.sim_log.parent().unwrap();
+        std::fs::write(
+            root.join("effective-config.json"),
+            serde_json::to_vec_pretty(config).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("report.json"),
+            serde_json::to_vec_pretty(report).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn production_paired_buy_reserves_whole_exact_action_once_or_sends_strictly_zero() {
+    for (cash, large_quantity) in [("100", false), ("3", false), ("100", true)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = evidence_path(&tmp, &format!("paired-cash-{cash}-large-{large_quantity}"));
+        let (mut config, rules) = setup(&root);
+        config.script = paired_script();
+        if large_quantity && let PaperScriptConfigV1::PairedBuy { orders, .. } = &mut config.script
+        {
+            // SDK合法大数量；中间百分之一份/微本金超过Decimal，仍须按实际现金正常拒绝。
+            orders[0].size_shares = "1000000000000000000000000000".parse().unwrap();
+        }
+        config.session.initial_account_state.available_pusd = ExactDecimal(cash.into());
+        let listener = UnixListener::bind(&config.socket_path).unwrap();
+        let peer = async {
+            let mut stream = accept(&listener).await;
+            send(&mut stream, 1, metadata()).await;
+            assert!(requests(&config.sim_log).is_empty(), "NoTrade零请求");
+            send(&mut stream, 2, book_row(1)).await;
+            send(&mut stream, 3, down_book(2)).await;
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            for seq in 4..=6 {
+                send(&mut stream, seq, book_row(seq)).await;
+            }
+            write_handoff_v2(
+                &mut stream,
+                &DataCollectHandoffV2::End {
+                    last_confirmed_sequence: 6,
+                },
+            )
+            .await
+            .unwrap();
+        };
+        let (run, ()) = tokio::join!(
+            run_paper_v1(&config, rules.clone(), std::future::pending()),
+            peer
+        );
+        let report = run.unwrap();
+        retained_report(&config, &report);
+        assert!(report.sim_noe_ledger_recording_drained);
+        let ledger = report.ledger_consumed.as_ref().unwrap();
+        let local = &ledger.local_pending_reservation_projection;
+        assert_eq!(
+            local
+                .principal_pusd
+                .0
+                .parse::<rust_decimal::Decimal>()
+                .unwrap(),
+            rust_decimal::Decimal::ZERO
+        );
+        assert_eq!(
+            local
+                .immediate_fee_pusd
+                .0
+                .parse::<rust_decimal::Decimal>()
+                .unwrap(),
+            rust_decimal::Decimal::ZERO
+        );
+        let req = requests(&config.sim_log);
+        if cash == "100" && !large_quantity {
+            assert_eq!(report.script, PaperScriptStepV1::SubmissionSent);
+            assert_eq!(req.len(), 1, "一个整动作一次提交，不拆腿不重试");
+            assert_eq!(req[0]["method"], "POST_ORDERS");
+            assert_eq!(
+                req[0]["request"]["context"]["global_request_id"],
+                "paper-pair"
+            );
+            let items = req[0]["request"]["items"].as_array().unwrap();
+            assert_eq!(items.len(), 2);
+            for (ordinal, (token, price, size)) in
+                [(UP_TOKEN_ID, "0.2", "5"), (DOWN_TOKEN_ID, "0.3", "7")]
+                    .iter()
+                    .enumerate()
+            {
+                assert_eq!(items[ordinal]["batch_item_ordinal"], ordinal);
+                let order = &items[ordinal]["item"]["order"];
+                assert_eq!(order["token_id"], *token);
+                assert_eq!(
+                    order["kind"]["GtcLimit"]["limit_price_pusd_per_share"],
+                    *price
+                );
+                assert_eq!(order["kind"]["GtcLimit"]["size_shares"], *size);
+                assert_eq!(
+                    items[ordinal]["item"]["order_identity_mode"],
+                    "PublicRequestV1"
+                );
+            }
+            assert_eq!(ledger.platform_confirmed_projection.open_order_count, 2);
+            assert_eq!(
+                ledger
+                    .platform_confirmed_projection
+                    .principal_encumbrance_pusd
+                    .0,
+                "3.1"
+            );
+            assert_eq!(
+                ledger.platform_confirmed_projection.available_pusd.0, "96.9",
+                "已预留与平台占资只计一次"
+            );
+        } else {
+            // 每腿分别1和2.1都不超过3，整动作3.1不足；不得部分发出或改值。
+            assert_eq!(
+                report.script,
+                PaperScriptStepV1::LocalFundsRejected {
+                    cash_available: cash.parse().unwrap()
+                }
+            );
+            assert!(req.is_empty(), "严格零发送");
+            assert_eq!(ledger.platform_confirmed_projection.open_order_count, 0);
+            assert_eq!(ledger.platform_confirmed_projection.available_pusd.0, cash);
+            assert_eq!(
+                ledger
+                    .platform_confirmed_projection
+                    .principal_encumbrance_pusd
+                    .0,
+                "0"
+            );
+        }
+        let summary = sim_system::execution::visit_sim_requests_v1(
+            &config.sim_log,
+            config.max_group_bytes,
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            summary.opened.projection_version,
+            BusinessProjectionVersionV1::V4
+        );
+        assert_eq!(
+            summary.opened.platform_rule_snapshot_file_sha256,
+            *rules.file_sha256()
+        );
+        assert!(!summary.saw_seal);
+        assert!(!summary.incomplete_tail);
+        println!(
+            "paired cash={cash} large={large_quantity} inputs={} groups={} report={}",
+            summary.inputs,
+            summary.groups,
+            serde_json::to_string(&report).unwrap()
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn production_v4_zero_target_cancel_completes_request_without_inventing_target_result() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = evidence_path(&tmp, "zero-target-cancel");
+    let (mut config, rules) = setup(&root);
+    config.script = PaperScriptConfigV1::CancelMarket {
+        condition_id: ConditionId(CONDITION_ID.into()),
+        cancel_context: context("paper-empty-cancel"),
+    };
+    let listener = UnixListener::bind(&config.socket_path).unwrap();
+    let peer = async {
+        let mut stream = accept(&listener).await;
+        send(&mut stream, 1, metadata()).await;
+        send(&mut stream, 2, book_row(1)).await;
+        send(&mut stream, 3, down_book(2)).await;
+        // 仍使用正式经验延迟；随后真实组领取反馈，不以登记回执替代完成。
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        send(&mut stream, 4, book_row(3)).await;
+        send(&mut stream, 5, book_row(4)).await;
+        write_handoff_v2(
+            &mut stream,
+            &DataCollectHandoffV2::End {
+                last_confirmed_sequence: 5,
+            },
+        )
+        .await
+        .unwrap();
+    };
+    let (run, ()) = tokio::join!(run_paper_v1(&config, rules, std::future::pending()), peer);
+    let report = run.unwrap();
+    retained_report(&config, &report);
+    assert_eq!(
+        report.script,
+        PaperScriptStepV1::CancellationRequestCompleted(
+            contracts::execution_normalization::CancellationRequestCompletedV1 {
+                canceled_count: 0,
+                not_canceled_no_effect_count: 0,
+                evidence_unknown_no_effect_count: 0,
+            }
+        )
+    );
+    let req = requests(&config.sim_log);
+    assert_eq!(req.len(), 1);
+    assert_eq!(req[0]["method"], "CANCEL_MARKET_ORDERS");
+    assert_eq!(
+        req[0]["request"]["context"]["global_request_id"],
+        "paper-empty-cancel"
+    );
+    assert_eq!(
+        report
+            .ledger_consumed
+            .as_ref()
+            .unwrap()
+            .platform_confirmed_projection
+            .available_pusd
+            .0,
+        "100"
+    );
+    let mut request_complete = 0;
+    let mut target_feedback = 0;
+    for context in std::fs::read_dir(&config.noe_root).unwrap() {
+        let metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(context.unwrap().path().join("context.json")).unwrap(),
+        )
+        .unwrap();
+        let reference =
+            serde_json::from_value(metadata["payload"]["context"]["context_reference"].clone())
+                .unwrap();
+        let store =
+            ::execution_normalization::DurableContextStoreV4::open(&config.noe_root, &reference)
+                .unwrap();
+        for commit in store.commits() {
+            for record in &commit.records {
+                if let ::execution_normalization::NormalizationRecord::Evidence {
+                    evidence:
+                        ::execution_normalization::SourceNeutralEvidenceKind::Control { result },
+                    ..
+                } = record
+                {
+                    match result {
+                        contracts::execution_normalization::SourceNeutralControlResult::CancellationRequestCompleted { .. } => request_complete += 1,
+                        contracts::execution_normalization::SourceNeutralControlResult::Cancellation { .. } => target_feedback += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(request_complete, 1);
+    assert_eq!(target_feedback, 0);
+    println!(
+        "zero-target request_complete={request_complete} targets={target_feedback} report={}",
+        serde_json::to_string(&report).unwrap()
     );
 }

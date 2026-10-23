@@ -1,11 +1,14 @@
 //! PAPER 唯一装配和串行消费入口。仅等待 DPT 下一输入时服务原执行时钟。
-use crate::SharedExecutionV1;
+use crate::{IntentReserveV1, ReservedIntentV1, SharedExecutionV2};
 use ::execution_normalization::{
     MemoryIdentityKeyV1, NormalizationRecord, SourceNeutralEntityKeyV1, SourceNeutralEvidenceKind,
 };
 use contracts::{execution_normalization::*, *};
 use data_pipeline_training::public_online::*;
-use ledger::{AccountAdmissionPolicyV1, LedgerProjectionV2, LedgerWriterV1};
+use ledger::{
+    AccountAdmissionPolicyV3, LedgerProjectionV2, LedgerRequestIdentityV1, LedgerWriterV1,
+    ReserveIntentV1,
+};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sim_system::{
@@ -34,7 +37,7 @@ pub struct PaperConfigV1 {
     pub activation_id: String,
     pub consumption_sequence_ref: String,
     pub noe_implementation_identity: String,
-    pub admission_policy: AccountAdmissionPolicyV1,
+    pub admission_policy: AccountAdmissionPolicyV3,
     pub max_group_bytes: usize,
     pub finite_in_flight_groups: usize,
     pub script: PaperScriptConfigV1,
@@ -66,14 +69,59 @@ impl PaperSessionV1 {
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PaperScriptConfigV1 {
-    pub condition_id: ConditionId,
+pub struct PaperGtcLegV1 {
     pub token_id: TokenId,
     pub limit_price_pusd_per_share: Decimal,
     pub size_shares: Decimal,
     pub post_only: bool,
-    pub submit_context: RequestContextV2,
-    pub cancel_context: RequestContextV2,
+}
+impl PaperGtcLegV1 {
+    fn intent(&self) -> BuyLegIntentV1 {
+        BuyLegIntentV1 {
+            token_id: self.token_id.clone(),
+            order: BuyOrderIntentV1::GtcLimit {
+                limit_price_pusd_per_share: self.limit_price_pusd_per_share,
+                size_shares: self.size_shares,
+                post_only: self.post_only,
+            },
+        }
+    }
+}
+/// 有限接口验收脚本；精确业务值由配置给出，不选择或修改订单。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum PaperScriptConfigV1 {
+    SingleBuyThenCancel {
+        condition_id: ConditionId,
+        order: PaperGtcLegV1,
+        submit_context: RequestContextV2,
+        cancel_context: RequestContextV2,
+    },
+    PairedBuy {
+        condition_id: ConditionId,
+        orders: [PaperGtcLegV1; 2],
+        submit_context: RequestContextV2,
+    },
+    CancelMarket {
+        condition_id: ConditionId,
+        cancel_context: RequestContextV2,
+    },
+}
+impl PaperScriptConfigV1 {
+    fn condition_id(&self) -> &ConditionId {
+        match self {
+            Self::SingleBuyThenCancel { condition_id, .. }
+            | Self::PairedBuy { condition_id, .. }
+            | Self::CancelMarket { condition_id, .. } => condition_id,
+        }
+    }
+    fn cancel_context(&self) -> Option<&RequestContextV2> {
+        match self {
+            Self::SingleBuyThenCancel { cancel_context, .. }
+            | Self::CancelMarket { cancel_context, .. } => Some(cancel_context),
+            Self::PairedBuy { .. } => None,
+        }
+    }
 }
 impl PaperConfigV1 {
     pub fn snapshot_request(&self) -> CurrentProcessSnapshotRequestV1 {
@@ -92,6 +140,11 @@ pub enum PaperScriptStepV1 {
     AwaitingCancellableOrder,
     AwaitingCancellationFeedback,
     CancellationFeedback(SourceNeutralCancellationOutcomeV1),
+    CancellationRequestCompleted(CancellationRequestCompletedV1),
+    SubmissionSent,
+    LocalFundsRejected {
+        cash_available: Decimal,
+    },
 }
 #[derive(Debug, Serialize)]
 pub struct PaperReportV1 {
@@ -125,7 +178,7 @@ impl std::error::Error for PaperFailureV1 {}
 fn assemble(
     config: &PaperConfigV1,
     rules: Arc<SealedProcessRuleSnapshotV3>,
-) -> Result<(ContinuousPublicConsumptionV1, SharedExecutionV1), PaperError> {
+) -> Result<(ContinuousPublicConsumptionV1, SharedExecutionV2), PaperError> {
     let finality = Arc::new(TradeFinalityPolicyV2::decode_and_seal(&std::fs::read(
         &config.finality_policy_path,
     )?)?);
@@ -138,7 +191,7 @@ fn assemble(
     )?);
     let latency = load_embedded_proxy_latency_profile()?;
     let opened = RunOpenedV2 {
-        projection_version: BusinessProjectionVersionV1::V3,
+        projection_version: BusinessProjectionVersionV1::V4,
         latency_sampler_version: "xoshiro256plusplus_jump_multiply_high_empirical_rank_v2".into(),
         run_id: config.session.run_id.clone(),
         durability_role: RunDurabilityRoleV2::CleanRun,
@@ -155,7 +208,7 @@ fn assemble(
             config.sim_log.display()
         )),
     };
-    let port = MemoryNoeProjectionPortV3::new(
+    let port = MemoryNoeProjectionPortV4::new(
         &config.noe_root,
         opened.clone(),
         reference(0),
@@ -196,9 +249,9 @@ fn assemble(
             }
         }
     }
-    let mut ledger = LedgerWriterV1::new(config.admission_policy.clone());
+    let mut ledger = LedgerWriterV1::new_with_admission_v3(config.admission_policy);
     execution.bind_ledger_recording_v2(&mut ledger, &config.ledger_root)?;
-    let shared = SharedExecutionV1::from_opening(ledger, observation)?
+    let shared = SharedExecutionV2::from_opening(ledger, observation)?
         .expect("真实 create_session 已产生开户事实");
     loop {
         match execution.activate_session(config.activation_id.clone()) {
@@ -217,55 +270,185 @@ fn assemble(
     ))
 }
 
+/// 仅映射到成本所属模块的整数轴；不能表示的精确输入沿错误返回，不舍入业务值。
+fn reserve_leg(
+    rules: &SealedProcessRuleSnapshotV3,
+    condition: &ConditionId,
+    context: &RequestContextV2,
+    ordinal: u16,
+    leg: &PaperGtcLegV1,
+    tick: &ExactDecimal,
+) -> Result<IntentReserveV1, PaperError> {
+    let tick_decimal: Decimal = tick.0.parse()?;
+    let quantity = leg.size_shares.normalize();
+    let quantity_axis: num_bigint::BigUint = quantity.mantissa().to_string().parse()?;
+    let quantity_axis = quantity_axis
+        * num_bigint::BigUint::from(10_u8).pow(
+            2_u32
+                .checked_sub(quantity.scale())
+                .ok_or("份额不能精确表示为百分之一份")?,
+        );
+    let price_axis = (leg.limit_price_pusd_per_share / tick_decimal)
+        .normalize()
+        .to_string()
+        .parse()?;
+    let cost = rules.limit_buy_cost_v1(&quantity_axis, price_axis, tick, leg.post_only)?;
+    let units = |amount: &num_bigint::BigUint, scale: usize| {
+        let mut digits = format!("{:0>width$}", amount.to_string(), width = scale + 1);
+        digits.insert(digits.len() - scale, '.');
+        ExactDecimal(
+            digits
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_owned(),
+        )
+    };
+    Ok(IntentReserveV1 {
+        batch_item_ordinal: ordinal,
+        reserve: ReserveIntentV1 {
+            request_identity: LedgerRequestIdentityV1(serde_json::to_string(&(
+                &context.global_request_id,
+                ordinal,
+            ))?),
+            condition_id: condition.clone(),
+            requested_principal_pusd: units(&cost.principal_micro, 6),
+            immediate_fee_reserve_pusd: units(&cost.fee_1e5_units, 5),
+        },
+    })
+}
+
 async fn script_group(
     config: &PaperScriptConfigV1,
+    rules: &SealedProcessRuleSnapshotV3,
     step: &mut PaperScriptStepV1,
     driver: &mut ContinuousPublicConsumptionV1,
-    shared: &mut SharedExecutionV1,
+    shared: &mut SharedExecutionV2,
 ) -> Result<(), PaperError> {
-    let Some(_) = shared.prepare_action_group(driver)? else {
+    let Some(cutoff) = shared.prepare_action_group(driver)? else {
         return Ok(());
     };
+    // 终态继续消费公共事实与经济反馈，不为已结束脚本逐组复制账户或登记。
+    if matches!(
+        step,
+        PaperScriptStepV1::SubmissionSent
+            | PaperScriptStepV1::LocalFundsRejected { .. }
+            | PaperScriptStepV1::CancellationFeedback(_)
+            | PaperScriptStepV1::CancellationRequestCompleted(_)
+    ) {
+        return Ok(());
+    }
+    let frames = driver.frames();
+    let before = shared
+        .borrow_action_before(cutoff, &frames)
+        .expect("已准备真实开户与公共组");
     match step {
         PaperScriptStepV1::AwaitingNoTrade => {
             *step = PaperScriptStepV1::AwaitingTargetGroup;
         }
         PaperScriptStepV1::AwaitingTargetGroup => {
-            let target = driver.frames().iter().any(|frame| {
-                frame.observation.market.condition_id == config.condition_id
-                    && frame
-                        .observation
-                        .assets
-                        .iter()
-                        .any(|asset| asset.asset.token_id == config.token_id)
-            });
-            if target {
-                let intent = Arc::new(ModelIntentV1::SubmitSingleBuy {
-                    condition_id: config.condition_id.clone(),
-                    order: BuyLegIntentV1 {
-                        token_id: config.token_id.clone(),
-                        order: BuyOrderIntentV1::GtcLimit {
-                            limit_price_pusd_per_share: config.limit_price_pusd_per_share,
-                            size_shares: config.size_shares,
-                            post_only: config.post_only,
-                        },
+            let Some(frame) = frames
+                .iter()
+                .find(|f| &f.observation.market.condition_id == config.condition_id())
+            else {
+                return Ok(());
+            };
+            let (context, intent, legs): (_, _, Vec<&PaperGtcLegV1>) = match config {
+                PaperScriptConfigV1::SingleBuyThenCancel {
+                    condition_id,
+                    order,
+                    submit_context,
+                    ..
+                } => (
+                    submit_context,
+                    ModelIntentV1::SubmitSingleBuy {
+                        condition_id: condition_id.clone(),
+                        order: order.intent(),
                     },
-                });
-                driver.wait_for_recording_capacity()?;
-                shared
-                    .execute(
-                        &mut driver.decision().expect("已应用组"),
-                        config.submit_context.clone(),
-                        Some(intent),
-                    )
-                    .await?;
-                *step = PaperScriptStepV1::AwaitingCancellableOrder;
+                    vec![order],
+                ),
+                PaperScriptConfigV1::PairedBuy {
+                    condition_id,
+                    orders,
+                    submit_context,
+                } => (
+                    submit_context,
+                    ModelIntentV1::SubmitPairedBuy {
+                        condition_id: condition_id.clone(),
+                        orders: orders.each_ref().map(PaperGtcLegV1::intent),
+                    },
+                    orders.iter().collect(),
+                ),
+                PaperScriptConfigV1::CancelMarket {
+                    condition_id,
+                    cancel_context,
+                } => (
+                    cancel_context,
+                    ModelIntentV1::CancelMarketOrders {
+                        condition_id: condition_id.clone(),
+                    },
+                    vec![],
+                ),
+            };
+            let mut reserves = Vec::with_capacity(legs.len());
+            for (ordinal, leg) in legs.iter().enumerate() {
+                let Some(tick) = frame
+                    .observation
+                    .assets
+                    .iter()
+                    .find(|asset| asset.asset.token_id == leg.token_id)
+                    .and_then(|asset| asset.tick.value.as_ref())
+                else {
+                    return Ok(());
+                };
+                reserves.push(reserve_leg(
+                    rules,
+                    config.condition_id(),
+                    context,
+                    ordinal as u16,
+                    leg,
+                    tick,
+                )?);
+            }
+            let cash_available = before.cash_available();
+            let item = ReservedIntentV1 {
+                context: context.clone(),
+                intent: Arc::new(intent),
+                reserves,
+            };
+            driver.wait_for_recording_capacity()?;
+            match shared
+                .execute_batch_reserved(&mut driver.decision().expect("已应用组"), &[item])
+                .await
+            {
+                Ok(_) => {
+                    *step = match config {
+                        PaperScriptConfigV1::SingleBuyThenCancel { .. } => {
+                            PaperScriptStepV1::AwaitingCancellableOrder
+                        }
+                        PaperScriptConfigV1::PairedBuy { .. } => PaperScriptStepV1::SubmissionSent,
+                        PaperScriptConfigV1::CancelMarket { .. } => {
+                            PaperScriptStepV1::AwaitingCancellationFeedback
+                        }
+                    }
+                }
+                Err(error) if error.is_local_funds_rejection() => {
+                    *step = PaperScriptStepV1::LocalFundsRejected { cash_available }
+                }
+                Err(error) => return Err(format!("{error:?}").into()),
             }
         }
         PaperScriptStepV1::AwaitingCancellableOrder => {
-            let id = shared.registry().orders().find_map(|order| {
+            let PaperScriptConfigV1::SingleBuyThenCancel {
+                submit_context,
+                cancel_context,
+                ..
+            } = config
+            else {
+                unreachable!("单腿脚本阶段");
+            };
+            let id = before.orders().find_map(|order| {
                 if order.origin.as_ref()?.intent.global_request_id()
-                    != config.submit_context.global_request_id
+                    != submit_context.global_request_id
                     || order.cancellable != ExecutionReadValueV1::Known(true)
                 {
                     return None;
@@ -280,36 +463,68 @@ async fn script_group(
             if let Some(platform_order_id) = id {
                 driver.wait_for_recording_capacity()?;
                 shared
-                    .execute(
+                    .execute_batch_reserved(
                         &mut driver.decision().expect("已应用组"),
-                        config.cancel_context.clone(),
-                        Some(Arc::new(ModelIntentV1::CancelOrder { platform_order_id })),
+                        &[ReservedIntentV1 {
+                            context: cancel_context.clone(),
+                            intent: Arc::new(ModelIntentV1::CancelOrder { platform_order_id }),
+                            reserves: vec![],
+                        }],
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| format!("{error:?}"))?;
                 *step = PaperScriptStepV1::AwaitingCancellationFeedback;
             }
         }
         PaperScriptStepV1::AwaitingCancellationFeedback => {
-            for order in shared.registry().orders() {
-                let Some(feedback) = order.latest_direct_feedback else {
-                    continue;
-                };
-                let associated = matches!(&feedback.record().source_reference().record, SimV2SourceRecordReferenceV1::DirectResponse { association: SimV2DirectResponseAssociationV1::CancellationTarget { global_request_id, .. }, .. } if global_request_id == &config.cancel_context.global_request_id);
-                if associated
-                    && let NormalizationRecord::Evidence {
-                        evidence:
-                            SourceNeutralEvidenceKind::Control {
-                                result: SourceNeutralControlResult::Cancellation { outcome, .. },
-                            },
-                        ..
-                    } = feedback.record()
-                {
-                    *step = PaperScriptStepV1::CancellationFeedback(outcome.clone());
-                    break;
+            let context = config.cancel_context().expect("取消脚本阶段");
+            let requests = before.cancellation_requests(None);
+            if let ExecutionReadValueV1::Known(Some(feedback)) = requests.latest_response
+                && matches!(&feedback.record().source_reference().record,
+                    SimV2SourceRecordReferenceV1::DirectResponse {
+                        association: SimV2DirectResponseAssociationV1::Request { global_request_id }, ..
+                    } if global_request_id == &context.global_request_id)
+                && let NormalizationRecord::Evidence {
+                    evidence:
+                        SourceNeutralEvidenceKind::Control {
+                            result:
+                                SourceNeutralControlResult::CancellationRequestCompleted { result },
+                        },
+                    ..
+                } = feedback.record()
+            {
+                if matches!(config, PaperScriptConfigV1::CancelMarket { .. }) {
+                    *step = PaperScriptStepV1::CancellationRequestCompleted(result.clone());
+                } else {
+                    // 单目标结果仍来自该订单的正式目标反馈，请求完成不冒充目标成功。
+                    for order in shared.registry().orders() {
+                        let Some(feedback) = order.latest_direct_feedback else {
+                            continue;
+                        };
+                        let associated = matches!(&feedback.record().source_reference().record,
+                            SimV2SourceRecordReferenceV1::DirectResponse { association: SimV2DirectResponseAssociationV1::CancellationTarget { global_request_id, .. }, .. }
+                            if global_request_id == &context.global_request_id);
+                        if associated
+                            && let NormalizationRecord::Evidence {
+                                evidence:
+                                    SourceNeutralEvidenceKind::Control {
+                                        result:
+                                            SourceNeutralControlResult::Cancellation { outcome, .. },
+                                    },
+                                ..
+                            } = feedback.record()
+                        {
+                            *step = PaperScriptStepV1::CancellationFeedback(outcome.clone());
+                            break;
+                        }
+                    }
                 }
             }
         }
-        PaperScriptStepV1::CancellationFeedback(_) => {}
+        PaperScriptStepV1::CancellationFeedback(_)
+        | PaperScriptStepV1::CancellationRequestCompleted(_)
+        | PaperScriptStepV1::SubmissionSent
+        | PaperScriptStepV1::LocalFundsRejected { .. } => {}
     }
     Ok(())
 }
@@ -321,7 +536,7 @@ pub async fn run_paper_v1(
     rules: Arc<SealedProcessRuleSnapshotV3>,
     stop: impl Future<Output = ()>,
 ) -> Result<PaperReportV1, PaperError> {
-    let (mut driver, mut shared) = assemble(config, rules)?;
+    let (mut driver, mut shared) = assemble(config, rules.clone())?;
     let mut progress = PublicOnlineProgressV1::default();
     let mut step = PaperScriptStepV1::default();
     let mut completed = None;
@@ -385,7 +600,8 @@ pub async fn run_paper_v1(
                             }
                         }
                         driver.apply_group(group)?;
-                        script_group(&config.script, &mut step, &mut driver, &mut shared).await?;
+                        script_group(&config.script, &rules, &mut step, &mut driver, &mut shared)
+                            .await?;
                     }
                     match pending.complete().await? {
                         PublicOnlineCompletedInputV1::Continue(next) => session = next,
