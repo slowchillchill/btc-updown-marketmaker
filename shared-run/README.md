@@ -61,7 +61,7 @@ Ledger 原经济读取索引维护账户已确认净损益、未支付返佣和�
 
 首次接入或跳组后的公共规则登记会补齐已消费市场元数据，正常读取只接纳本组新增登记。首次登记仍解除原待应用反馈的重试抑制。显式完整报告和恢复的全量工作保留；公共生产者仍生成完整组。
 
-## PAPER 运行入口（#109 任务 7）
+## PAPER 运行入口（#109 任务 7／任务 8 公共对齐）
 
 `cargo run -p shared-run --bin paper --locked --offline -- <显式配置.json>` 启动独立消费者。二进制仅调用原固定官方 HTTPS 冷启动规则加载器，随后调用 `paper::run_paper_v1`，不启动或管理采集器。此命令描述接口，本轮未执行真实在线业务。受控测试通过原历史加载器得到合法封存规则后调用同一个装配/运行函数，不存在生产历史测试模式、外部每组时钟或任意 HTTP 端点。
 
@@ -71,18 +71,38 @@ Ledger 原经济读取索引维护账户已确认净损益、未支付返佣和�
 - `public_online` 直接使用 `PublicOnlineConfigV1`，包括原输入头、记录额度、在途输入数、稳定触发和分页参数。
 - `reference_market`、`rule_snapshot_path`、`implementation_identity` 组成原 `CurrentProcessSnapshotRequestV1`；`finality_policy_path` 指向原最终性策略。延迟固定使用内嵌经验分布，没有替换文件入口。
 - `session` 提供原运行/会话/账户/调用方/开户/Bridge 身份、`initial_account_state` 和 `session_seed`，装配固定原 `Paper` 角色。`activation_id`、`consumption_sequence_ref`、`noe_implementation_identity` 明确提供原接线标识。
-- `admission_policy` 直接使用 `AccountAdmissionPolicyV1`；`max_group_bytes`、`finite_in_flight_groups` 明确提供原 SIM 记录容量。
-- `script` 提供目标 `condition_id`、`token_id`、原 GTC `limit_price_pusd_per_share`、`size_shares`、`post_only` 及独立 `submit_context`、`cancel_context`。本入口不选择生产参数、容量或策略，不增加父策略风险检查。
+- `admission_policy` 显式填写正式 `AccountAdmissionPolicyV3` 的 `"ActualCashNoMarketLimit"`，沿实际可用现金准入；原 V1 的 `per_market_all_in_commitment_limit_pusd` 对象须迁移，不能保留旧市场限额含义；`max_group_bytes`、`finite_in_flight_groups` 明确提供原 SIM 记录容量。
+- `script.kind` 必填，可为 `SingleBuyThenCancel`、`PairedBuy` 或 `CancelMarket`。三者都先一次 NoTrade。原单腿配置迁到 `SingleBuyThenCancel`：目标 `condition_id`、`order`（`token_id`、`limit_price_pusd_per_share`、`size_shares`、`post_only`）、独立 `submit_context` 和 `cancel_context`。`PairedBuy` 给出同市场 `orders` 两条精确 GTC 腿及 `submit_context`；`CancelMarket` 只给 `condition_id` 和 `cancel_context`。入口不选择生产参数、容量或策略，不增加父策略风险检查。
 
-冷启动后创建空场景与真实 NOE 开户，绑定原唯一后台 Ledger 材料，再构造共享读取、激活和连接 socket。开户不等待市场。每次原输入闭组使用 `from_online` 的同次材料；首次相关组前按原 PM 上下文登记市场，仅查询驱动已有规则表。组经持续 SIM、完整外生事实/新截止共享读取与原 Bridge 后，才完成 DPT Record→confirm。
+例如，配对脚本部分使用以下形状（替换为调用方准确身份与精确业务值，不是生产默认）：
 
-最短脚本仅保存当前步骤，意图/请求仍归原 registry：首个可用共享组 NoTrade 零请求；后续目标组只提交一次 GTC；按原请求身份找到真实形成、实际可撤订单才取原平台 ID 提交一次取消。只有本次取消请求关联的原 `Cancellation(Canceled)` 才是取消成功，其他结果保持原语义，不造 ID、不重试。若市场双侧初始化或后续反馈尚未到齐，正常输入结束也可以报告步骤未覆盖。
+```json
+{
+  "kind": "PairedBuy",
+  "condition_id": "<condition_id>",
+  "orders": [
+    {"token_id": "<UP token_id>", "limit_price_pusd_per_share": "0.2", "size_shares": "5", "post_only": true},
+    {"token_id": "<DOWN token_id>", "limit_price_pusd_per_share": "0.3", "size_shares": "7", "post_only": true}
+  ],
+  "submit_context": {"global_request_id": "<独立请求身份>", "caller_correlation_id": null}
+}
+```
+
+本增量更新配置接口，旧 `admission_policy` 对象和旧无 `kind` 的 `script` 不能直接交给新程序；旧产物按其原实现解释，不自动拼接或续跑。
+
+冷启动后以 `BusinessProjectionVersionV1::V4`／`MemoryNoeProjectionPortV4` 创建空场景与真实 NOE 开户，绑定原唯一后台 Ledger 材料，再构造 `SharedExecutionV2`、激活和连接 socket。开户不等待市场。每次原输入闭组使用 `from_online` 的同次材料；首次相关组前按原 PM 上下文登记市场，仅查询驱动已有规则表。组经持续 SIM、完整外生事实/新截止共享读取与原 Bridge 后，才完成 DPT Record→confirm。
+
+脚本使用原 `ActionBeforeReadV2`／`AccountEconomicsReadV3` 读取，同组读取不被后继事实改写。每条 GTC 腿按其实际 tick 交给规则所属模块的 `limit_buy_cost_v1`，将本金及即时费用分别装入 `IntentReserveV1`；请求及腿序号形成独立预留身份。`execute_batch_reserved` 完成整动作先预留、准确准备订单身份、提交登记与唯一 Bridge，入口不再另做一次预留。配对价格、数量、腿顺序及 `post_only` 原样发送，不缩量、改价、拆腿重试。真实现金不足严格零发送，报告 `LocalFundsRejected` 及该组实际 `cash_available`，随后继续消费输入；程序故障仍沿 `PaperFailureV1` 返回，平台结果沿 V4 NOE／Ledger 保持。
+
+最短单腿脚本仅保存当前步骤，意图/请求仍归原 registry：首个可用共享组 NoTrade 零请求；后续目标组只提交一次 GTC；按原请求身份找到真实形成、实际可撤订单才取原平台 ID 提交一次取消。先从正式 `cancellation_requests` 确认本次请求完成，再以本次取消请求关联的原 `Cancellation(Canceled)` 判断目标取消成功；其他结果保持原语义，不造 ID、不重试。若市场双侧初始化或后续反馈尚未到齐，正常输入结束也可以报告步骤未覆盖。`CancelMarket` 单独报告正式 `CancellationRequestCompleted` 三类目标计数，合法零目标完成为三个零，不制造逐目标 Canceled；`PairedBuy` 的 `SubmissionSent` 只表示真实发送回执，不代表平台接受或成交。脚本终态仍消费公共事实和经济反馈，但不为已结束脚本逐组复制完整账户/登记。
 
 同一个 `next_applied` future 在等待半帧或原异步容量期间保持，按 `next_wake_after` 服务原 `advance_due`。返回输入后 Record→confirm、真实 End 完成段及 Stopped 排空段均不插 timer。SIM 同步容量等待仍串行；恢复后沿原时钟规则。SIGINT/SIGTERM 请求消费者计划停止，不替采集器生成 End。
 
 正常 End 或 Stopped 后只调用 SIM `stop_and_drain`，不推进未来业务、不生成 RunSeal、不撤单清仓。报告分别保留 DPT 结果/确认/应用/稳定前缀、SIM/NOE/Ledger 记录排空、Ledger 实际已消费投影和脚本步骤；`collector_exit: null` 表示没有外部退出证据。基础设施失败以错误和非零退出报告，既有应用/确认/稳定进度保留，不能以成功排空掩盖失败。记录排空、脚本覆盖、账户完成和采集器退出是不同结论。
 
-`tests/paper.rs` 直接覆盖同一入口的双侧盘口与真实 GTC/取消、关联反馈、半帧期间原 timer、单边盘口 Unknown 未覆盖、正常 End、Stopped/Aborted/断连、原后台 I/O 失败及参数错误。测试只使用本地 Unix 对端。原 DPT reserve/取消和 SIM 同毫秒/返佣/背压机制反例继续复用组件测试。本次不证明真实线上稳定性、长运行资源、收益或整个 PAPER 阶段完成。
+PAPER 继续使用原 Maker 分支及准确规则身份（D-0338），V4／V2 对齐不切换历史新 Maker/Gamma，也不新增选择器、隐藏驱动或撮合/资金释放/结算政策。完整策略、模型 ABI、新 B 时间接线、健康/待发失效与结算协调仍不在本入口。
+
+`tests/paper.rs` 直接覆盖同一入口的精确配对一次预留/提交、各腿单独可负担而整动作不足的严格零发送、零目标请求完成与目标结果区分、双侧盘口与真实 GTC/取消、关联反馈、半帧期间原 timer、单边盘口 Unknown 未覆盖、正常 End、Stopped/Aborted/断连、原后台 I/O 失败及参数错误。测试只使用本地 Unix 对端。原 DPT reserve/取消和 SIM 同毫秒/返佣/背压机制反例继续复用组件测试。本次不证明真实线上稳定性、长运行资源、收益或整个 PAPER 阶段完成。
 
 NOE 有限报告按借用参数直接编码，Parquet 记录变体按实际结构编码/解码，不经过中间 JSON Value 树。新 NOE context、commit、Parquet 清单及共享引用不再写 `boundary_sha256`；旧额外字段被读取忽略，旧 JSON 和 Parquet 的实际重开/重复入账由有限场景覆盖。旧读取器要求该字段，不能读取缺字段的新产物。记录字段与 variant 语义保持，但直接结构编码的字段顺序和物理字节不承诺与旧 Value 编码相同。
 

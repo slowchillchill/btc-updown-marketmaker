@@ -807,10 +807,20 @@ mod public_candidate_tests {
     use super::*;
     #[test]
     fn public_and_legacy_parameter_versions_and_switch_override() {
-        let public: StrategyParameters = serde_json::from_str(include_str!(
-            "../../../baseline-mm/configs/strategies/complementary_pair/public-c0.json"
-        ))
+        let file = tempfile::NamedTempFile::new().unwrap();
+        // 与生产入口相同：先加载完整 JSON Value，再解释具体策略；保留原 f64 数值。
+        std::fs::write(
+            file.path(),
+            format!(
+                "{{\"strategy\":{}}}",
+                include_str!(
+                    "../../../baseline-mm/configs/strategies/complementary_pair/public-c0.json"
+                )
+            ),
+        )
         .unwrap();
+        let value = load_value(["--config".into(), file.path().display().to_string()]).unwrap();
+        let public: StrategyParameters = serde_json::from_value(value["strategy"].clone()).unwrap();
         assert_eq!(public.version(), PUBLIC_RULE_VERSION);
         let StrategyParameters::Public(c) = public else {
             panic!()
