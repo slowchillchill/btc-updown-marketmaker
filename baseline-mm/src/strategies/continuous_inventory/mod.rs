@@ -25,6 +25,12 @@ pub const CONTINUOUS_INVENTORY_STRATEGY_ID: &str = "continuous_inventory";
 pub const CONTINUOUS_INVENTORY_RULE_VERSION: &str = "candidate_v1_continuous_inventory";
 pub const CONTINUOUS_INVENTORY_QUOTE_SPACE_RULE_VERSION: &str =
     "candidate_v2_continuous_inventory_quote_space";
+pub const CONTINUOUS_INVENTORY_NO_ACTIVE_REPLENISHMENT_RULE_VERSION: &str =
+    "candidate_v3_continuous_inventory_no_active_replenishment";
+
+fn ordinary_active_replenishment_default() -> bool {
+    true
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +42,9 @@ pub struct ContinuousInventoryConfigV1 {
     /// 两腿共同额外报价空间，单位为两腿最大tick的整数倍；缺省兼容原报价。
     #[serde(default)]
     pub extra_quote_space_ticks: u32,
+    /// 关闭时仅抑制经过原可行性检查的普通active正量，保留initial、受限修复和旧单维护。
+    #[serde(default = "ordinary_active_replenishment_default")]
+    pub enable_ordinary_active_replenishment: bool,
     pub initial_cash_pusd: Decimal,
     pub market_investment_limit_pusd: Decimal,
     pub per_market_orphan_limit_pusd: Decimal,
@@ -45,7 +54,9 @@ pub struct ContinuousInventoryConfigV1 {
 }
 impl ContinuousInventoryConfigV1 {
     pub fn rule_version(&self) -> &'static str {
-        if self.extra_quote_space_ticks == 0 {
+        if !self.enable_ordinary_active_replenishment {
+            CONTINUOUS_INVENTORY_NO_ACTIVE_REPLENISHMENT_RULE_VERSION
+        } else if self.extra_quote_space_ticks == 0 {
             CONTINUOUS_INVENTORY_RULE_VERSION
         } else {
             CONTINUOUS_INVENTORY_QUOTE_SPACE_RULE_VERSION
@@ -82,6 +93,11 @@ impl ContinuousInventoryContinuityV1 {
         }
     }
 }
+/// 存在即表示本计算在原稳定插点实际抑制了普通active正量；不是完整机会分母。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OrdinaryActiveReplenishmentSuppressionV1 {
+    pub original_quantities: [ExactDecimal; 2],
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InventoryMarketDiagnosticV1 {
     pub condition_id: ConditionId,
@@ -106,6 +122,7 @@ pub struct InventoryMarketDiagnosticV1 {
     pub cash_after: ExactDecimal,
     pub risk_quantities: [ExactDecimal; 2],
     pub quantities: [ExactDecimal; 2],
+    pub ordinary_active_replenishment_suppression: Option<OrdinaryActiveReplenishmentSuppressionV1>,
     pub unavailable: Vec<String>,
     pub source_health: Vec<SourceHealthStatusV1>,
     pub obligation_count: usize,
@@ -140,6 +157,8 @@ pub struct InventoryReservationDependencyV1 {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContinuousInventoryDiagnosticV1 {
     pub strategy_id: String,
+    #[serde(default = "ordinary_active_replenishment_default")]
+    pub enable_ordinary_active_replenishment: bool,
     pub rule_version: String,
     pub risk_equity: ExecutionReadValueV1<ExactRationalV1>,
     pub high_water: ExactRationalV1,
@@ -298,6 +317,7 @@ impl ContinuousInventoryV1 {
         self.continuity.high_water_pusd = high.public();
         let mut diagnostic = ContinuousInventoryDiagnosticV1 {
             strategy_id: CONTINUOUS_INVENTORY_STRATEGY_ID.into(),
+            enable_ordinary_active_replenishment: self.config.enable_ordinary_active_replenishment,
             rule_version: self.config.rule_version().into(),
             risk_equity: match &equity {
                 ExecutionReadValueV1::Known(e) => ExecutionReadValueV1::Known(e.public()),
@@ -453,6 +473,7 @@ impl ContinuousInventoryV1 {
                 cash_after: exact(cash),
                 risk_quantities: [exact(Decimal::ZERO), exact(Decimal::ZERO)],
                 quantities: [exact(Decimal::ZERO), exact(Decimal::ZERO)],
+                ordinary_active_replenishment_suppression: None,
                 unavailable: vec![],
                 source_health: self.health_states(o, &self.normal_sources(o), now),
                 obligation_count: state.obligations.len(),
@@ -648,6 +669,17 @@ impl ContinuousInventoryV1 {
                 if support[0].add(&support[1]) > profit {
                     q = [0, 0];
                 }
+                if !self.config.enable_ordinary_active_replenishment
+                    && !restricted
+                    && !d.initial
+                    && q.iter().any(|quantity| *quantity > 0)
+                {
+                    d.ordinary_active_replenishment_suppression =
+                        Some(OrdinaryActiveReplenishmentSuppressionV1 {
+                            original_quantities: [exact(shares(q[0])?), exact(shares(q[1])?)],
+                        });
+                    q = [0, 0];
+                }
                 let mut legs = Vec::new();
                 for side in 0..2 {
                     if q[side] > 0 {
@@ -780,6 +812,62 @@ mod configuration_tests {
     use super::*;
     const PARAMETERS: &str =
         include_str!("../../../configs/strategies/continuous_inventory/adopted-v1.toml");
+    #[test]
+    fn ordinary_replenishment_default_bool_domain_and_independent_version() {
+        let explicit = ContinuousInventoryConfigV1::parse_toml(PARAMETERS).unwrap();
+        let missing = PARAMETERS.replace("enable_ordinary_active_replenishment = true\n", "");
+        assert_eq!(
+            ContinuousInventoryConfigV1::parse_toml(&missing).unwrap(),
+            explicit
+        );
+        let mut json = serde_json::to_value(&explicit).unwrap();
+        assert_eq!(json["enable_ordinary_active_replenishment"], true);
+        json.as_object_mut()
+            .unwrap()
+            .remove("enable_ordinary_active_replenishment");
+        assert_eq!(
+            serde_json::from_value::<ContinuousInventoryConfigV1>(json.clone()).unwrap(),
+            explicit
+        );
+        for enabled in [true, false] {
+            for w in [0, 1, u32::MAX] {
+                json["enable_ordinary_active_replenishment"] = serde_json::json!(enabled);
+                json["extra_quote_space_ticks"] = serde_json::json!(w);
+                let c: ContinuousInventoryConfigV1 = serde_json::from_value(json.clone()).unwrap();
+                let expected = if !enabled {
+                    CONTINUOUS_INVENTORY_NO_ACTIVE_REPLENISHMENT_RULE_VERSION
+                } else if w == 0 {
+                    CONTINUOUS_INVENTORY_RULE_VERSION
+                } else {
+                    CONTINUOUS_INVENTORY_QUOTE_SPACE_RULE_VERSION
+                };
+                assert_eq!(c.rule_version(), expected);
+                assert_eq!(
+                    ContinuousInventoryContinuityV1::new_account_for_config(&c).rule_version,
+                    expected
+                );
+            }
+        }
+        for raw in ["0", "1", "null", "\"false\""] {
+            json["enable_ordinary_active_replenishment"] = serde_json::from_str(raw).unwrap();
+            assert!(serde_json::from_value::<ContinuousInventoryConfigV1>(json.clone()).is_err());
+            assert!(
+                ContinuousInventoryConfigV1::parse_toml(&PARAMETERS.replace(
+                    "enable_ordinary_active_replenishment = true",
+                    &format!("enable_ordinary_active_replenishment = {raw}")
+                ))
+                .is_err()
+            );
+        }
+        assert!(
+            !ContinuousInventoryConfigV1::parse_toml(&PARAMETERS.replace(
+                "enable_ordinary_active_replenishment = true",
+                "enable_ordinary_active_replenishment = false"
+            ))
+            .unwrap()
+            .enable_ordinary_active_replenishment
+        );
+    }
     #[test]
     fn quote_space_defaults_integer_domain_and_continuity_identity() {
         let missing = PARAMETERS.replace("extra_quote_space_ticks = 0\n", "");

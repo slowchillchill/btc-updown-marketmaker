@@ -781,6 +781,7 @@ impl StrategyV1 for ContinuousInventoryV1 {
     }
     fn research_compact_diagnostics(&self, d: &Self::Diagnostics) -> serde_json::Value {
         let scalar = serde_json::json!({"strategy_id":d.strategy_id,"rule_version":d.rule_version,
+            "enable_ordinary_active_replenishment":d.enable_ordinary_active_replenishment,
             "risk_equity":d.risk_equity,"high_water":d.high_water,"terminating":d.terminating,
             "available_profit":d.available_profit,"markets":d.markets,"profit_allocations":d.profit_allocations,
             "action_dependencies":d.action_dependencies,"reservation_count":d.reservations.len(),

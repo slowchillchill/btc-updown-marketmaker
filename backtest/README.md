@@ -470,3 +470,5 @@ D-0367 的公共环境适配复用上述原 Parquet 日供料及泛型策略入�
 研究脚本 `scripts/run_research.sh` 可通过 `GNU_TIME_BIN=<GNU time可执行路径>` 显式选择仓库外计时产物；缺省仍为 `/usr/bin/time`。此参数不替换CLI或业务时序，原 `-v/-o` 资源输出、子程序退出码及失败后的部分报告汇总保持。运行前准备适用的GNU time依赖；不使用shell内置time充当该产物。
 
 持续库存的 `--strategy.extra_quote_space_ticks <整数>` 沿正式参数覆盖进入实际候选，JSON/TOML缺省为0，表示域0..=4294967295。完整生效配置始终输出该值。0对应原v1，正值对应 `candidate_v2_continuous_inventory_quote_space`；显式声明的候选版本须同步，不能将旧结果重标。报价及诊断half_spread语义见[持续库存接口](../baseline-mm/docs/strategies/continuous-inventory-v1.md#d-0380-共同额外报价空间)。
+
+持续库存的 `--strategy.enable_ordinary_active_replenishment true|false` 通过原Bool参数解析进入正式候选，缺省true；false使用 `candidate_v3_continuous_inventory_no_active_replenishment`，合法w>0也接受。完整生效配置含40个叶字段。实际抑制的同次原量见证沿原紧凑定义输出，空意图calculation仍保留；null不能作为全程无抑制的证明。字段与双坐标消费见[持续库存接口](../baseline-mm/docs/strategies/continuous-inventory-v1.md#d-0381-普通active补量开关)。
