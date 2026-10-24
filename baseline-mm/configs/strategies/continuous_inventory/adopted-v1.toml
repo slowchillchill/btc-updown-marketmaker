@@ -2,6 +2,7 @@
 capacity_shares = "50"
 inventory_skew_ticks_per_capacity = "1"
 extra_quote_space_ticks = 0
+enable_ordinary_active_replenishment = true
 initial_cash_pusd = "2000"
 market_investment_limit_pusd = "1000"
 per_market_orphan_limit_pusd = "100"

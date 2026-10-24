@@ -42,9 +42,10 @@ async fn formal_continuous_inventory_uses_same_production_host_without_account_o
     .unwrap();
     strategy.initial_cash_pusd = rust_decimal::Decimal::from(100);
     strategy.extra_quote_space_ticks = 1;
+    strategy.enable_ordinary_active_replenishment = false;
     assert_eq!(
         strategy.rule_version(),
-        baseline_mm::CONTINUOUS_INVENTORY_QUOTE_SPACE_RULE_VERSION
+        baseline_mm::CONTINUOUS_INVENTORY_NO_ACTIVE_REPLENISHMENT_RULE_VERSION
     );
     let config = PaperTradeConfigV1 {
         runtime: PaperStrategyConfigV1 {

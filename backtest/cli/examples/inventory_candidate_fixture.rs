@@ -10,10 +10,12 @@ use std::path::{Path, PathBuf};
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     assert!(
-        (3..=4).contains(&args.len()),
-        "用法: inventory_candidate_fixture <新输出目录> <每日期点数> <准确ImplementationJSON> [extra_quote_space_ticks]"
+        (3..=5).contains(&args.len()),
+        "用法: inventory_candidate_fixture <新输出目录> <每日期点数> <准确ImplementationJSON> [extra_quote_space_ticks] [enable_ordinary_active_replenishment]"
     );
     let extra_quote_space_ticks: u32 = args.get(3).map(|n| n.parse().unwrap()).unwrap_or(0);
+    let enable_ordinary_active_replenishment: bool =
+        args.get(4).map(|n| n.parse().unwrap()).unwrap_or(true);
     let root = PathBuf::from(&args[0]);
     let count: u64 = args[1].parse().unwrap();
     assert!(count > 0);
@@ -27,6 +29,7 @@ fn main() {
             fixture::common::BASE + index as i64 * 86_400_000,
             date,
             extra_quote_space_ticks,
+            enable_ordinary_active_replenishment,
         );
         rules.get_or_insert(value["rules"].clone());
         days.push(value["days"][0].clone());
@@ -65,6 +68,7 @@ fn build_day(
     base: i64,
     utc_day: &str,
     extra_quote_space_ticks: u32,
+    enable_ordinary_active_replenishment: bool,
 ) -> serde_json::Value {
     std::fs::create_dir(&root).unwrap();
     let (mut run, rules) =
@@ -324,6 +328,7 @@ fn build_day(
     )
     .unwrap();
     new["extra_quote_space_ticks"] = json!(extra_quote_space_ticks);
+    new["enable_ordinary_active_replenishment"] = json!(enable_ordinary_active_replenishment);
     // 工程小窗的全部生效值单独保存；不冒充研究完整八小时参数。
     new["probability_reference"]["binance_innovation_weight"] = json!(0.0);
     for (key, value) in new["health"].as_object_mut().unwrap() {

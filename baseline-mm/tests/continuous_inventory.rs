@@ -441,6 +441,7 @@ struct InventoryFixture {
     shared: SharedExecutionV2,
     driver: Driver,
     strategy: ContinuousInventoryV1,
+    rules: std::sync::Arc<SealedProcessRuleSnapshotV3>,
     hidden: RecordedHiddenBucketSourceV1,
     next_hidden: Option<AcceptedHiddenStepBucketV1>,
 }
@@ -540,7 +541,8 @@ impl InventoryFixture {
         }
         let continuity = ContinuousInventoryContinuityV1::new_account_for_config(&config);
         let strategy =
-            ContinuousInventoryV1::new(config, rules, "inventory".into(), continuity).unwrap();
+            ContinuousInventoryV1::new(config, rules.clone(), "inventory".into(), continuity)
+                .unwrap();
         let temp = if forensic_root.is_some() {
             let _ = temp.keep();
             None
@@ -552,6 +554,7 @@ impl InventoryFixture {
             shared,
             driver,
             strategy,
+            rules,
             hidden,
             next_hidden,
         }
@@ -812,7 +815,9 @@ async fn real_v2_maker_trade_moves_pending_to_successful_inventory_without_doubl
             },
         ),
     ];
-    let mut f = InventoryFixture::new(events, engineering_config());
+    let mut config = engineering_config();
+    config.enable_ordinary_active_replenishment = false;
+    let mut f = InventoryFixture::new(events, config);
     let receipts = f
         .shared
         .execute_batch_reserved(
@@ -880,6 +885,19 @@ async fn real_v2_maker_trade_moves_pending_to_successful_inventory_without_doubl
         d.markets[0].investment,
         contracts::economics::EconomicRational::from_decimal(dec("13.5")).public()
     );
+    let witness = d.markets[0]
+        .ordinary_active_replenishment_suppression
+        .as_ref()
+        .expect("健康H的普通补足也关闭");
+    assert!(dec(&witness.original_quantities[1].0) > Decimal::ZERO);
+    assert_eq!(
+        d.markets[0].quantities,
+        [ExactDecimal("0".into()), ExactDecimal("0".into())]
+    );
+    assert!(
+        d.action_dependencies.is_empty(),
+        "不让held受限路径接管普通抑制"
+    );
     assert_eq!(cash, dec("1986.5"));
     assert_eq!(unclosed, 0);
 }
@@ -888,6 +906,7 @@ async fn real_v2_maker_trade_moves_pending_to_successful_inventory_without_doubl
 async fn health_deadline_invalidates_unsent_and_empty_book_keeps_cancellation_responsibility() {
     use fixture_input::{DOWN_TOKEN_ID as DOWN, UP_TOKEN_ID as UP};
     let mut config = engineering_config();
+    config.enable_ordinary_active_replenishment = false;
     config.health.polymarket_silence_ms = 500;
     config.health.polymarket_event_delay_ms = 1500;
     let mut empty = quoted_book(DOWN, "0.5", "0.6");
@@ -925,6 +944,11 @@ async fn health_deadline_invalidates_unsent_and_empty_book_keeps_cancellation_re
     f.advance(24_000);
     let c = f.calculation();
     let (intents, d) = details(&c);
+    assert!(
+        d.markets[0]
+            .ordinary_active_replenishment_suppression
+            .is_none()
+    );
     assert!(d.markets[0].books.is_none(), "真正有效空簿不能以BBA补齐");
     assert!(
         d.markets[0]
@@ -1079,9 +1103,11 @@ fn failure_policy(applied: bool) -> Vec<u8> {
 async fn final_failure_releases_pending_and_returns_to_initial_without_sticky_history() {
     use fixture_input::UP_TOKEN_ID as UP;
     for applied in [false, true] {
+        let mut config = engineering_config();
+        config.enable_ordinary_active_replenishment = false;
         let mut f = InventoryFixture::with_policy(
             vec![(24_000, trade(UP, "0.45", "130"))],
-            engineering_config(),
+            config,
             &failure_policy(applied),
         );
         f.shared
@@ -1108,6 +1134,7 @@ async fn final_failure_releases_pending_and_returns_to_initial_without_sticky_hi
                     contracts::economics::EconomicRational::zero().public()
                 );
                 assert_eq!(m.cash_before, ExactDecimal("2000".into()));
+                assert!(m.ordinary_active_replenishment_suppression.is_none());
                 assert!(m.initial, "失败后没有H/T/承诺时恢复首次，不设曾交易sticky");
                 assert_eq!(
                     m.quantities,
@@ -1837,6 +1864,7 @@ async fn quote_space_keeps_exact_price_coverage_old_obligations_and_independent_
 
     // 原真实V2 Maker链形成H，再由原风险责任进入受限独立补足。
     extra.per_market_orphan_limit_pusd = dec("1");
+    extra.enable_ordinary_active_replenishment = false;
     let mut f = InventoryFixture::new(
         vec![
             (24_000, trade(UP, "0.45", "130")),
@@ -1916,6 +1944,187 @@ async fn quote_space_keeps_exact_price_coverage_old_obligations_and_independent_
             .unwrap()
             .independent_held_token,
         Some(TokenId(UP.into()))
+    );
+    f.dispatch(c).await;
+    f.driver.stop_and_drain().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ordinary_replenishment_suppresses_same_frozen_positive_quantities_without_skipping_maintenance()
+ {
+    use fixture_input::{DOWN_TOKEN_ID as DOWN, UP_TOKEN_ID as UP};
+    let mut off = engineering_config();
+    off.enable_ordinary_active_replenishment = false;
+    let mut f = InventoryFixture::new(
+        vec![(
+            23_000,
+            PolymarketOrderbookEvent::TickSizeChange {
+                asset_id: UP.into(),
+                old_tick_size: Some("0.01".into()),
+                new_tick_size: "0.02".into(),
+            },
+        )],
+        off.clone(),
+    );
+    let make = |config: ContinuousInventoryConfigV1,
+                rules: std::sync::Arc<SealedProcessRuleSnapshotV3>| {
+        let continuity = ContinuousInventoryContinuityV1::new_account_for_config(&config);
+        ContinuousInventoryV1::new(config, rules, "inventory".into(), continuity).unwrap()
+    };
+    let mut enabled = off.clone();
+    enabled.enable_ordinary_active_replenishment = true;
+    let mut implicit = serde_json::to_value(&enabled).unwrap();
+    implicit
+        .as_object_mut()
+        .unwrap()
+        .remove("enable_ordinary_active_replenishment");
+    let mut default_strategy = make(serde_json::from_value(implicit).unwrap(), f.rules.clone());
+    let mut control = make(enabled, f.rules.clone());
+    let input = f
+        .shared
+        .strategy_observation_input(&mut f.driver)
+        .unwrap()
+        .unwrap();
+    let at = input
+        .action_before
+        .cutoff()
+        .decision_time()
+        .logical_time_utc_ms();
+    let default_initial = input.calculate(&mut default_strategy, at).unwrap();
+    let explicit_initial = input.calculate(&mut control, at).unwrap();
+    assert_eq!(
+        serde_json::to_value(default_initial.output).unwrap(),
+        serde_json::to_value(explicit_initial.output).unwrap()
+    );
+    let initial = input.calculate(&mut f.strategy, at).unwrap();
+    assert!(details(&initial).1.markets[0].initial);
+    assert_eq!(
+        details(&initial).1.markets[0].quantities,
+        [ExactDecimal("50".into()), ExactDecimal("50".into())]
+    );
+    assert!(
+        details(&initial).1.markets[0]
+            .ordinary_active_replenishment_suppression
+            .is_none()
+    );
+    // Initial calculations were not dispatched. Register only this explicit old obligation.
+    f.shared
+        .execute_batch_reserved(
+            &mut f.driver.decision().unwrap(),
+            &[limit("old-up", UP, "30", "0.45")],
+        )
+        .await
+        .unwrap();
+    let before = f.strategy.continuity();
+    let input = f
+        .shared
+        .strategy_observation_input(&mut f.driver)
+        .unwrap()
+        .unwrap();
+    let at = input
+        .action_before
+        .cutoff()
+        .decision_time()
+        .logical_time_utc_ms();
+    let allowed = input.calculate(&mut control, at).unwrap();
+    let suppressed = input.calculate(&mut f.strategy, at).unwrap();
+    assert_eq!(
+        allowed.input_cutoff, suppressed.input_cutoff,
+        "同一正式冻结输入"
+    );
+    let (intents, d) = details(&suppressed);
+    let m = &d.markets[0];
+    assert!(!m.initial);
+    assert_eq!(
+        details(&allowed).1.markets[0].quantities,
+        [ExactDecimal("20".into()), ExactDecimal("50".into())]
+    );
+    assert_eq!(
+        m.ordinary_active_replenishment_suppression
+            .as_ref()
+            .unwrap()
+            .original_quantities,
+        details(&allowed).1.markets[0].quantities
+    );
+    assert!(
+        intents.is_empty(),
+        "旧异价单原规则保留，本次没有BUY或假请求"
+    );
+    assert_eq!(
+        m.quantities,
+        [ExactDecimal("0".into()), ExactDecimal("0".into())]
+    );
+    assert_eq!(m.cash_before, m.cash_after);
+    assert_eq!(m.account_exposure_before, m.account_exposure_after);
+    assert!(d.profit_allocations.is_empty() && d.action_dependencies.is_empty());
+    assert_eq!(
+        before.next_request_sequence,
+        f.strategy.continuity().next_request_sequence
+    );
+    assert_eq!(
+        before.unresolved_profit_allocations,
+        f.strategy.continuity().unresolved_profit_allocations
+    );
+    let first = f.strategy.research_compact_diagnostics(d);
+    assert!(
+        first["definition"]["markets"][0]["ordinary_active_replenishment_suppression"].is_object()
+    );
+    let repeated = f.strategy.research_compact_diagnostics(d);
+    assert_eq!(first["version"], repeated["version"]);
+    assert!(repeated["definition"].is_null());
+    println!(
+        "suppression_same_frozen {}",
+        serde_json::json!({"allowed":allowed,"suppressed":suppressed,"definition":first,"reused":repeated})
+    );
+    f.dispatch(suppressed).await;
+    // At the same legal public prefix full original-price coverage yields true q=0, not suppression.
+    f.shared
+        .execute_batch_reserved(
+            &mut f.driver.decision().unwrap(),
+            &[
+                limit("cover-up", UP, "20", "0.45"),
+                limit("cover-down", DOWN, "50", "0.45"),
+            ],
+        )
+        .await
+        .unwrap();
+    let zero = f.calculation();
+    let (_, d) = details(&zero);
+    assert!(
+        d.markets[0]
+            .ordinary_active_replenishment_suppression
+            .is_none()
+    );
+    let cleared = f.strategy.research_compact_diagnostics(d);
+    assert_ne!(cleared["version"], first["version"]);
+    assert!(
+        cleared["definition"]["markets"][0]["ordinary_active_replenishment_suppression"].is_null(),
+        "见证不得stale复用"
+    );
+    f.advance(24_000);
+    let c = f.calculation();
+    let (intents, d) = details(&c);
+    assert!(
+        d.markets[0]
+            .ordinary_active_replenishment_suppression
+            .is_some()
+    );
+    assert!(
+        !intents.is_empty()
+            && intents
+                .iter()
+                .all(|i| matches!(i.intent.as_ref(), ModelIntentV1::CancelOrders { .. })),
+        "抑制后继续原tick无效旧单维护: {d:?}"
+    );
+    assert!(
+        d.markets[0]
+            .cancellations
+            .iter()
+            .any(|(_, reason)| reason == "formal_tick_rule_unavailable_or_invalid")
+    );
+    println!(
+        "suppression_maintenance {}",
+        serde_json::to_string(&c).unwrap()
     );
     f.dispatch(c).await;
     f.driver.stop_and_drain().unwrap();

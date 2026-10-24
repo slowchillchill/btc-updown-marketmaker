@@ -4,7 +4,7 @@
 
 ## 身份和入口
 
-库入口是 `ContinuousInventoryV1`、`ContinuousInventoryConfigV1` 与独立的 `ContinuousInventoryContinuityV1`。策略身份为 `continuous_inventory`；`extra_quote_space_ticks=0` 使用 `candidate_v1_continuous_inventory`，正值使用 `candidate_v2_continuous_inventory_quote_space`。新命名空间及接续版本独立保存，旧候选记忆不能换标签后接入。
+库入口是 `ContinuousInventoryV1`、`ContinuousInventoryConfigV1` 与独立的 `ContinuousInventoryContinuityV1`。策略身份为 `continuous_inventory`；关闭 `enable_ordinary_active_replenishment` 使用 `candidate_v3_continuous_inventory_no_active_replenishment`。保留普通补量时，`extra_quote_space_ticks=0` 使用 `candidate_v1_continuous_inventory`，正值使用 `candidate_v2_continuous_inventory_quote_space`。新命名空间及接续版本独立保存，旧候选记忆不能换标签后接入。
 
 `backtest-cli --mode day --config <完整日期配置> --progress-interval-seconds <秒>` 在每个候选的 `strategy` 中接收完整参数。`run.strategy.strategy_id` 与 `strategy_rule_version` 若声明，必须与参数类型一致。新旧候选可放入同一日期的 `candidates`，每日公共输入只消费一次，账户、请求命名空间、seed和输出位置分别声明。旧 V5/off 仍使用 `complementary_pair` / `candidate_v5_public_low_price` 及原 `parameters`、`initial_pair_low_price_veto=false`，不自动改用新候选。
 
@@ -24,9 +24,21 @@ CLI覆盖为 `--strategy.extra_quote_space_ticks 1`，仍须让所有已声明�
 
 本轮工程允许研究候选w=1的准备，未批准真实历史运行、正式默认采用或盈利声明。
 
+## D-0381 普通active补量开关
+
+`enable_ordinary_active_replenishment: bool` 在JSON/TOML中缺省true，完整生效配置始终序列化实际布尔。CLI使用 `--strategy.enable_ordinary_active_replenishment true|false`，拒绝数字、字符串布尔和其它非布尔表示。true保持上述w0/v1和w>0/v2；false使用独立v3，原合法w>0同样允许。所有显式版本声明、continuity及metadata须与 `config.rule_version()` 一致，策略ID仍为 `continuous_inventory`。旧 `new_account(initial_cash)` 只保持true/w0的v1身份。
+
+关闭只作用于原 `!restricted && !initial`：全部原价格、精确coverage、量、现金/投入、风险、最低量、最终可行性和利润支持检查后，将同次原稳定正q置零。它包含健康状态下较小H侧的普通补足，不纯分离扩新与正常补足。抑制发生在本次BUY身份、预留、利润分配及现金/风险扣减之前；旧单维护仍按原序执行，必要Cancel可真实生成。旧订单仍可能成交，未使用资源与后续市场联动属于干预。initial沿当前H/T/义务/未知可重新成立；restricted和held不接管，不增每市场首次锁存。
+
+全局诊断记录实际 `enable_ordinary_active_replenishment` 一次。市场 `ordinary_active_replenishment_suppression` 仅在准确实际抑制时为对象，其 `original_quantities` 是同次原q，数组位置沿同市场tokens/prices，不是request ordinal。实际 `quantities` 仍为抑制后的零量。该见证不重复价格/身份，不另算影子反事实，不制造request。缺失或null表示本计算未保留有效见证/Unavailable，不能推出原q0、没有机会或全程没有抑制；initial、restricted、q0和未知不伪造有效见证。
+
+见证沿原 `continuous-inventory-changes-v1` 的version/definition输出；正见证清除须产生定义变化，相同值可复用旧定义。读取者同时保留定义来源计算与当前真实calculation的index/input_cutoff/timing双坐标，不将旧定义时点冒当前冻结，不把时间塞进市场定义。空意图calculation沿正式出口保留，研究薄读取器须在非空意图筛选之外接收新见证；正式SIM/NOE reader不消费该策略诊断。有限见证不提供完整机会分母。
+
+此候选只服务已批准受控研究准备及工程合成验证，不改变正式默认采用，也不签发真实历史、PAPER/LIVE、部署或资金运行。
+
 ## 原42参数迁移
 
-旧候选的42项及语义保留。原v1有38个显式叶字段；D-0380新增一个有默认值的字段，完整生效配置共39个叶字段。原字段迁移如下。
+旧候选的42项及语义保留。原v1有38个显式叶字段；D-0380新增一个有默认值的字段，当时完整生效配置共39个叶字段；D-0381再增加一个默认true的布尔，当前完整配置为40个叶字段。原字段迁移如下。
 
 | 旧字段 | 新字段及处理 |
 | --- | --- |

@@ -219,6 +219,7 @@ fn ledger_files(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
 struct FeedbackCompletionStrategy {
     phase: u8,
     response_received_at: Option<i64>,
+    sent_clock_lower_bound: Option<(i64, std::time::Instant)>,
     reads: Arc<std::sync::Mutex<Vec<(u8, u64, bool)>>>,
 }
 impl StrategyV1 for FeedbackCompletionStrategy {
@@ -245,6 +246,8 @@ impl StrategyV1 for FeedbackCompletionStrategy {
         if let Some(receipt) = sent.first() {
             // 原固定seed/profile第一条DirectResponseInbound实际抽样=10（setup已核）。
             self.response_received_at = Some(receipt.receipt.platform_arrived_at_utc_ms() + 10);
+            // 回调晚于同一owner的真实发送采样；这对标量只给单调执行时钟下界。
+            self.sent_clock_lower_bound = Some((receipt.sent_at_utc_ms, std::time::Instant::now()));
         }
     }
 }
@@ -282,7 +285,15 @@ impl DetachedStrategyV1 for FeedbackCompletionStrategy {
             1 => {
                 self.phase = 2;
                 let until = self.response_received_at.unwrap() + 1;
-                std::thread::sleep(Duration::from_millis((until - now()).max(0) as u64));
+                let (sent_at, after_sent) = self.sent_clock_lower_bound.unwrap();
+                loop {
+                    let lower_bound = sent_at + after_sent.elapsed().as_millis() as i64;
+                    let remaining = until - lower_bound;
+                    if remaining <= 0 {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(remaining as u64));
+                }
                 Ok(StrategyOutputV1::Continue {
                     intents: vec![],
                     next_evaluation_at_utc_ms: None,
@@ -318,6 +329,7 @@ async fn worker_first_completion_consumes_feedback_and_recalculates_without_new_
     let strategy = FeedbackCompletionStrategy {
         phase: 0,
         response_received_at: None,
+        sent_clock_lower_bound: None,
         reads: reads.clone(),
     };
     let (first_sent, first_received) = tokio::sync::oneshot::channel();
@@ -364,6 +376,17 @@ async fn worker_first_completion_consumes_feedback_and_recalculates_without_new_
     .expect("静默时实际新反馈必须触发最早合法重算");
     WORKER_RESULT_SENT_NOTICE.with(|notice| notice.borrow_mut().take());
     let report = run.unwrap();
+    // 先保留实际报告与冻结读取，断言失败也不丢取证材料。
+    std::fs::write(
+        evidence.path.join("report.json"),
+        serde_json::to_vec_pretty(&report).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        evidence.path.join("reads.json"),
+        serde_json::to_vec_pretty(&*reads.lock().unwrap()).unwrap(),
+    )
+    .unwrap();
     assert!(matches!(report.outcome, PaperStrategyEndV1::StrategyExit));
     assert_eq!(report.measurements.applied_inputs, 2);
     assert_eq!(
@@ -376,16 +399,6 @@ async fn worker_first_completion_consumes_feedback_and_recalculates_without_new_
         reads.as_slice(),
         &[(0, 0, false), (1, 0, false), (2, 1, true)]
     );
-    std::fs::write(
-        evidence.path.join("reads.json"),
-        serde_json::to_vec_pretty(&*reads).unwrap(),
-    )
-    .unwrap();
-    std::fs::write(
-        evidence.path.join("report.json"),
-        serde_json::to_vec_pretty(&report).unwrap(),
-    )
-    .unwrap();
 }
 
 // 与正式健康schedule相同的严格未来约定；期限来自真实来源事实。
