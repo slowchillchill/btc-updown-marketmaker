@@ -57,6 +57,8 @@ define_stages! {
     CandidateCursorPublishAndReclaim => "candidate_cursor_publish_and_detach",
     CandidateReclaimDetach => "candidate_reclaim_detach",
     CandidateReclaimedDrop => "candidate_reclaimed_drop_outside_lock",
+    CandidateReclaimedPublicRootsDrop => "candidate_reclaimed_public_roots_drop_outside_lock",
+    CandidateReclaimedHiddenRootsDrop => "candidate_reclaimed_hidden_roots_drop_outside_lock",
     CandidateBatchClaim => "candidate_batch_claim",
     CandidateDataWait => "candidate_data_wait",
 }
@@ -96,6 +98,17 @@ impl StageTimings {
             reclaimed_public: 0,
             reclaimed_hidden: 0,
         }
+    }
+    /// 同一退休元组依原顺序释放；每个子区间计一次根 Vec 释放，可能为空。
+    /// 根元素数量仍复用原 add_delivery_work，避免把引用释放冒内值最终析构。
+    pub(crate) fn drop_reclaimed_roots<P, H>(&mut self, retired: (Vec<P>, Vec<H>)) {
+        let (public, hidden) = retired;
+        let started = self.start(Stage::CandidateReclaimedPublicRootsDrop);
+        drop(public);
+        self.finish(Stage::CandidateReclaimedPublicRootsDrop, started);
+        let started = self.start(Stage::CandidateReclaimedHiddenRootsDrop);
+        drop(hidden);
+        self.finish(Stage::CandidateReclaimedHiddenRootsDrop, started);
     }
     pub(crate) fn next_diagnostic_sample(&mut self) -> bool {
         if !self.diagnostics_enabled {
@@ -194,6 +207,19 @@ macro_rules! measure_stage {
         #[cfg(feature = "stage-timing")]
         $timings.finish(crate::stage_timing::Stage::$stage, started);
         result
+    }};
+}
+// 不启计量时保持原 tuple drop；启用时只细分同一 public→hidden 顺序。
+macro_rules! drop_reclaimed_roots {
+    ($timings:expr, $retired:expr) => {{
+        #[cfg(feature = "stage-timing")]
+        {
+            $timings.drop_reclaimed_roots($retired);
+        }
+        #[cfg(not(feature = "stage-timing"))]
+        {
+            drop($retired);
+        }
     }};
 }
 /// 只对新增高频诊断采样；原 measure_stage 的统计区间与计数不变。

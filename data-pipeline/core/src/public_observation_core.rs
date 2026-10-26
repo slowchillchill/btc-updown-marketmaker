@@ -25,7 +25,8 @@ pub struct PmEvidenceObjectCountsV1 {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PmOwnedStateV1<E = SourceEvidenceRefV3> {
-    context: PmMarketContextV1<E>,
+    // 原owner建立的固定上下文沿正式材料共享；当前盘口/tick仍由assets归约。
+    context: Arc<PmMarketContextV1<E>>,
     epoch: Option<String>,
     assets: BTreeMap<String, PmAssetStateV1<E>>,
     quantities: Option<BTreeMap<LevelKey, Decimal>>,
@@ -54,7 +55,8 @@ impl<E: PmEvidenceV1> PmOwnedStateV1<E> {
     pub fn context(&self) -> &PmMarketContextV1<E> {
         &self.context
     }
-    pub fn new(context: PmMarketContextV1<E>) -> Self {
+    pub fn new(context: impl Into<Arc<PmMarketContextV1<E>>>) -> Self {
+        let context = context.into();
         let evidence = context.identity_source_evidence[0].clone();
         let assets = context
             .assets
@@ -87,7 +89,7 @@ impl<E: PmEvidenceV1> PmOwnedStateV1<E> {
         }
     }
     /// 模拟器仅持有原归约证据，数量通过其已有数量簿借用。
-    pub fn new_evidence_only(context: PmMarketContextV1<E>) -> Self {
+    pub fn new_evidence_only(context: impl Into<Arc<PmMarketContextV1<E>>>) -> Self {
         let mut state = Self::new(context);
         state.quantities = None;
         state
@@ -793,7 +795,7 @@ impl PublicObservationCoreV1 {
     pub fn prepared_pm_context(
         &self,
         condition: &str,
-    ) -> Option<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>> {
+    ) -> Option<Arc<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>> {
         self.markets.get(condition).map(|m| m.pm.context.clone())
     }
     pub fn pm_context(&self, condition: &str) -> Option<PmMarketContextV1> {

@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+# 转发 core 唯一诊断能力；本包只据此编译已签有界单元测试。
+observation-diagnostics = ["data-pipeline-core/observation-diagnostics"]
+
 [dependencies]
 ciborium = "=0.2.2"
 contracts = { path = "../contracts" }

@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = []
+# 仅供显式有界观察诊断，普通构建没有计量。
+observation-diagnostics = []
+
 [dependencies]
 ciborium = "=0.2.2"
 rayon = "=1.12.0"

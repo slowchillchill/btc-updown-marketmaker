@@ -21450,26 +21450,59 @@ impl PublicConsumptionStateV1 {
         let Some(cutoff) = self.observation_cutoff() else {
             return Vec::new();
         };
-        let mut ids: std::collections::BTreeSet<String> =
-            self.unfinished_public_markets.keys().cloned().collect();
-        ids.extend(historical.into_iter().map(str::to_owned));
+        #[cfg(feature = "measurement")]
+        let selection_measured = std::time::Instant::now();
+        let mut ids = std::collections::BTreeSet::new();
+        for id in self.unfinished_public_markets.keys() {
+            ids.insert(id.as_str());
+        }
+        for id in historical {
+            ids.insert(id);
+        }
         let Some(prepared) = self.last_prepared.as_ref() else {
             return Vec::new();
         };
         let observations = &prepared.group.observations;
+        #[cfg(feature = "measurement")]
+        crate::public_consumption::observation_diagnostics::add(|w| {
+            w.calls += 1;
+            w.selection_ns += selection_measured.elapsed().as_nanos();
+        });
         ids.into_iter()
             .filter_map(|id| {
-                let observation = observations.get_market(&id)?;
-                Some(PublicObservationFrameV1 {
-                    statistics: self
-                        .statistics_prefix
-                        .as_ref()
-                        .map(|p| p.read(observation, cutoff.decision_time().logical_time_utc_ms())),
+                #[cfg(feature = "measurement")]
+                let get_measured = std::time::Instant::now();
+                let observation = observations.get_market(id)?;
+                #[cfg(feature = "measurement")]
+                crate::public_consumption::observation_diagnostics::add(|w| {
+                    w.get_market_calls += 1;
+                    w.get_market_ns += get_measured.elapsed().as_nanos();
+                });
+                #[cfg(feature = "measurement")]
+                let stats_measured = std::time::Instant::now();
+                let statistics = self
+                    .statistics_prefix
+                    .as_ref()
+                    .map(|p| p.read(observation, cutoff.decision_time().logical_time_utc_ms()));
+                #[cfg(feature = "measurement")]
+                crate::public_consumption::observation_diagnostics::add(|w| {
+                    w.statistics_ns += stats_measured.elapsed().as_nanos()
+                });
+                #[cfg(feature = "measurement")]
+                let fields_measured = std::time::Instant::now();
+                let frame = PublicObservationFrameV1 {
+                    statistics,
                     observation,
                     rule_context: self.rules[&observation.market.condition_id.0].clone(),
                     receipt: self.last_receipt.as_ref().unwrap().clone(),
                     decision_cutoff: cutoff.clone(),
-                })
+                };
+                #[cfg(feature = "measurement")]
+                crate::public_consumption::observation_diagnostics::add(|w| {
+                    w.frames += 1;
+                    w.frame_fields_ns += fields_measured.elapsed().as_nanos();
+                });
+                Some(frame)
             })
             .collect()
     }

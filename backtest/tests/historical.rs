@@ -2671,7 +2671,7 @@ impl HistoricalPublicObserverV1 for EarlyExitFinishFailure {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(Arc::new(HistoricalPublicEvidenceV1 {
-            scalars: serde_json::Value::Null,
+            scalars: Default::default(),
             request_evidence: Default::default(),
         }))
     }

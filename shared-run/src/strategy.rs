@@ -586,42 +586,67 @@ impl SharedExecutionV2 {
         driver: &'a PublicConsumptionStateV1,
         historical: &[ConditionId],
     ) -> Vec<PublicObservationFrameV1<'a>> {
-        let mut ids = std::collections::BTreeSet::new();
-        ids.extend(historical.iter().map(|id| id.0.clone()));
-        if let Some(read) = self.ledger().necessary_read_v2() {
-            ids.extend(
-                read.marked_markets()
-                    .chain(read.funds_markets())
-                    .map(str::to_owned),
-            );
-        }
-        ids.extend(
+        let economics = self.ledger().necessary_read_v2();
+        let ledger_ids = economics
+            .iter()
+            .flat_map(|read| read.marked_markets().chain(read.funds_markets()));
+        let orders = self
+            .registry()
+            .unfinished_orders()
+            .filter_map(|o| o.condition_id)
+            .map(|id| id.0.as_str());
+        let commitments =
             self.registry()
-                .unfinished_orders()
-                .filter_map(|o| o.condition_id)
-                .map(|id| id.0.clone()),
-        );
-        ids.extend(self.registry().all_commitments().filter_map(
-            |c| match c.origin.intent.intent() {
-                ModelIntentV1::SubmitSingleBuy { condition_id, .. }
-                | ModelIntentV1::SubmitPairedBuy { condition_id, .. } => {
-                    Some(condition_id.0.clone())
-                }
-                _ => None,
-            },
-        ));
-        // 身份集合只用于本次选择；返回观察借用原 driver，不借用临时集合。
-        driver.selected_frames_at_observation(ids.iter().map(String::as_str))
+                .all_commitments()
+                .filter_map(|c| match c.origin.intent.intent() {
+                    ModelIntentV1::SubmitSingleBuy { condition_id, .. }
+                    | ModelIntentV1::SubmitPairedBuy { condition_id, .. } => {
+                        Some(condition_id.0.as_str())
+                    }
+                    _ => None,
+                });
+        // 仅借本次合法读取的ID；由原driver与未结束市场求并集并去重一次。
+        // 返回帧仍只借driver，不把临时集合/账户读取带入其寿命。
+        let ids = historical
+            .iter()
+            .map(|id| id.0.as_str())
+            .chain(ledger_ids)
+            .chain(orders)
+            .chain(commitments);
+        #[cfg(test)]
+        let input_count = std::cell::Cell::new(0);
+        #[cfg(test)]
+        let ids = ids.inspect(|_| input_count.set(input_count.get() + 1));
+        let frames = driver.selected_frames_at_observation(ids);
+        #[cfg(test)]
+        crate::observation_scaling::selected(input_count.get(), &frames);
+        frames
     }
     pub fn strategy_selected_current_observations<'a>(
         &mut self,
         driver: &'a PublicConsumptionStateV1,
         historical: &[ConditionId],
     ) -> Result<Vec<PublicObservationFrameV1<'a>>, LedgerErrorV1> {
+        #[cfg(test)]
+        let phase = std::time::Instant::now();
         self.apply_closed()?;
+        #[cfg(test)]
+        crate::observation_scaling::phase(0, phase.elapsed());
+        #[cfg(test)]
+        let phase = std::time::Instant::now();
         self.observe_public_rules(driver);
+        #[cfg(test)]
+        crate::observation_scaling::phase(1, phase.elapsed());
+        #[cfg(test)]
+        let phase = std::time::Instant::now();
         let frames = self.selected_observations(driver, historical);
+        #[cfg(test)]
+        crate::observation_scaling::phase(2, phase.elapsed());
+        #[cfg(test)]
+        let phase = std::time::Instant::now();
         self.observe_group(&frames);
+        #[cfg(test)]
+        crate::observation_scaling::phase(3, phase.elapsed());
         Ok(frames)
     }
     /// 原市场帧保持冻结；账户、在途、已合法交付反馈及估值取当前真实观察前缀。

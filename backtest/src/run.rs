@@ -360,7 +360,7 @@ fn invalidation_release_failure(
     };
     (release_errors.remove(0), effects)
 }
-fn assemble(
+pub(crate) fn assemble(
     config: &HistoricalPreparedRunConfigV1,
     rules: Arc<SealedProcessRuleSnapshotV3>,
     input_identity: Sha256Hex,

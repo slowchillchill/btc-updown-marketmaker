@@ -347,14 +347,14 @@ impl StreamingResearchV1 {
         }
         state.markets.retain(|id, _| present.contains(id));
         Ok(Arc::new(HistoricalPublicEvidenceV1 {
-            scalars: Value::Object(links),
+            scalars: links.into_iter().collect(),
             request_evidence,
         }))
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::sync::Arc;
     fn observed<T>(value: T) -> ObservedFactV1<T> {
@@ -363,7 +363,7 @@ mod tests {
             ..Default::default()
         }
     }
-    fn observation(k: Option<&str>) -> MarketBusinessObservationV1 {
+    pub(crate) fn observation(k: Option<&str>) -> MarketBusinessObservationV1 {
         let level = |p: &str, q: &str| ReferencePriceLevelV1 {
             price_usdt_per_btc: ExactDecimal(p.into()),
             quantity_btc: ExactDecimal(q.into()),
@@ -419,7 +419,7 @@ mod tests {
         }
     }
 
-    fn asset() -> AssetBusinessObservationV1 {
+    pub(crate) fn asset() -> AssetBusinessObservationV1 {
         let mut book = observed(vec![PriceLevelV1 {
             price_pusd_per_share: ExactDecimal("0.4".into()),
             quantity_shares: ExactDecimal("7".into()),

@@ -6,6 +6,34 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, Weak};
 
+/// 显式诊断构建的本线程累计值；不改变统计输入、缓存或结果。
+#[cfg(feature = "observation-diagnostics")]
+pub mod observation_diagnostics {
+    use serde::Serialize;
+    #[derive(Default, Serialize)]
+    pub struct Work {
+        pub reads: u64,
+        pub market_hits: u64,
+        pub market_builds: u64,
+        pub common_hits: u64,
+        pub common_computations: u64,
+        pub variance_points: u64,
+        pub integral_points: u64,
+        pub partition_probes: u64,
+        pub read_ns: u128,
+        pub cache_lock_ns: u128,
+        pub common_ns: u128,
+        pub market_ns: u128,
+    }
+    thread_local! { static WORK: std::cell::RefCell<Work> = std::cell::RefCell::new(Work::default()); }
+    pub(super) fn add(f: impl FnOnce(&mut Work)) {
+        WORK.with(|w| f(&mut w.borrow_mut()));
+    }
+    pub fn take() -> Work {
+        WORK.with(|w| std::mem::take(&mut *w.borrow_mut()))
+    }
+}
+
 type Number = Result<Decimal, &'static str>;
 fn number(v: &ExactDecimal) -> Number {
     v.0.parse().map_err(|_| "decimal_unrepresentable")
@@ -137,6 +165,22 @@ struct SavedBasis {
     related_group: PublicGroupReferenceV1,
     at: i64,
 }
+#[derive(Debug)]
+struct CommonStatistics {
+    momentum: Vec<PublicMomentumV1>,
+    spot_variance: Vec<PublicSpotVarianceV1>,
+}
+/// 同一冻结历史的既有读取缓存；共同结果仅保留最后一个精确查询时点。
+#[derive(Debug, Default)]
+struct StatisticsReadCache {
+    markets: std::collections::BTreeMap<String, (i64, Arc<PublicMarketStatisticsV1>)>,
+    common: Option<(i64, CommonStatistics)>,
+}
+#[cfg(test)]
+thread_local! {
+    // 只用于有限成本夹具：实际共同计算次数与进入原方差算法的点数。
+    static COMMON_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
 /// 纯历史状态可持久保存；观察、规则和账户仍引用各自正式合同。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PublicStatisticsHistoryV1 {
@@ -158,7 +202,7 @@ pub struct PublicStatisticsHistoryV1 {
     #[serde(skip)]
     depth: Option<Arc<PublicDepthStatisticsV1>>,
     #[serde(skip)]
-    cache: Arc<Mutex<std::collections::BTreeMap<String, (i64, Arc<PublicMarketStatisticsV1>)>>>,
+    cache: Arc<Mutex<StatisticsReadCache>>,
 }
 impl PublicStatisticsHistoryV1 {
     pub fn history_points(&self) -> (usize, usize) {
@@ -444,6 +488,8 @@ impl PublicStatisticsHistoryV1 {
                     .or_else(|| self.spot.front().map(|p| p.at.max(from)))
                     .filter(|s| *s < end);
                 let mut total = 0.;
+                #[cfg(feature = "observation-diagnostics")]
+                let mut scanned = 0u64;
                 let mut cursor = start.unwrap_or(end);
                 let mut held = asof(&self.spot, cursor).map(|p| p.scalar);
                 for p in self
@@ -452,12 +498,18 @@ impl PublicStatisticsHistoryV1 {
                     .skip(partition(&self.spot, |p| p.at <= cursor))
                     .take_while(|p| p.at < end)
                 {
+                    #[cfg(feature = "observation-diagnostics")]
+                    {
+                        scanned += 1;
+                    }
                     if let Some(s) = held {
                         total += s * (p.at - cursor) as f64 / 1000.;
                     }
                     cursor = p.at;
                     held = Some(p.scalar);
                 }
+                #[cfg(feature = "observation-diagnostics")]
+                observation_diagnostics::add(|w| w.integral_points += scanned);
                 if let Some(s) = held {
                     total += s * (end - cursor) as f64 / 1000.;
                 }
@@ -480,15 +532,14 @@ impl PublicStatisticsHistoryV1 {
             })
             .collect()
     }
-    /// 只能由已持有此合法前缀的读取层传入对应 F0；不触及未来流或账户状态。
-    pub fn read(&self, o: &MarketBusinessObservationV1, t: i64) -> Arc<PublicMarketStatisticsV1> {
-        let mut cache = self.cache.lock().unwrap();
-        let id = &o.market.condition_id.0;
-        if let Some((old_t, result)) = cache.get(id)
-            && *old_t == t
-        {
-            return result.clone();
-        }
+    fn read_common(&self, t: i64) -> CommonStatistics {
+        #[cfg(feature = "observation-diagnostics")]
+        let measured = std::time::Instant::now();
+        #[cfg(test)]
+        COMMON_WORK.with(|n| {
+            let (calls, points) = n.get();
+            n.set((calls + 1, points));
+        });
         let at_or_before = |v: &Vector<Point>, at: i64| -> Option<Point> {
             let n = partition(v, |p| p.at <= at);
             n.checked_sub(1).map(|i| v[i].clone())
@@ -520,14 +571,25 @@ impl PublicStatisticsHistoryV1 {
             .map(|h| {
                 let from = t.saturating_sub(*h as i64);
                 let index = partition(&self.spot, |p| p.at < from).saturating_sub(1);
+                #[cfg(feature = "observation-diagnostics")]
+                let mut scanned = 0u64;
                 let statistics = spot_variance_statistics_v1(
-                    self.spot
-                        .iter()
-                        .skip(index)
-                        .filter(|p| p.at <= t)
-                        .map(|p| (p.at, p.scalar)),
+                    self.spot.iter().skip(index).filter(|p| p.at <= t).map(|p| {
+                        #[cfg(feature = "observation-diagnostics")]
+                        {
+                            scanned += 1;
+                        }
+                        #[cfg(test)]
+                        COMMON_WORK.with(|n| {
+                            let (calls, points) = n.get();
+                            n.set((calls, points + 1));
+                        });
+                        (p.at, p.scalar)
+                    }),
                     from,
                 );
+                #[cfg(feature = "observation-diagnostics")]
+                observation_diagnostics::add(|w| w.variance_points += scanned);
                 PublicSpotVarianceV1 {
                     window_ms: *h,
                     sigma_usd_per_btc_per_sqrt_second: statistics.sigma_usd_per_sqrt_second(),
@@ -535,6 +597,47 @@ impl PublicStatisticsHistoryV1 {
                 }
             })
             .collect();
+        #[cfg(feature = "observation-diagnostics")]
+        observation_diagnostics::add(|w| {
+            w.common_computations += 1;
+            w.common_ns += measured.elapsed().as_nanos();
+        });
+        CommonStatistics {
+            momentum,
+            spot_variance,
+        }
+    }
+    /// 只能由已持有此合法前缀的读取层传入对应 F0；不触及未来流或账户状态。
+    pub fn read(&self, o: &MarketBusinessObservationV1, t: i64) -> Arc<PublicMarketStatisticsV1> {
+        #[cfg(feature = "observation-diagnostics")]
+        let measured = std::time::Instant::now();
+        let mut cache = self.cache.lock().unwrap();
+        #[cfg(feature = "observation-diagnostics")]
+        observation_diagnostics::add(|w| {
+            w.reads += 1;
+            w.cache_lock_ns += measured.elapsed().as_nanos();
+        });
+        let id = &o.market.condition_id.0;
+        if let Some((old_t, result)) = cache.markets.get(id)
+            && *old_t == t
+        {
+            #[cfg(feature = "observation-diagnostics")]
+            observation_diagnostics::add(|w| {
+                w.market_hits += 1;
+                w.read_ns += measured.elapsed().as_nanos();
+            });
+            return result.clone();
+        }
+        #[cfg(feature = "observation-diagnostics")]
+        if cache.common.as_ref().is_some_and(|(at, _)| *at == t) {
+            observation_diagnostics::add(|w| w.common_hits += 1);
+        }
+        if cache.common.as_ref().is_none_or(|(old_t, _)| *old_t != t) {
+            cache.common = Some((t, self.read_common(t)));
+        }
+        #[cfg(feature = "observation-diagnostics")]
+        let market_measured = std::time::Instant::now();
+        let common = &cache.common.as_ref().expect("已准备此时点共同结果").1;
         let spot_integrals = self
             .completed_integrals
             .get(&o.market.condition_id.0)
@@ -585,8 +688,8 @@ impl PublicStatisticsHistoryV1 {
                 },
                 |p| p.evaluate(&o.official_anchor, false),
             ),
-            momentum,
-            spot_variance,
+            momentum: common.momentum.clone(),
+            spot_variance: common.spot_variance.clone(),
             spot_integrals,
             latest_trade_pressure: result(pressure),
             basis: std::array::from_fn(|i| {
@@ -630,7 +733,13 @@ impl PublicStatisticsHistoryV1 {
                     .map(|at| t - at)
             }),
         });
-        cache.insert(id.clone(), (t, out.clone()));
+        cache.markets.insert(id.clone(), (t, out.clone()));
+        #[cfg(feature = "observation-diagnostics")]
+        observation_diagnostics::add(|w| {
+            w.market_builds += 1;
+            w.market_ns += market_measured.elapsed().as_nanos();
+            w.read_ns += measured.elapsed().as_nanos();
+        });
         out
     }
 }
@@ -640,7 +749,13 @@ fn asof(v: &Vector<Point>, at: i64) -> Option<Point> {
 }
 fn partition(points: &Vector<Point>, predicate: impl Fn(&Point) -> bool) -> usize {
     let (mut lo, mut hi) = (0, points.len());
+    #[cfg(feature = "observation-diagnostics")]
+    let mut probes = 0u64;
     while lo < hi {
+        #[cfg(feature = "observation-diagnostics")]
+        {
+            probes += 1;
+        }
         let m = (lo + hi) / 2;
         if predicate(&points[m]) {
             lo = m + 1;
@@ -648,6 +763,8 @@ fn partition(points: &Vector<Point>, predicate: impl Fn(&Point) -> bool) -> usiz
             hi = m;
         }
     }
+    #[cfg(feature = "observation-diagnostics")]
+    observation_diagnostics::add(|w| w.partition_probes += probes);
     lo
 }
 /// 宿主显式创建并交给同输入/时序的消费者；没有全局缓存或路线默认参数。
@@ -755,5 +872,248 @@ impl PreparedPublicStatisticsV1 {
         cache.retain(|(s, _)| s.strong_count() > 0);
         cache.push((Arc::downgrade(stream), next.clone()));
         Ok(Some(next))
+    }
+}
+
+#[cfg(test)]
+mod reuse_tests {
+    use super::*;
+
+    fn reference(position: u64) -> PublicGroupReferenceV1 {
+        PublicGroupReferenceV1 {
+            input_stream_id: "statistics-reuse".into(),
+            applied_prefix: AppliedIngressPrefixV1 {
+                input_stream_id: "statistics-reuse".into(),
+                next_input_position: position + 1,
+            },
+            group_position: position,
+            group_id: Sha256Hex(format!("{position:064x}")),
+            closed_at_input_position: position,
+        }
+    }
+    fn fact<T>(value: T, field: &str, position: u64, at: i64) -> ObservedFactV1<T> {
+        ObservedFactV1 {
+            value: Some(value),
+            quality: MarketDataQuality::Fresh,
+            direct_anchors: vec![DirectObservationAnchorV1 {
+                field_path: field.into(),
+                position: PublicFactPositionV1 {
+                    input_stream_id: "statistics-reuse".into(),
+                    closed_at_input_position: position,
+                    fact_ordinal: 0,
+                },
+                group_id: reference(position).group_id,
+                source_message_id: Sha256Hex(format!("{position:064x}")),
+                source_event_at_utc_ms: Some(at),
+                received_at_utc_ms: at,
+            }],
+            dependency_frontier: Some(reference(position).applied_prefix),
+        }
+    }
+    fn group(position: u64, at: i64, price: i64) -> ClosedBusinessGroupV1 {
+        let r = reference(position);
+        let markets = (1..=2)
+            .map(|id| {
+                let market = MarketIdentityV2 {
+                    condition_id: ConditionId(format!("0x{id:064x}")),
+                    clob_market_id: ClobMarketId(id.to_string()),
+                    window: MarketWindowV2 {
+                        start_at_utc_ms: 0,
+                        end_at_utc_ms: 300000,
+                    },
+                };
+                let assets = (0..2)
+                    .map(|leg| AssetBusinessObservationV1 {
+                        asset: AssetIdentityV1 {
+                            token_id: TokenId((id * 2 + leg).to_string()),
+                            outcome: OutcomeIdentityV1 {
+                                index: leg as u32,
+                                label: if leg == 0 { "Up" } else { "Down" }.into(),
+                            },
+                        },
+                        bids: Arc::new(Default::default()),
+                        asks: Arc::new(fact(vec![], "asks", position, at)),
+                        best_bid_ask: Default::default(),
+                        valuation_best_bid: Default::default(),
+                        tick: Default::default(),
+                        public_trade: Default::default(),
+                    })
+                    .collect();
+                (
+                    market.condition_id.0.clone(),
+                    Arc::new(MarketObservationSnapshotV1 {
+                        market,
+                        assets,
+                        lifecycle: Default::default(),
+                        active: fact(true, "active", position, at),
+                        closed: fact(false, "closed", position, at),
+                        accepting_orders: fact(true, "accepting_orders", position, at),
+                        terminal: Default::default(),
+                        official_anchor: Default::default(),
+                        settlement_reference: Default::default(),
+                        temporary_reference: None,
+                        effective_reference: EffectiveMarketReferenceV1::Missing,
+                    }),
+                )
+            })
+            .collect();
+        ClosedBusinessGroupV1 {
+            group_id: r.group_id.clone(),
+            group_position: position,
+            member_input_positions: vec![position],
+            closed_at_input_position: position,
+            records: Arc::from([]),
+            observations: MarketObservationSetV1::shared(
+                markets,
+                MarketObservationGroupV1 {
+                    schema_version: "market_business_observation_v1".into(),
+                    group_id: r.group_id,
+                    group_position: position,
+                    visible_prefix: r.applied_prefix,
+                    chainlink_spot: fact(
+                        ChainlinkBtcUsdReferenceV1 {
+                            symbol: "BTCUSD".into(),
+                            price_usd_per_btc: ExactDecimal(price.to_string()),
+                            message_timestamp_utc_ms: at,
+                        },
+                        "chainlink_spot",
+                        position,
+                        at,
+                    ),
+                    chainlink_twap_thirty: Default::default(),
+                    chainlink_twap_sixty: Default::default(),
+                    binance_depth: Arc::new(fact(
+                        BinanceDepthObservationV1::Full(Arc::new(BinanceDepthStateReferenceV1 {
+                            symbol: "BTCUSDT".into(),
+                            last_update_id: position,
+                            bids: vec![ReferencePriceLevelV1 {
+                                price_usdt_per_btc: ExactDecimal((price - 1).to_string()),
+                                quantity_btc: ExactDecimal("1".into()),
+                            }],
+                            asks: vec![ReferencePriceLevelV1 {
+                                price_usdt_per_btc: ExactDecimal((price + 1).to_string()),
+                                quantity_btc: ExactDecimal("1".into()),
+                            }],
+                        })),
+                        "binance_depth",
+                        position,
+                        at,
+                    )),
+                    binance_trade: Default::default(),
+                    group_events: Arc::from([]),
+                    source_progress: Default::default(),
+                },
+            ),
+        }
+    }
+    fn stream() -> Arc<PublicStatisticsStreamV1> {
+        PublicStatisticsStreamV1::new(
+            PublicStatisticsIdentityV1 {
+                input_set_identity: Sha256Hex("1".repeat(64)),
+                rules_identity: Sha256Hex("2".repeat(64)),
+                delivery_policy: "synthetic-fixed-zero-delay".into(),
+                stream_header: PublicInputStreamHeaderV1 {
+                    input_stream_id: "statistics-reuse".into(),
+                    canonical_rule_version: "canonical-v1".into(),
+                    observation_version: "market_business_observation_v1".into(),
+                    ordering_version: "input-order-v1".into(),
+                    input_scope: "finite-synthetic".into(),
+                    max_pending_ws_terminals: 8,
+                    initial_state: PublicInitialStateV1::Empty,
+                },
+            },
+            PublicStatisticsConfigV1 {
+                momentum_windows_ms: vec![1000],
+                spot_variance_windows_ms: vec![1000],
+                terminal_integral_windows_ms: vec![1000],
+                blb_lookback_windows_ms: vec![],
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn exact_time_common_slot_matches_uncached_reads_and_preserves_same_ms_old_prefix() {
+        let stream = stream();
+        let mut prefixes = vec![];
+        let mut groups = vec![];
+        for (position, at, price) in [(0, 1000, 100), (1, 2000, 102), (2, 2000, 104)] {
+            let g = group(position, at, price);
+            let prepared = PreparedPublicStatisticsV1::default();
+            let h = prepared
+                .consume(&stream, reference(position), at, &g)
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(
+                &h,
+                &prepared
+                    .consume(&stream, reference(position), at, &g)
+                    .unwrap()
+                    .unwrap()
+            ));
+            assert!(
+                prepared
+                    .consume(&stream, reference(position), at + 1, &g)
+                    .is_err()
+            );
+            groups.push(g);
+            prefixes.push(h);
+        }
+        let last = &prefixes[2];
+        let observations = groups[2].observations.iter().cloned().collect::<Vec<_>>();
+        // 每次直接读取的独立空缓存作参照，不复制统计公式。
+        let expected = observations
+            .iter()
+            .map(|o| {
+                let mut h = last.as_ref().clone();
+                h.cache = Default::default();
+                h.read(o, 3000)
+            })
+            .collect::<Vec<_>>();
+        COMMON_WORK.with(|n| n.set((0, 0)));
+        let first = last.read(&observations[0], 3000);
+        let second = last.read(&observations[1], 3000);
+        assert_eq!(first, expected[0]);
+        assert_eq!(second, expected[1]);
+        assert_eq!(COMMON_WORK.with(|n| n.get()), (1, 2));
+        assert_eq!(
+            first.spot_variance[0].sigma_usd_per_btc_per_sqrt_second,
+            Some(4.0)
+        );
+        assert_eq!(
+            first.momentum[0].change_usdt_per_btc.value,
+            Some(Decimal::ZERO)
+        );
+        assert!(first.pm_quantities[0].bid_shares.value.is_none());
+        assert_eq!(first.pm_quantities[0].ask_shares.value, Some(Decimal::ZERO));
+        assert!(first.blb.official_k_usd_per_btc.is_none());
+        assert!(first.blb.visible_quantity_btc.is_none());
+        let later_query = last.read(&observations[0], 3001);
+        assert!(
+            later_query.spot_variance[0]
+                .sigma_usd_per_btc_per_sqrt_second
+                .is_none()
+        );
+        assert_eq!(last.read(&observations[0], 3000), first);
+        assert_eq!(COMMON_WORK.with(|n| n.get()).0, 3);
+        let next = group(3, 2000, 106);
+        let next = PreparedPublicStatisticsV1::default()
+            .consume(&stream, reference(3), 2000, &next)
+            .unwrap()
+            .unwrap();
+        assert!(!Arc::ptr_eq(&last.cache, &next.cache));
+        let updated = next.read(&observations[0], 3000);
+        assert_eq!(
+            updated.spot_variance[0].sigma_usd_per_btc_per_sqrt_second,
+            Some(6.0)
+        );
+        assert_eq!(last.read(&observations[0], 3000), first);
+        assert_eq!(
+            prefixes[0]
+                .read(&groups[0].observations[0], 1000)
+                .spot_variance[0]
+                .sigma_usd_per_btc_per_sqrt_second,
+            None
+        );
     }
 }

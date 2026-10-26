@@ -986,3 +986,172 @@ fn local_funds_classification_keeps_mixed_fault_unknown_and_release_failure_fata
     error.error = SharedActionErrorV1::Ledger(LedgerErrorV1::AccountNotOpened);
     assert!(!error.is_local_funds_rejection());
 }
+
+/// 真实NOE领取和资金变化后重新选取责任；闭市不裁掉旧持仓/预留。
+#[tokio::test(flavor = "current_thread")]
+async fn selected_observations_refresh_feedback_funds_and_ended_market_responsibility() {
+    let temporary;
+    let root = if let Some(parent) = std::env::var_os("BACKTEST_COST_TEST_OUTPUT_ROOT") {
+        let root = std::path::PathBuf::from(parent).join("selected-feedback");
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    } else {
+        temporary = tempfile::tempdir().unwrap();
+        temporary.path().to_owned()
+    };
+    let (core, times) = recorded_nav_marks_with_book_quantity(&root.join("dpt"), "10");
+    let (mut execution, observation, _) = execution_with_rules_v4(
+        &root.join("sim.jsonl"),
+        &core,
+        SUCCESS_POLICY,
+        None,
+        "e".repeat(64),
+        "100",
+    );
+    let mut ledger =
+        LedgerWriterV1::new_with_admission_v3(AccountAdmissionPolicyV3::ActualCashNoMarketLimit);
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &root.join("ledger"))
+        .unwrap();
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation)
+        .unwrap()
+        .unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&root.join("dpt"), 1, 1 << 20, times).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "selected-feedback".into());
+    driver.enable_finite_recording_wait().unwrap();
+    for _ in 0..8 {
+        driver.next_group().unwrap().unwrap();
+    }
+    let old = ConditionId(CONDITION_ID.into());
+    let other = ConditionId(fixture_market_identity::OTHER_CONDITION_ID.into());
+    let first = shared
+        .strategy_selected_observation_input(
+            &mut driver,
+            false,
+            &[other.clone(), old.clone(), old.clone()],
+        )
+        .unwrap()
+        .unwrap();
+    let initial_sequence = first.action_before.cutoff().private_feedback_sequence();
+    assert_eq!(first.markets.len(), 2, "重复历史ID与当前市场仅合并一次");
+    assert!(
+        first.markets.windows(2).all(
+            |p| p[0].observation.market.condition_id.0 < p[1].observation.market.condition_id.0
+        )
+    );
+    drop(first);
+    shared
+        .reserve_action_v2(&[ReserveIntentV1 {
+            request_identity: LedgerRequestIdentityV1("selected-local-pending".into()),
+            condition_id: old.clone(),
+            requested_principal_pusd: ExactDecimal("3".into()),
+            immediate_fee_reserve_pusd: ExactDecimal("0".into()),
+        }])
+        .unwrap();
+    let receipt = shared
+        .execute(
+            &mut driver.decision().unwrap(),
+            RequestContextV2 {
+                global_request_id: "selected-ten".into(),
+                caller_correlation_id: None,
+            },
+            Some(Arc::new(ModelIntentV1::SubmitSingleBuy {
+                condition_id: old.clone(),
+                order: BuyLegIntentV1 {
+                    token_id: TokenId(UP_TOKEN_ID.into()),
+                    order: BuyOrderIntentV1::GtcLimit {
+                        limit_price_pusd_per_share: Decimal::new(6, 1),
+                        size_shares: Decimal::from(10),
+                        post_only: false,
+                    },
+                },
+            })),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    std::fs::write(
+        root.join("request-receipt.json"),
+        serde_json::to_vec_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
+    let mut rows = Vec::new();
+    let mut saw_ended = false;
+    while driver.next_group().unwrap().is_some() {
+        let selected = shared
+            .strategy_selected_observation_input(&mut driver, false, &[])
+            .unwrap()
+            .unwrap();
+        let cutoff = selected.action_before.cutoff().clone();
+        let economics = selected.action_before.economics().clone();
+        let selected_ids: Vec<_> = selected
+            .markets
+            .iter()
+            .map(|f| f.observation.market.condition_id.clone())
+            .collect();
+        drop(selected);
+        let full = shared
+            .strategy_observation_input_with_trade_details(&mut driver, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cutoff, *full.action_before.cutoff());
+        assert_eq!(economics, *full.action_before.economics());
+        let at = cutoff.decision_time().logical_time_utc_ms();
+        rows.push(serde_json::json!({"at":at,"private_feedback_sequence":cutoff.private_feedback_sequence(),"selected":selected_ids,"cash":full.action_before.cash_available()}));
+        if at == 66_000 {
+            assert!(
+                cutoff.private_feedback_sequence() > initial_sequence,
+                "必须实际领取新反馈"
+            );
+            assert!(
+                shared.registry().orders().any(|o| o.accepted.is_some()),
+                "本地登记不代平台接纳"
+            );
+            let read = shared.ledger().necessary_read_v2().unwrap();
+            assert!(
+                read.marked_markets().any(|id| id == old.0),
+                "真实持仓参与选择"
+            );
+            assert!(
+                read.funds_markets().any(|id| id == old.0),
+                "当前真实预留参与选择"
+            );
+            assert_eq!(read.cash().1, Decimal::from(3));
+            let public_only: Vec<_> = driver
+                .selected_frames_at_observation(std::iter::empty())
+                .iter()
+                .map(|f| f.observation.market.condition_id.clone())
+                .collect();
+            assert_eq!(
+                public_only,
+                [other.clone()],
+                "旧市场已经结束，不再是默认当前市场"
+            );
+            assert_eq!(selected_ids.len(), 2);
+            assert!(selected_ids.contains(&old));
+            // 同前缀重读不改变反馈位置、资金或责任；不缓存过去选择集合。
+            let again = shared
+                .strategy_selected_observation_input(&mut driver, false, &[])
+                .unwrap()
+                .unwrap();
+            assert_eq!(again.action_before.cutoff(), &cutoff);
+            assert_eq!(
+                again
+                    .markets
+                    .iter()
+                    .map(|f| f.observation.market.condition_id.clone())
+                    .collect::<Vec<_>>(),
+                selected_ids
+            );
+            saw_ended = true;
+            break;
+        }
+    }
+    std::fs::write(
+        root.join("selection.json"),
+        serde_json::to_vec_pretty(&rows).unwrap(),
+    )
+    .unwrap();
+    assert!(saw_ended);
+    driver.stop_and_drain().unwrap();
+}
