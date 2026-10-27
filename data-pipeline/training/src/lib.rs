@@ -15,6 +15,7 @@ mod gate_a_publication;
 mod gate_a_sim_adapter;
 pub mod hidden_preparation;
 pub mod hidden_stream;
+pub mod historical_admission;
 pub mod historical_initialization;
 pub mod historical_preparation_progress;
 pub mod observation;

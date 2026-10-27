@@ -58,7 +58,7 @@ struct ManifestFile {
     sha256: String,
 }
 type MetadataOrder = (i64, u64, String);
-fn existing(row: &TypedRawRowV2) -> Option<&PolymarketMarketMetadataRow> {
+pub(crate) fn existing(row: &TypedRawRowV2) -> Option<&PolymarketMarketMetadataRow> {
     match row {
         TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(row)) => Some(row),
         TypedRawRowV2::PolymarketMarketMetadataV6(row) => match row.as_ref() {
@@ -83,6 +83,55 @@ fn order(row: &PolymarketMarketMetadataRow, id: &Sha256Hex) -> MetadataOrder {
         id,
     )
 }
+/// 与原选择器共用原清单解析及同一文件事实冲突检查。
+pub(crate) fn resolve_initialization_files(
+    selections: &[MetadataInitializationFileSelectionV1],
+) -> RecordingResult<Vec<MetadataInitializationFileFactsV1>> {
+    let mut files: Vec<MetadataInitializationFileFactsV1> = Vec::new();
+    let mut seen = BTreeMap::<PathBuf, usize>::new();
+    for selection in selections {
+        let manifest_path = std::fs::canonicalize(&selection.manifest_path)?;
+        let raw = crate::read_daily_manifest(&manifest_path)?;
+        let manifest: Manifest = serde_json::from_slice(&raw)?;
+        let manifest_sha256 = Sha256Hex(format!("{:x}", Sha256::digest(&raw)));
+        for relative in &selection.relative_paths {
+            let facts = manifest
+                .files
+                .iter()
+                .find(|file| &file.path == relative)
+                .ok_or("初始化文件不在指定原清单中")?;
+            if facts.source_kind != "polymarket_market_metadata" {
+                return Err("初始化只接受市场元数据文件".into());
+            }
+            let path = std::fs::canonicalize(manifest_path.parent().unwrap().join(relative))?;
+            if let Some(&first) = seen.get(&path) {
+                let original = &files[first].file;
+                if facts.schema_version != original.schema_version
+                    || facts.bytes != original.bytes
+                    || facts.rows != original.rows
+                    || facts.sha256 != original.sha256
+                {
+                    return Err("同一初始化文件的清单事实互相矛盾".into());
+                }
+                continue;
+            }
+            seen.insert(path.clone(), files.len());
+            files.push(MetadataInitializationFileFactsV1 {
+                manifest_sha256: manifest_sha256.clone(),
+                relative_path: relative.clone(),
+                file: PublicFiniteFileV1 {
+                    path,
+                    source_kind: facts.source_kind.clone(),
+                    schema_version: facts.schema_version.clone(),
+                    bytes: facts.bytes,
+                    rows: facts.rows,
+                    sha256: facts.sha256.clone(),
+                },
+            });
+        }
+    }
+    Ok(files)
+}
 /// 一次读取选择正式Snapshot及所需前序行；不建立账户或价格预热。
 pub struct MetadataInitializationSelectionV1 {
     pub files: Vec<MetadataInitializationFileFactsV1>,
@@ -102,49 +151,17 @@ impl MetadataInitializationSelectionV1 {
         bytes: usize,
         progress: Option<&HistoricalPreparationNotifierV1<'_>>,
     ) -> RecordingResult<Self> {
-        let mut files: Vec<MetadataInitializationFileFactsV1> = Vec::new();
-        let mut seen = BTreeMap::<PathBuf, usize>::new();
-        for selection in &config.files {
-            let manifest_path = std::fs::canonicalize(&selection.manifest_path)?;
-            let raw = crate::read_daily_manifest(&manifest_path)?;
-            let manifest: Manifest = serde_json::from_slice(&raw)?;
-            let manifest_sha256 = Sha256Hex(format!("{:x}", Sha256::digest(&raw)));
-            for relative in &selection.relative_paths {
-                let facts = manifest
-                    .files
-                    .iter()
-                    .find(|file| &file.path == relative)
-                    .ok_or("初始化文件不在指定原清单中")?;
-                if facts.source_kind != "polymarket_market_metadata" {
-                    return Err("初始化只接受市场元数据文件".into());
-                }
-                let path = std::fs::canonicalize(manifest_path.parent().unwrap().join(relative))?;
-                if let Some(&first) = seen.get(&path) {
-                    let original = &files[first].file;
-                    if facts.schema_version != original.schema_version
-                        || facts.bytes != original.bytes
-                        || facts.rows != original.rows
-                        || facts.sha256 != original.sha256
-                    {
-                        return Err("同一初始化文件的清单事实互相矛盾".into());
-                    }
-                    continue;
-                }
-                seen.insert(path.clone(), files.len());
-                files.push(MetadataInitializationFileFactsV1 {
-                    manifest_sha256: manifest_sha256.clone(),
-                    relative_path: relative.clone(),
-                    file: PublicFiniteFileV1 {
-                        path,
-                        source_kind: facts.source_kind.clone(),
-                        schema_version: facts.schema_version.clone(),
-                        bytes: facts.bytes,
-                        rows: facts.rows,
-                        sha256: facts.sha256.clone(),
-                    },
-                });
-            }
-        }
+        let files = resolve_initialization_files(&config.files)?;
+        Self::open_from_files(config, files, rows, bytes, progress)
+    }
+    /// 仅供同crate的有界入口复用已经解析的相同来源事实；选择算法不变。
+    pub(crate) fn open_from_files(
+        config: &MetadataInitializationConfigV1,
+        files: Vec<MetadataInitializationFileFactsV1>,
+        rows: usize,
+        bytes: usize,
+        progress: Option<&HistoricalPreparationNotifierV1<'_>>,
+    ) -> RecordingResult<Self> {
         let mut starts = BTreeMap::new();
         let mut found = BTreeSet::new();
         let mut candidates = Vec::new();
