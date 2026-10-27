@@ -9,7 +9,7 @@ pub struct EncodingConfig {
     pub field_buckets: u32,
     pub category_buckets: u32,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Token(pub u32, pub u32, pub f32, pub u8);
 fn bucket(s: &str, count: u32) -> u32 {
     // 稳定FNV-1a；哈希投影仅供神经编码，不决定动作资格、份额或资金域。

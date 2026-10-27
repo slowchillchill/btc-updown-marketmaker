@@ -2,7 +2,8 @@ use crate::{domain::*, encoding::*, worker::ModelWorker};
 use contracts::{economics::EconomicRational as R, *};
 use ledger::*;
 use num_bigint::BigUint;
-use num_traits::{One, Zero};
+use num_traits::Zero;
+use rayon::prelude::*;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -45,6 +46,7 @@ pub struct ModelConsumer {
     pub config: ConsumerConfig,
     worker: ModelWorker,
     rules: Arc<SealedProcessRuleSnapshotV3>,
+    frozen_rules: crate::FrozenRuleBindingV1,
     call: u64,
     first_observation: Option<Arc<crate::first_observation::FirstObservation>>,
     entry_scope: backtest::EffectiveEntryMarketScopeV1,
@@ -58,12 +60,147 @@ pub struct ModelConsumer {
     test_market_private: std::collections::VecDeque<Value>,
 }
 #[derive(Clone)]
-struct MarketDomain {
-    ticks: [ExactDecimal; 2],
-    max_prices: [u16; 2],
-    eligible: [bool; 2],
-    pair: bool,
+pub(crate) struct MarketDomain {
+    pub(crate) ticks: [ExactDecimal; 2],
+    pub(crate) max_prices: [u16; 2],
+    pub(crate) eligible: [bool; 2],
+    pub(crate) pair: bool,
 }
+pub(crate) struct FrozenActorInput {
+    pub(crate) cash: Decimal,
+    pub(crate) time: Value,
+    pub(crate) global_projection: Value,
+    pub(crate) private_markets: Vec<Value>,
+    pub(crate) repair_evidence: Vec<Value>,
+    pub(crate) domains: Vec<MarketDomain>,
+    pub(crate) options: Vec<Value>,
+    pub(crate) global: Vec<Token>,
+    pub(crate) market_tokens: Vec<Vec<Token>>,
+}
+/// 工程有限材料和生产decide复用同一纯投影、资格与精确域；不发意图或调用模型。
+pub(crate) fn freeze_actor_input(
+    input: &StrategyInputV1,
+    at: i64,
+    encoding: &EncodingConfig,
+    entry_scope: &backtest::EffectiveEntryMarketScopeV1,
+    rules: &SealedProcessRuleSnapshotV3,
+    learning: Option<&crate::learning::CollectionConfig>,
+    parallel: bool,
+) -> Result<FrozenActorInput, String> {
+    freeze_actor_input_with(
+        input,
+        at,
+        encoding,
+        entry_scope,
+        rules,
+        learning,
+        parallel,
+        |_, value| value,
+    )
+}
+fn freeze_actor_input_with(
+    input: &StrategyInputV1,
+    at: i64,
+    encoding: &EncodingConfig,
+    entry_scope: &backtest::EffectiveEntryMarketScopeV1,
+    rules: &SealedProcessRuleSnapshotV3,
+    learning: Option<&crate::learning::CollectionConfig>,
+    parallel: bool,
+    mut private_projection: impl FnMut(usize, Value) -> Value,
+) -> Result<FrozenActorInput, String> {
+    let cash = input.action_before.cash_available();
+    let mut time = time_projection(input, at);
+    if let Some(c) = learning {
+        time["active_end_utc_ms"] = c.active_end_utc_ms.into();
+        time["evidence_end_utc_ms"] = c.evidence_end_utc_ms.into();
+        time["until_active_end_ms"] = (c.active_end_utc_ms - at).into();
+    }
+    let mut domains = Vec::new();
+    let mut private_markets = Vec::new();
+    let mut repair_evidence = Vec::new();
+    let mut options = vec![json!({"kind":"NoTrade","market":null,"side":null})];
+    for (index, m) in input.markets.iter().enumerate() {
+        let o = &m.observation;
+        let (eligible, account) = repair_eligibility(input, m)?;
+        let mut evidence = account.clone();
+        if let Some(object) = evidence.as_object_mut() {
+            object.remove("commitments");
+        }
+        repair_evidence.push(evidence);
+        let order_feedback=input.action_before.orders().filter(|r|r.condition_id==Some(&o.market.condition_id)).map(|r|json!({"token_id":r.token_id,"matched_shares":r.matched_shares,"active_unfilled_shares":r.active_unfilled_shares,"accepted":r.accepted.is_some(),"formed":r.formed.is_some(),"latest_lifecycle":r.latest_lifecycle.map(|x|x.record()),"latest_direct_feedback":r.latest_direct_feedback.map(|x|x.record()),"cancellable":r.cancellable})).collect::<Vec<_>>();
+        let funds = input.action_before.market_funds(&o.market.condition_id);
+        let private = json!({"account":account,"order_feedback":order_feedback,"funds":{"principal":funds.principal.to_string(),"fee":funds.fee.to_string(),"local_principal":funds.local_principal.to_string(),"local_fee":funds.local_fee.to_string(),"platform_pending_principal":funds.platform_pending_principal.to_string(),"platform_pending_fee":funds.platform_pending_fee.to_string(),"pending_count":funds.pending_count}});
+        let private = private_projection(index, private);
+        private_markets.push(private);
+        let (ticks, max_prices) = market_limit_bounds(m)?;
+        let start = o.market.window.start_at_utc_ms;
+        let publicly_allowed = o.active.value != Some(false)
+            && o.closed.value != Some(true)
+            && o.accepting_orders.value != Some(false);
+        let pair = publicly_allowed && pair_start_allowed(start, entry_scope);
+        let d = MarketDomain {
+            ticks,
+            max_prices,
+            eligible,
+            pair,
+        };
+        if max_prices.iter().all(|n| *n > 0) && publicly_allowed {
+            for (kind, side) in [
+                ("Pair", None),
+                ("Repair", Some(0usize)),
+                ("Repair", Some(1usize)),
+            ] {
+                if (kind == "Pair" && !d.pair) || side.is_some_and(|s| !eligible[s]) {
+                    continue;
+                }
+                let indices: Vec<_> = side.map_or_else(|| vec![0, 1], |s| vec![s]);
+                let legs = indices
+                    .iter()
+                    .map(|s| LimitLeg {
+                        price_index: 1,
+                        tick: d.ticks[*s].clone(),
+                        post_only: true,
+                    })
+                    .collect::<Vec<_>>();
+                if !affordable_count(rules, cash, &legs)?.is_zero() {
+                    options.push(json!({"kind":kind,"market":index,"side":side}));
+                }
+            }
+        }
+        domains.push(d);
+    }
+    let market_tokens: Vec<_> = if parallel && input.markets.len() > 1 {
+        private_markets
+            .par_iter()
+            .zip(input.markets.par_iter())
+            .map(|(private, market)| {
+                tokens_with_public(private, &market_projection(market, at), encoding)
+            })
+            .collect()
+    } else {
+        private_markets
+            .iter()
+            .zip(&input.markets)
+            .map(|(private, market)| {
+                tokens_with_public(private, &market_projection(market, at), encoding)
+            })
+            .collect()
+    };
+    let global_projection = json!({"time":time,"cash_available":cash.to_string(),"unfinished_order_count":input.action_before.orders().count(),"commitment_count":input.action_before.commitments().count()});
+    let global = tokens(&global_projection, encoding);
+    Ok(FrozenActorInput {
+        cash,
+        time,
+        global_projection,
+        private_markets,
+        repair_evidence,
+        domains,
+        options,
+        global,
+        market_tokens,
+    })
+}
+
 fn decimal(v: &ExactDecimal) -> Result<Decimal, String> {
     Decimal::from_str_exact(&v.0).map_err(|e| e.to_string())
 }
@@ -217,6 +354,7 @@ impl ModelConsumer {
             config,
             worker,
             rules,
+            frozen_rules: rule_binding.clone(),
             call: 0,
             first_observation: None,
             entry_scope,
@@ -252,6 +390,25 @@ impl ModelConsumer {
         }
         *elapsed += s.elapsed().as_secs_f64();
         Ok(r)
+    }
+    fn head_exchange(
+        &self,
+        request: Value,
+        elapsed: &mut f64,
+        local: &mut Option<std::collections::VecDeque<Value>>,
+    ) -> Result<Value, String> {
+        let Some(local) = local else {
+            return self.exchange(request, elapsed);
+        };
+        let item = local.pop_front().ok_or("整帧响应缺条件头")?;
+        if item["request"] != request {
+            return Err("整帧条件域与同一Rust冻结域不同".into());
+        }
+        let response = item["response"].clone();
+        if self.config.learning.is_some() {
+            self.rpc.borrow_mut().push(json!({"request":request,"response":{"post_only":response["post_only"],"index":response["index"],"rank":response["rank"]}}));
+        }
+        Ok(response)
     }
     fn base(&self, phase: &str) -> Value {
         json!({"phase":phase,"account":self.config.account_key,"call":self.call})
@@ -381,13 +538,6 @@ impl StrategyV1 for ModelConsumer {
         }
         self.call += 1;
         self.rpc.borrow_mut().clear();
-        let cash = input.action_before.cash_available();
-        let mut time = time_projection(input, at);
-        if let Some(c) = &self.config.learning {
-            time["active_end_utc_ms"] = c.active_end_utc_ms.into();
-            time["evidence_end_utc_ms"] = c.evidence_end_utc_ms.into();
-            time["until_active_end_ms"] = (c.active_end_utc_ms - at).into();
-        }
         let mut special_credit = Value::Null;
         let mut special_safe_notrade = None;
         if let Some(policy) = self
@@ -423,93 +573,58 @@ impl StrategyV1 for ModelConsumer {
                 }
             };
         }
-        let mut domains = Vec::new();
-        let mut market_tokens = Vec::new();
-        let mut private_markets = Vec::new();
-        let mut repair_evidence = Vec::new();
-        let mut options = vec![json!({"kind":"NoTrade","market":null,"side":null})];
-        for (index, m) in input.markets.iter().enumerate() {
-            let o = &m.observation;
-            let (eligible, account) = repair_eligibility(input, m)?;
-            let mut evidence = account.clone();
-            if let Some(object) = evidence.as_object_mut() {
-                object.remove("commitments");
-            }
-            repair_evidence.push(evidence);
-            let order_feedback=input.action_before.orders().filter(|r|r.condition_id==Some(&o.market.condition_id)).map(|r|json!({"token_id":r.token_id,"matched_shares":r.matched_shares,"active_unfilled_shares":r.active_unfilled_shares,"accepted":r.accepted.is_some(),"formed":r.formed.is_some(),"latest_lifecycle":r.latest_lifecycle.map(|x|x.record()),"latest_direct_feedback":r.latest_direct_feedback.map(|x|x.record()),"cancellable":r.cancellable})).collect::<Vec<_>>();
-            let funds = input.action_before.market_funds(&o.market.condition_id);
-            let private = json!({"account":account,"order_feedback":order_feedback,"funds":{"principal":funds.principal.to_string(),"fee":funds.fee.to_string(),"local_principal":funds.local_principal.to_string(),"local_fee":funds.local_fee.to_string(),"platform_pending_principal":funds.platform_pending_principal.to_string(),"platform_pending_fee":funds.platform_pending_fee.to_string(),"pending_count":funds.pending_count}});
-            // #368实例局部夹具，预先准备的同schema值按所有权移入，发布构建不存在。
-            #[cfg(test)]
-            let private = self.test_market_private.pop_front().unwrap_or(private);
-            let public = market_projection(m, at);
-            market_tokens.push(tokens_with_public(
-                &private,
-                &public,
-                &self.worker.config.encoding,
-            ));
-            private_markets.push(private);
-            let mut ticks = [ExactDecimal("0".into()), ExactDecimal("0".into())];
-            let mut max_prices = [0u16; 2];
-            if o.assets.len() == 2 {
-                for side in 0..2 {
-                    if let Some(tick) = &o.assets[side].tick.value {
-                        let t = decimal(tick)?;
-                        if t > Decimal::ZERO {
-                            ticks[side] = tick.clone();
-                            max_prices[side] =
-                                u16::try_from(((Decimal::ONE - t) / t).floor().mantissa())
-                                    .map_err(|_| "tick超出原SDK六档索引")?;
-                        }
-                    }
-                }
-            }
-            let start = o.market.window.start_at_utc_ms;
-            let publicly_allowed = o.active.value != Some(false)
-                && o.closed.value != Some(true)
-                && o.accepting_orders.value != Some(false);
-            let pair = publicly_allowed && pair_start_allowed(start, &self.entry_scope);
-            let d = MarketDomain {
-                ticks,
-                max_prices,
-                eligible,
-                pair,
-            };
-            if max_prices.iter().all(|n| *n > 0) && publicly_allowed {
-                for (kind, side) in [
-                    ("Pair", None),
-                    ("Repair", Some(0usize)),
-                    ("Repair", Some(1usize)),
-                ] {
-                    if (kind == "Pair" && !d.pair) || side.is_some_and(|s| !eligible[s]) {
-                        continue;
-                    }
-                    let indices: Vec<_> = side.map_or_else(|| vec![0, 1], |s| vec![s]);
-                    let legs = indices
-                        .iter()
-                        .map(|s| LimitLeg {
-                            price_index: 1,
-                            tick: d.ticks[*s].clone(),
-                            post_only: true,
-                        })
-                        .collect::<Vec<_>>();
-                    if !affordable_count(&self.rules, cash, &legs)?.is_zero() {
-                        options.push(json!({"kind":kind,"market":index,"side":side}));
-                    }
-                }
-            }
-            domains.push(d);
-        }
-        let global_projection = json!({"time":time,"cash_available":cash.to_string(),"unfinished_order_count":input.action_before.orders().count(),"commitment_count":input.action_before.commitments().count()});
-        let global = tokens(&global_projection, &self.worker.config.encoding);
+        #[cfg(test)]
+        let private_projection =
+            |_: usize, value| self.test_market_private.pop_front().unwrap_or(value);
+        #[cfg(not(test))]
+        let private_projection = |_: usize, value| value;
+        let FrozenActorInput {
+            cash,
+            time,
+            global_projection,
+            private_markets,
+            repair_evidence,
+            domains,
+            options,
+            global,
+            market_tokens,
+        } = freeze_actor_input_with(
+            input,
+            at,
+            &self.worker.config.encoding,
+            &self.entry_scope,
+            &self.rules,
+            self.config.learning.as_ref(),
+            self.worker.compact(),
+            private_projection,
+        )?;
         let encoding_seconds = started.elapsed().as_secs_f64();
         let mut roundtrip = 0.0;
-        let mut request = self.base("begin");
-        request["seed"] = self.config.sampling_seed.into();
-        request["global"] = json!(global);
-        request["markets"] = json!(market_tokens);
-        request["options"] = json!(options);
-        let begin = self.exchange(request, &mut roundtrip)?;
+        let (begin, mut local_rpc) = if self.worker.compact() {
+            let mut request = self.base("frame");
+            request["seed"] = self.config.sampling_seed.into();
+            request["options"] = json!(options);
+            request["processing_start_utc_ms"] = at.into();
+            request["domain_context"] = json!({"cash":cash.to_string(),"markets":domains.iter().map(|d|json!({"ticks":d.ticks,"max_prices":d.max_prices})).collect::<Vec<_>>()});
+            request["native_rules"] = json!({"snapshot_path":self.frozen_rules.snapshot_path,"expected_file_sha256":self.frozen_rules.expected_file_sha256,"implementation_identity":self.frozen_rules.implementation_identity});
+            let began = Instant::now();
+            let response = self.worker.request_frame(request, global, market_tokens)?;
+            roundtrip += began.elapsed().as_secs_f64();
+            let rpc = response["rpc"]
+                .as_array()
+                .ok_or("整帧响应缺RPC历史")?
+                .iter()
+                .cloned()
+                .collect();
+            (response["begin"].clone(), Some(rpc))
+        } else {
+            let mut request = self.base("begin");
+            request["seed"] = self.config.sampling_seed.into();
+            request["global"] = json!(global);
+            request["markets"] = json!(market_tokens);
+            request["options"] = json!(options);
+            (self.exchange(request, &mut roundtrip)?, None)
+        };
         let mut logp = begin["log_probability"]
             .as_f64()
             .ok_or("模型没有返回动作概率")?;
@@ -534,30 +649,13 @@ impl StrategyV1 for ModelConsumer {
             let mut selected_legs = Vec::new();
             for (ordinal, side) in sides.iter().enumerate() {
                 // 属性先选；价格和数量随后使用该属性的原公共成本。
-                let mut supported_posts = Vec::new();
-                for post in [false, true] {
-                    let mut minimum = selected_legs.clone();
-                    minimum.push(LimitLeg {
-                        price_index: 1,
-                        tick: d.ticks[*side].clone(),
-                        post_only: post,
-                    });
-                    for other in sides.iter().skip(ordinal + 1) {
-                        minimum.push(LimitLeg {
-                            price_index: 1,
-                            tick: d.ticks[*other].clone(),
-                            post_only: true,
-                        });
-                    }
-                    if !affordable_count(&self.rules, cash, &minimum)?.is_zero() {
-                        supported_posts.push(post);
-                    }
-                }
+                let supported_posts =
+                    supported_posts(&self.rules, cash, &d.ticks, &sides, &selected_legs, ordinal)?;
                 let mut req = self.base("post");
                 req["allowed"] = json!(supported_posts);
                 req["ordinal"] = ordinal.into();
                 req["side"] = (*side).into();
-                let post_result = self.exchange(req, &mut roundtrip)?;
+                let post_result = self.head_exchange(req, &mut roundtrip, &mut local_rpc)?;
                 head_trace.extend(
                     post_result["head_trace"]
                         .as_array()
@@ -576,39 +674,21 @@ impl StrategyV1 for ModelConsumer {
                     .ok_or("模型缺属性概率")?;
                 heads += post_result["heads"].as_u64().ok_or("模型缺属性头计数")?;
                 // 所选价格须至少允许0.01份，余腿保留最便宜合法价格；不是平台MOS掩码。
-                let mut lower = 1u16;
-                let mut upper = d.max_prices[*side];
-                while lower < upper {
-                    let mid = lower + (upper - lower).div_ceil(2);
-                    let mut candidate = selected_legs.clone();
-                    candidate.push(LimitLeg {
-                        price_index: mid,
-                        tick: d.ticks[*side].clone(),
-                        post_only,
-                    });
-                    for other in sides.iter().skip(ordinal + 1) {
-                        candidate.push(LimitLeg {
-                            price_index: 1,
-                            tick: d.ticks[*other].clone(),
-                            post_only: true,
-                        });
-                    }
-                    let total = costs(&self.rules, &BigUint::one(), &candidate)?
-                        .into_iter()
-                        .fold(BigUint::zero(), |s, c| {
-                            s + c.principal_micro + c.fee_1e5_units * 10u8
-                        });
-                    if total <= cash_micro(cash) {
-                        lower = mid;
-                    } else {
-                        upper = mid - 1;
-                    }
-                }
+                let lower = maximum_affordable_price(
+                    &self.rules,
+                    cash,
+                    &d.ticks,
+                    &d.max_prices,
+                    &sides,
+                    &selected_legs,
+                    ordinal,
+                    post_only,
+                )?;
                 let mut req = self.base("price");
                 req["maximum"] = lower.into();
                 req["ordinal"] = ordinal.into();
                 req["side"] = (*side).into();
-                let result = self.exchange(req, &mut roundtrip)?;
+                let result = self.head_exchange(req, &mut roundtrip, &mut local_rpc)?;
                 head_trace.extend(
                     result["head_trace"]
                         .as_array()
@@ -635,7 +715,7 @@ impl StrategyV1 for ModelConsumer {
             }
             let mut req = self.base("quantity");
             req["count"] = count.to_string().into();
-            let result = self.exchange(req, &mut roundtrip)?;
+            let result = self.head_exchange(req, &mut roundtrip, &mut local_rpc)?;
             head_trace.extend(
                 result["head_trace"]
                     .as_array()
@@ -714,6 +794,9 @@ impl StrategyV1 for ModelConsumer {
                 intent: Arc::new(intent),
                 reserves,
             });
+        }
+        if local_rpc.as_ref().is_some_and(|rpc| !rpc.is_empty()) {
+            return Err("整帧响应包含未消费条件头".into());
         }
         if let Some(c) = &self.config.learning {
             let economic = input

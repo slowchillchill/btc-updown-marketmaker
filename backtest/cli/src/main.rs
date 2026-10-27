@@ -705,7 +705,7 @@ async fn main() {
                 Ok(strategy.build(rules.clone(),namespace)?.with_entry_market_range(run.effective_entry_market_scope.as_ref().map(|e| EntryMarketRangeV1 { start_at_utc_ms:e.market_start_inclusive_utc_ms,end_at_utc_ms:e.market_start_exclusive_utc_ms })))
             };
             let options=HistoricalDayRunOptionsV1 { research_summary:research.summary, started, public_observer:observer,
-                budget_stop_after:research.budget_seconds.map(|budget| std::time::Duration::from_secs(budget-research.reserve_seconds.unwrap_or(900))) };
+                budget_stop_after:research.budget_seconds.map(|budget| std::time::Duration::from_secs(budget-research.reserve_seconds.unwrap_or(900))), ..Default::default() };
             let result=if research.summary || research.budget_seconds.is_some() || research.evidence_root.is_some() {
                 run_historical_days_with_options_v1(&days,rules.clone(),&factory,command.parallel_dates.unwrap_or(1),&options)
             } else if let Some(parallel)=command.parallel_dates {run_historical_days_with_parallelism_v1(&days,rules.clone(),&factory,parallel)}

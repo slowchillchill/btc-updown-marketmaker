@@ -523,6 +523,118 @@ fn visit_group_frames(
     Ok(())
 }
 
+/// 原visit_day_frames的day/统计时序流/cutoff/候选/index顺序，无行情读取。
+fn cached_learning_schedule(
+    consumer: &crate::ConsumerRunConfig,
+    rows: &std::collections::BTreeMap<String, Trajectory>,
+) -> Result<Vec<Value>, backtest::MaterialError> {
+    let mut schedule = Vec::new();
+    for day in &consumer.days {
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (index, candidate) in day.candidates.iter().enumerate() {
+            if let Some(group) = groups.iter_mut().find(|group| {
+                let previous = &day.candidates[group[0]];
+                previous.public_statistics == candidate.public_statistics
+                    && previous.timing.public_delivery_delay_ms
+                        == candidate.timing.public_delivery_delay_ms
+            }) {
+                group.push(index);
+            } else {
+                groups.push(vec![index]);
+            }
+        }
+        for group in groups {
+            let keys = group
+                .iter()
+                .map(|index| {
+                    let config: crate::ConsumerConfig = serde_json::from_value(
+                        day.candidates[*index].strategy.effective_parameters["model_consumer"]
+                            .clone(),
+                    )?;
+                    Ok(config.account_key)
+                })
+                .collect::<Result<Vec<_>, serde_json::Error>>()?;
+            let times = keys
+                .iter()
+                .flat_map(|key| {
+                    rows[key]
+                        .meta
+                        .iter()
+                        .map(|r| r["cutoff"].as_i64().expect("合法市场截止"))
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            for at in times {
+                for key in &keys {
+                    for index in rows[key].positions_at(at) {
+                        schedule.push(json!({"account":key,"index":index}));
+                    }
+                }
+            }
+        }
+    }
+    Ok(schedule)
+}
+
+fn prepare_worker_cache(
+    worker: &crate::worker::ModelWorker,
+    consumer: &crate::ConsumerRunConfig,
+    rows: &mut std::collections::BTreeMap<String, Trajectory>,
+    labels: &std::collections::BTreeMap<String, Vec<Value>>,
+    collection: &Value,
+    rules: std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
+) -> Result<(), backtest::MaterialError> {
+    let status = worker.request(json!({"phase":"learn_cache_status"}))?;
+    let matches = rows
+        .iter()
+        .all(|(key, row)| status["accounts"][key].as_u64().unwrap_or(0) == row.meta.len() as u64);
+    if !matches {
+        let empty = status["accounts"]
+            .as_object()
+            .is_none_or(|a| a.values().all(|v| v.as_u64() == Some(0)));
+        if !empty {
+            return Err("存活worker输入缓存与完整采集不同，不能重采或拼接".into());
+        }
+        let sampling = &collection["summary"]["model"]["collection_sampling_state"];
+        if sampling.is_null() {
+            return Err("旧完整采集没有新采样状态材料，不能声称精确CPU采样恢复".into());
+        }
+        let calls = rows
+            .iter()
+            .map(|(key, row)| (key.clone(), row.meta.len()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        worker.request(json!({"phase":"learn_restore_collection_sampling_state","state":sampling,"expected_calls":calls}))?;
+        // 仅新进程对完整已封存采集重建一次；正常存活worker不读取公共行情。
+        visit_group_frames(
+            consumer,
+            rows,
+            rules,
+            GroupFrameUse::LearnStep,
+            |_, _, mut frame| {
+                let global = serde_json::from_value(
+                    frame
+                        .as_object_mut()
+                        .ok_or("冷恢复帧不是对象")?
+                        .remove("global")
+                        .ok_or("冷恢复帧缺global")?,
+                )?;
+                let markets = serde_json::from_value(
+                    frame
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("markets")
+                        .ok_or("冷恢复帧缺markets")?,
+                )?;
+                frame["phase"] = "learn_cache_frame".into();
+                worker.request_frame(frame, global, markets)?;
+                Ok(())
+            },
+        )?;
+    }
+    let schedule = cached_learning_schedule(consumer, rows)?;
+    worker.request(json!({"phase":"learn_prepare","labels":labels,"schedule":schedule}))?;
+    Ok(())
+}
+
 struct CollectedTargets {
     consumer: crate::ConsumerRunConfig,
     rows: std::collections::BTreeMap<String, Trajectory>,
@@ -706,6 +818,7 @@ fn run_learning_job_with_opener(
         &crate::ConsumerRunConfig,
     ) -> Result<crate::rules::OpenedRulesV1, backtest::MaterialError>,
 ) -> Result<Value, backtest::MaterialError> {
+    crate::worker::configure_runtime(&config.consumer.worker)?;
     let first_observation = std::sync::Arc::new(crate::first_observation::FirstObservation::new(
         std::time::Instant::now(),
     ));
@@ -887,6 +1000,16 @@ fn run_learning_job_opened(
             mut rows,
             labels,
         } = targets;
+        if worker.compact() {
+            prepare_worker_cache(
+                &worker,
+                &effective,
+                &mut rows,
+                &labels,
+                &collection,
+                opened.rules.clone(),
+            )?;
+        }
         let mut audits = Vec::new();
         let mut audit_output = if config.audit_before_update {
             Some(std::io::BufWriter::new(
@@ -951,30 +1074,34 @@ fn run_learning_job_opened(
         } else {
             0
         } {
-            worker.request(json!({"phase":"learn_epoch"}))?;
-            let mut batch = Vec::new();
-            let mut batch_keys = std::collections::BTreeSet::new();
-            visit_group_frames(
-                &effective,
-                &mut rows,
-                opened.rules.clone(),
-                GroupFrameUse::LearnStep,
-                |key, index, frame| {
-                    if batch_keys.contains(key)
-                        || batch.len() == config.parameters.training_sequence_batch
-                    {
-                        worker.request_batch(std::mem::take(&mut batch))?;
-                        batch_keys.clear();
-                    }
-                    batch.push(learn_step_request(frame, &labels[key][index]));
-                    batch_keys.insert(key.to_owned());
-                    Ok(())
-                },
-            )?;
-            if !batch.is_empty() {
-                worker.request_batch(batch)?;
-            }
-            let result = worker.request(json!({"phase":"learn_end_epoch"}))?;
+            let result = if worker.compact() {
+                worker.request(json!({"phase":"learn_run_epoch"}))?
+            } else {
+                worker.request(json!({"phase":"learn_epoch"}))?;
+                let mut batch = Vec::new();
+                let mut batch_keys = std::collections::BTreeSet::new();
+                visit_group_frames(
+                    &effective,
+                    &mut rows,
+                    opened.rules.clone(),
+                    GroupFrameUse::LearnStep,
+                    |key, index, frame| {
+                        if batch_keys.contains(key)
+                            || batch.len() == config.parameters.training_sequence_batch
+                        {
+                            worker.request_batch(std::mem::take(&mut batch))?;
+                            batch_keys.clear();
+                        }
+                        batch.push(learn_step_request(frame, &labels[key][index]));
+                        batch_keys.insert(key.to_owned());
+                        Ok(())
+                    },
+                )?;
+                if !batch.is_empty() {
+                    worker.request_batch(batch)?;
+                }
+                worker.request(json!({"phase":"learn_end_epoch"}))?
+            };
             eprintln!("PPO整轮{}完成，一次联合更新", epoch + 1);
             write_new(
                 &config
@@ -1011,7 +1138,20 @@ fn run_learning_job_opened(
         let partial = json!({"first_observation":first_observation.snapshot(),"failed_learning":true,"error":error.to_string(),"model":metrics.as_ref().ok(),"metrics_error":metrics.err(),"worker_ipc":worker.io_metrics(),"elapsed_seconds":started.elapsed().as_secs_f64()});
         write_new(&config.attempt_report, &partial)?;
     }
-    outcome
+    let shutdown_started = Instant::now();
+    let closed = worker.shutdown();
+    let shutdown_elapsed = shutdown_started.elapsed().as_secs_f64();
+    match (outcome, closed) {
+        (Ok(mut result), Ok(())) => {
+            // 原attempt/elapsed保留事务时点；CLI stdout持久记录实际关闭和完整阶段墙钟。
+            result["elapsed_seconds_through_worker_exit"] = started.elapsed().as_secs_f64().into();
+            result["worker_exit"] =
+                json!({"normal":true,"waited":true,"shutdown_elapsed_seconds":shutdown_elapsed});
+            Ok(result)
+        }
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]

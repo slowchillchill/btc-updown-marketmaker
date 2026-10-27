@@ -56,7 +56,7 @@ fn ordinary_pm(input: &RecordedIngressV1) -> bool {
     matches!(&input.ingress, DptIngressV1::Message {row:TypedRawRowV2::Existing(data_pipeline_core::typed_raw::TypedRawRow::PolymarketOrderbook(row)),..} if !matches!(row.event,data_pipeline_core::typed_raw::PolymarketOrderbookEvent::MarketResolved {..}))
 }
 // 批次限制统计原消息实际载荷字符及容器；准备材料随本批消费释放。
-fn pm_payload_bytes(input: &RecordedIngressV1) -> usize {
+pub fn retained_pm_input_bytes_hint(input: &RecordedIngressV1) -> usize {
     use data_pipeline_core::typed_raw::{PolymarketOrderbookEvent as Event, TypedRawRow};
     let DptIngressV1::Message {
         row: TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row)),
@@ -215,7 +215,7 @@ impl<'a> DayProducerV1<'a> {
             #[cfg(feature = "stage-timing")]
             let decode_ns = started.elapsed().as_nanos();
             let pm = ordinary_pm(&input);
-            retained += pm_payload_bytes(&input);
+            retained += retained_pm_input_bytes_hint(&input);
             // 原路径在当前 Core 应用后才消费下界错误，预读不能提前报告它。
             let source_lower = self
                 .ingress

@@ -16,6 +16,7 @@ pub(crate) fn worker(
     )
     .unwrap();
     let config = crate::worker::WorkerConfig {
+        performance: None,
         python: "python3".into(),
         script: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ipc-worker.py"),
         model: control,

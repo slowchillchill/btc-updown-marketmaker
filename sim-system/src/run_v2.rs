@@ -21508,6 +21508,7 @@ impl PublicConsumptionStateV1 {
             send_time: None,
             paper_clock: None,
             request_boundary_prepared: false,
+            send_boundary_mode: PublicSendBoundaryModeV1::HostManaged,
         })
     }
     pub fn hidden_bucket(
@@ -21620,11 +21621,27 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         self.advance_before(at)?;
         self.state.observe_at(at)
     }
-    /// 从原冻结观察取得当前发送能力，不重新选择意图。
+    /// 原有限宿主发送合同：逐项准备、领取反馈与资格复核。
     pub fn send_decision_at(
         &mut self,
         cutoff: TrustedGroupDecisionCutoffV1,
         at: i64,
+    ) -> Result<PublicGroupDecisionV1<'_>, SimRunActorErrorV2> {
+        self.send_decision_at_with_mode(cutoff, at, PublicSendBoundaryModeV1::ActualSendBoundary)
+    }
+    /// 显式由宿主管理反馈领取的发送入口；冻结观察与发送时间构造保持相同。
+    pub fn send_decision_at_host_managed(
+        &mut self,
+        cutoff: TrustedGroupDecisionCutoffV1,
+        at: i64,
+    ) -> Result<PublicGroupDecisionV1<'_>, SimRunActorErrorV2> {
+        self.send_decision_at_with_mode(cutoff, at, PublicSendBoundaryModeV1::HostManaged)
+    }
+    fn send_decision_at_with_mode(
+        &mut self,
+        cutoff: TrustedGroupDecisionCutoffV1,
+        at: i64,
+        mode: PublicSendBoundaryModeV1,
     ) -> Result<PublicGroupDecisionV1<'_>, SimRunActorErrorV2> {
         self.state.validate_observation(&cutoff)?;
         if at < cutoff.decision_time.logical_time_utc_ms() {
@@ -21646,6 +21663,7 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
             send_time: Some(send_time),
             paper_clock: None,
             request_boundary_prepared: false,
+            send_boundary_mode: mode,
         })
     }
     pub fn next_group(
@@ -21994,6 +22012,7 @@ impl ContinuousPublicConsumptionV1 {
             send_time: None,
             paper_clock: Some(&self.clock),
             request_boundary_prepared: false,
+            send_boundary_mode: PublicSendBoundaryModeV1::ActualSendBoundary,
         })
     }
     /// 只读实际单项事务的瞬时原group峰值，供受控成本记录。
@@ -22097,6 +22116,12 @@ fn reduce_hidden_step_bucket_v1(
     Ok((state, effects))
 }
 
+/// 由正式宿主构造入口选用，不接受配置或调用方修改。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PublicSendBoundaryModeV1 {
+    HostManaged,
+    ActualSendBoundary,
+}
 /// 组决定持有同一驱动器的独占借用；业务调用方不能替换其冻结截止或跨运行投递。
 pub struct PublicGroupDecisionV1<'a> {
     driver: &'a mut PublicConsumptionStateV1,
@@ -22104,8 +22129,24 @@ pub struct PublicGroupDecisionV1<'a> {
     send_time: Option<TrustedActorExecutionTimeV1>,
     paper_clock: Option<&'a PaperExecutionClockV1>,
     request_boundary_prepared: bool,
+    send_boundary_mode: PublicSendBoundaryModeV1,
 }
 impl<'driver> PublicGroupDecisionV1<'driver> {
+    /// 原有限发送入口与Continuous::send_decision正式选用逐项实际发送边界。
+    pub fn uses_actual_send_boundary(&self) -> bool {
+        self.send_boundary_mode == PublicSendBoundaryModeV1::ActualSendBoundary
+    }
+    /// 共用批次借用：历史宿主不增加Close/Observe或反馈领取。
+    pub fn batch_request_boundary(
+        &mut self,
+    ) -> Result<PublicRequestBoundaryV1<'_, 'driver>, SimRunActorErrorV2> {
+        if self.uses_actual_send_boundary() {
+            self.prepare_request_boundary()
+        } else {
+            Ok(PublicRequestBoundaryV1 { decision: self })
+        }
+    }
+
     /// 原owner在单项真正发送前分配一次时间。所有可能的容量/稳定等待先完成。
     /// 只在没有更早义务的真实空档补Close；同刻义务保持原先行情后请求顺序。
     pub fn prepare_request_boundary(
