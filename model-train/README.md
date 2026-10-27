@@ -2,7 +2,7 @@
 
 任务入口为 [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181)。
 本目录实现真实模型消费者，以及[D-0371](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6287942857)采用的公共经济目标、整组PPO/TBPTT学习和事务恢复。
-学习接口、原工程合成成本及边界见[学习交付说明](LEARNING.md)。后继已分别获准并完成[最小真实链验证](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6305408177)和[有限两臂机制研究](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6339458665)，原工程合成证据与各轮真实研究分别解释。
+学习接口、原工程合成成本及边界见[学习交付说明](LEARNING.md)。#377 的显式执行模式、缓存、冷恢复与有界验证入口见[性能候选说明](PERFORMANCE.md)。后继已分别获准并完成[最小真实链验证](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6305408177)和[有限两臂机制研究](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6339458665)，原工程合成证据与各轮真实研究分别解释。
 两臂研究六个作业正常完成，共49,088次主GRU调用、4次更新、2次提交和2次导出；本窗信用全为0，无`alpha1`优势依据，跨运行微差及冻结K/J、请求原因投影的局限仍保留。独立审查仅接收实际运行及有限证据，任务4整体验收、完整PPO正确性、正式训练、独立评价、全日容量和盈利均未因此成立；模型及专项奖励机制尚未采用。当前停点、后继数据用途和预算由#181维护，已结束预算不转为新作业。
 模型、订单和修复政策采用 [D-0370](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6272123144)，
 时序沿用 [D-0369](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181#issuecomment-6270139404)。

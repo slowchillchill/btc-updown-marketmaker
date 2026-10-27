@@ -24,6 +24,7 @@ pub(crate) fn run_consumer_with_opener(
     config: &ConsumerRunConfig,
     open: impl FnOnce(&ConsumerRunConfig) -> Result<crate::rules::OpenedRulesV1, MaterialError>,
 ) -> Result<Value, MaterialError> {
+    crate::worker::configure_runtime(&config.worker)?;
     let first_observation = std::sync::Arc::new(crate::first_observation::FirstObservation::new(
         Instant::now(),
     ));
@@ -46,8 +47,21 @@ pub(crate) fn run_consumer_with_opener(
     let opened = open(config)?;
     let effective = crate::rules::bind_consumer(config, &opened.binding);
     let worker = ModelWorker::start(config.worker.clone())?;
-    let mut summary =
-        run_with_worker_observed(&effective, worker, opened.rules, started, first_observation)?;
+    let summary = run_with_worker_observed(
+        &effective,
+        worker.clone(),
+        opened.rules,
+        started,
+        first_observation,
+    );
+    let shutdown_started = Instant::now();
+    let closed = worker.shutdown();
+    let shutdown_elapsed = shutdown_started.elapsed().as_secs_f64();
+    let mut summary = summary?;
+    closed?;
+    summary["elapsed_seconds_through_worker_exit"] = started.elapsed().as_secs_f64().into();
+    summary["worker_exit"] =
+        json!({"normal":true,"waited":true,"shutdown_elapsed_seconds":shutdown_elapsed});
     summary["rules_opened_via"] = serde_json::to_value(opened.opened_via)?;
     Ok(summary)
 }
@@ -90,7 +104,7 @@ pub(crate) fn run_with_worker_observed(
                 .get_or_insert_with(EntryMarketScopeV1::default);
         }
     }
-    let result = run_historical_days_with_parallelism_v1(
+    let result = run_historical_days_host_managed_with_options_v1(
         &days,
         rules.clone(),
         &|c| {
@@ -109,6 +123,10 @@ pub(crate) fn run_with_worker_observed(
             .map_err(Into::into)
         },
         config.parallel_dates,
+        &HistoricalDayRunOptionsV1 {
+            producer_payload_bytes: config.worker.performance.as_ref().map(|p| p.queue_bytes),
+            ..Default::default()
+        },
     )?;
     let metrics = worker.request(json!({"phase":"metrics"}))?;
     let elapsed = started.elapsed().as_secs_f64();

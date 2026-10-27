@@ -3,6 +3,7 @@ use contracts::ExactDecimal;
 use num_bigint::BigUint;
 use num_traits::{One, ToPrimitive, Zero};
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use sim_system::{buy_cost::ExactBuyCostV1, platform_rules::SealedProcessRuleSnapshotV3};
 
 pub fn coefficient_max() -> BigUint {
@@ -67,11 +68,33 @@ pub fn cash_micro(cash: Decimal) -> BigUint {
         mantissa / BigUint::from(10u8).pow(cash.scale() - 6)
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LimitLeg {
     pub price_index: u16,
     pub tick: ExactDecimal,
     pub post_only: bool,
+}
+/// 公开tick的原SDK索引边界；生产与有限公共材料重建共用。
+pub(crate) fn market_limit_bounds(
+    market: &shared_run::FrozenMarketReadV1,
+) -> Result<([ExactDecimal; 2], [u16; 2]), String> {
+    let mut ticks = [ExactDecimal("0".into()), ExactDecimal("0".into())];
+    let mut maximum = [0u16; 2];
+    if market.observation.assets.len() == 2 {
+        for side in 0..2 {
+            if let Some(tick) = &market.observation.assets[side].tick.value {
+                let value = Decimal::from_str_exact(&tick.0).map_err(|e| e.to_string())?;
+                if value > Decimal::ZERO {
+                    ticks[side] = tick.clone();
+                    maximum[side] =
+                        u16::try_from(((Decimal::ONE - value) / value).floor().mantissa())
+                            .map_err(|_| "tick超出原SDK六档索引")?;
+                }
+            }
+        }
+    }
+    Ok((ticks, maximum))
 }
 pub fn costs(
     rules: &SealedProcessRuleSnapshotV3,
@@ -110,6 +133,83 @@ pub fn affordable_count(
         }
     }
     Ok(lo)
+}
+
+/// 冻结帧中同一精确资金域；Python 只调用此实现，不复制金额或费用算法。
+pub fn supported_posts(
+    rules: &SealedProcessRuleSnapshotV3,
+    cash: Decimal,
+    ticks: &[ExactDecimal; 2],
+    sides: &[usize],
+    selected: &[LimitLeg],
+    ordinal: usize,
+) -> Result<Vec<bool>, String> {
+    let side = *sides.get(ordinal).ok_or("属性腿序号越界")?;
+    let tick = ticks.get(side).ok_or("属性方向越界")?;
+    let mut supported = Vec::new();
+    for post in [false, true] {
+        let mut minimum = selected.to_vec();
+        minimum.push(LimitLeg {
+            price_index: 1,
+            tick: tick.clone(),
+            post_only: post,
+        });
+        for other in sides.iter().skip(ordinal + 1) {
+            minimum.push(LimitLeg {
+                price_index: 1,
+                tick: ticks.get(*other).ok_or("属性余腿方向越界")?.clone(),
+                post_only: true,
+            });
+        }
+        if !affordable_count(rules, cash, &minimum)?.is_zero() {
+            supported.push(post);
+        }
+    }
+    Ok(supported)
+}
+
+/// 所选价格至少容纳0.01份，余腿保持最便宜合法价格；没有添加平台MOS掩码。
+pub fn maximum_affordable_price(
+    rules: &SealedProcessRuleSnapshotV3,
+    cash: Decimal,
+    ticks: &[ExactDecimal; 2],
+    max_prices: &[u16; 2],
+    sides: &[usize],
+    selected: &[LimitLeg],
+    ordinal: usize,
+    post_only: bool,
+) -> Result<u16, String> {
+    let side = *sides.get(ordinal).ok_or("价格腿序号越界")?;
+    let tick = ticks.get(side).ok_or("价格方向越界")?;
+    let mut lower = 1u16;
+    let mut upper = *max_prices.get(side).ok_or("价格方向越界")?;
+    while lower < upper {
+        let mid = lower + (upper - lower).div_ceil(2);
+        let mut candidate = selected.to_vec();
+        candidate.push(LimitLeg {
+            price_index: mid,
+            tick: tick.clone(),
+            post_only,
+        });
+        for other in sides.iter().skip(ordinal + 1) {
+            candidate.push(LimitLeg {
+                price_index: 1,
+                tick: ticks.get(*other).ok_or("价格余腿方向越界")?.clone(),
+                post_only: true,
+            });
+        }
+        let total = costs(rules, &BigUint::one(), &candidate)?
+            .into_iter()
+            .fold(BigUint::zero(), |sum, c| {
+                sum + c.principal_micro + c.fee_1e5_units * 10u8
+            });
+        if total <= cash_micro(cash) {
+            lower = mid;
+        } else {
+            upper = mid - 1;
+        }
+    }
+    Ok(lower)
 }
 
 #[cfg(test)]

@@ -4,7 +4,10 @@ import json
 import math
 import os
 from pathlib import Path
+import sys
+import time
 import torch
+from input_cache import GroupInputCache
 
 
 def gradient_norm(parameters):
@@ -46,17 +49,28 @@ class LearningEngine:
         self.report = []
         self.weights = None
         self.audit = False
+        self.cache = GroupInputCache(service)
+        self.sequence_observer = None
+        self.device_labels = None
+
+    def device_learning(self):
+        return (getattr(self.service, "performance", None) or {}).get("mode") == "device_v1"
 
     def meter(self, name, amount=1):
         self.service.metrics[name] = self.service.metrics.get(name, 0) + amount
 
-    def teacher(self, frame, hidden, trace=False):
-        """沿原选项/整数域/价格与属性前缀计算；既不重采，也不反推float金额域。"""
+    def check_cancel(self):
+        check = getattr(self.service, "check_cancel", None)
+        if check is not None:
+            check()
+
+    def _teacher_trunk(self, frame, hidden):
+        """原逐帧encode/两级mean/vector投影/单步GRU；每帧只执行一次。"""
         s, model = self.service, self.model
         model.train(torch.is_grad_enabled())
         self.meter("recompute_forwards")  # 发起前计量，故障/在途不隐藏工作。
         encoded, nbytes = model.encode([frame["global"]] + frame["markets"], s.device)
-        if s.device.type == "cuda":
+        if s.device.type == "cuda" and nbytes:
             s.metrics["h2d_bytes"] += nbytes
             s.metrics["h2d_copies"] += 1
         pooled = encoded[1:].mean(0) if len(encoded) > 1 else torch.zeros_like(encoded[0])
@@ -64,6 +78,18 @@ class LearningEngine:
         output, following = model.gru(features.reshape(1, 1, -1), hidden)
         latent = output[0, 0]
         value = model.value(latent).squeeze()
+        return encoded, latent, value, following
+
+    def teacher(self, frame, hidden, trace=False):
+        """沿原历史条件头；主干结果与所有条件头共用，不重采动作。"""
+        encoded, latent, value, following = self._teacher_trunk(frame, hidden)
+        logp, terms = self._teacher_heads(frame, encoded, latent, trace=trace,
+                                         probability_device=self.service.device if self.device_learning() else "cpu")
+        return logp, value, following, terms
+
+    def _teacher_heads(self, frame, encoded, latent, trace=False, probability_device="cpu", tensor_trace=False):
+        """共同历史条件链；B只改变概率投影设备，不改CPU采样、整数域或前缀顺序。"""
+        s, model = self.service, self.model
         options = frame["options"]
         selected = frame["selected_option"]
         terms = []
@@ -72,15 +98,21 @@ class LearningEngine:
             if choice not in allowed:
                 raise ValueError("历史动作不属于其冻结精确条件域")
             # 与采集路径相同FP64概率投影，cast保留梯度；单值logp=0仍继续原条件状态。
-            logits64 = logits.to(device="cpu", dtype=torch.float64)
-            if s.device.type == "cuda":
+            logits64 = logits.to(device=probability_device, dtype=torch.float64)
+            if s.device.type == "cuda" and logits64.device.type == "cpu":
                 s.metrics["d2h_bytes"] += logits64.numel() * 8
                 s.metrics["d2h_copies"] += 1
             result = torch.log_softmax(logits64[allowed], dim=0)[allowed.index(choice)]
             self.meter("recompute_heads")
-            if trace:
+            if tensor_trace:
+                terms.append({"logits": logits64.detach(), "allowed": allowed,
+                              "selected": choice, "logp": result.detach()})
+            elif trace:
                 terms.append({"logits": logits64.detach().tolist(), "allowed": allowed,
                               "selected": choice, "logp": float(result.detach())})
+                if logits64.device.type == "cuda":
+                    self.meter("d2h_bytes", (logits64.numel() + 1) * 8)
+                    self.meter("d2h_copies", 2)
             return result
 
         scores = []
@@ -92,7 +124,7 @@ class LearningEngine:
             kinds.append(kind)
         logp = probability(torch.stack(scores), list(range(len(options))), selected)
         if kinds[selected] == 0:
-            return logp, value, following, terms
+            return logp, terms
         option = options[selected]
         context = torch.tanh(latent + encoded[1 + option["market"]])
 
@@ -137,7 +169,7 @@ class LearningEngine:
                 integer(int(request["count"]) - 1, 3 if kinds[selected] == 1 else 4, int(response["rank"]))
             else:
                 raise ValueError("未知历史条件头")
-        return logp, value, following, terms
+        return logp, terms
 
     def zeros(self):
         s = self.service
@@ -209,14 +241,17 @@ class LearningEngine:
             raise ValueError("同一学习器不能静默改变生效配置")
         self.group = request["group"]
         self.weights = request["account_weights"]
+        self.device_labels = None
         existing = self.consumed.get(self.group["id"])
         if existing is not None:
             if learning_group_semantics(existing) != learning_group_semantics(self.group):
                 raise ValueError("同一消费身份对应不同轨迹/目标")
             return {"already_committed": True, "sequence": self.sequence}
+        self.cache.begin_group(self.group["id"])
         return {"already_committed": False, "sequence": self.sequence}
 
     def start_epoch(self):
+        self.check_cancel()
         self.epoch += 1
         self.hidden, self.pending_loss, self.counts, self.report = {}, {}, {}, []
         self.optimizer.zero_grad(set_to_none=True)
@@ -254,38 +289,191 @@ class LearningEngine:
             torch.stack(self.pending_loss[key]).sum().backward()
             self.pending_loss[key] = []
             self.hidden[key] = after.detach()
+            self.check_cancel()
         return result
 
+    def run_epoch(self):
+        if self.device_learning():
+            return self.run_device_epoch()
+        if self.cache.schedule is None:
+            raise ValueError("内部学习前必须封存当前组输入和标签")
+        self.start_epoch()
+        started = last_progress = time.monotonic()
+        total = len(self.cache.schedule)
+        progress_every = (getattr(self.service, "performance", None) or {}).get("progress_seconds", 900)
+        for number, (account, index) in enumerate(self.cache.schedule, 1):
+            self.step({"frame": self.cache.frame(account, index),
+                       "label": self.cache.labels[account][index]})
+            now = time.monotonic()
+            if now - last_progress >= progress_every:
+                print(json.dumps({"stage": "learning_epoch", "epoch": self.epoch,
+                                  "account": account, "samples": number, "total_samples": total,
+                                  "tbptt_segments": sum(count // self.config["tbptt_steps"]
+                                                        for count in self.counts.values()),
+                                  "elapsed_seconds": now - started}, ensure_ascii=False),
+                      file=sys.stderr, flush=True)
+                last_progress = now
+        self.check_cancel()
+        return self.end_epoch()
+
+    def _prepare_device_labels(self):
+        if self.device_labels is not None:
+            return
+        # 原Python binary64除法只在封存标签时求一次，随后有效advantage与old logp均在GPU FP64。
+        scale = self.config["money_scale_pusd"]
+        values = [[self.cache.labels[key][index]["old_joint_logp"],
+                   self.cache.labels[key][index]["advantage"] / scale]
+                  for key, index in self.cache.schedule]
+        with torch.inference_mode(False), torch.no_grad():
+            self.device_labels = torch.tensor(values, dtype=torch.float64,
+                                              device=self.service.device).reshape(-1, 2)
+        size = self.device_labels.numel() * self.device_labels.element_size()
+        self.service.metrics["learning_label_device_bytes"] = size
+        if size:
+            self.meter("learning_label_h2d_bytes", size)
+            self.meter("learning_label_h2d_copies")
+            self.meter("h2d_bytes", size)
+            self.meter("h2d_copies")
+
+    def _device_forward(self, start, stop):
+        """只形成原设备loss图；TBPTT反向仍由原片段/epoch控制，不能在此更新。"""
+        entries = self.cache.schedule[start:stop]
+        frames = [self.cache.frame(key, index) for key, index in entries]
+        key = entries[0][0]
+        observer = self.sequence_observer
+        rows = []
+        scale, epsilon = self.config["money_scale_pusd"], self.config["epsilon"]
+        for offset, ((_, index), frame) in enumerate(zip(entries, frames)):
+            if observer is not None:
+                # 每帧是一次真实[1,1,W]调用；不把完整片段伪装成一次sequence。
+                observer.begin_sequence([frame], [{"batch": 0, "time": 0}])
+            before = self.hidden.get(key)
+            if before is None:
+                before = self.zeros()
+            teacher_frame = self.cache.frame_for_teacher(frame)
+            frame_encoded, latent, value, following = self._teacher_trunk(teacher_frame, before)
+            self.hidden[key] = following
+            next_position = start + offset + 1
+            if next_position < len(self.cache.schedule):
+                next_account, next_index = self.cache.schedule[next_position]
+                self.cache.prefetch_block([self.cache.frame(next_account, next_index)])
+            logp, terms = self._teacher_heads(frame, frame_encoded, latent,
+                                             probability_device=self.service.device,
+                                             tensor_trace=observer is not None)
+            label = self.cache.labels[key][index]
+            old_logp, advantage = self.device_labels[start + offset].unbind()
+            ratio = (logp - old_logp).exp()
+            actor = -torch.minimum(ratio * advantage,
+                                   torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * advantage)
+            # 保留原FP32 value与Python标量运算的转换、除法和乘法顺序。
+            critic = 0.5 * self.config["value_weight"] * ((value - label["critic_target"]) / scale).square()
+            loss = self.weights[key] * (actor.to(value.device) + critic)
+            self.pending_loss.setdefault(key, []).append(loss)
+            self.counts[key] = self.counts.get(key, 0) + 1
+            rows.append(torch.stack((logp.detach(), ratio.detach(), value.detach().to(torch.float64),
+                                     actor.detach(), critic.detach().to(torch.float64))))
+            if observer is not None:
+                observer.sequence_sample(frame, label, {"logp": logp, "value": value, "ratio": ratio,
+                                                        "actor": actor, "critic": critic, "loss": loss}, terms)
+                observer.end_sequence()
+        # 正常路径仅按片段导出必要报告，不在每个条件头/样本上同步取标量。
+        report_values = torch.stack(rows).cpu().tolist()
+        self.meter("learning_report_d2h_bytes", len(rows) * 5 * 8)
+        self.meter("learning_report_d2h_copies")
+        self.meter("d2h_bytes", len(rows) * 5 * 8)
+        self.meter("d2h_copies")
+        for frame, values in zip(frames, report_values):
+            self.report.append({"epoch": self.epoch, "account": key, "call": frame["call"],
+                                "logp": values[0], "ratio": values[1], "value": values[2],
+                                "actor_loss": values[3], "critic_loss": values[4]})
+        return key, following
+
+    def _device_segment(self, start, stop, next_frames):
+        # 仅主干恢复逐帧；设备标签/heads/loss和原32步反向时点保持。
+        # 取数只包当前帧，下一实际帧raw预取不改变本帧数值算子或反向边界。
+        key, following = self._device_forward(start, stop)
+        if self.counts[key] % self.config["tbptt_steps"] == 0:
+            torch.stack(self.pending_loss[key]).sum().backward()
+            self.pending_loss[key] = []
+            self.hidden[key] = following.detach()
+            self.cache.release_account_columns(key)
+            self.check_cancel()
+
+    def run_device_epoch(self):
+        if self.cache.schedule is None:
+            raise ValueError("内部学习前必须封存当前组输入和标签")
+        if self.service.device.type != "cuda":
+            raise ValueError("device_v1的学习要求CUDA设备")
+        self.start_epoch()
+        self._prepare_device_labels()
+        started = last_progress = time.monotonic()
+        schedule = self.cache.schedule
+        total, position = len(schedule), 0
+        progress_every = (self.service.performance or {}).get("progress_seconds", 900)
+        while position < total:
+            self.check_cancel()
+            account = schedule[position][0]
+            remaining = self.config["tbptt_steps"] - self.counts.get(account, 0) % self.config["tbptt_steps"]
+            stop = position
+            while stop < total and stop - position < remaining and schedule[stop][0] == account:
+                stop += 1
+            self._device_segment(position, stop, None)
+            position = stop
+            now = time.monotonic()
+            if now - last_progress >= progress_every:
+                print(json.dumps({"stage": "learning_epoch", "epoch": self.epoch,
+                                  "account": account, "samples": position, "total_samples": total,
+                                  "tbptt_segments": sum(count // self.config["tbptt_steps"]
+                                                        for count in self.counts.values()),
+                                  "elapsed_seconds": now - started}, ensure_ascii=False),
+                      file=sys.stderr, flush=True)
+                last_progress = now
+        self.check_cancel()
+        return self.end_epoch()
+
     def end_epoch(self):
-        for losses in self.pending_loss.values():
+        self.check_cancel()
+        for account, losses in self.pending_loss.items():
             if losses:
                 torch.stack(losses).sum().backward()
+                if self.device_learning():
+                    self.cache.release_account_columns(account)
+                self.check_cancel()
         self.pending_loss = {}
         m = self.model
         result = {"epoch": self.epoch, "samples": self.report,
                   "gradients": {"gru": gradient_norm(m.gru.parameters()), "encoder": gradient_norm(m.token.parameters()),
                                 "actor": gradient_norm(list(m.option.parameters()) + [m.option_bias]),
                                 "critic": gradient_norm(m.value.parameters()), "decoder": gradient_norm(m.decoder.parameters())}}
+        self.check_cancel()
         self.meter("optimizer_steps")
         self.optimizer.step()  # 一轮一次；所有块之间参数不变。
         self.service.identity["optimizer_updates_since_commit"] = self.service.identity.get("optimizer_updates_since_commit", 0) + 1
+        self.check_cancel()
         return result
 
     def commit(self, request):
+        self.check_cancel()
         path = Path(self.config["checkpoint_directory"])
         path.mkdir(parents=True, exist_ok=True)
         if request.get("fault") == "before_commit":
             self.fault_witness(request["witness"], "before_commit")
             raise RuntimeError("injected-before-commit-fault")
         # 单文件包含全部学习状态、随机状态及消费版本；原子rename是唯一提交边界。
-        self.consumed[self.group["id"]] = self.group
-        self.sequence += 1
+        self.check_cancel()
+        following_consumed = {**self.consumed, self.group["id"]: self.group}
+        following_sequence = self.sequence + 1
+        state = self.checkpoint_state()
+        state["consumed"] = following_consumed
+        state["sequence"] = following_sequence
         temporary = path / "checkpoint.incomplete"
         with temporary.open("wb") as stream:
-            torch.save(self.checkpoint_state(), stream)
+            torch.save(state, stream)
             stream.flush()
             os.fsync(stream.fileno())
+        self.check_cancel()
         os.replace(temporary, path / "checkpoint.pt")
+        self.consumed, self.sequence = following_consumed, following_sequence
         immutable=path / ("committed-%06d.pt" % self.sequence)
         if not immutable.exists():
             os.link(path / "checkpoint.pt",immutable)
@@ -297,6 +485,10 @@ class LearningEngine:
         self.meter("successful_commits")
         self.service.identity["checkpoint_sha256"] = hashlib.sha256((path / "checkpoint.pt").read_bytes()).hexdigest()
         self.service.identity["optimizer_updates_since_commit"] = 0
+        self.cache.release()
+        if self.device_learning():
+            self.device_labels = None
+            self.service.metrics["learning_label_device_bytes"] = 0
         if request.get("fault") == "after_commit":
             self.fault_witness(request["witness"], "after_commit")
             raise RuntimeError("injected-after-commit-ack-fault")
@@ -343,6 +535,17 @@ class LearningEngine:
             return self.open(request, audit=True)
         if phase == "learn_epoch":
             return self.start_epoch()
+        if phase == "learn_cache_status":
+            return self.cache.status()
+        if phase == "learn_cache_frame":
+            if self.cache.group_id is None:
+                raise ValueError("冷重建前必须打开可缓存的学习组")
+            frame = self.cache.prepare_frame(request.get("frame", request))
+            return {"cached": True, "frame": self.cache.record_frame(frame)}
+        if phase == "learn_prepare":
+            return self.cache.prepare(request["labels"], request["schedule"])
+        if phase == "learn_run_epoch":
+            return self.run_epoch()
         if phase == "learn_step":
             return self.step(request)
         if phase == "audit_step":

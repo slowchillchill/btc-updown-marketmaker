@@ -3283,3 +3283,182 @@ async fn learning_fixture_schedule_has_eight_calls_and_a_frozen_e_crossing() {
     );
     assert!(p.inner.calls.iter().all(|c| c.started_at < BASE + 1000));
 }
+
+#[test]
+fn byte_target_smaller_than_one_public_group_preserves_original_day_and_hidden_progress() {
+    let mut results = Vec::new();
+    for byte_target in [None, Some(1)] {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, rules) = setup(temp.path());
+        let day = research_day(&config, temp.path());
+        let result = run_historical_days_with_options_v1(
+            &[day],
+            rules.clone(),
+            &|_| {
+                Ok(Probe {
+                    no_trade_only: true,
+                    rules: Some(rules.clone()),
+                    ..Default::default()
+                })
+            },
+            1,
+            &HistoricalDayRunOptionsV1 {
+                producer_payload_bytes: byte_target,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let candidate = &result[0].candidates[0];
+        assert!(result[0].public_applied_inputs > 0);
+        assert_eq!(candidate.outcome, CandidateOutcomeV1::Complete);
+        results.push((
+            result[0].public_applied_inputs,
+            candidate.report["calculation_count"].clone(),
+            candidate.report["day_economics"].clone(),
+            candidate.report["account_economics_memory"].clone(),
+        ));
+    }
+    assert_eq!(
+        results[0], results[1],
+        "超小字节目标不得拒绝/截断合法组或改变隐藏推进和账户终值"
+    );
+}
+
+struct DaySendBoundaryProbe {
+    proposed: bool,
+    post_reserve_qualification_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl StrategyV1 for DaySendBoundaryProbe {
+    type Error = &'static str;
+    type Diagnostics = ();
+    fn uses_source_health(&self) -> bool {
+        true
+    }
+    fn decide(&mut self, input: &StrategyInputV1, _: i64) -> Result<StrategyOutputV1, Self::Error> {
+        let has_book = input.markets.iter().any(|m| {
+            m.observation.market.condition_id.0 == FIRST
+                && m.observation.assets.iter().any(|a| {
+                    a.asset.token_id.0 == "20"
+                        && a.asks
+                            .value
+                            .as_ref()
+                            .is_some_and(|levels| !levels.is_empty())
+                })
+        });
+        let mut intents = vec![];
+        if has_book && !self.proposed {
+            self.proposed = true;
+            intents.push(ReservedIntentV1 {
+                context: RequestContextV2 {
+                    global_request_id: "day-boundary-overflow".into(),
+                    caller_correlation_id: None,
+                },
+                intent: Arc::new(ModelIntentV1::SubmitSingleBuy {
+                    condition_id: ConditionId(FIRST.into()),
+                    order: BuyLegIntentV1 {
+                        token_id: TokenId("20".into()),
+                        order: BuyOrderIntentV1::GtdLimit {
+                            limit_price_pusd_per_share: Decimal::new(2, 1),
+                            size_shares: Decimal::from(10),
+                            post_only: true,
+                            expires_at_utc_sec: i64::MAX,
+                        },
+                    },
+                }),
+                reserves: vec![IntentReserveV1 {
+                    batch_item_ordinal: 0,
+                    reserve: ReserveIntentV1 {
+                        request_identity: LedgerRequestIdentityV1(
+                            "day-boundary-overflow-reserve".into(),
+                        ),
+                        condition_id: ConditionId(FIRST.into()),
+                        requested_principal_pusd: ExactDecimal("2".into()),
+                        immediate_fee_reserve_pusd: ExactDecimal("0".into()),
+                    },
+                }],
+            });
+        }
+        Ok(StrategyOutputV1::Continue {
+            intents,
+            next_evaluation_at_utc_ms: None,
+            diagnostics: (),
+        })
+    }
+    fn qualify_intent(
+        &mut self,
+        current: &StrategyCurrentReadV1<'_>,
+        _: &StrategyCalculationV1,
+        _: usize,
+        _: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        // The original host may revalidate before dispatch. Only the real batch
+        // creates this fresh request's reserve, so count its send qualification.
+        if !current
+            .action_before
+            .request_funds()
+            .any(|request| request.request_identity.0 == "day-boundary-overflow-reserve")
+        {
+            return Ok(IntentQualificationV1::Qualified);
+        }
+        self.post_reserve_qualification_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(IntentQualificationV1::Invalidated(
+            IntentInvalidationReasonV1 {
+                reason_code: "synthetic-own-dependency-expired".into(),
+                scopes: vec![SourceStreamScopeV1 {
+                    source: SourceStreamKindV1::ChainlinkSpot,
+                    condition_id: None,
+                    asset_or_symbol: "BTC/USD".into(),
+                }],
+            },
+        ))
+    }
+}
+#[test]
+fn formal_day_entries_select_actual_or_explicit_host_managed_error_order() {
+    for host_managed in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, rules) = setup(temp.path());
+        let day = HistoricalDayConfigV1 {
+            preparation: config.preparation.clone(),
+            candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
+            progress_interval_seconds: 0,
+            producer_lead_groups: Some(1),
+        };
+        let post_reserve_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let factory = |_: &HistoricalPreparedRunConfigV1| {
+            Ok(DaySendBoundaryProbe {
+                proposed: false,
+                post_reserve_qualification_calls: post_reserve_calls.clone(),
+            })
+        };
+        let options = HistoricalDayRunOptionsV1::default();
+        let result = if host_managed {
+            run_historical_days_host_managed_with_options_v1(&[day], rules, &factory, 1, &options)
+        } else {
+            run_historical_days_with_options_v1(&[day], rules, &factory, 1, &options)
+        };
+        if host_managed {
+            let result = result.unwrap();
+            assert_eq!(
+                post_reserve_calls.load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            assert_eq!(
+                result[0].candidates[0].report["source_health"]["invalidated_batches"],
+                1
+            );
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                format!("{error:?}").contains("RequestTimeOverflow"),
+                "{error:?}"
+            );
+            assert_eq!(
+                post_reserve_calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "默认日宿主保留Bridge错误先于资格复核"
+            );
+        }
+    }
+}

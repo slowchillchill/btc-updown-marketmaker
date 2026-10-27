@@ -36,6 +36,10 @@ use std::{path::Path, sync::Arc};
 
 type Driver = FinitePublicConsumptionV1<RecordedPublicGroupSourceV1<MemoryRecordedTimes>>;
 fn setup(root: &Path) -> (SharedExecutionV2, Driver) {
+    let (shared, driver, _) = setup_with_observation(root);
+    (shared, driver)
+}
+fn setup_with_observation(root: &Path) -> (SharedExecutionV2, Driver, MemoryNoeObservationV4) {
     let dpt = root.join("dpt");
     let core = recorded_memory_complete(&dpt);
     let (mut execution, observation, _) = execution_with_rules_v4(
@@ -51,7 +55,7 @@ fn setup(root: &Path) -> (SharedExecutionV2, Driver) {
     execution
         .bind_ledger_recording_v2(&mut ledger, &root.join("ledger"))
         .unwrap();
-    let shared = SharedExecutionV2::from_opening(ledger, observation)
+    let shared = SharedExecutionV2::from_opening(ledger, observation.clone())
         .unwrap()
         .unwrap();
     let source = RecordedPublicGroupSourceV1::open(&dpt, 1, 1 << 20, MemoryRecordedTimes).unwrap();
@@ -59,7 +63,7 @@ fn setup(root: &Path) -> (SharedExecutionV2, Driver) {
     for _ in 0..2 {
         driver.next_group().unwrap().unwrap();
     }
-    (shared, driver)
+    (shared, driver, observation)
 }
 fn buy(id: &str, principal: u32) -> ReservedIntentV1 {
     ReservedIntentV1 {
@@ -985,4 +989,481 @@ fn local_funds_classification_keeps_mixed_fault_unknown_and_release_failure_fata
     assert!(!error.is_local_funds_rejection());
     error.error = SharedActionErrorV1::Ledger(LedgerErrorV1::AccountNotOpened);
     assert!(!error.is_local_funds_rejection());
+}
+
+struct HostBoundaryProbe {
+    qualified: bool,
+    observed_old: Option<(ReservationStatusV1, u64)>,
+}
+impl StrategyV1 for HostBoundaryProbe {
+    type Error = &'static str;
+    type Diagnostics = ();
+    fn uses_source_health(&self) -> bool {
+        self.qualified
+    }
+    fn decide(&mut self, _: &StrategyInputV1, _: i64) -> Result<StrategyOutputV1, Self::Error> {
+        Ok(StrategyOutputV1::Continue {
+            intents: vec![buy("new-host-managed", 2)],
+            next_evaluation_at_utc_ms: None,
+            diagnostics: (),
+        })
+    }
+    fn qualify_intent(
+        &mut self,
+        current: &StrategyCurrentReadV1<'_>,
+        _: &StrategyCalculationV1,
+        index: usize,
+        _: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        assert_eq!(index, 0);
+        self.observed_old = current
+            .action_before
+            .request_funds()
+            .find(|r| r.request_identity.0 == "old-host-managed-reserve")
+            .map(|r| (r.reservation_state, r.last_ledger_entry_seq));
+        Ok(IntentQualificationV1::Qualified)
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn host_managed_dispatch_keeps_closed_old_feedback_until_original_account_read() {
+    for qualified in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut shared, mut driver, observation) = setup_with_observation(temp.path());
+        shared
+            .execute_batch_reserved(
+                &mut driver.decision().unwrap(),
+                &[buy("old-host-managed", 1)],
+            )
+            .await
+            .unwrap();
+        let input = shared.strategy_input(&mut driver).unwrap().unwrap();
+        let at = input
+            .action_before
+            .cutoff()
+            .decision_time()
+            .logical_time_utc_ms();
+        let mut strategy = HostBoundaryProbe {
+            qualified,
+            observed_old: None,
+        };
+        let calculation = input.calculate(&mut strategy, at).unwrap().complete(at);
+        while driver
+            .next_group_at()
+            .unwrap()
+            .is_some_and(|at| at <= 26_000)
+        {
+            driver.next_group().unwrap().unwrap();
+        }
+        let ready = observation
+            .next_pending_feedback_received_at_utc_ms()
+            .expect("原请求反馈已实际进入消费源");
+        let now = driver
+            .observation_cutoff()
+            .unwrap()
+            .decision_time()
+            .logical_time_utc_ms();
+        assert!(ready <= now, "旧反馈已到当前合法领取时刻");
+        let delivered_before = observation.delivered_through();
+        let before = shared
+            .ledger()
+            .funds_read_v1()
+            .request(&LedgerRequestIdentityV1("old-host-managed-reserve".into()))
+            .map(|r| (r.reservation_state, r.last_ledger_entry_seq))
+            .unwrap();
+        assert_eq!(before.0, ReservationStatusV1::SubmittedUnknown);
+        if qualified {
+            shared
+                .dispatch_strategy_qualified(
+                    &mut driver.decision().unwrap(),
+                    &mut strategy,
+                    calculation,
+                )
+                .await
+                .unwrap();
+            assert_eq!(strategy.observed_old, Some(before));
+        } else {
+            shared
+                .dispatch_strategy(&mut driver.decision().unwrap(), &mut strategy, calculation)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            observation.delivered_through(),
+            delivered_before,
+            "发送前不提前领取已经可达的旧NOE"
+        );
+        let old = shared
+            .ledger()
+            .funds_read_v1()
+            .request(&LedgerRequestIdentityV1("old-host-managed-reserve".into()))
+            .map(|r| (r.reservation_state, r.last_ledger_entry_seq))
+            .unwrap();
+        assert_eq!(old, before);
+        let new = shared
+            .ledger()
+            .funds_read_v1()
+            .request(&LedgerRequestIdentityV1("new-host-managed-reserve".into()))
+            .map(|r| {
+                (
+                    r.reservation_state,
+                    r.last_ledger_entry_seq,
+                    r.principal_pusd.0,
+                )
+            })
+            .unwrap();
+        assert_eq!(new.0, ReservationStatusV1::SubmittedUnknown);
+        assert_eq!(new.2, "2");
+        assert!(new.1 > before.1);
+        shared.apply_closed().unwrap();
+        assert!(observation.delivered_through() > delivered_before);
+        let old = shared
+            .ledger()
+            .funds_read_v1()
+            .request(&LedgerRequestIdentityV1("old-host-managed-reserve".into()))
+            .map(|r| (r.reservation_state, r.last_ledger_entry_seq))
+            .unwrap();
+        assert_eq!(old.0, ReservationStatusV1::Converted);
+        assert!(
+            old.1 > new.1,
+            "旧反馈在原宿主读取时才应用，Ledger事务次序保持"
+        );
+        driver.stop_and_drain().unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn finite_actual_and_host_managed_keep_distinct_feedback_and_ledger_order() {
+    for (qualified, actual) in [(false, false), (true, false), (false, true), (true, true)] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut shared, mut driver, observation) = setup_with_observation(temp.path());
+        shared
+            .execute_batch_reserved(
+                &mut driver.decision().unwrap(),
+                &[buy("old-host-managed", 1)],
+            )
+            .await
+            .unwrap();
+        let input = shared.strategy_input(&mut driver).unwrap().unwrap();
+        let at = input
+            .action_before
+            .cutoff()
+            .decision_time()
+            .logical_time_utc_ms();
+        let mut strategy = HostBoundaryProbe {
+            qualified,
+            observed_old: None,
+        };
+        let frozen_cutoff = input.action_before.cutoff().clone();
+        let calculation = input.calculate(&mut strategy, at).unwrap().complete(at);
+        while driver
+            .next_group_at()
+            .unwrap()
+            .is_some_and(|at| at <= 26_000)
+        {
+            driver.next_group().unwrap().unwrap();
+        }
+        let ready = observation
+            .next_pending_feedback_received_at_utc_ms()
+            .expect("原请求反馈已实际进入消费源");
+        let now = driver
+            .observation_cutoff()
+            .unwrap()
+            .decision_time()
+            .logical_time_utc_ms();
+        assert!(ready <= now, "旧反馈已到当前合法领取时刻");
+        let delivered_before = observation.delivered_through();
+        let before = shared
+            .ledger()
+            .funds_read_v1()
+            .request(&LedgerRequestIdentityV1("old-host-managed-reserve".into()))
+            .map(|r| (r.reservation_state, r.last_ledger_entry_seq))
+            .unwrap();
+        assert_eq!(before.0, ReservationStatusV1::SubmittedUnknown);
+        let mut decision = if actual {
+            driver.send_decision_at(frozen_cutoff, now).unwrap()
+        } else {
+            driver
+                .send_decision_at_host_managed(frozen_cutoff, now)
+                .unwrap()
+        };
+        assert_eq!(decision.uses_actual_send_boundary(), actual);
+        if qualified {
+            shared
+                .dispatch_strategy_qualified(&mut decision, &mut strategy, calculation)
+                .await
+                .unwrap();
+            if actual {
+                let observed = strategy.observed_old.expect("实际资格已读取旧请求");
+                assert_eq!(observed.0, ReservationStatusV1::Converted);
+                assert!(observed.1 > before.1);
+            } else {
+                assert_eq!(strategy.observed_old, Some(before));
+            }
+        } else {
+            shared
+                .dispatch_strategy(&mut decision, &mut strategy, calculation)
+                .await
+                .unwrap();
+        }
+        drop(decision);
+        if actual {
+            assert!(observation.delivered_through() > delivered_before);
+        } else {
+            assert_eq!(observation.delivered_through(), delivered_before);
+        }
+        let old = shared
+            .ledger()
+            .funds_read_v1()
+            .request(&LedgerRequestIdentityV1("old-host-managed-reserve".into()))
+            .map(|r| (r.reservation_state, r.last_ledger_entry_seq))
+            .unwrap();
+        if actual {
+            assert_eq!(old.0, ReservationStatusV1::Converted);
+            assert!(old.1 > before.1);
+        } else {
+            assert_eq!(old, before);
+        }
+        let old_before_host_read = old;
+        let new = shared
+            .ledger()
+            .funds_read_v1()
+            .request(&LedgerRequestIdentityV1("new-host-managed-reserve".into()))
+            .map(|r| {
+                (
+                    r.reservation_state,
+                    r.last_ledger_entry_seq,
+                    r.principal_pusd.0,
+                )
+            })
+            .unwrap();
+        assert_eq!(new.0, ReservationStatusV1::SubmittedUnknown);
+        assert_eq!(new.2, "2");
+        assert!(new.1 > before.1);
+        shared.apply_closed().unwrap();
+        assert!(observation.delivered_through() > delivered_before);
+        let old = shared
+            .ledger()
+            .funds_read_v1()
+            .request(&LedgerRequestIdentityV1("old-host-managed-reserve".into()))
+            .map(|r| (r.reservation_state, r.last_ledger_entry_seq))
+            .unwrap();
+        assert_eq!(old.0, ReservationStatusV1::Converted);
+        if actual {
+            assert_eq!(old, old_before_host_read);
+            assert!(old.1 < new.1, "默认finite先领取旧事实，再登记新提交");
+        } else {
+            assert!(
+                old.1 > new.1,
+                "显式HostManaged先登记新提交，再由宿主领取旧事实"
+            );
+        }
+        driver.stop_and_drain().unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn finite_actual_bridge_error_precedes_feedback_and_invalidating_qualification() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver, observation) = setup_with_observation(temp.path());
+    shared
+        .execute_batch_reserved(
+            &mut driver.decision().unwrap(),
+            &[buy("old-host-managed", 1)],
+        )
+        .await
+        .unwrap();
+    let mut bad = buy("finite-gtd-overflow", 2);
+    bad.intent = Arc::new(ModelIntentV1::SubmitSingleBuy {
+        condition_id: ConditionId(CONDITION_ID.into()),
+        order: BuyLegIntentV1 {
+            token_id: TokenId(UP_TOKEN_ID.into()),
+            order: BuyOrderIntentV1::GtdLimit {
+                limit_price_pusd_per_share: Decimal::new(2, 1),
+                size_shares: Decimal::from(10),
+                post_only: true,
+                expires_at_utc_sec: i64::MAX,
+            },
+        },
+    });
+    let mut strategy = QualificationProbe {
+        intents: vec![bad],
+        invalidate_at: Some(0),
+        checked: vec![],
+        invalidated: None,
+    };
+    let input = shared.strategy_input(&mut driver).unwrap().unwrap();
+    let cutoff = input.action_before.cutoff().clone();
+    let at = cutoff.decision_time().logical_time_utc_ms();
+    let calculation = input.calculate(&mut strategy, at).unwrap().complete(at);
+    while driver
+        .next_group_at()
+        .unwrap()
+        .is_some_and(|at| at <= 26_000)
+    {
+        driver.next_group().unwrap().unwrap();
+    }
+    let now = driver
+        .observation_cutoff()
+        .unwrap()
+        .decision_time()
+        .logical_time_utc_ms();
+    assert!(
+        observation
+            .next_pending_feedback_received_at_utc_ms()
+            .unwrap()
+            <= now
+    );
+    let delivered = observation.delivered_through();
+    let result = shared
+        .dispatch_strategy_qualified(
+            &mut driver.send_decision_at(cutoff, now).unwrap(),
+            &mut strategy,
+            calculation,
+        )
+        .await;
+    let failure = match result {
+        Err(failure) => failure,
+        Ok(_) => panic!("原Bridge错误必须返回"),
+    };
+    let QualifiedBatchErrorV1::Execution(error) = failure.error else {
+        panic!("Bridge error must remain the original execution error")
+    };
+    assert!(matches!(
+        error.error,
+        SharedActionErrorV1::Sim(SimRunActorErrorV2::RequestTimeOverflow)
+    ));
+    assert_eq!(error.attempted_intent_index, Some(0));
+    assert_eq!(
+        error.failed_request_effect,
+        Some(RequestEffectV1::NoRequestEffect)
+    );
+    assert!(error.sent.is_empty() && error.release_errors.is_empty());
+    assert!(strategy.checked.is_empty(), "资格不能掩盖原Bridge错误");
+    assert_eq!(
+        observation.delivered_through(),
+        delivered,
+        "Bridge失败时尚未提前领取旧反馈"
+    );
+    assert_eq!(
+        shared
+            .ledger()
+            .funds_read_v1()
+            .request(&LedgerRequestIdentityV1(
+                "finite-gtd-overflow-reserve".into()
+            ))
+            .unwrap()
+            .reservation_state,
+        ReservationStatusV1::Released
+    );
+    driver.stop_and_drain().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn finite_actual_qualification_preserves_sent_prefix_and_releases_only_unsent() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver) = setup(temp.path());
+    let cancel = ReservedIntentV1 {
+        context: RequestContextV2 {
+            global_request_id: "old-batch-cancel".into(),
+            caller_correlation_id: None,
+        },
+        intent: Arc::new(ModelIntentV1::CancelMarketOrders {
+            condition_id: ConditionId(CONDITION_ID.into()),
+        }),
+        reserves: vec![],
+    };
+    let mut strategy = QualificationProbe {
+        intents: vec![buy("prefix", 1), buy("invalid", 2), cancel],
+        invalidate_at: Some(1),
+        checked: vec![],
+        invalidated: None,
+    };
+    let input = shared.strategy_input(&mut driver).unwrap().unwrap();
+    let at = input
+        .action_before
+        .cutoff()
+        .decision_time()
+        .logical_time_utc_ms();
+    let calculation = input.calculate(&mut strategy, at).unwrap().complete(at);
+    let result = shared
+        .dispatch_strategy_qualified(
+            &mut driver
+                .send_decision_at(input.action_before.cutoff().clone(), at)
+                .unwrap(),
+            &mut strategy,
+            calculation,
+        )
+        .await
+        .unwrap();
+    let QualifiedStrategyDispatchV1::Invalidated {
+        calculation,
+        result,
+        ..
+    } = result
+    else {
+        panic!("失效必须独立表达")
+    };
+    assert_eq!(strategy.checked, [0, 1]);
+    assert_eq!(result.sent.len(), 1);
+    assert_eq!(result.invalidated_intent_index, 1);
+    assert!(result.release_errors.is_empty());
+    assert_eq!(
+        result.observed_cutoff,
+        driver.observation_cutoff().unwrap().clone()
+    );
+    assert!(shared.registry().frozen_intent("invalid").is_none());
+    assert!(
+        shared
+            .registry()
+            .frozen_intent("old-batch-cancel")
+            .is_none()
+    );
+    let requests: std::collections::BTreeMap<_, _> = shared
+        .ledger()
+        .funds_read_v1()
+        .requests()
+        .map(|r| (r.request_identity.0.clone(), r.reservation_state))
+        .collect();
+    assert_eq!(
+        requests["prefix-reserve"],
+        ReservationStatusV1::SubmittedUnknown
+    );
+    assert_eq!(requests["invalid-reserve"], ReservationStatusV1::Released);
+    let StrategyOutputV1::Continue {
+        intents,
+        diagnostics,
+        ..
+    } = calculation.calculation.output
+    else {
+        panic!()
+    };
+    assert_eq!(intents.len(), 3);
+    assert_eq!(diagnostics, "original-frozen-diagnostics");
+    // 已尝试未知的原请求复读不再被健康资格当作尚未发送，也不释放原承诺。
+    let mut retry = QualificationProbe {
+        intents: vec![buy("prefix", 1)],
+        invalidate_at: Some(0),
+        checked: vec![],
+        invalidated: None,
+    };
+    let calculation = input.calculate(&mut retry, at).unwrap().complete(at);
+    let result = shared
+        .dispatch_strategy_qualified(&mut driver.decision().unwrap(), &mut retry, calculation)
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        QualifiedStrategyDispatchV1::Dispatched { .. }
+    ));
+    assert!(retry.checked.is_empty());
+    assert_eq!(
+        shared
+            .ledger()
+            .funds_read_v1()
+            .requests()
+            .find(|r| r.request_identity.0 == "prefix-reserve")
+            .unwrap()
+            .reservation_state,
+        ReservationStatusV1::SubmittedUnknown
+    );
 }

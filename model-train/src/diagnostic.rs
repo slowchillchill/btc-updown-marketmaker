@@ -754,6 +754,7 @@ mod tests {
             completed_collection: missing.clone(),
             trajectory: missing,
             worker: WorkerConfig {
+                performance: None,
                 python: "python3".into(),
                 script: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("tests/fixtures/diagnostic-worker.py"),

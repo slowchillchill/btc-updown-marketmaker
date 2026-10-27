@@ -34,6 +34,7 @@ fn worker(out: &Path) -> ModelWorker {
     let control = out.join("worker.json");
     std::fs::write(&control, serde_json::to_vec(&json!({"out":out})).unwrap()).unwrap();
     ModelWorker::start(crate::worker::WorkerConfig {
+        performance: None,
         python: "python3".into(),
         script: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/token-borrow-worker.py"),
         model: control,
@@ -249,6 +250,7 @@ fn freeze_token_borrow_inputs() {
         days: vec![day],
         parallel_dates: 1,
         worker: crate::worker::WorkerConfig {
+            performance: None,
             python: "unused".into(),
             script: "unused".into(),
             model: "unused".into(),
