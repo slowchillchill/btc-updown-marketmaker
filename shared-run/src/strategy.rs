@@ -1019,7 +1019,7 @@ impl SharedExecutionV2 {
         &mut self,
         decision: &mut PublicGroupDecisionV1<'_>,
         intents: &[ReservedIntentV1],
-        _observed_cutoff: Option<&TrustedGroupDecisionCutoffV1>,
+        observed_cutoff: Option<&TrustedGroupDecisionCutoffV1>,
         mut qualify: impl FnMut(
             &Self,
             &PublicGroupDecisionV1<'_>,
@@ -1123,22 +1123,30 @@ impl SharedExecutionV2 {
                 }
                 .into());
             }
-            let prepared = match intent_bridge::IntentBridge::bind_sim_group(decision)
-                .prepare(item.context.clone(), &item.intent)
-            {
-                Ok(prepared) => prepared,
-                Err(failure) => {
-                    return Err(BatchExecutionErrorV1 {
-                        error: SharedActionErrorV1::Sim(failure.error),
-                        sent,
-                        attempted_intent_index: Some(index),
-                        failed_request_effect: Some(failure.effect),
-                        release_errors: self.release_unsent_intents(&intents[index..], &owned),
-                    }
-                    .into());
-                }
+            let actual_send_boundary = decision.uses_actual_send_boundary();
+            let prepared = if actual_send_boundary {
+                Some(
+                    match intent_bridge::IntentBridge::bind_sim_group(decision)
+                        .prepare(item.context.clone(), &item.intent)
+                    {
+                        Ok(prepared) => prepared,
+                        Err(failure) => {
+                            return Err(BatchExecutionErrorV1 {
+                                error: SharedActionErrorV1::Sim(failure.error),
+                                sent,
+                                attempted_intent_index: Some(index),
+                                failed_request_effect: Some(failure.effect),
+                                release_errors: self
+                                    .release_unsent_intents(&intents[index..], &owned),
+                            }
+                            .into());
+                        }
+                    },
+                )
+            } else {
+                None
             };
-            let mut send_boundary = match decision.prepare_request_boundary() {
+            let mut send_boundary = match decision.batch_request_boundary() {
                 Ok(boundary) => boundary,
                 Err(error) => {
                     return Err(BatchExecutionErrorV1 {
@@ -1152,7 +1160,11 @@ impl SharedExecutionV2 {
                 }
             };
             let decision = &mut *send_boundary;
-            if let Err(error) = self.apply_closed() {
+            if let Err(error) = if actual_send_boundary {
+                self.apply_closed()
+            } else {
+                Ok(false)
+            } {
                 return Err(BatchExecutionErrorV1 {
                     error: SharedActionErrorV1::Ledger(error),
                     sent,
@@ -1162,7 +1174,9 @@ impl SharedExecutionV2 {
                 }
                 .into());
             }
-            self.observe_group(&decision.frames_at_observation());
+            if actual_send_boundary {
+                self.observe_group(&decision.frames_at_observation());
+            }
             let qualification = if self
                 .registry()
                 .has_sim_submission_evidence(&item.context.global_request_id)
@@ -1179,10 +1193,16 @@ impl SharedExecutionV2 {
                             sent,
                             invalidated_intent_index: index,
                             reason,
-                            observed_cutoff: decision
-                                .observation_driver()
-                                .observation_cutoff()
-                                .expect("本项真实资格边界已有当前截止"),
+                            observed_cutoff: if actual_send_boundary {
+                                decision
+                                    .observation_driver()
+                                    .observation_cutoff()
+                                    .expect("本项真实资格边界已有当前截止")
+                            } else {
+                                observed_cutoff
+                                    .expect("HostManaged资格失效保留宿主原截止")
+                                    .clone()
+                            },
                             detected_at_utc_ms: decision.sent_at_utc_ms(),
                             release_errors: self.release_unsent_intents(&intents[index..], &owned),
                         },
@@ -1196,6 +1216,24 @@ impl SharedExecutionV2 {
                     });
                 }
             }
+            let prepared = match prepared {
+                Some(prepared) => prepared,
+                None => match intent_bridge::IntentBridge::bind_sim_group(decision)
+                    .prepare(item.context.clone(), &item.intent)
+                {
+                    Ok(prepared) => prepared,
+                    Err(failure) => {
+                        return Err(BatchExecutionErrorV1 {
+                            error: SharedActionErrorV1::Sim(failure.error),
+                            sent,
+                            attempted_intent_index: Some(index),
+                            failed_request_effect: Some(failure.effect),
+                            release_errors: self.release_unsent_intents(&intents[index..], &owned),
+                        }
+                        .into());
+                    }
+                },
+            };
             for reserve in &item.reserves {
                 let submission = LedgerSubmissionItemIdentityV1 {
                     global_request_id: item.context.global_request_id.clone(),
@@ -1270,10 +1308,16 @@ impl SharedExecutionV2 {
                             .registered_request_sent_at_utc_ms(&item.context.global_request_id)
                             .expect("原登记回执必有真实请求记录"),
                         newly_registered: !was_registered,
-                        observed_cutoff: decision
-                            .observation_driver()
-                            .observation_cutoff()
-                            .expect("本项正式发送边界"),
+                        observed_cutoff: if actual_send_boundary {
+                            decision
+                                .observation_driver()
+                                .observation_cutoff()
+                                .expect("本项正式发送边界")
+                        } else {
+                            observed_cutoff
+                                .cloned()
+                                .unwrap_or_else(|| decision.cutoff().clone())
+                        },
                         context: item.context.clone(),
                         receipt,
                     });

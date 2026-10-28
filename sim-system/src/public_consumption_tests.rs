@@ -287,6 +287,20 @@ fn checkpoint_prepared_groups_keep_nonempty_empty_and_unknown_valuation() {
                 ciborium::from_reader(bytes.as_slice()).unwrap();
             let restored = restored.restore().unwrap();
             assert_eq!(group.group, restored.group);
+            assert_eq!(group.reference, restored.reference);
+            assert_eq!(
+                group
+                    .pm_inputs
+                    .iter()
+                    .map(|(position, message)| (*position, message.message()))
+                    .collect::<Vec<_>>(),
+                restored
+                    .pm_inputs
+                    .iter()
+                    .map(|(position, message)| (*position, message.message()))
+                    .collect::<Vec<_>>(),
+                "owned checkpoint恢复原PM值与各自规范位置，不要求恢复对象保持内存指针共享",
+            );
         }
     }
 }

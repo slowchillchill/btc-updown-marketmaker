@@ -2,6 +2,7 @@
 import hashlib
 import json
 import math
+import select
 import os
 import resource
 import sys
@@ -34,21 +35,32 @@ class Policy(nn.Module):
         # 六个字段：配对腿0/腿1价、修复价、配对/修复数量、post_only。
         self.bit_bias = nn.Parameter(torch.zeros(6, 100, 2))
 
-    def encode(self, sequences, device):
-        lengths = [len(s) for s in sequences]
-        rows = [row for sequence in sequences for row in sequence]
-        tensor = torch.tensor(rows, dtype=torch.float32, device=device)
-        fields = tensor[:, 0].to(torch.int64)
-        categories = tensor[:, 1].to(torch.int64)
-        kinds = tensor[:, 3].to(torch.int64)
+    def encode_columns(self, columns, lengths):
+        """同一原token数学；各sequence单独均值，市场均值仍由调用方等权处理。"""
+        fields, categories, numeric, kinds = columns
         tokens = self.token(self.field(fields) + self.category(categories)
-                            + self.kind(kinds) + self.numeric(tensor[:, 2:3]))
+                            + self.kind(kinds) + self.numeric(numeric))
         pooled = []
         offset = 0
         for length in lengths:
             pooled.append(tokens[offset:offset + length].mean(0))
             offset += length
-        return torch.stack(pooled), tensor.numel() * tensor.element_size()
+        return torch.stack(pooled)
+
+    def encode(self, sequences, device):
+        lengths = [len(s) for s in sequences]
+        if sequences and hasattr(sequences[0], "columns"):
+            columns = [sequence.columns(device) for sequence in sequences]
+            values = (torch.cat([c[0] for c in columns]),
+                      torch.cat([c[1] for c in columns]),
+                      torch.cat([c[2] for c in columns]),
+                      torch.cat([c[3] for c in columns]))
+            return self.encode_columns(values, lengths), sum(c[4] for c in columns)
+        rows = [row for sequence in sequences for row in sequence]
+        tensor = torch.tensor(rows, dtype=torch.float32, device=device)
+        values = (tensor[:, 0].to(torch.int64), tensor[:, 1].to(torch.int64),
+                  tensor[:, 2:3], tensor[:, 3].to(torch.int64))
+        return self.encode_columns(values, lengths), tensor.numel() * tensor.element_size()
 
 
 def initialize(config_path, model_path):
@@ -91,6 +103,14 @@ class Service:
     def __init__(self, path, device, threads):
         started = time.perf_counter()
         torch.set_num_threads(threads)
+        if "B_MODEL_INTEROP_THREADS" in os.environ:
+            torch.set_num_interop_threads(int(os.environ["B_MODEL_INTEROP_THREADS"]))
+        self.performance = None
+        self.native_domain = None
+        self.cancel_fd = int(os.environ["B_MODEL_CANCEL_FD"]) if "B_MODEL_CANCEL_FD" in os.environ else None
+        self.cancelled = False
+        if self.cancel_fd is not None:
+            os.set_blocking(self.cancel_fd, False)
         self.device = torch.device(device)
         package = torch.load(path, map_location="cpu", weights_only=True)
         if package["version"] != MODEL_VERSION or package["encoding_version"] != ENCODING_VERSION:
@@ -116,6 +136,10 @@ class Service:
                          "config": self.config,
                          "numerical_runtime": {"default_dtype": str(torch.get_default_dtype()),
                              "parameter_dtype": str(next(self.model.parameters()).dtype),
+                             "torch_intra_threads": torch.get_num_threads(),
+                             "torch_interop_threads": torch.get_num_interop_threads(),
+                             "omp_threads": os.environ.get("OMP_NUM_THREADS"),
+                             "mkl_threads": os.environ.get("MKL_NUM_THREADS"),
                              "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
                              "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
                              "cudnn_deterministic": torch.backends.cudnn.deterministic,
@@ -124,6 +148,69 @@ class Service:
     def sync(self):
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
+
+    def check_cancel(self):
+        if self.cancel_fd is not None and not self.cancelled:
+            ready, _, _ = select.select([self.cancel_fd], [], [], 0)
+            if ready:
+                os.read(self.cancel_fd, 4096)
+                self.cancelled = True  # 控制端EOF也停止，不能在监督者消失后继续。
+        if self.cancelled:
+            raise InterruptedError("模型收到独立停止请求；未提交状态不视为成功")
+
+    def frame(self, requests):
+        """一帧一次IPC；条件域仍由同份Rust函数按已选前缀计算。"""
+        prepared = [self.learning.cache.prepare_frame(request) for request in requests]
+        with torch.inference_mode():
+            begins = self.begin(prepared)
+            output = []
+            for request, begin in zip(prepared, begins):
+                self.check_cancel()
+                selected = begin["option"]
+                option = request["options"][selected]
+                rpc = []
+                if option["kind"] != "NoTrade":
+                    market = request["domain_context"]["markets"][option["market"]]
+                    sides = [0, 1] if option["kind"] == "Pair" else [option["side"]]
+                    context = {"handle": self.native_domain.open(request["native_rules"]),
+                               "cash": request["domain_context"]["cash"],
+                               "ticks": market["ticks"], "max_prices": market["max_prices"],
+                               "sides": sides, "selected": []}
+                    for ordinal, side in enumerate(sides):
+                        self.check_cancel()
+                        context["ordinal"] = ordinal
+                        allowed = self.native_domain.request(dict(context, op="post"))["allowed"]
+                        item = {"phase": "post", "account": request["account"], "call": request["call"],
+                                "allowed": allowed, "ordinal": ordinal, "side": side}
+                        response = self.decode(item)
+                        rpc.append({"request": item, "response": response})
+                        context["post_only"] = response["post_only"]
+                        maximum = self.native_domain.request(dict(context, op="price"))["maximum"]
+                        item = {"phase": "price", "account": request["account"], "call": request["call"],
+                                "maximum": maximum, "ordinal": ordinal, "side": side}
+                        response = self.decode(item)
+                        rpc.append({"request": item, "response": response})
+                        context["selected"].append({"price_index": response["index"],
+                                                    "tick": market["ticks"][side],
+                                                    "post_only": context["post_only"]})
+                    count = self.native_domain.request(dict(context, op="quantity"))["count"]
+                    item = {"phase": "quantity", "account": request["account"], "call": request["call"], "count": count}
+                    rpc.append({"request": item, "response": self.decode(item)})
+                record = {key: request[key] for key in ("account", "call", "global", "markets", "options")}
+                joint_logp = begin["log_probability"]
+                for item in rpc:
+                    joint_logp += item["response"]["log_probability"]
+                record.update({"selected_option": selected,
+                               "rpc": [{"request": item["request"], "response": {
+                                   "post_only": item["response"].get("post_only"),
+                                   "index": item["response"].get("index"),
+                                   "rank": item["response"].get("rank")}} for item in rpc],
+                               "old_joint_logp": joint_logp,
+                               "old_value": begin["value"]})
+                if self.learning.group is not None:
+                    self.learning.cache.record_frame(record)
+                output.append({"begin": begin, "rpc": rpc})
+            return output
 
     def account(self, key, seed):
         if key not in self.accounts:
@@ -169,7 +256,7 @@ class Service:
             sequences.append(request["global"])
             sequences.extend(request["markets"])
         encoded, byte_count = self.model.encode(sequences, self.device)
-        if self.device.type == "cuda":
+        if self.device.type == "cuda" and byte_count:
             self.metrics["h2d_bytes"] += byte_count
             self.metrics["h2d_copies"] += 1
         inputs = []
@@ -294,6 +381,40 @@ class Service:
         self.metrics["heads"] += result["heads"]
         return result
 
+    def collection_sampling_state(self):
+        if self.performance is None or self.learning.group is None:
+            return None
+        return {"version": "b-collection-sampling-v1", "group": self.learning.group["id"],
+                "accounts": {key: {"calls": value["calls"],
+                                     "rng_state": value["rng"].get_state().tolist()}
+                             for key, value in self.accounts.items()}}
+
+    def restore_collection_sampling_state(self, request):
+        """仅恢复同一完整采集的采样状态；学习hidden仍由teacher从合法零状态建立。"""
+        state, expected = request["state"], request["expected_calls"]
+        if self.performance is None or self.learning.group is None:
+            raise ValueError("采样恢复需要已打开的新性能学习组")
+        if state.get("version") != "b-collection-sampling-v1" or state.get("group") != self.learning.group["id"]:
+            raise ValueError("完整采集采样状态的版本或组绑定不同")
+        if set(state["accounts"]) != {key for key, count in expected.items() if count}:
+            raise ValueError("完整采集采样状态账户集合不同")
+        if self.accounts:
+            if self.collection_sampling_state() != state:
+                raise ValueError("已有账户不能被不同采样状态覆盖")
+            return {"restored": False, "already_present": True}
+        pending = {}
+        for key, value in state["accounts"].items():
+            if value["calls"] != expected[key]:
+                raise ValueError("完整采集采样状态调用计数不同")
+            generator = torch.Generator(device="cpu")
+            generator.set_state(torch.tensor(value["rng_state"], dtype=torch.uint8))
+            pending[key] = {"calls": value["calls"], "rng": generator,
+                            "hidden": torch.zeros(self.config["layers"], 1, self.config["width"], device=self.device)}
+        self.accounts = pending
+        self.metrics["collection_sampling_restores"] = self.metrics.get("collection_sampling_restores", 0) + 1
+        self.metrics["restored_collection_calls"] = sum(expected.values())
+        return {"restored": True, "accounts": sorted(pending), "calls": sum(expected.values())}
+
     def account_snapshot(self, key):
         # 夹具诊断：不建立账户、不调用网络、不推进hidden/RNG或经济状态。
         account = self.accounts[key]
@@ -310,46 +431,90 @@ class Service:
         result["rss_peak_kib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         result["account_calls"] = {k: v["calls"] for k, v in self.accounts.items()}
         result["pending_accounts"] = list(self.pending)
+        sampling = self.collection_sampling_state()
+        if sampling is not None:
+            result["collection_sampling_state"] = sampling
+        if self.native_domain is not None:
+            result["native_domain_calls"] = self.native_domain.calls
+            result["native_domain_seconds"] = self.native_domain.seconds
+        if hasattr(self.learning, "cache"):
+            result["input_cache"] = self.learning.cache.status()
         if self.device.type == "cuda":
             result["cuda_allocated_peak_bytes"] = torch.cuda.max_memory_allocated(self.device)
             result["cuda_reserved_peak_bytes"] = torch.cuda.max_memory_reserved(self.device)
         return result
 
     def run(self):
-        for line in sys.stdin:
-            request = json.loads(line)
-            if "hello" in request:
-                hello = request["hello"]
-                for key in ("field_buckets", "category_buckets"):
-                    if hello["encoding"][key] != self.config[key]:
-                        raise ValueError("编码参数与模型不匹配")
-                if hello["encoding_version"] != ENCODING_VERSION:
-                    raise ValueError("编码版本不匹配")
-                response={"ready":True,"identity":self.identity,"load_seconds":self.metrics["load_seconds"]}
-            else:
-                batch=request["batch"]
-                results=[None]*len(batch)
-                indices=[i for i,r in enumerate(batch) if r["phase"]=="begin"]
-                if indices:
-                    with torch.inference_mode():
-                        for index,result in zip(indices,self.begin([batch[i] for i in indices])):
-                            results[index]=result
-                for i,item in enumerate(batch):
-                    phase=item["phase"]
-                    if phase=="begin":
-                        continue
-                    if phase.startswith(("learn_","audit_")) or phase=="gradient_reference":
-                        with torch.enable_grad():
-                            results[i]=self.learning.dispatch(item)
-                    elif phase=="metrics":
-                        results[i]=self.snapshot()
-                    elif phase=="account_snapshot":
-                        results[i]=self.account_snapshot(item["account"])
-                    else:
+        from model_protocol import PROTOCOL_VERSION, NativeDomain, read_packet
+        binary = False
+        stream = sys.stdin.buffer
+        try:
+            while True:
+                if binary:
+                    request = read_packet(stream)
+                    if request is None:
+                        break
+                else:
+                    line = stream.readline()
+                    if not line:
+                        break
+                    request = json.loads(line)
+                if "hello" in request:
+                    hello = request["hello"]
+                    for key in ("field_buckets", "category_buckets"):
+                        if hello["encoding"][key] != self.config[key]:
+                            raise ValueError("编码参数与模型不匹配")
+                    if hello["encoding_version"] != ENCODING_VERSION:
+                        raise ValueError("编码版本不匹配")
+                    response = {"ready": True, "identity": self.identity, "load_seconds": self.metrics["load_seconds"]}
+                    if "performance" in hello:
+                        if hello.get("transport") != PROTOCOL_VERSION:
+                            raise ValueError("未知紧凑协议版本")
+                        self.performance = hello["performance"]
+                        self.native_domain = NativeDomain(self.performance["native_library"])
+                        self.identity["execution"] = {"mode": self.performance["mode"],
+                                                      "transport": PROTOCOL_VERSION,
+                                                      "native_domain": "rust-exact-domain-v1"}
+                        response["transport"] = PROTOCOL_VERSION
+                        binary = True
+                else:
+                    batch = request["batch"]
+                    results = [None] * len(batch)
+                    indices = [i for i, item in enumerate(batch) if item["phase"] == "begin"]
+                    if indices:
                         with torch.inference_mode():
-                            results[i]=self.decode(item)
-                response={"batch":results}
-            print(json.dumps(response,ensure_ascii=False,allow_nan=False),flush=True)
+                            for index, result in zip(indices, self.begin([batch[i] for i in indices])):
+                                results[index] = result
+                    indices = [i for i, item in enumerate(batch) if item["phase"] == "frame"]
+                    if indices:
+                        for index, result in zip(indices, self.frame([batch[i] for i in indices])):
+                            results[index] = result
+                    for i, item in enumerate(batch):
+                        phase = item["phase"]
+                        if phase in ("begin", "frame"):
+                            continue
+                        try:
+                            if phase == "learn_restore_collection_sampling_state":
+                                results[i] = self.restore_collection_sampling_state(item)
+                            elif phase.startswith(("learn_", "audit_")) or phase == "gradient_reference":
+                                with torch.enable_grad():
+                                    results[i] = self.learning.dispatch(item)
+                            elif phase == "metrics":
+                                results[i] = self.snapshot()
+                            elif phase == "account_snapshot":
+                                results[i] = self.account_snapshot(item["account"])
+                            else:
+                                with torch.inference_mode():
+                                    results[i] = self.decode(item)
+                        except InterruptedError as error:
+                            results[i] = {"error": str(error), "stopped_before_commit": True}
+                    response = {"batch": results}
+                print(json.dumps(response, ensure_ascii=False, allow_nan=False), flush=True)
+        finally:
+            if self.native_domain is not None:
+                self.native_domain.close()
+            if self.cancel_fd is not None:
+                os.close(self.cancel_fd)
 
 
 if __name__ == "__main__":

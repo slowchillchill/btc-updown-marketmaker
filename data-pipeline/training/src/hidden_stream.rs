@@ -38,6 +38,9 @@ impl StreamingHiddenStateV1 {
             next_index_position: 0,
         }
     }
+    pub(crate) fn has_market(&self, condition_id: &str) -> bool {
+        self.states.contains_key(condition_id)
+    }
     pub fn enroll(&mut self, context: PmMarketContextV1) -> RecordingResult<()> {
         if self.states.contains_key(&context.market.condition_id.0) {
             return Ok(());

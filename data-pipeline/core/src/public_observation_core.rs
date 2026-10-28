@@ -1240,7 +1240,9 @@ impl PublicObservationCoreV1 {
                             fact_ordinal: 0,
                         },
                         direct_sources: vec![message.evidence().source().clone()],
-                        payload: PublicBusinessPayloadV1::PolymarketMessage(msg.clone()),
+                        payload: PublicBusinessPayloadV1::PolymarketMessage(
+                            message.shared_message(),
+                        ),
                         source_refs: std::iter::once(msg.input_record.clone())
                             .chain(input.recorded.dependency_record_refs.iter().cloned())
                             .collect(),
@@ -2405,7 +2407,7 @@ fn observed_pm<T>(
 
 #[cfg(test)]
 #[path = "public_observation_core_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 fn direct_bba(payload: &CanonicalPmPayloadV1, member: Option<u32>) -> Option<CanonicalBbaFactV1> {
     match payload {

@@ -1,6 +1,9 @@
 //! #181步骤6：真实模型消费者；环境与经济权威继续归公共模块。
+#[cfg(test)]
+mod compact_tests;
 pub mod domain;
 pub mod encoding;
+mod native_domain;
 mod strategy;
 pub mod worker;
 pub use strategy::*;
@@ -29,3 +32,8 @@ mod first_observation;
 pub mod special;
 
 pub mod result_readout;
+
+pub mod performance_fixture;
+pub mod performance_sample;
+
+pub mod performance_slot;

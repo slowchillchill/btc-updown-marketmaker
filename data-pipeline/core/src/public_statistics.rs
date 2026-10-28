@@ -191,6 +191,9 @@ pub struct PublicStatisticsHistoryV1 {
     midpoint: Vector<Point>,
     #[serde(default)]
     blb_endpoints: imbl::OrdMap<String, Vector<Arc<PublicBlbEndpointV1>>>,
+    // 只记上一组的共享输入形状；首次、跳组、非共享切换与冷恢复沿完整后备。
+    #[serde(skip)]
+    blb_shared_group: bool,
     active_integral_markets: imbl::OrdMap<String, MarketIdentityV2>,
     completed_integrals: imbl::OrdMap<String, Vec<PublicSpotIntegralV1>>,
     spot: Vector<Point>,
@@ -353,6 +356,8 @@ impl PublicStatisticsHistoryV1 {
         anchor: &ObservedFactV1<MarketPriceAnchorV1>,
         depth: &Arc<ObservedFactV1<BinanceDepthObservationV1>>,
     ) {
+        #[cfg(test)]
+        cost_tests::visit();
         let Some(window) = self.config.blb_lookback_windows_ms.iter().max().copied() else {
             return;
         };
@@ -374,6 +379,8 @@ impl PublicStatisticsHistoryV1 {
                     && old.depth_quality == depth.quality
             });
         if !unchanged {
+            #[cfg(test)]
+            cost_tests::evaluate();
             let value = self
                 .prepared_depth
                 .as_ref()
@@ -417,26 +424,59 @@ impl PublicStatisticsHistoryV1 {
             }
         }
     }
-    fn retain_blb(&mut self, observations: &MarketObservationSetV1) {
+    fn retain_blb(&mut self, group: &ClosedBusinessGroupV1, incremental: bool) {
         if self.config.blb_lookback_windows_ms.is_empty() {
             return;
         }
-        if let Some((markets, common)) = observations.shared_parts() {
-            for market in markets.values() {
-                self.retain_blb_endpoint(
-                    &market.market,
-                    &market.official_anchor,
-                    &common.binance_depth,
-                );
+        if let Some((markets, common)) = group.observations.shared_parts() {
+            if incremental {
+                // 已保留端点涵盖仍有BLB用途的旧市场；只从本组正式事实补新市场。
+                // 临时集合仅去重本次读取，不保存另一份市场生命周期状态。
+                let mut ids = self
+                    .blb_endpoints
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>();
+                for record in group.records.iter() {
+                    let market = match &record.payload {
+                        PublicBusinessPayloadV1::MarketFact { market, .. } => Some(market),
+                        PublicBusinessPayloadV1::PolymarketMessage(message) => {
+                            Some(&message.market)
+                        }
+                        _ => None,
+                    };
+                    if let Some(market) = market {
+                        ids.insert(market.condition_id.0.clone());
+                    }
+                }
+                for id in ids {
+                    if let Some(market) = markets.get(&id) {
+                        self.retain_blb_endpoint(
+                            &market.market,
+                            &market.official_anchor,
+                            &common.binance_depth,
+                        );
+                    }
+                }
+            } else {
+                for market in markets.values() {
+                    self.retain_blb_endpoint(
+                        &market.market,
+                        &market.official_anchor,
+                        &common.binance_depth,
+                    );
+                }
             }
+            self.blb_shared_group = true;
         } else {
-            for market in observations.iter() {
+            for market in group.observations.iter() {
                 self.retain_blb_endpoint(
                     &market.market,
                     &market.official_anchor,
                     &market.binance_depth,
                 );
             }
+            self.blb_shared_group = false;
         }
     }
     fn blb_lookbacks(&self, market: &MarketIdentityV2, t: i64) -> Vec<PublicBlbLookbackV1> {
@@ -845,6 +885,10 @@ impl PreparedPublicStatisticsV1 {
         }) {
             return Err("统计组必须沿首次成功应用的公共顺序消费".into());
         }
+        let incremental_blb = latest.as_ref().is_some_and(|h| {
+            h.blb_shared_group
+                && h.group.group_position.checked_add(1) == Some(group.group_position)
+        });
         let mut next = latest
             .as_ref()
             .map(|h| h.as_ref().clone())
@@ -855,6 +899,7 @@ impl PreparedPublicStatisticsV1 {
                 applied_at_utc_ms: at,
                 midpoint: Vector::new(),
                 blb_endpoints: Default::default(),
+                blb_shared_group: false,
                 active_integral_markets: Default::default(),
                 completed_integrals: Default::default(),
                 spot: Vector::new(),
@@ -866,7 +911,7 @@ impl PreparedPublicStatisticsV1 {
                 cache: Default::default(),
             });
         next.advance(group, at, &o, &prepared_group.records);
-        next.retain_blb(&prepared_group.observations);
+        next.retain_blb(prepared_group, incremental_blb);
         let next = Arc::new(next);
         *latest = Some(next.clone());
         cache.retain(|(s, _)| s.strong_count() > 0);
@@ -1006,7 +1051,7 @@ mod reuse_tests {
             ),
         }
     }
-    fn stream() -> Arc<PublicStatisticsStreamV1> {
+    pub(super) fn stream() -> Arc<PublicStatisticsStreamV1> {
         PublicStatisticsStreamV1::new(
             PublicStatisticsIdentityV1 {
                 input_set_identity: Sha256Hex("1".repeat(64)),
@@ -1117,3 +1162,11 @@ mod reuse_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "public_statistics_cost_tests.rs"]
+mod cost_tests;
+
+#[cfg(test)]
+#[path = "public_statistics_blb_tests.rs"]
+mod blb_reuse_tests;

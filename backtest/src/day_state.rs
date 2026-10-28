@@ -41,6 +41,11 @@ pub(crate) struct DayFailureSignalV1 {
 pub(crate) struct DayBufferV1 {
     pub public_base: usize,
     pub public: VecDeque<DayPublicDeliveryV1>,
+    pub retained_payload_bytes: u64,
+    pub peak_payload_bytes: u64,
+    pub public_payload_sizes: VecDeque<u64>,
+    pub hidden_payload_sizes: VecDeque<u64>,
+    pub producer_wait_seconds: f64,
     pub hidden_base: usize,
     pub hidden: VecDeque<AcceptedHiddenStepBucketV1>,
     pub candidates: Vec<CandidateProgressV1>,
@@ -69,6 +74,11 @@ impl DayHubV1 {
             Mutex::new(DayBufferV1 {
                 public_base: 0,
                 public: Default::default(),
+                retained_payload_bytes: 0,
+                peak_payload_bytes: 0,
+                public_payload_sizes: Default::default(),
+                hidden_payload_sizes: Default::default(),
+                producer_wait_seconds: 0.0,
                 hidden_base: 0,
                 hidden: Default::default(),
                 candidates: candidates
@@ -120,7 +130,20 @@ impl DayHubV1 {
             .map(|c| c.cursor.hidden)
             .min()
             .unwrap_or(buffer.hidden_base + buffer.hidden.len());
-        let retired_public = buffer.public.drain(..public - buffer.public_base).collect();
+        let public_retired = public - buffer.public_base;
+        let hidden_retired = hidden - buffer.hidden_base;
+        let released_public: u64 = buffer
+            .public_payload_sizes
+            .drain(..public_retired.min(buffer.public_payload_sizes.len()))
+            .sum();
+        let released_hidden: u64 = buffer
+            .hidden_payload_sizes
+            .drain(..hidden_retired.min(buffer.hidden_payload_sizes.len()))
+            .sum();
+        buffer.retained_payload_bytes = buffer
+            .retained_payload_bytes
+            .saturating_sub(released_public.saturating_add(released_hidden));
+        let retired_public = buffer.public.drain(..public_retired).collect();
         let retired_hidden = buffer.hidden.drain(..hidden - buffer.hidden_base).collect();
         buffer.public_base = public;
         buffer.hidden_base = hidden;

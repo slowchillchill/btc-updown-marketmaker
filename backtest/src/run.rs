@@ -745,6 +745,7 @@ where
     let config = &effective_config;
     let metadata = serde_json::json!({"effective_entry_market_scope":config.effective_entry_market_scope,"config": metadata_config, "prepared_material": material, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "source_identity_sha256": prepared.source_identity_sha256, "initialization": prepared.initialization, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "maker_model_version": rules.maker_model_version_for(config.session.caller_role), "caller_role": config.session.caller_role, "input_lifecycle_policy":config.session.input_lifecycle_policy, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
     let context = HistoricalRuntimeContextV1 {
+        send_boundary: HistoricalSendBoundaryV1::ActualSendBoundary,
         statistics: statistics_stream(
             config,
             prepared.source_identity_sha256.clone(),
@@ -804,7 +805,14 @@ pub(crate) fn statistics_stream(
         })
         .transpose()
 }
+/// 由正式宿主入口选用，不进入用户配置或策略政策。
+#[derive(Clone, Copy)]
+pub(crate) enum HistoricalSendBoundaryV1 {
+    ActualSendBoundary,
+    HostManaged,
+}
 pub(crate) struct HistoricalRuntimeContextV1 {
+    pub send_boundary: HistoricalSendBoundaryV1,
     pub statistics: Option<Arc<data_pipeline_core::public_statistics::PublicStatisticsStreamV1>>,
     pub public_observer: Option<Arc<dyn HistoricalPublicObserverV1>>,
     pub start: i64,
@@ -1310,9 +1318,16 @@ where
                         driver.wait_for_recording_capacity()
                     )
                     .map_err(HistoricalFailureCauseV1::Sim)?;
-                    let mut decision = driver
-                        .send_decision_at(p.calculation.calculation.input_cutoff.clone(), at)
-                        .map_err(HistoricalFailureCauseV1::Sim)?;
+                    let cutoff = p.calculation.calculation.input_cutoff.clone();
+                    let mut decision = match context.send_boundary {
+                        HistoricalSendBoundaryV1::ActualSendBoundary => {
+                            driver.send_decision_at(cutoff, at)
+                        }
+                        HistoricalSendBoundaryV1::HostManaged => {
+                            driver.send_decision_at_host_managed(cutoff, at)
+                        }
+                    }
+                    .map_err(HistoricalFailureCauseV1::Sim)?;
                     let p = pending.take().expect("发送入口前计算保持存在");
                     // 正常停批不重发旧意图，但仍保留原冻结决定要求的严格未来重评。
                     let future_evaluation = match &p.calculation.calculation.output {

@@ -478,6 +478,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "#378 成本例仅在准确签发后定向运行，不随普通回归支用额度"]
     fn cumulative_history_keeps_fixed_current_projection_work_and_reports_finite_cost() {
         let (_temporary, path) = root("inventory-growth");
         for count in [8, 128, 2048] {
