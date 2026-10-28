@@ -6879,6 +6879,7 @@ fn reduce_normalized_market_slice_v1(
 enum MembershipAssetsV1<'a> {
     None,
     One(&'a contracts::AssetIdentityV1),
+    LevelChanges(&'a [contracts::CanonicalAbsoluteLevelChangeV1]),
     Exact(&'a [contracts::AssetIdentityV1]),
     Terminal(&'a contracts::MarketResolutionTerminalV3),
 }
@@ -6900,6 +6901,15 @@ fn validate_membership_v1(
         MembershipAssetsV1::One(asset) => {
             if !member.assets().contains(asset) {
                 return Err(MarketEventErrorV1::UnknownAsset(asset.token_id.0.clone()));
+            }
+        }
+        MembershipAssetsV1::LevelChanges(changes) => {
+            for change in changes {
+                if !member.assets().contains(&change.asset) {
+                    return Err(MarketEventErrorV1::UnknownAsset(
+                        change.asset.token_id.0.clone(),
+                    ));
+                }
             }
         }
         MembershipAssetsV1::Exact(assets) => {
@@ -6973,31 +6983,19 @@ fn validate_public_group_membership_v1(
                 validate_membership_v1(directory, market, fact_membership_v1(payload))?
             }
             F::PolymarketMessage(message) => {
-                validate_membership_v1(directory, &message.market, MembershipAssetsV1::None)?;
-                match &message.payload {
+                let assets = match &message.payload {
                     P::Book {
                         fact: B::FullBook { asset, .. },
                     }
                     | P::BestBidAsk { asset, .. }
                     | P::TickSizeChange { asset, .. }
-                    | P::PublicTrade { asset, .. } => validate_membership_v1(
-                        directory,
-                        &message.market,
-                        MembershipAssetsV1::One(asset),
-                    )?,
+                    | P::PublicTrade { asset, .. } => MembershipAssetsV1::One(asset),
                     P::Book {
                         fact: B::AbsoluteLevelChanges { changes },
-                    } => {
-                        for change in changes {
-                            validate_membership_v1(
-                                directory,
-                                &message.market,
-                                MembershipAssetsV1::One(&change.asset),
-                            )?;
-                        }
-                    }
-                    P::NewMarket { .. } => {}
-                }
+                    } => MembershipAssetsV1::LevelChanges(changes),
+                    P::NewMarket { .. } => MembershipAssetsV1::None,
+                };
+                validate_membership_v1(directory, &message.market, assets)?;
             }
             F::ReferenceFact(_)
             | F::BinanceDepthReference(_)
@@ -7649,6 +7647,106 @@ mod tests {
             ],
         )
         .expect("构造追加市场测试正文")
+    }
+
+    #[test]
+    fn public_message_membership_preserves_market_then_first_asset_error() {
+        let first = market('1', "101", "201", "202");
+        let second = market('2', "102", "203", "204");
+        let scenario =
+            crate::scenario::PlatformScenarioV1::try_new(vec![first.clone(), second.clone()])
+                .unwrap();
+        let directory = SessionMarketDirectoryV1::try_from_scenario(&scenario).unwrap();
+        let change = |asset| contracts::CanonicalAbsoluteLevelChangeV1 {
+            asset,
+            side: contracts::CanonicalPmSideV1::Buy,
+            price_pusd_per_share: ExactDecimal("0.5".into()),
+            quantity_shares: Some(ExactDecimal("1".into())),
+            best_bid_ask: None,
+        };
+        let mut conflicting_asset = first.assets()[0].clone();
+        conflicting_asset.outcome.label = "different-outcome".into();
+        let changes = [
+            change(first.assets()[1].clone()),
+            change(conflicting_asset),
+            change(second.assets()[0].clone()),
+        ];
+        let unknown = market('3', "103", "205", "206");
+        assert_eq!(
+            validate_membership_v1(
+                &directory,
+                unknown.market(),
+                MembershipAssetsV1::LevelChanges(&changes),
+            ),
+            Err(MarketEventErrorV1::UnknownMarket(
+                unknown.market().condition_id.0.clone(),
+            )),
+        );
+        let mut conflicting_market = first.market().clone();
+        conflicting_market.clob_market_id = second.market().clob_market_id.clone();
+        assert_eq!(
+            validate_membership_v1(
+                &directory,
+                &conflicting_market,
+                MembershipAssetsV1::LevelChanges(&changes),
+            ),
+            Err(MarketEventErrorV1::MarketIdentityConflict(
+                first.market().condition_id.0.clone(),
+            )),
+        );
+        assert_eq!(
+            validate_membership_v1(
+                &directory,
+                first.market(),
+                MembershipAssetsV1::LevelChanges(&changes),
+            ),
+            Err(MarketEventErrorV1::UnknownAsset("201".into())),
+            "保留完整AssetIdentity比较及原changes中首个无效资产",
+        );
+        assert_eq!(
+            validate_membership_v1(
+                &directory,
+                first.market(),
+                MembershipAssetsV1::LevelChanges(&changes[2..]),
+            ),
+            Err(MarketEventErrorV1::UnknownAsset("203".into())),
+            "其它已登记市场的资产不属于本市场",
+        );
+        for member in [&first, &second] {
+            let valid = [
+                change(member.assets()[0].clone()),
+                change(member.assets()[1].clone()),
+            ];
+            assert_eq!(
+                validate_membership_v1(
+                    &directory,
+                    member.market(),
+                    MembershipAssetsV1::LevelChanges(&valid),
+                ),
+                Ok(()),
+            );
+            assert_eq!(
+                validate_membership_v1(&directory, member.market(), MembershipAssetsV1::None),
+                Ok(()),
+            );
+            assert_eq!(
+                validate_membership_v1(
+                    &directory,
+                    member.market(),
+                    MembershipAssetsV1::LevelChanges(&[]),
+                ),
+                Ok(()),
+            );
+        }
+        for assets in [MembershipAssetsV1::None, MembershipAssetsV1::LevelChanges(&[])] {
+            assert_eq!(
+                validate_membership_v1(&directory, unknown.market(), assets),
+                Err(MarketEventErrorV1::UnknownMarket(
+                    unknown.market().condition_id.0.clone(),
+                )),
+                "NewMarket及空changes仍先验证市场成员",
+            );
+        }
     }
 
     fn market_with_window(
@@ -21450,26 +21548,59 @@ impl PublicConsumptionStateV1 {
         let Some(cutoff) = self.observation_cutoff() else {
             return Vec::new();
         };
-        let mut ids: std::collections::BTreeSet<String> =
-            self.unfinished_public_markets.keys().cloned().collect();
-        ids.extend(historical.into_iter().map(str::to_owned));
+        #[cfg(feature = "measurement")]
+        let selection_measured = std::time::Instant::now();
+        let mut ids = std::collections::BTreeSet::new();
+        for id in self.unfinished_public_markets.keys() {
+            ids.insert(id.as_str());
+        }
+        for id in historical {
+            ids.insert(id);
+        }
         let Some(prepared) = self.last_prepared.as_ref() else {
             return Vec::new();
         };
         let observations = &prepared.group.observations;
+        #[cfg(feature = "measurement")]
+        crate::public_consumption::observation_diagnostics::add(|w| {
+            w.calls += 1;
+            w.selection_ns += selection_measured.elapsed().as_nanos();
+        });
         ids.into_iter()
             .filter_map(|id| {
-                let observation = observations.get_market(&id)?;
-                Some(PublicObservationFrameV1 {
-                    statistics: self
-                        .statistics_prefix
-                        .as_ref()
-                        .map(|p| p.read(observation, cutoff.decision_time().logical_time_utc_ms())),
+                #[cfg(feature = "measurement")]
+                let get_measured = std::time::Instant::now();
+                let observation = observations.get_market(id)?;
+                #[cfg(feature = "measurement")]
+                crate::public_consumption::observation_diagnostics::add(|w| {
+                    w.get_market_calls += 1;
+                    w.get_market_ns += get_measured.elapsed().as_nanos();
+                });
+                #[cfg(feature = "measurement")]
+                let stats_measured = std::time::Instant::now();
+                let statistics = self
+                    .statistics_prefix
+                    .as_ref()
+                    .map(|p| p.read(observation, cutoff.decision_time().logical_time_utc_ms()));
+                #[cfg(feature = "measurement")]
+                crate::public_consumption::observation_diagnostics::add(|w| {
+                    w.statistics_ns += stats_measured.elapsed().as_nanos()
+                });
+                #[cfg(feature = "measurement")]
+                let fields_measured = std::time::Instant::now();
+                let frame = PublicObservationFrameV1 {
+                    statistics,
                     observation,
                     rule_context: self.rules[&observation.market.condition_id.0].clone(),
                     receipt: self.last_receipt.as_ref().unwrap().clone(),
                     decision_cutoff: cutoff.clone(),
-                })
+                };
+                #[cfg(feature = "measurement")]
+                crate::public_consumption::observation_diagnostics::add(|w| {
+                    w.frames += 1;
+                    w.frame_fields_ns += fields_measured.elapsed().as_nanos();
+                });
+                Some(frame)
             })
             .collect()
     }

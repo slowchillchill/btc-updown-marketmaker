@@ -2190,7 +2190,7 @@ impl<E: PmEvidenceV1> PmEvidenceV1 for PreparedPmEvidenceV1<E> {
 
 #[derive(Clone)]
 pub struct PreparedPmMessageV1 {
-    message: CanonicalPmMessageV1,
+    message: std::sync::Arc<CanonicalPmMessageV1>,
     evidence: PreparedPmEvidenceV1<SourceEvidenceRefV3>,
 }
 impl serde::Serialize for PreparedPmMessageV1 {
@@ -2209,10 +2209,16 @@ impl PreparedPmMessageV1 {
         let parsed = crate::pm_message::parse_canonical_pm_message(&message)?;
         let evidence =
             PreparedPmEvidenceV1::prepare(parsed.source.clone(), Some(&message.payload))?;
-        Ok(Self { message, evidence })
+        Ok(Self {
+            message: std::sync::Arc::new(message),
+            evidence,
+        })
     }
     pub fn message(&self) -> &CanonicalPmMessageV1 {
         &self.message
+    }
+    pub(crate) fn shared_message(&self) -> std::sync::Arc<CanonicalPmMessageV1> {
+        self.message.clone()
     }
     pub fn evidence(&self) -> &PreparedPmEvidenceV1<SourceEvidenceRefV3> {
         &self.evidence

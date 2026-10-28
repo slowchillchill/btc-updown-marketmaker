@@ -349,7 +349,7 @@ pub fn materialize_public_reduction_v1(
             PublicBusinessPayloadV1::PolymarketMessage(message) => {
                 let id = message.event_id.clone();
                 (
-                    CanonicalEventRecordV2::PolymarketMessage(message.clone()),
+                    CanonicalEventRecordV2::PolymarketMessage(message.as_ref().clone()),
                     id,
                 )
             }

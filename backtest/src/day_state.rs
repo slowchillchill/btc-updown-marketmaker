@@ -149,10 +149,10 @@ impl DayHubV1 {
         buffer.hidden_base = hidden;
         (retired_public, retired_hidden)
     }
-    pub fn finish(
+    pub fn finish<T>(
         &self,
         index: usize,
-        result: &Result<HistoricalDayCandidateResultV1, MaterialError>,
+        result: &Result<T, MaterialError>,
         run_id: &str,
     ) {
         let (mut buffer, cv) = (self.0.0.lock().unwrap(), &self.0.1);
@@ -171,7 +171,21 @@ impl DayHubV1 {
         let retired = Self::compact(&mut buffer);
         cv.notify_all();
         drop(buffer);
-        drop(retired);
+        #[cfg(feature = "stage-timing")]
+        let mut stages = crate::stage_timing::StageTimings::new_transport(format!(
+            "candidate_finish_transport:{index}:{run_id}"
+        ));
+        #[cfg(feature = "stage-timing")]
+        stages.add_delivery_work(0, retired.0.len(), retired.1.len());
+        if !retired.0.is_empty() || !retired.1.is_empty() {
+            measure_stage!(
+                stages,
+                CandidateReclaimedDrop,
+                drop_reclaimed_roots!(stages, retired)
+            );
+        } else {
+            drop(retired);
+        }
     }
 }
 // 仅由一个候选线程持有；领取不推进共享回收位置。
@@ -315,7 +329,11 @@ impl Iterator for DayPublicSourceV1 {
             // 发布仍在原锁内完成；先解锁并释放本批回收引用，再锁定当前可领取材料。
             if !retired.0.is_empty() || !retired.1.is_empty() {
                 drop(buffer);
-                measure_stage!(self.stages, CandidateReclaimedDrop, drop(retired));
+                measure_stage!(
+                    self.stages,
+                    CandidateReclaimedDrop,
+                    drop_reclaimed_roots!(self.stages, retired)
+                );
                 #[cfg(feature = "stage-timing")]
                 let lock_started = self
                     .stages
@@ -474,7 +492,11 @@ impl Iterator for DayHiddenSourceV1 {
             // 发布仍在原锁内完成；先解锁并释放本批回收引用，再锁定当前可领取材料。
             if !retired.0.is_empty() || !retired.1.is_empty() {
                 drop(buffer);
-                measure_stage!(self.stages, CandidateReclaimedDrop, drop(retired));
+                measure_stage!(
+                    self.stages,
+                    CandidateReclaimedDrop,
+                    drop_reclaimed_roots!(self.stages, retired)
+                );
                 #[cfg(feature = "stage-timing")]
                 let lock_started = self
                     .stages
@@ -899,3 +921,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/reclamation_lifecycle.rs"]
+mod reclamation_lifecycle;

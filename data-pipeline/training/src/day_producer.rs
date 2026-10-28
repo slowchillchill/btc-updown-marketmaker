@@ -5,6 +5,7 @@ use data_pipeline_core::{
     pm_reduction::*, public_input::*, public_observation_core::*, public_reduction::*,
 };
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 pub struct DayProducerV1<'a> {
     pub core: PublicObservationCoreV1,
@@ -36,7 +37,8 @@ pub struct DayAppliedV1 {
     pub applied: AppliedIngressV1,
     pub first_canonical_position: u64,
     pub prepared_pm: Option<PreparedPmMessageV1>,
-    pub contexts: BTreeMap<String, PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>,
+    pub contexts:
+        BTreeMap<String, Arc<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>>,
     pub initialization_binding: Option<SourceArtifactBindingV1>,
     pub hidden: Vec<StreamingHiddenBucketV1>,
 }
@@ -454,8 +456,10 @@ impl<'a> DayProducerV1<'a> {
                     if let Some(context) = self.core.prepared_pm_context(&market.condition_id.0) {
                         contexts.insert(market.condition_id.0.clone(), context);
                     }
-                    if let Some(context) = self.core.pm_context(&market.condition_id.0) {
-                        self.hidden.enroll(context)?;
+                    if !self.hidden.has_market(&market.condition_id.0) {
+                        if let Some(context) = self.core.pm_context(&market.condition_id.0) {
+                            self.hidden.enroll(context)?;
+                        }
                     }
                 }
                 match &fact.payload {

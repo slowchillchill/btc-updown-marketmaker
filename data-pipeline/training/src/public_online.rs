@@ -354,8 +354,10 @@ pub struct PublicOnlineMaterialsV1 {
     pub prepared_pm: Option<data_pipeline_core::pm_reduction::PreparedPmMessageV1>,
     pub pm_contexts: BTreeMap<
         String,
-        data_pipeline_core::pm_reduction::PmMarketContextV1<
-            data_pipeline_core::pm_reduction::PreparedPmEvidenceV1<SourceEvidenceRefV3>,
+        Arc<
+            data_pipeline_core::pm_reduction::PmMarketContextV1<
+                data_pipeline_core::pm_reduction::PreparedPmEvidenceV1<SourceEvidenceRefV3>,
+            >,
         >,
     >,
 }

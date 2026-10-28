@@ -203,7 +203,7 @@ pub enum CanonicalMarketFactPayloadV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PublicBusinessPayloadV1 {
-    PolymarketMessage(crate::CanonicalPmMessageV1),
+    PolymarketMessage(std::sync::Arc<crate::CanonicalPmMessageV1>),
     MarketFact {
         market: MarketIdentityV2,
         payload: CanonicalMarketFactPayloadV1,

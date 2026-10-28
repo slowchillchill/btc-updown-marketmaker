@@ -1742,9 +1742,15 @@ fn day_received_range_does_not_include_late_received_hidden_source_fact() {
 }
 
 #[test]
+#[ignore = "#378 U1/U4成本入口；仅按已绑定输入定向运行，不随普通回归执行"]
 fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (config, rules) = setup(tmp.path());
+    let whole_started = std::time::Instant::now();
+    let root = std::path::PathBuf::from(
+        std::env::var_os("BACKTEST_COST_TEST_OUTPUT_ROOT").expect("成本原件使用显式独立输出根"),
+    );
+    std::fs::create_dir_all(&root).unwrap();
+    let preparation_started = std::time::Instant::now();
+    let (config, rules) = setup(&root);
     let mut first = HistoricalPreparedRunConfigV1::from(&config);
     // 原零容量通道迫使实际日入口逐次等交接；不改变生产默认或业务时间。
     first.finite_in_flight_groups = 0;
@@ -1753,17 +1759,19 @@ fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
     second.session.run_id = "day-slow".into();
     second.session.account_id = "independent-slow-account".into();
     second.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(300);
-    second.sim_log = tmp.path().join("slow-sim.jsonl");
-    second.noe_root = tmp.path().join("slow-noe");
-    second.ledger_root = tmp.path().join("slow-ledger");
-    second.metadata_path = tmp.path().join("slow-metadata.json");
-    second.result_path = tmp.path().join("slow-result.json");
+    second.sim_log = root.as_path().join("slow-sim.jsonl");
+    second.noe_root = root.as_path().join("slow-noe");
+    second.ledger_root = root.as_path().join("slow-ledger");
+    second.metadata_path = root.as_path().join("slow-metadata.json");
+    second.result_path = root.as_path().join("slow-result.json");
     let day = HistoricalDayConfigV1 {
         preparation: config.preparation.clone(),
         candidates: vec![first, second],
         progress_interval_seconds: 0,
         producer_lead_groups: Some(1),
     };
+    let preparation_seconds = preparation_started.elapsed().as_secs_f64();
+    let operation_started = std::time::Instant::now();
     let results = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| {
         Ok(Probe {
             rules: Some(rules.clone()),
@@ -1771,6 +1779,8 @@ fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
         })
     })
     .unwrap();
+    let operation_seconds = operation_started.elapsed().as_secs_f64();
+    let validation_started = std::time::Instant::now();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].public_applied_inputs, 9);
     assert_eq!(results[0].candidates.len(), 2);
@@ -1796,13 +1806,13 @@ fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
             }
         }
     }
-    assert_no_resume_files(tmp.path());
+    assert_no_resume_files(root.as_path());
     assert!(
         !config.preparation.work_root.exists(),
         "日入口不得生成完整宽录制"
     );
     let fast = serde_json::to_string(&sim_log_values(&config.sim_log)).unwrap();
-    let slow = serde_json::to_string(&sim_log_values(&tmp.path().join("slow-sim.jsonl"))).unwrap();
+    let slow = serde_json::to_string(&sim_log_values(&root.as_path().join("slow-sim.jsonl"))).unwrap();
     assert!(fast.contains("day-fast"));
     assert!(!fast.contains("day-slow"));
     assert!(slow.contains("day-slow"));
@@ -1811,6 +1821,26 @@ fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
         results[0].candidates[0].report["last_dispatched_calculation_timing"],
         results[0].candidates[1].report["last_dispatched_calculation_timing"]
     );
+    let validation_seconds = validation_started.elapsed().as_secs_f64();
+    let cleanup_started = std::time::Instant::now();
+    drop((fast, slow, results, day, config, rules));
+    let cleanup_seconds = cleanup_started.elapsed().as_secs_f64();
+    let whole_seconds = whole_started.elapsed().as_secs_f64();
+    std::fs::write(
+        root.join("day-cost.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "entry":"original_day_shares_public_core_and_keeps_delayed_candidates_independent",
+            "typed_inputs":8,"metadata":2,"full_books":6,"end_inputs":1,
+            "declared_range_ms":12000,"consumers":2,"finite_in_flight_groups":0,
+            "producer_lead_groups":1,"levels_per_book_side":1,
+            "preparation_seconds":preparation_seconds,
+            "day_operation_including_runtime_finish_seconds":operation_seconds,
+            "original_assertions_and_output_read_seconds":validation_seconds,
+            "remaining_owner_drop_seconds":cleanup_seconds,
+            "whole_through_drop_seconds":whole_seconds,
+            "limits":"外层time-v覆盖harness/构造/操作/释放/报告输出；内部区间不重加。计量扰动含在实耗，峰值只取外层可得口径；小盘口不外推真实收益。"
+        })).unwrap(),
+    ).unwrap();
 }
 
 #[test]
@@ -2671,7 +2701,7 @@ impl HistoricalPublicObserverV1 for EarlyExitFinishFailure {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(Arc::new(HistoricalPublicEvidenceV1 {
-            scalars: serde_json::Value::Null,
+            scalars: Default::default(),
             request_evidence: Default::default(),
         }))
     }

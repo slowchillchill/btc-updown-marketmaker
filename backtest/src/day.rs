@@ -786,6 +786,98 @@ fn comparison_identity(candidate: &HistoricalPreparedRunConfigV1, rules: &Sha256
 mod entry_identity_tests {
     use super::*;
     #[test]
+    fn public_payload_hint_counts_arc_slots_per_item_without_shared_allocation_dedup() {
+        let temporary;
+        let root = if let Some(parent) = std::env::var_os("BACKTEST_COST_TEST_OUTPUT_ROOT") {
+            let root = std::path::PathBuf::from(parent).join("arc-logical-hint");
+            std::fs::create_dir_all(&root).unwrap();
+            root
+        } else {
+            temporary = tempfile::tempdir().unwrap();
+            temporary.path().to_owned()
+        };
+        let (config, _) = crate::test_common::setup(&root);
+        let prepared = crate::prepare_historical_run_v1(&config.preparation).unwrap();
+        let mut source = RecordedPublicGroupSourceV1::open(
+            &prepared.public_root,
+            config.preparation.read_page_rows,
+            config.preparation.max_read_batch_bytes,
+            crate::timing::DeliveryTimes {
+                delays: crate::DelayScheduleV1::Fixed(0),
+                last: None,
+            },
+        )
+        .unwrap();
+        let delivery = source.next().unwrap().unwrap();
+        let mut item = DayPublicDeliveryV1::from(delivery);
+        assert!(!item.delivery.prepared.pm_contexts.is_empty());
+        let values = serde_json::to_value(&item.delivery.prepared.pm_contexts).unwrap();
+        let capacity = item.delivery.prepared.pm_contexts.capacity();
+        let old_hint = public_payload_hint(&item, 37);
+        let contexts = &mut Arc::get_mut(&mut item.delivery.prepared)
+            .expect("正式构造返回的这一准备组尚未交给第二消费者")
+            .pm_contexts;
+        contexts.reserve(4);
+        let extra_slots = contexts.capacity() - capacity;
+        assert!(extra_slots > 0);
+        let slot_bytes = std::mem::size_of_val(&contexts[0]);
+        let new_hint = public_payload_hint(&item, 37);
+        assert_eq!(new_hint - old_hint, (extra_slots * slot_bytes) as u64);
+        assert_eq!(
+            serde_json::to_value(&item.delivery.prepared.pm_contexts).unwrap(),
+            values,
+            "容器扩容不改变正式上下文成员及值"
+        );
+        let second_item = item.clone();
+        assert!(Arc::ptr_eq(
+            &item.delivery.prepared,
+            &second_item.delivery.prepared
+        ));
+        assert_eq!(public_payload_hint(&second_item, 37), new_hint);
+        assert_eq!(public_payload_hint(&item, 0) + 37, new_hint);
+        let pm_delivery = loop {
+            let delivery = source.next().unwrap().expect("正式原件包含PM消息");
+            if !delivery.prepared.pm_inputs.is_empty() {
+                break delivery;
+            }
+        };
+        let mut item = DayPublicDeliveryV1::from(pm_delivery);
+        let prepared = &item.delivery.prepared;
+        let original = prepared.pm_inputs[0].1.message();
+        let shared = prepared
+            .group
+            .records
+            .iter()
+            .find_map(|fact| match &fact.payload {
+                PublicBusinessPayloadV1::PolymarketMessage(message) => Some(message),
+                _ => None,
+            })
+            .unwrap();
+        assert!(std::ptr::eq(original, shared.as_ref()));
+        assert_eq!(original, shared.as_ref());
+        let values = serde_json::to_value(&prepared.group).unwrap();
+        let capacity = prepared.pm_inputs.capacity();
+        let old_hint = public_payload_hint(&item, 37);
+        let inputs = &mut Arc::get_mut(&mut item.delivery.prepared).unwrap().pm_inputs;
+        inputs.reserve(4);
+        let extra_slots = inputs.capacity() - capacity;
+        let slot_bytes = std::mem::size_of_val(&inputs[0]);
+        assert!(extra_slots > 0);
+        assert_eq!(
+            public_payload_hint(&item, 37) - old_hint,
+            (extra_slots * slot_bytes) as u64,
+        );
+        assert_eq!(
+            serde_json::to_value(&item.delivery.prepared.group).unwrap(),
+            values,
+        );
+        assert_eq!(
+            public_payload_hint(&item.clone(), 37),
+            public_payload_hint(&item, 37),
+        );
+    }
+
+    #[test]
     fn identity_distinguishes_policy_and_shape_but_aggregates_dates() {
         let temp = tempfile::tempdir().unwrap();
         let (run, rules) = crate::test_common::setup(temp.path());
@@ -845,12 +937,35 @@ fn public_payload_hint(item: &DayPublicDeliveryV1, source_pm_hint: u64) -> u64 {
         + group.member_input_positions.capacity() * std::mem::size_of::<u64>()
         + prepared.pm_inputs.capacity()
             * std::mem::size_of::<(u64, data_pipeline_core::pm_reduction::PreparedPmMessageV1)>();
+    // 每项逐持有者计Arc指向的已知消息布局；payload动态载荷仍复用原源提示。
+    // 不按指针或跨队列项去重，不把此逻辑口径当物理RSS。
+    known += prepared
+        .pm_inputs
+        .iter()
+        .map(|(_, pm)| std::mem::size_of_val(pm.message()))
+        .sum::<usize>();
+    known += group
+        .records
+        .iter()
+        .filter_map(|fact| match &fact.payload {
+            PublicBusinessPayloadV1::PolymarketMessage(message) => {
+                Some(std::mem::size_of_val(message.as_ref()))
+            }
+            _ => None,
+        })
+        .sum::<usize>();
+    // 每队列项计Arc槽位和已用上下文的已知布局；共享不作跨项去重，不是RSS。
     known += prepared.pm_contexts.capacity()
         * std::mem::size_of::<
-            data_pipeline_core::pm_reduction::PmMarketContextV1<
+            Arc<data_pipeline_core::pm_reduction::PmMarketContextV1<
                 data_pipeline_core::pm_reduction::PreparedPmEvidenceV1<SourceEvidenceRefV3>,
-            >,
-        >();
+            >>,
+        >()
+        + prepared
+            .pm_contexts
+            .iter()
+            .map(|context| std::mem::size_of_val(&**context))
+            .sum::<usize>();
     if let Some((markets, shared)) = group.observations.shared_parts() {
         known += std::mem::size_of_val(&**shared)
             + markets.len() * std::mem::size_of::<MarketObservationSnapshotV1>();

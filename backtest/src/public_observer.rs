@@ -1,10 +1,12 @@
 use crate::MaterialError;
 use contracts::{ClosedBusinessGroupV1, PublicGroupReferenceV1, PublicObservationRequirementsV1};
 use std::{collections::BTreeMap, sync::Arc};
+/// 原市场键到必要研究标量的持久映射；冻结组共享未变化节点。
+pub type HistoricalPublicScalarsV1 = imbl::OrdMap<String, serde_json::Value>;
 /// 标量随原公开组运输；逐档明细按市场共享，仅真实请求消费。
 #[derive(Debug)]
 pub struct HistoricalPublicEvidenceV1 {
-    pub scalars: serde_json::Value,
+    pub scalars: HistoricalPublicScalarsV1,
     pub request_evidence: BTreeMap<String, Arc<dyn HistoricalRequestEvidenceV1>>,
 }
 /// 显式研究消费者；与策略需求求并集，不改变其权重或业务状态。

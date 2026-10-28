@@ -25,3 +25,7 @@ mod learning;
 pub use learning::*;
 
 pub mod paper_strategy;
+
+#[cfg(test)]
+#[path = "../tests/support/observation_scaling.rs"]
+mod observation_scaling;

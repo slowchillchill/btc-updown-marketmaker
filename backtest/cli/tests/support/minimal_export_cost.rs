@@ -14,7 +14,7 @@ impl HistoricalPublicObserverV1 for FullNoop {
         _: &ClosedBusinessGroupV1,
     ) -> Result<Arc<HistoricalPublicEvidenceV1>, MaterialError> {
         Ok(Arc::new(HistoricalPublicEvidenceV1 {
-            scalars: json!({}),
+            scalars: Default::default(),
             request_evidence: Default::default(),
         }))
     }

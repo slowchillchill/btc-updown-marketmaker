@@ -511,7 +511,7 @@ mod observation_pool {
             reference: PublicGroupReferenceV1,
             group: Group,
             pm_inputs: Vec<(u64, CanonicalPmMessageV1)>,
-            pm_contexts: Vec<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>,
+            pm_contexts: Vec<Arc<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>>,
             delivered_at_utc_ms: i64,
         }
         #[derive(Serialize, Deserialize)]

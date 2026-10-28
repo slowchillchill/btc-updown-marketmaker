@@ -136,14 +136,17 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         self.markets.len()
     }
     pub(crate) fn observe_market(&mut self, rules: &Arc<PublicTradingRuleContextV1>) -> bool {
-        if let std::collections::btree_map::Entry::Vacant(entry) =
+        let first = if let std::collections::btree_map::Entry::Vacant(entry) =
             self.markets.entry(rules.market.condition_id.0.clone())
         {
             entry.insert(rules.clone());
             true
         } else {
             false
-        }
+        };
+        #[cfg(test)]
+        crate::observation_scaling::registered(first);
+        first
     }
     pub(crate) fn action_snapshot_with_orders(&self, retained: &BTreeSet<Identity>) -> Self {
         let mut orders: BTreeMap<_, _> = self

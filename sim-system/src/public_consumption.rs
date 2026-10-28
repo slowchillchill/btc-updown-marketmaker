@@ -121,7 +121,7 @@ pub struct PreparedPublicGroupV1 {
     pub reference: PublicGroupReferenceV1,
     pub group: Arc<ClosedBusinessGroupV1>,
     pub pm_inputs: Vec<(u64, PreparedPmMessageV1)>,
-    pub pm_contexts: Vec<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>,
+    pub pm_contexts: Vec<Arc<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>>,
 }
 #[cfg(any(test, feature = "public-consumption"))]
 impl PreparedPublicGroupV1 {
@@ -167,7 +167,8 @@ fn prepare_public_groups(
     prepared_pm: &mut Option<PreparedPmMessageV1>,
     mut context: impl FnMut(
         &str,
-    ) -> Option<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>,
+    )
+        -> Option<Arc<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>>,
 ) -> Vec<Arc<PreparedPublicGroupV1>> {
     applied
         .closed_groups
@@ -1069,7 +1070,7 @@ pub mod checkpoint {
         #[serde(with = "group_observation")]
         group: Arc<ClosedBusinessGroupV1>,
         pm_inputs: Vec<(u64, CanonicalPmMessageV1)>,
-        pm_contexts: Vec<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>,
+        pm_contexts: Vec<Arc<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>>,
     }
     include!("public_consumption_checkpoint.rs");
     use observation_pool::group as group_observation;
@@ -1155,5 +1156,28 @@ impl HiddenBucketCheckpointV1 {
             reference: self.reference,
             records: self.records,
         }
+    }
+}
+
+/// 仅 measurement 构建的选帧累计计量；不保存行情或账户副本。
+#[cfg(feature = "measurement")]
+pub mod observation_diagnostics {
+    use serde::Serialize;
+    #[derive(Default, Serialize)]
+    pub struct Work {
+        pub calls: u64,
+        pub frames: u64,
+        pub get_market_calls: u64,
+        pub selection_ns: u128,
+        pub get_market_ns: u128,
+        pub statistics_ns: u128,
+        pub frame_fields_ns: u128,
+    }
+    thread_local! { static WORK: std::cell::RefCell<Work> = std::cell::RefCell::new(Work::default()); }
+    pub(crate) fn add(f: impl FnOnce(&mut Work)) {
+        WORK.with(|w| f(&mut w.borrow_mut()));
+    }
+    pub fn take() -> Work {
+        WORK.with(|w| std::mem::take(&mut *w.borrow_mut()))
     }
 }

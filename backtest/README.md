@@ -211,6 +211,8 @@ D-0311/D-0312 下的 `run_historical_days_v1` 接收 `HistoricalDayConfigV1` 日
 
 `stage-timing` 特性沿原整点和结束输出累计计时，保留原业务阶段。新增运输诊断由进程启动时的 `BACKTEST_TRANSPORT_DIAGNOSTICS=1` 独立启用；默认跳过其读钟、计数和运输日志，原业务计时和进度继续工作。预算在每个原事件边界检查唯一原子标记；真实已返回游标只在补货、等待等交接边界发布。公开数据、隐藏数据和生产控制分别通知，结束及失败通知全部等待者。生产循环在正常结束、预算停止或失败时，输出公共生产的解码、准备、Core、物化和隐藏归约累计计时，以及深度状态大小。各线程的包含耗时不能相加当墙钟；这些数值不参与业务准入。短夹具成本不代表完整研究速度。
 
+运输诊断中的 `candidate_public_transport:<index>`、`candidate_hidden_transport:<index>` 表示触发领取的入口；`candidate_finish_transport:<index>:<run_id>` 单列候选收尾。三个入口的 `candidate_reclaimed_drop_outside_lock` 都表示同一非空退休元组的完整释放区间。其两个子区间 `candidate_reclaimed_public_roots_drop_outside_lock`、`candidate_reclaimed_hidden_roots_drop_outside_lock` 分别表示公共、hidden 根 Vec 的释放，顺序仍为公共先、hidden 后。子区间 `count` 是根集合释放调用次数；同一非空元组中的某一集合可以为空，不能将此次数当 payload 数。`diagnostics.reclaimed_public`、`reclaimed_hidden` 是对应入口退休的根元素数，不能当内部节点数或最后析构数。子区间嵌套在原混合区间，不相加；运输逐个非空元组全计，与生产者的 `*_sampled` 每64次采样分开。其它缓存或冻结引用可能继续保活 payload，这些数值不能证明根释放就是最终销毁，也不能直接当净节省墙钟。未启运输诊断时不增加这些分类读钟、计数或输出；没有队列、线程、allocator 或生命周期政策调整。
+
 有限宿主在运行装配后、首条公共输入前，开启原记录器的逐次交接等待。每次尚未成功的 SIM 提交遇到原通道暂满时，只等待已有待交接组；不重试已成功的关闭、观察或经济步骤，不增加容量。后台写入失败仍返回原错误。其他使用原非阻塞调用和外层供料重试的消费者保留原行为；账户角色不用于推导宿主是否允许等待。此项线程调度方式不改变业务身份。
 
 正常范围结束、失败和成功 `StrategyExit` 分别保留原原因。Exit沿原立即结束语义，不追加排空等待。合法日末未闭合订单、持仓、待发送计算和应收不会被强行关闭。SIM日入口显式选择 `SIMDAY01` 紧凑记录：固定版本标识后，每个原接纳组保存一个长度+CBOR帧，组顺序、输入序号、关闭依据和取消命中保持。头部保存原RunOpened及公共流、消费时序、隐藏输入集合和排序绑定；高频公共／隐藏记录保存真实驱动时刻及原输入／组／桶位置。独立重放须从原Parquet、初始化和同版本公共模块重建组ID、桶事实及PM派生材料，读取类型明确表示这一要求。请求、市场登记、结算和其他控制仍保留完整原业务载荷，NOE的 `#input` 关联不变。
@@ -440,6 +442,10 @@ python3 backtest/scripts/read_minimal_research.py <public-N.jsonl> <candidate-I-
 运行结束或已有整点输出；公共观察阶段嵌套于原生产交付阶段，不能重复相加或跨候选相加当墙钟。
 进度由 `--progress-interval-seconds` 控制，工作总量或剩余时间未知时沿原输出标为未知。
 
+连续库存公共证据沿原共享市场快照比较持久映射的变化，只重新投影新增或变化市场；完整投影相等时沿用原版本。市场消失只移除当前引用，历史投影保留，再现且投影相同可复用历史版本。共同输入变化不重复写未变 PM。共享与非共享输入切换走完整后备；候选只编码本次实际评估市场的引用，慢消费者已冻结的旧引用保持不变。共享树比较最坏仍可能遍历全部市场，不承诺常数耗时。
+
+同一冻结公共统计前缀在同一精确查询时点，共用原 momentum 与 spot variance 结果。缓存只保存最近一个共同查询时点；交错时点可以重新计算，新接纳前缀使用独立缓存。原窗口、累加顺序、单市场统计、未知值和纯查询语义保持。观察选择仅在本次调用借用市场 ID，由原 driver 合并当前市场及 Ledger、订单和承诺中的真实责任；不缓存账户帧，也不因闭市删除旧义务。有限组件测量与合成链只说明相应输入成本，完整研究耗时另由获批研究运行判断。
+
 ## 连续零账户公共观察
 
 独立研究消费入口为 `export_public_continuous`，详见[启动配置、字段映射与中断限制](continuous-public-export.md)。
@@ -472,3 +478,5 @@ D-0367 的公共环境适配复用上述原 Parquet 日供料及泛型策略入�
 持续库存的 `--strategy.extra_quote_space_ticks <整数>` 沿正式参数覆盖进入实际候选，JSON/TOML缺省为0，表示域0..=4294967295。完整生效配置始终输出该值。0对应原v1，正值对应 `candidate_v2_continuous_inventory_quote_space`；显式声明的候选版本须同步，不能将旧结果重标。报价及诊断half_spread语义见[持续库存接口](../baseline-mm/docs/strategies/continuous-inventory-v1.md#d-0380-共同额外报价空间)。
 
 持续库存的 `--strategy.enable_ordinary_active_replenishment true|false` 通过原Bool参数解析进入正式候选，缺省true；false使用 `candidate_v3_continuous_inventory_no_active_replenishment`，合法w>0也接受。完整生效配置含40个叶字段。实际抑制的同次原量见证沿原紧凑定义输出，空意图calculation仍保留；null不能作为全程无抑制的证明。字段与双坐标消费见[持续库存接口](../baseline-mm/docs/strategies/continuous-inventory-v1.md#d-0381-普通active补量开关)。
+
+公共PM固定上下文从`PmOwnedStateV1`原owner开始由`Arc`共享，沿day/online、prepared组及首次SIM证据状态传递；每组市场成员、排序及实际上下文值保持。`context()`仍借值，`pm_context()`的真实拥有型投影保留。当前盘口/tick继续由原运行状态归约，不按市场ID回填旧组。core、PreparedGroup和池化DeliveryBatch checkpoint沿原字段/值序列化；恢复不保证重建原共享指针拓扑，也不建立intern表。共享只减少这条固定上下文链的重复深复制，不改变Hub/64批/等待背压、安全前沿、退休或锁外释放策略，不据人工clone/drop计时宣称真实运行净收益。

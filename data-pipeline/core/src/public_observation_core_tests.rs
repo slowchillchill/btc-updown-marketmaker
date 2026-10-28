@@ -25,7 +25,7 @@ fn market() -> MarketIdentityV2 {
         },
     }
 }
-fn metadata_snapshot_row() -> PolymarketMarketMetadataRow {
+pub(crate) fn metadata_snapshot_row() -> PolymarketMarketMetadataRow {
     let payload = r#"{"orderPriceMinTickSize":"0.01"}"#.to_owned();
     let payload_sha256 = format!("{:x}", Sha256::digest(payload.as_bytes()));
     PolymarketMarketMetadataRow {
@@ -250,7 +250,7 @@ fn level(price: &str, quantity: &str) -> DepthLevel {
         quantity: quantity.to_owned(),
     }
 }
-fn snapshot(epoch: &str, last_update_id: u64, admission_sequence: u64) -> BinanceDepthSnapshotRow {
+pub(crate) fn snapshot(epoch: &str, last_update_id: u64, admission_sequence: u64) -> BinanceDepthSnapshotRow {
     BinanceDepthSnapshotRow {
         timestamp_received: 2_000 + admission_sequence as i64,
         snapshot_fetch_start_utc: 900,
@@ -271,7 +271,7 @@ fn snapshot(epoch: &str, last_update_id: u64, admission_sequence: u64) -> Binanc
         schema_version: "binance_depth_snapshot_v3".to_owned(),
     }
 }
-fn update(
+pub(crate) fn update(
     epoch: &str,
     first_update_id: u64,
     final_update_id: u64,
@@ -402,7 +402,7 @@ fn twap_input(window_s: u64) -> crate::public_input::PolymarketRtdsChainlinkTwap
     }
 }
 
-fn core() -> PublicObservationCoreV1 {
+pub(crate) fn core() -> PublicObservationCoreV1 {
     PublicObservationCoreV1::new(PublicInputStreamHeaderV1 {
         input_stream_id: "core-test".to_owned(),
         canonical_rule_version: "rule-v1".to_owned(),
@@ -414,7 +414,7 @@ fn core() -> PublicObservationCoreV1 {
     })
     .unwrap()
 }
-fn record(position: u64, row: TypedRawRowV2) -> RecordedIngressV1 {
+pub(crate) fn record(position: u64, row: TypedRawRowV2) -> RecordedIngressV1 {
     let source_evidence = source_evidence_v3_from_typed_raw_v2(&row).unwrap();
     RecordedIngressV1 {
         input_stream_id: "core-test".to_owned(),
@@ -3033,4 +3033,109 @@ fn recording_counts_skip_observation_projection_and_preserve_core_state() {
     };
     // 切回正常入口后完整观察与未知状态、深度和证据仍逐字段相同。
     assert_eq!(push(&mut full, &end), push(&mut recording, &end));
+}
+
+#[test]
+fn shared_pm_message_keeps_owned_wire_values_old_groups_and_releases_with_owners() {
+    let mut core = core();
+    push(&mut core, &meta(0));
+    let inputs = [
+        pm(1, 1, 21_000, book("100")),
+        pm(
+            2,
+            2,
+            21_001,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![change(Some("80")), change(Some("100"))],
+            },
+        ),
+        pm(3, 3, 21_002, book("150")),
+    ];
+    let mut groups = Vec::new();
+    let mut weak = Vec::new();
+    let mut first_value = None;
+    for input in &inputs {
+        if let Some(root) = std::env::var_os("BACKTEST_COST_TEST_OUTPUT_ROOT") {
+            let root = std::path::PathBuf::from(root);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(
+                root.join(format!("pm-sharing-input-{}.json", input.input_position)),
+                serde_json::to_vec_pretty(input).unwrap(),
+            )
+            .unwrap();
+        }
+        let ids = BTreeMap::new();
+        let prepared = prepare_public_ingress_v1(&core, input, &ids, &[]).unwrap();
+        let PreparedCanonicalInputV1::PolymarketMessage(message) = &prepared.current else {
+            panic!("原合法PM构造");
+        };
+        let cloned: crate::pm_reduction::PreparedPmMessageV1 = message.clone();
+        assert!(std::ptr::eq(message.message(), cloned.message()));
+        assert_eq!(
+            serde_json::to_vec(&cloned).unwrap(),
+            serde_json::to_vec(message.message()).unwrap()
+        );
+        let applied = core.push(&prepared).unwrap().applied;
+        assert_eq!(applied.closed_groups.len(), 1);
+        let group = applied.closed_groups[0].clone();
+        let payload = &group.records[0].payload;
+        let PublicBusinessPayloadV1::PolymarketMessage(shared) = payload else {
+            panic!("公共组保留完整PM消息");
+        };
+        assert!(std::ptr::eq(shared.as_ref(), message.message()));
+        assert_eq!(shared.as_ref(), message.message());
+        let legacy = CanonicalEventRecordV2::PolymarketMessage(message.message().clone());
+        let old_json = serde_json::to_vec(&legacy).unwrap();
+        assert_eq!(serde_json::to_vec(payload).unwrap(), old_json);
+        assert_eq!(
+            serde_json::from_slice::<PublicBusinessPayloadV1>(&old_json).unwrap(),
+            *payload
+        );
+        let mut old_cbor = Vec::new();
+        ciborium::into_writer(&legacy, &mut old_cbor).unwrap();
+        let mut current_cbor = Vec::new();
+        ciborium::into_writer(payload, &mut current_cbor).unwrap();
+        assert_eq!(current_cbor, old_cbor);
+        let restored: PublicBusinessPayloadV1 = ciborium::from_reader(old_cbor.as_slice()).unwrap();
+        assert_eq!(restored, *payload);
+        if groups.is_empty() {
+            first_value = Some(serde_json::to_value(&group).unwrap());
+        }
+        weak.push(Arc::downgrade(shared));
+        groups.push(group);
+    }
+    assert_eq!(
+        serde_json::to_value(&groups[0]).unwrap(),
+        first_value.unwrap()
+    );
+    for (index, expected) in [(0, vec!["100"]), (1, vec!["80", "100"]), (2, vec!["150"])] {
+        let PublicBusinessPayloadV1::PolymarketMessage(message) = &groups[index].records[0].payload
+        else {
+            unreachable!();
+        };
+        let quantities = match &message.payload {
+            CanonicalPmPayloadV1::Book {
+                fact: CanonicalBookFactV1::FullBook { bids, .. },
+            } => bids
+                .iter()
+                .map(|l| l.quantity_shares.0.as_str())
+                .collect::<Vec<_>>(),
+            CanonicalPmPayloadV1::Book {
+                fact: CanonicalBookFactV1::AbsoluteLevelChanges { changes },
+            } => changes
+                .iter()
+                .map(|c| c.quantity_shares.as_ref().unwrap().0.as_str())
+                .collect(),
+            _ => unreachable!(),
+        };
+        assert_eq!(quantities, expected);
+        assert_eq!(message.input_record.input_position, index as u64 + 1);
+        assert_eq!(
+            message.time.source_event_at_utc_ms,
+            Some(21_000 + index as i64)
+        );
+    }
+    drop(groups);
+    drop(core);
+    assert!(weak.iter().all(|message| message.upgrade().is_none()));
 }
