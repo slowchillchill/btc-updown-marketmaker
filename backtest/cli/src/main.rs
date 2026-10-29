@@ -139,6 +139,8 @@ fn require_current_rule(run: &serde_json::Value) -> Result<(), CommandError> {
                     | CONTINUOUS_INVENTORY_RULE_VERSION
                     | CONTINUOUS_INVENTORY_QUOTE_SPACE_RULE_VERSION
                     | CONTINUOUS_INVENTORY_NO_ACTIVE_REPLENISHMENT_RULE_VERSION
+                    | CONTINUOUS_INVENTORY_PAIR_COMPLETION_RULE_VERSION
+                    | CONTINUOUS_INVENTORY_PAIR_COMPLETION_COST_RULE_VERSION
             )
         ) {
             return Err(format!("策略版本{version}不受当前入口支持；请生成准确版本材料，不能覆盖旧candidate_v1/candidate_v2历史包").into());
@@ -231,6 +233,7 @@ fn load_days_command(mut value: serde_json::Value) -> Result<DaysCommand, Comman
 }
 #[derive(Clone, Copy)]
 enum ParameterType {
+    InventoryOperatingMode,
     PriceReference,
     Decimal,
     U64,
@@ -246,6 +249,11 @@ impl ParameterType {
             Ok(serde_json::to_value(serde_json::from_str::<T>(raw)?)?)
         }
         match self {
+            Self::InventoryOperatingMode => Ok(serde_json::to_value(serde_json::from_value::<
+                ContinuousInventoryOperatingModeV1,
+            >(
+                serde_json::Value::String(raw.into()),
+            )?)?),
             Self::PriceReference => Ok(serde_json::to_value(serde_json::from_value::<
                 InitialPairPriceReferenceV1,
             >(
@@ -263,6 +271,7 @@ impl ParameterType {
 }
 // 原策略字段类型决定覆盖解析，不依赖文件中的占位值或复制策略默认。
 const INVENTORY_PARAMETERS: &[&str] = &[
+    "operating_mode",
     "capacity_shares",
     "inventory_skew_ticks_per_capacity",
     "extra_quote_space_ticks",
@@ -274,6 +283,7 @@ const INVENTORY_PARAMETERS: &[&str] = &[
     "drawdown_fraction",
 ];
 const PARAMETERS: &[(&str, ParameterType)] = &[
+    ("operating_mode", ParameterType::InventoryOperatingMode),
     ("capacity_shares", ParameterType::Decimal),
     ("inventory_skew_ticks_per_capacity", ParameterType::Decimal),
     ("extra_quote_space_ticks", ParameterType::U64),
@@ -642,7 +652,7 @@ fn write_day_failure_json(value: &serde_json::Value) -> std::io::Result<()> {
 async fn main() {
     if std::env::args().any(|arg| arg == "--help") {
         println!(
-            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，每次从头运行，不保存或恢复检查点\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--summary-reserve-seconds <秒>（默认900）\nday可选--entry-market-start-offset-ms <非负毫秒>、--entry-market-end-margin-ms <非负毫秒>：声明输入[S,E)上的S+a≤market.start<E-b；无配置不限制，显式0/0限制；单端沿文件补值后缺值取0。\nday可选--research-evidence-root <新目录>，同次公共生产输出BLB/PM与真实决策，失败返回部分结果。\n公共候选 candidate_v4_public_c0_c1 使用parameters内完整42参数及blb_decrease_veto；--blb-decrease-veto true|false覆盖新候选唯一开关。\n低价候选 candidate_v5_public_low_price 使用parameters内原42参数和initial_pair_low_price_veto；--initial-pair-low-price-veto true|false覆盖唯一开关，固定沿C0不叠BLB。\n连续库存enable_ordinary_active_replenishment缺省true，false使用candidate_v3_continuous_inventory_no_active_replenishment；true时extra_quote_space_ticks缺省/0使用candidate_v1_continuous_inventory，正整数使用candidate_v2_continuous_inventory_quote_space；strategy_id=continuous_inventory；同一day可与candidate_v5_public_low_price/off独立账户对照。新参数含capacity_shares、inventory_skew_ticks_per_capacity、初始现金/投入/风险/回撤、probability_reference及原health/repair；不恢复或重标旧记忆。\n全部策略字段可覆盖（混合day按字段所属候选覆盖，health/repair同时作用）：\n{}",
+            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse|day\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\nday: --config <日期及独立候选 JSON/TOML>；直接原Parquet供料，每次从头运行，不保存或恢复检查点\n--progress-interval-seconds <秒>（默认30，0关闭）\nday可显式启用--research-summary、--wall-budget-seconds <秒>、--summary-reserve-seconds <秒>（默认900）\nday可选--entry-market-start-offset-ms <非负毫秒>、--entry-market-end-margin-ms <非负毫秒>：声明输入[S,E)上的S+a≤market.start<E-b；无配置不限制，显式0/0限制；单端沿文件补值后缺值取0。\nday可选--research-evidence-root <新目录>，同次公共生产输出BLB/PM与真实决策，失败返回部分结果。\n公共候选 candidate_v4_public_c0_c1 使用parameters内完整42参数及blb_decrease_veto；--blb-decrease-veto true|false覆盖新候选唯一开关。\n低价候选 candidate_v5_public_low_price 使用parameters内原42参数和initial_pair_low_price_veto；--initial-pair-low-price-veto true|false覆盖唯一开关，固定沿C0不叠BLB。\n连续库存operating_mode缺省legacy（旧40叶配置保持）；pair_completion使用candidate_v4_continuous_inventory_pair_completion，pair_completion_cost使用candidate_v5_continuous_inventory_pair_completion_cost。新模式保留普通active开关，false仍仅在原稳定位置抑制普通active补量。legacy的enable_ordinary_active_replenishment缺省true，false使用candidate_v3_continuous_inventory_no_active_replenishment；true时extra_quote_space_ticks缺省/0使用candidate_v1_continuous_inventory，正整数使用candidate_v2_continuous_inventory_quote_space；strategy_id=continuous_inventory；同一day可与candidate_v5_public_low_price/off独立账户对照。新参数含capacity_shares、inventory_skew_ticks_per_capacity、初始现金/投入/风险/回撤、probability_reference及原health/repair；不恢复或重标旧记忆。\n全部策略字段可覆盖（混合day按字段所属候选覆盖，health/repair同时作用）：\n{}",
             PARAMETERS
                 .iter()
                 .map(|(field, _)| *field)
@@ -806,6 +816,63 @@ fn print_result<E: std::fmt::Debug>(
 mod tests {
     use super::*;
     #[test]
+    fn inventory_operating_modes_preserve_legacy_and_select_exact_versions() {
+        let text = include_str!(
+            "../../../baseline-mm/configs/strategies/continuous_inventory/adopted-v1.toml"
+        );
+        let legacy = ContinuousInventoryConfigV1::parse_toml(text).unwrap();
+        let original = serde_json::to_value(&legacy).unwrap();
+        assert!(original.get("operating_mode").is_none());
+        for (name, version) in [
+            ("legacy", CONTINUOUS_INVENTORY_RULE_VERSION),
+            (
+                "pair_completion",
+                CONTINUOUS_INVENTORY_PAIR_COMPLETION_RULE_VERSION,
+            ),
+            (
+                "pair_completion_cost",
+                CONTINUOUS_INVENTORY_PAIR_COMPLETION_COST_RULE_VERSION,
+            ),
+        ] {
+            let mut value = original.clone();
+            value["operating_mode"] = ParameterType::InventoryOperatingMode.parse(name).unwrap();
+            let config: ContinuousInventoryConfigV1 = serde_json::from_value(value).unwrap();
+            assert_eq!(config.rule_version(), version);
+            assert_eq!(
+                ContinuousInventoryContinuityV1::new_account_for_config(&config).rule_version,
+                version
+            );
+            require_current_rule(
+                &serde_json::json!({"strategy":{"strategy_rule_version":version}}),
+            )
+            .unwrap();
+            if name == "legacy" {
+                assert_eq!(serde_json::to_value(&config).unwrap(), original);
+            } else {
+                let mut off = config.clone();
+                off.enable_ordinary_active_replenishment = false;
+                off.extra_quote_space_ticks = u32::MAX;
+                assert_eq!(off.rule_version(), version);
+            }
+        }
+        for invalid in ["pair", "true", "1", "PairCompletion"] {
+            assert!(
+                ParameterType::InventoryOperatingMode
+                    .parse(invalid)
+                    .is_err()
+            );
+        }
+        for value in [
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::Value::Null,
+        ] {
+            let mut config = original.clone();
+            config["operating_mode"] = value;
+            assert!(serde_json::from_value::<ContinuousInventoryConfigV1>(config).is_err());
+        }
+    }
+    #[test]
     fn inventory_replenishment_bool_cli_and_version_are_effective() {
         let config = ContinuousInventoryConfigV1::parse_toml(include_str!(
             "../../../baseline-mm/configs/strategies/continuous_inventory/adopted-v1.toml"
@@ -927,13 +994,15 @@ mod tests {
         ))
         .unwrap();
         let value = serde_json::to_value(config).unwrap();
-        let inventory = serde_json::to_value(
+        let mut inventory = serde_json::to_value(
             ContinuousInventoryConfigV1::parse_toml(include_str!(
                 "../../../baseline-mm/configs/strategies/continuous_inventory/adopted-v1.toml"
             ))
             .unwrap(),
         )
         .unwrap();
+        // legacy省略该可选字段；CLI仍必须覆盖新模式的真实序列化字段。
+        inventory["operating_mode"] = serde_json::json!("pair_completion");
         let actual = [&value, &inventory]
             .into_iter()
             .flat_map(|config| {

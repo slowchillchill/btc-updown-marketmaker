@@ -58,6 +58,48 @@ pub(super) fn floor_price(
     let price = book.tick * Decimal::from(index);
     Ok((price > Decimal::ZERO && price < Decimal::ONE).then_some(price))
 }
+/// 普通补腿按正式含费成本、最小量和当前资金/风险共同选择最高合法Maker tick。
+pub(super) fn completion_price(
+    rules: &SealedProcessRuleSnapshotV3,
+    books: &[InventoryBookV1; 2],
+    side: usize,
+    unit_held_cost: &R,
+    maximum_quantity: Decimal,
+    minimum_quantity: Decimal,
+    budget: &R,
+) -> Result<Option<Decimal>, StrategyErrorV1> {
+    let minimum =
+        (minimum_quantity.max(Decimal::new(1, 2)) * Decimal::from(100)).ceil() / Decimal::from(100);
+    if maximum_quantity < minimum {
+        return Ok(None);
+    }
+    let cap = r(Decimal::ONE)
+        .sub(unit_held_cost)
+        .sub(&r(books[0].tick.max(books[1].tick)).mul(&r(Decimal::from(2))));
+    let Some(high_price) = floor_price(&cap, &books[side])? else {
+        return Ok(None);
+    };
+    let high = (high_price / books[side].tick)
+        .to_u128()
+        .ok_or(StrategyErrorV1::Arithmetic("价格索引溢出"))?;
+    let index = maximum(high, |n| {
+        if n == 0 {
+            return Ok(true);
+        }
+        let price = books[side].tick
+            * Decimal::from_u128(n).ok_or(StrategyErrorV1::Arithmetic("价格索引溢出"))?;
+        let cost = limit_cost(rules, minimum, price, &exact(books[side].tick), true)?;
+        Ok(cost <= cap.mul(&r(minimum)) && cost <= *budget)
+    })?;
+    if index == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(
+            books[side].tick
+                * Decimal::from_u128(index).ok_or(StrategyErrorV1::Arithmetic("价格索引溢出"))?,
+        ))
+    }
+}
 pub(super) fn targets(
     books: &[InventoryBookV1; 2],
     difference: Decimal,

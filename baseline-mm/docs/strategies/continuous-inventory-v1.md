@@ -101,3 +101,27 @@ H只含Ledger成功应用孤腿。T含已观察、非最终失败且尚未成功
 `RangeEnd`、`recording_drained`、`pending_noe_records`、`unclosed_commitments`、`observation_cutoff` 与市场结算状态分别读取。自然结束不证明resolution、未来反馈或全部经济最终性完整。end_at后不新增/撮合；SIM不自动在end_at释放所有open。策略仍可按原结束规则发出Cancel，现金须待正式取消反馈应用后释放。结束夹具没有派发该次策略输出，其1955现金仅证明该条件下SIM不会自行释放，不能当作策略真实派发后的现金结论。原合格resolution及结算路径决定取消和兑现。当前A历史经营沿D-0328消费SIM的原`AutoRedeemApplied`，交易侧不发起redeem；真实到账后应收归零，不能继续计作未兑现资产。
 
 进度周期通过CLI明确配置；准备和回放各报实际量及耗时。未知总量/剩余时间保持未知。人工SIGTERM可能没有最终报告或完整尾部，已发布耐久前缀与完整JSON行可按原读取器检查，不能承诺排空、自动续跑或中断后完整经营结果。需要完整结果时使用新输出目录从头运行，真实历史执行须由研究组接收准确包后另行签发。
+
+## D-0386：完成配对优先的独立经营模式
+
+`operating_mode`为单一枚举：`legacy`、`pair_completion`、`pair_completion_cost`。缺省和显式`legacy`在配置与诊断序列化时都省略此字段，原40叶字段、v1/v2/v3选择和行为保持。新模式分别使用`candidate_v4_continuous_inventory_pair_completion`与`candidate_v5_continuous_inventory_pair_completion_cost`，`strategy_id`仍为`continuous_inventory`。新模式先选版本，再由旧开关控制原普通active稳定插点；`false`与任一新模式均合法。研究C/D显式使用`true`，不把旧false候选改名。
+
+配置可在原完整TOML根部增加：
+
+```toml
+operating_mode = "pair_completion_cost" # C为pair_completion；旧模式为legacy或省略
+```
+
+CLI覆盖为`--strategy.operating_mode pair_completion_cost`。文件JSON/TOML与CLI使用同一枚举。两处策略声明、`effective_parameters`、continuity、诊断及元数据都取生效配置的`rule_version()`；旧`new_account`仍保持零值v1语义，配置感知调用使用`new_account_for_config`。
+
+H和已有腿本金/历史费仅来自正式Ledger成功应用的未配池；R取原`old_quantity(token)`的全部价位未闭责任。只观察到成交或发出撤单，不提前变成成功H或释放R。原完整请求腿、订单、成交身份去重和Unknown保持，不以T替代所有R，也不新增配对池或按请求轮次的锁。
+
+设K为`capacity_shares`。无已确认未配H时，新等量上界为`min(K,max(0,K−R0),max(0,K−R1))`。即使H0且R>0，仍须经过原normal和EntryMarketScope，共同求合法量，两侧均发或均不发；旧`initial=!state.active()`的诊断含义不改。有未配u>0时，仅缺侧m新增，上界为`min(K,max(0,u−Rm))`。上述量继续经过原现金、逐市场含费投入、最小量和风险流程；已配份数不重复占未配工作容量，但本金/资金不预先释放。
+
+C沿原targets、成本下压和floor_price报价。D只改变普通实际H缺侧补腿：`k=(正式未配本金+已知归属历史费)/u`，`g=2×max(tick0,tick1)`，新增单位含费上限为`1−k−g`。H可有0.01份以下的正式精度，k不得用名义请求份数或取整后的补腿量作分母。历史费只在k中一次，新买入成本仍用正式`limit_buy_cost_v1`，不预用返佣。
+
+D在当前tick、post-only、正量/最小量、现金/投入及风险条件内取最高合法Maker tick。价格上界不再受旧raw或未发送较多侧假设新价封住。最高成本tick不能负担最小量时，仍需查到更低的可行tick；没有合法正量才等待。当前正式post-only即时费为0，不能据此将历史费Unknown补0。新价格流程复用原精确费用函数及单调可行性，没有浮点费用近似。
+
+派发资格保持冻结价格/数量。D普通缺侧还检查两侧tick和正式H/成本/全部责任；依赖改变时原意图失效，不重报价、缩量或替发。restricted、独立held、原有限小亏、健康、回撤终止及旧单维护继续沿原适用路径，普通量0也不会提前跳过取消处理。FAK/`enable_active_repair`仍关闭。
+
+有界验证复用原DPT→SIM→NOE→Ledger和实际receipt。费用场景中的显式Taker setup只用于形成已有非零历史费用，不是C/D策略输出。unit采用原工程健康宽窗、无BTC依赖；其中价格/最低量耦合场景的投入限额为2000，不能冒作研究原1000。正式合成CLI另用完整研究40叶和四独立账户；`research_evidence_root`关闭，必要候选紧凑诊断仍保实际calculation与definition来源双坐标。稀疏合成不证明真实密度、吞吐、盈利或真实运行许可。

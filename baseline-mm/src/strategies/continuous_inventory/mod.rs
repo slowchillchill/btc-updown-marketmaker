@@ -3,7 +3,7 @@ use super::common::*;
 use contracts::{economics::EconomicRational as R, *};
 use ledger::*;
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
+use num_traits::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use shared_run::*;
@@ -27,6 +27,24 @@ pub const CONTINUOUS_INVENTORY_QUOTE_SPACE_RULE_VERSION: &str =
     "candidate_v2_continuous_inventory_quote_space";
 pub const CONTINUOUS_INVENTORY_NO_ACTIVE_REPLENISHMENT_RULE_VERSION: &str =
     "candidate_v3_continuous_inventory_no_active_replenishment";
+pub const CONTINUOUS_INVENTORY_PAIR_COMPLETION_RULE_VERSION: &str =
+    "candidate_v4_continuous_inventory_pair_completion";
+pub const CONTINUOUS_INVENTORY_PAIR_COMPLETION_COST_RULE_VERSION: &str =
+    "candidate_v5_continuous_inventory_pair_completion_cost";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuousInventoryOperatingModeV1 {
+    #[default]
+    Legacy,
+    PairCompletion,
+    PairCompletionCost,
+}
+impl ContinuousInventoryOperatingModeV1 {
+    fn is_legacy(&self) -> bool {
+        *self == Self::Legacy
+    }
+}
 
 fn ordinary_active_replenishment_default() -> bool {
     true
@@ -35,6 +53,11 @@ fn ordinary_active_replenishment_default() -> bool {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContinuousInventoryConfigV1 {
+    #[serde(
+        default,
+        skip_serializing_if = "ContinuousInventoryOperatingModeV1::is_legacy"
+    )]
+    pub operating_mode: ContinuousInventoryOperatingModeV1,
     pub health: SourceHealthConfigV1,
     pub probability_reference: ProbabilityConfigV1,
     pub capacity_shares: Decimal,
@@ -54,6 +77,15 @@ pub struct ContinuousInventoryConfigV1 {
 }
 impl ContinuousInventoryConfigV1 {
     pub fn rule_version(&self) -> &'static str {
+        match self.operating_mode {
+            ContinuousInventoryOperatingModeV1::PairCompletion => {
+                return CONTINUOUS_INVENTORY_PAIR_COMPLETION_RULE_VERSION;
+            }
+            ContinuousInventoryOperatingModeV1::PairCompletionCost => {
+                return CONTINUOUS_INVENTORY_PAIR_COMPLETION_COST_RULE_VERSION;
+            }
+            ContinuousInventoryOperatingModeV1::Legacy => {}
+        }
         if !self.enable_ordinary_active_replenishment {
             CONTINUOUS_INVENTORY_NO_ACTIVE_REPLENISHMENT_RULE_VERSION
         } else if self.extra_quote_space_ticks == 0 {
@@ -157,6 +189,11 @@ pub struct InventoryReservationDependencyV1 {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContinuousInventoryDiagnosticV1 {
     pub strategy_id: String,
+    #[serde(
+        default,
+        skip_serializing_if = "ContinuousInventoryOperatingModeV1::is_legacy"
+    )]
+    pub operating_mode: ContinuousInventoryOperatingModeV1,
     #[serde(default = "ordinary_active_replenishment_default")]
     pub enable_ordinary_active_replenishment: bool,
     pub rule_version: String,
@@ -317,6 +354,7 @@ impl ContinuousInventoryV1 {
         self.continuity.high_water_pusd = high.public();
         let mut diagnostic = ContinuousInventoryDiagnosticV1 {
             strategy_id: CONTINUOUS_INVENTORY_STRATEGY_ID.into(),
+            operating_mode: self.config.operating_mode,
             enable_ordinary_active_replenishment: self.config.enable_ordinary_active_replenishment,
             rule_version: self.config.rule_version().into(),
             risk_equity: match &equity {
@@ -524,6 +562,26 @@ impl ContinuousInventoryV1 {
                 d.books = Some(books.clone());
                 let allowance = self.loss_allowance(o, state, now)?;
                 let orphan_cost = state.principal.add(&state.fee);
+                let over_limit = state.market_exposure()
+                    > r(self.config.per_market_orphan_limit_pusd)
+                    || account_exposure > r(self.config.account_orphan_limit_pusd);
+                let restricted = !normal || over_limit;
+                let completion = !self.config.operating_mode.is_legacy();
+                let equal_pair = if completion {
+                    state.h.iter().all(|h| *h == Decimal::ZERO)
+                } else {
+                    d.initial
+                };
+                let normal_limit = r(self.config.per_market_orphan_limit_pusd).min(
+                    r(self.config.account_orphan_limit_pusd)
+                        .sub(&account_exposure.sub(&state.market_exposure())),
+                );
+                let budget = r(cash).min(
+                    r(self.config.market_investment_limit_pusd)
+                        .sub(&state.investment)
+                        .max(R::zero()),
+                );
+                let minimum = decimal(&frame.rule_context().limit_min_quantity_shares)?;
                 // 成本下压先于最终价容量；利润价格支撑分母固定为 capacity，而不是后续补量。
                 for side in 0..2 {
                     if state.h[1 - side] > Decimal::ZERO {
@@ -535,10 +593,30 @@ impl ContinuousInventoryV1 {
                         raw[side] = raw[side].clone().min(cap);
                     }
                 }
-                let prices = [
+                let mut prices = [
                     floor_price(&raw[0], &books[0])?,
                     floor_price(&raw[1], &books[1])?,
                 ];
+                if !restricted
+                    && self.config.operating_mode
+                        == ContinuousInventoryOperatingModeV1::PairCompletionCost
+                    && let Some(held) = state.h.iter().position(|h| *h > Decimal::ZERO)
+                {
+                    let side = 1 - held;
+                    prices[side] = completion_price(
+                        &self.rules,
+                        &books,
+                        side,
+                        &orphan_cost.divided_by(&r(state.h[held])),
+                        self.config.capacity_shares.min(
+                            (state.h[held] - state.old_quantity(&tokens[side])).max(Decimal::ZERO),
+                        ),
+                        minimum,
+                        &budget
+                            .clone()
+                            .min(normal_limit.sub(&state.exposure[side]).max(R::zero())),
+                    )?;
+                }
                 d.prices = prices.map(|p| p.map(exact));
                 let coverage: [Decimal; 2] = std::array::from_fn(|i| {
                     prices[i].map_or(Decimal::ZERO, |p| state.coverage(&tokens[i], p))
@@ -547,10 +625,6 @@ impl ContinuousInventoryV1 {
                     coverage.map(|c| (self.config.capacity_shares - c).max(Decimal::ZERO));
                 d.coverage = coverage.map(exact);
                 d.deficit = deficits.map(exact);
-                let over_limit = state.market_exposure()
-                    > r(self.config.per_market_orphan_limit_pusd)
-                    || account_exposure > r(self.config.account_orphan_limit_pusd);
-                let restricted = !normal || over_limit;
                 // 受限责任仅允许实际 H 的独立降险。T 和 E 都不能借作成功成本池。
                 let mut repair_side = None;
                 if restricted && trading && !state.unknown {
@@ -569,10 +643,6 @@ impl ContinuousInventoryV1 {
                     }
                 }
                 let mut a = [0u128; 2];
-                let normal_limit = r(self.config.per_market_orphan_limit_pusd).min(
-                    r(self.config.account_orphan_limit_pusd)
-                        .sub(&account_exposure.sub(&state.market_exposure())),
-                );
                 for side in 0..2 {
                     let Some(price) = prices[side] else {
                         continue;
@@ -586,6 +656,15 @@ impl ContinuousInventoryV1 {
                         } else {
                             Decimal::ZERO
                         }
+                    } else if completion {
+                        self.config.capacity_shares.min(
+                            ((if equal_pair {
+                                self.config.capacity_shares
+                            } else {
+                                state.h[1 - side]
+                            }) - state.old_quantity(&tokens[side]))
+                            .max(Decimal::ZERO),
+                        )
                     } else {
                         deficits[side]
                     };
@@ -601,16 +680,11 @@ impl ContinuousInventoryV1 {
                         Ok(restricted || cost <= space)
                     })?;
                 }
-                if d.initial {
+                if equal_pair {
                     let equal = a[0].min(a[1]);
                     a = [equal; 2];
                 }
                 d.risk_quantities = [exact(shares(a[0])?), exact(shares(a[1])?)];
-                let budget = r(cash).min(
-                    r(self.config.market_investment_limit_pusd)
-                        .sub(&state.investment)
-                        .max(R::zero()),
-                );
                 let future_gap = std::array::from_fn::<_, 2, _>(|side| {
                     (state.h[1 - side] - state.old_quantity(&tokens[side])).max(Decimal::ZERO)
                 });
@@ -639,13 +713,12 @@ impl ContinuousInventoryV1 {
                     Ok(cost[0].add(&cost[1]).add(&future) <= budget)
                 };
                 let mut q = highest_vector(a, feasible)?;
-                let minimum = decimal(&frame.rule_context().limit_min_quantity_shares)?;
                 for side in 0..2 {
                     if shares(q[side])? < minimum {
                         q[side] = 0;
                     }
                 }
-                if d.initial && q.contains(&0) {
+                if equal_pair && q.contains(&0) {
                     q = [0, 0];
                 }
                 if !feasible(q)? {
