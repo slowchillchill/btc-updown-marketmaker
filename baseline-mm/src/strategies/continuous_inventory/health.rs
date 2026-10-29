@@ -381,6 +381,29 @@ impl ContinuousInventoryV1 {
         if matches!(public, IntentQualificationV1::Invalidated(_)) {
             return Ok(public);
         }
+        if self.config.operating_mode == ContinuousInventoryOperatingModeV1::PairCompletionCost
+            && dependency.independent_held_token.is_none()
+            && let Some(original) = diagnostics
+                .markets
+                .iter()
+                .find(|m| m.condition_id == dependency.condition_id)
+            && original
+                .h
+                .iter()
+                .any(|h| decimal(h).is_ok_and(|h| h > Decimal::ZERO))
+        {
+            let Some(assets) = pair_assets(frame.observation) else {
+                return Ok(invalid("materialized_book_unavailable", vec![]));
+            };
+            let Some(old_books) = &original.books else {
+                return Ok(invalid("materialized_book_unavailable", vec![]));
+            };
+            for side in 0..2 {
+                if book(assets[side])?.is_none_or(|b| b.tick != old_books[side].tick) {
+                    return Ok(invalid("pair_completion_ticks_changed", vec![]));
+                }
+            }
+        }
         let (_, equity) = input.action_before.profit_and_equity();
         if dependency.independent_held_token.is_none()
             && !matches!(&equity, ExecutionReadValueV1::Known(_))
@@ -469,6 +492,68 @@ impl ContinuousInventoryV1 {
                 || obligations != original.obligations
             {
                 return Ok(invalid("action_business_facts_changed", vec![]));
+            }
+            if self.config.operating_mode == ContinuousInventoryOperatingModeV1::PairCompletionCost
+                && dependency.independent_held_token.is_none()
+                && original.condition_id == dependency.condition_id
+                && let Some(held) = current.h.iter().position(|h| *h > Decimal::ZERO)
+            {
+                let Some(market) = diagnostics
+                    .markets
+                    .iter()
+                    .find(|m| m.condition_id == original.condition_id)
+                else {
+                    return Ok(invalid("action_dependency_unavailable", vec![]));
+                };
+                let Some(books) = &market.books else {
+                    return Ok(invalid("materialized_book_unavailable", vec![]));
+                };
+                let cap = r(Decimal::ONE)
+                    .sub(
+                        &current
+                            .principal
+                            .add(&current.fee)
+                            .divided_by(&r(current.h[held])),
+                    )
+                    .sub(&r(books[0].tick.max(books[1].tick)).mul(&r(Decimal::from(2))));
+                if current.unknown {
+                    return Ok(invalid("account_obligation_unknown", vec![]));
+                }
+                for ordinal in 0..2 {
+                    if let Some((_, leg)) = limit_leg(&item.intent, ordinal) {
+                        let BuyOrderIntentV1::GtcLimit {
+                            limit_price_pusd_per_share: price,
+                            size_shares: quantity,
+                            ..
+                        } = leg.order
+                        else {
+                            return Ok(invalid("maker_order_required", vec![]));
+                        };
+                        let side = 1 - held;
+                        let remaining = obligations
+                            .iter()
+                            .filter(|o| o.token_id.as_ref() == Some(&original.tokens[side]))
+                            .try_fold(Decimal::ZERO, |sum, o| {
+                                known(&o.quantity).map_or(Ok(sum), |q| decimal(q).map(|q| sum + q))
+                            })?;
+                        if leg.token_id != original.tokens[side]
+                            || quantity
+                                > self
+                                    .config
+                                    .capacity_shares
+                                    .min((current.h[held] - remaining).max(Decimal::ZERO))
+                            || limit_cost(
+                                &self.rules,
+                                quantity,
+                                price,
+                                &exact(books[side].tick),
+                                true,
+                            )? > cap.mul(&r(quantity))
+                        {
+                            return Ok(invalid("pair_completion_frozen_cost_or_quantity", vec![]));
+                        }
+                    }
+                }
             }
             // 原 owner 的本批资金从当前读取中剔除一次；其余市场/请求的义务必须与冻结相符。
             let mut batch_funds = R::zero();

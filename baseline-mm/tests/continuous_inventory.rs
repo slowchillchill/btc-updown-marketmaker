@@ -444,6 +444,7 @@ struct InventoryFixture {
     rules: std::sync::Arc<SealedProcessRuleSnapshotV3>,
     hidden: RecordedHiddenBucketSourceV1,
     next_hidden: Option<AcceptedHiddenStepBucketV1>,
+    observation: MemoryNoeObservationV4,
 }
 impl InventoryFixture {
     fn new(
@@ -504,7 +505,7 @@ impl InventoryFixture {
         execution
             .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
             .unwrap();
-        let shared = SharedExecutionV2::from_opening(ledger, observation)
+        let shared = SharedExecutionV2::from_opening(ledger, observation.clone())
             .unwrap()
             .unwrap();
         let prepared = data_pipeline_training::hidden_preparation::prepare_hidden_v1(
@@ -557,6 +558,7 @@ impl InventoryFixture {
             rules,
             hidden,
             next_hidden,
+            observation,
         }
     }
     fn detached_calculation(&mut self) -> StrategyCalculationV1<ContinuousInventoryDiagnosticV1> {
@@ -628,6 +630,9 @@ impl InventoryFixture {
         }
     }
 }
+
+#[path = "support/pair_completion.rs"]
+mod pair_completion;
 // 沿正式有限宿主选择公共、隐藏和原义务三者最早时点；本毫秒事件先供完再闭合。
 fn next_combined(
     driver: &mut Driver,

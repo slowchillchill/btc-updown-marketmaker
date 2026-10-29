@@ -1609,3 +1609,514 @@ impl StrategyV1 for NecessaryReadProbe {
         Ok(IntentQualificationV1::Qualified)
     }
 }
+
+// #384 M2独立成本入口：原例/原0-48-863矩阵不变；唯一执行内各构造C/D一份。
+// 不调用历史prepare，不发送32次计算所得建议，所有准备/收尾计入外层。
+fn pair_completion_cost_metadata(
+    i: usize,
+    at: i64,
+    closed: bool,
+    active: bool,
+    sequence: u64,
+) -> TypedRawRowV2 {
+    let TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(mut m)) =
+        metadata(i, at, closed, active)
+    else {
+        unreachable!()
+    };
+    m.collector_admission_sequence = sequence;
+    // 原V5 source_evidence_payload_json是单市场对象；正式tick提取器按此解码。
+    let payload = json!({
+        "id":m.clob_market_id,"conditionId":m.condition_id,"slug":m.slug,
+        "clobTokenIds":m.asset_ids,"market_start_utc":m.market_start_utc,
+        "market_end_utc":m.market_end_utc,"closed":closed,
+        "acceptingOrders":!closed,"orderPriceMinTickSize":"0.01"
+    })
+    .to_string();
+    m.source_evidence_raw_sha256 = Some(hash(payload.as_bytes()));
+    m.source_evidence_payload_json = Some(payload);
+    TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(m))
+}
+fn pair_completion_cost_anchor(at: i64) -> TypedRawRowV2 {
+    let TypedRawRowV2::PolymarketMarketMetadataV6(mut input) = anchor(at) else {
+        unreachable!()
+    };
+    let PolymarketMarketMetadataV6Input::AnchorRule(a) = input.as_mut() else {
+        unreachable!()
+    };
+    let body = json!({
+        "slug":a.slug,"conditionId":a.condition_id,"clobTokenIds":a.asset_ids,
+        "market_start_utc":a.market_start_utc,"market_end_utc":a.market_end_utc,
+        "eventMetadata":{"priceToBeat":"65000"},"twapEnabled":false
+    })
+    .to_string();
+    a.http_request_url = Some(format!(
+        "https://gamma-api.polymarket.com/events/slug/{}",
+        a.slug
+    ));
+    a.http_response_url = a.http_request_url.clone();
+    a.http_status_code = Some(200);
+    a.http_body_encoding = Some("utf8".into());
+    a.http_body_sha256 = Some(hash(body.as_bytes()));
+    a.http_body = Some(body);
+    TypedRawRowV2::PolymarketMarketMetadataV6(input)
+}
+fn pair_completion_cost_material(root: &Path) -> (Material, Vec<u64>) {
+    let mut c = core();
+    c.enable_source_progress();
+    let mut writer =
+        PublicRecordingWriterV1::create_historical(root, c.header(), common::config()).unwrap();
+    let mut position = 0_u64;
+    let mut times = Vec::new();
+    let mut push = |c: &mut PublicObservationCoreV1, row: TypedRawRowV2, at: i64| {
+        let ingress = record(position, row);
+        position += 1;
+        let prepared = prepare_public_ingress_v1(c, &ingress, &BTreeMap::new(), &[]).unwrap();
+        let applied = c.push(&prepared).unwrap().into_owned();
+        let last = applied.applied.closed_groups.last().unwrap().group_position;
+        times.extend(std::iter::repeat_n(
+            at + 2,
+            applied.applied.closed_groups.len(),
+        ));
+        writer.record(ingress, applied).unwrap();
+        last
+    };
+    let mut metadata_sequence = 0;
+    for i in [0, 1, CURRENT] {
+        metadata_sequence += 1;
+        push(
+            &mut c,
+            pair_completion_cost_metadata(i, BASE, false, i != CURRENT, metadata_sequence),
+            BASE,
+        );
+    }
+    push(&mut c, pair_completion_cost_anchor(BASE), BASE);
+    let mut book_sequence = 0;
+    let mut early = 0;
+    for offset in [1000, 2000] {
+        for i in 0..2 {
+            for up in [true, false] {
+                book_sequence += 1;
+                let group = push(
+                    &mut c,
+                    book(i, up, BASE + offset, book_sequence),
+                    BASE + offset,
+                );
+                if offset == 1000 {
+                    early = group;
+                }
+            }
+        }
+    }
+    for i in 0..2 {
+        metadata_sequence += 1;
+        push(
+            &mut c,
+            pair_completion_cost_metadata(i, BASE + 3000, true, true, metadata_sequence),
+            BASE + 3000,
+        );
+    }
+    let mut history = Vec::new();
+    for n in 0..=300 {
+        let at = BASE + 4000 + n * 1000;
+        // 已结束且无责任的48个市场逐步出现；不塞入early首帧。
+        if n < 48 {
+            metadata_sequence += 1;
+            push(
+                &mut c,
+                pair_completion_cost_metadata(n as usize + 2, at, true, true, metadata_sequence),
+                at,
+            );
+        }
+        if n == 296 {
+            metadata_sequence += 1;
+            push(
+                &mut c,
+                pair_completion_cost_metadata(CURRENT, at, false, true, metadata_sequence),
+                at,
+            );
+        }
+        for up in [true, false] {
+            book_sequence += 1;
+            push(&mut c, book(CURRENT, up, at, book_sequence), at);
+        }
+        let mut last = 0;
+        for row in sources(at, n as u64 + 1) {
+            last = push(&mut c, row, at);
+        }
+        history.push(last);
+    }
+    let mut late = Vec::new();
+    for n in 0..32 {
+        let at = BASE + 364000 + n * 1000;
+        for up in [true, false] {
+            book_sequence += 1;
+            push(&mut c, book(CURRENT, up, at, book_sequence), at);
+        }
+        let mut last = 0;
+        for row in sources_with_price(at, 302 + n as u64, "64999".into()) {
+            last = push(&mut c, row, at);
+        }
+        late.push(last);
+    }
+    drop(push);
+    assert_eq!(position, 1395);
+    assert_eq!(metadata_sequence, 54);
+    assert_eq!(book_sequence, 674);
+    assert_eq!(c.fixed_markets().count(), 51);
+    let ingress = fixture_recording::end(position);
+    position += 1;
+    let prepared = prepare_public_ingress_v1(&c, &ingress, &BTreeMap::new(), &[]).unwrap();
+    let applied = c.push(&prepared).unwrap().into_owned();
+    times.extend(std::iter::repeat_n(
+        BASE + 395002,
+        applied.applied.closed_groups.len(),
+    ));
+    writer.record(ingress, applied).unwrap();
+    writer.stabilize().unwrap();
+    assert_eq!(position, 1396);
+    (
+        Material {
+            core: c,
+            times: TradingTimes(times),
+            early,
+            history,
+            follow_up: None,
+        },
+        late,
+    )
+}
+fn pair_completion_cost_config(
+    mode: ContinuousInventoryOperatingModeV1,
+) -> ContinuousInventoryConfigV1 {
+    let config = ContinuousInventoryConfigV1::parse_toml(include_str!(
+        "../configs/strategies/continuous_inventory/adopted-v1.toml"
+    ))
+    .unwrap();
+    let mut value = serde_json::to_value(config).unwrap();
+    for (key, v) in value["health"].as_object_mut().unwrap() {
+        *v = json!(if key.contains("normal") { 0 } else { 1_000_000 });
+    }
+    value["probability_reference"]["binance_innovation_weight"] = json!(0.0);
+    let mut config: ContinuousInventoryConfigV1 = serde_json::from_value(value).unwrap();
+    config.operating_mode = mode;
+    config.extra_quote_space_ticks = 1;
+    config.inventory_skew_ticks_per_capacity = Decimal::ZERO;
+    config
+}
+fn pair_completion_cost_rss() -> serde_json::Value {
+    // 每状态有限边界；没有持续采样。RSS/HWM只是当前测试进程口径。
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    json!(
+        status
+            .lines()
+            .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:"))
+            .collect::<Vec<_>>()
+    )
+}
+fn pair_completion_cost_files(path: &Path) -> (u64, u64) {
+    let mut files = 0;
+    let mut bytes = 0;
+    for item in std::fs::read_dir(path).unwrap() {
+        let item = item.unwrap();
+        let kind = item.file_type().unwrap();
+        if kind.is_dir() {
+            let (n, size) = pair_completion_cost_files(&item.path());
+            files += n;
+            bytes += size;
+        } else {
+            assert!(kind.is_file(), "仅本例自有普通产物");
+            files += 1;
+            bytes += item.metadata().unwrap().len();
+        }
+    }
+    (files, bytes)
+}
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "#384 M2一次有界release成本：C/D各51已见、32固定late；须明确来源/输出，禁止workspace重跑"]
+async fn pair_completion_multimarket_selected_qualification_cost() {
+    use std::io::Write as _;
+    // 仅新M2复用#384已审M1输入；旧host常量和旧结果保持原身份。
+    const M2_RULE_SHA: &str = "60e21a97c1d59fe1d33fdf777dbd2e448653539bc8c13114d3dd7785d833e519";
+    const M2_FINALITY_SHA: &str =
+        "65295a7a83cb2aa5ed612cd48d84675e9798b2da2f5037f4466e2bc5c2159b62";
+    let whole = Instant::now();
+    let root = std::path::PathBuf::from(std::env::var("ISSUE384_COST_ROOT").unwrap());
+    std::fs::create_dir(&root).unwrap();
+    let finality_path = std::env::var("ISSUE185_FINALITY").unwrap();
+    let finality_bytes = std::fs::read(&finality_path).unwrap();
+    assert_eq!(hash(&finality_bytes), M2_FINALITY_SHA);
+    let finality = Arc::new(TradeFinalityPolicyV2::decode_and_seal(&finality_bytes).unwrap());
+    assert_eq!(finality.policy_id(), &Sha256Hex(M2_FINALITY_SHA.into()));
+    let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+        snapshot_path: std::env::var("ISSUE185_RULES").unwrap().into(),
+        expected_file_sha256: Sha256Hex(M2_RULE_SHA.into()),
+        replay_causal_start_utc_ms: BASE,
+    })
+    .unwrap();
+    let mut cells = Vec::new();
+    for (name, mode) in [
+        ("C", ContinuousInventoryOperatingModeV1::PairCompletion),
+        ("D", ContinuousInventoryOperatingModeV1::PairCompletionCost),
+    ] {
+        let state_start = Instant::now();
+        let cell_root = root.join(name);
+        std::fs::create_dir(&cell_root).unwrap();
+        let rss_before = pair_completion_cost_rss();
+        let preparation = Instant::now();
+        let (material, late) = pair_completion_cost_material(&cell_root.join("dpt"));
+        let preparation_ns = preparation.elapsed().as_nanos();
+        let (mut execution, observation) = execution(
+            &cell_root.join("sim.jsonl"),
+            &material.core,
+            rules.clone(),
+            finality.clone(),
+            &format!("issue384-m2-{name}"),
+        );
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(
+            AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
+        );
+        execution
+            .bind_ledger_recording_v2(&mut ledger, &cell_root.join("ledger"))
+            .unwrap();
+        let mut shared = SharedExecutionV2::from_opening(ledger, observation)
+            .unwrap()
+            .unwrap();
+        let mut source = RecordedPublicGroupSourceV1::open(
+            &cell_root.join("dpt"),
+            128,
+            16 << 20,
+            material.times.clone(),
+        )
+        .unwrap();
+        source.enable_source_progress();
+        let mut driver =
+            FinitePublicConsumptionV1::new(execution, source, format!("issue384-m2-{name}"));
+        driver.enable_finite_recording_wait().unwrap();
+        advance(&mut driver, material.early);
+        let early_start = Instant::now();
+        let early = shared
+            .strategy_selected_observation_input(&mut driver, false, &[])
+            .unwrap()
+            .unwrap();
+        let early_ns = early_start.elapsed().as_nanos();
+        let early_value = json!({"selected_markets":early.markets.iter().map(|m|m.observation.market.condition_id.clone()).collect::<Vec<_>>(),"cutoff":early.action_before.cutoff(),"cash":early.action_before.cash_available()});
+        drop(early);
+        let setup = shared
+            .execute_batch_reserved(
+                &mut driver.decision().unwrap(),
+                &[
+                    buy(&rules, 0, "m2-old-h", false),
+                    buy(&rules, 1, "m2-old-r", true),
+                ],
+            )
+            .await
+            .unwrap();
+        let mut setup_receipts = setup;
+        for (n, &group) in material.history.iter().enumerate() {
+            advance(&mut driver, group);
+            shared.apply_closed().unwrap();
+            if n == 299 {
+                let receipts = shared
+                    .execute_batch_reserved(
+                        &mut driver.decision().unwrap(),
+                        &[buy(&rules, CURRENT, "m2-current-h", false)],
+                    )
+                    .await
+                    .unwrap();
+                setup_receipts.extend(receipts);
+            }
+        }
+        assert_eq!(setup_receipts.len(), 3);
+        let config = pair_completion_cost_config(mode);
+        let mut strategy = ContinuousInventoryV1::new(
+            config.clone(),
+            rules.clone(),
+            format!("m2-{name}"),
+            ContinuousInventoryContinuityV1::new_account_for_config(&config),
+        )
+        .unwrap();
+        let mut output = std::io::BufWriter::new(
+            std::fs::File::create(cell_root.join("calculations.jsonl")).unwrap(),
+        );
+        let mut samples = Vec::new();
+        let mut qualification_items = 0_u64;
+        let mut qualification_account_reads = 0_u64;
+        let mut target_qualified = 0;
+        let mut serialized_bytes = 0;
+        for (n, &group) in late.iter().enumerate() {
+            advance(&mut driver, group);
+            let historical = strategy.historical_market_requirements();
+            let selected_start = Instant::now();
+            let input = shared
+                .strategy_selected_observation_input(&mut driver, false, &historical)
+                .unwrap()
+                .unwrap();
+            let selected_ns = selected_start.elapsed().as_nanos();
+            let at = input
+                .action_before
+                .cutoff()
+                .decision_time()
+                .logical_time_utc_ms();
+            assert_eq!(at, BASE + 364002 + n as i64 * 1000);
+            let ids = input
+                .markets
+                .iter()
+                .map(|m| m.observation.market.condition_id.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(ids.len(), 3);
+            for i in [0, 1, CURRENT] {
+                assert!(ids.contains(&ConditionId(condition(i))));
+            }
+            let old = input
+                .action_before
+                .market_economics(&ConditionId(condition(0)))
+                .unwrap();
+            let current = input
+                .action_before
+                .market_economics(&ConditionId(condition(CURRENT)))
+                .unwrap();
+            assert!(old.orphan_shares.iter().any(|q| *q > Decimal::ZERO));
+            assert!(current.orphan_shares.iter().any(|q| *q > Decimal::ZERO));
+            assert!(matches!(&old.orphan_fee, ExecutionReadValueV1::Known(_)));
+            assert!(matches!(
+                &current.orphan_fee,
+                ExecutionReadValueV1::Known(_)
+            ));
+            let old_r_orders = input.action_before.orders().filter(|o|o.condition_id==Some(&ConditionId(condition(1))) && matches!(&o.active_unfilled_shares, ExecutionReadValueV1::Known(q) if Decimal::from_str_exact(&q.0).unwrap()>Decimal::ZERO)).map(|o|json!({"condition_id":o.condition_id,"token_id":o.token_id,"active_unfilled_shares":o.active_unfilled_shares})).collect::<Vec<_>>();
+            let old_r = old_r_orders.len();
+            assert_eq!(old_r, 1);
+            let economic_value = json!({"old_h":old.orphan_shares,"old_principal":old.orphan_principal,"old_fee":old.orphan_fee,"current_h":current.orphan_shares,"current_principal":current.orphan_principal,"current_fee":current.orphan_fee,"old_r_order_count":old_r,"old_r_orders":old_r_orders});
+            let calculate_start = Instant::now();
+            let calculation = input.calculate_borrowed(&mut strategy, at).unwrap();
+            let calculate_ns = calculate_start.elapsed().as_nanos();
+            drop(input);
+            let (diagnostic, intents) = match &calculation.output {
+                StrategyOutputV1::Continue {
+                    diagnostics,
+                    intents,
+                    ..
+                } => (diagnostics, intents),
+                _ => panic!("固定成本前缀不应退出"),
+            };
+            assert!(intents.len() <= 6);
+            let current_d = diagnostic
+                .markets
+                .iter()
+                .find(|m| m.condition_id == ConditionId(condition(CURRENT)))
+                .unwrap();
+            assert!(
+                current_d
+                    .h
+                    .iter()
+                    .any(|q| Decimal::from_str_exact(&q.0).unwrap() > Decimal::ZERO)
+            );
+            let target = intents.iter().position(|intent| matches!(intent.intent.as_ref(), ModelIntentV1::SubmitSingleBuy {condition_id,order} if *condition_id==ConditionId(condition(CURRENT)) && order.token_id==TokenId(token(CURRENT,false)) && matches!(&order.order, BuyOrderIntentV1::GtcLimit {size_shares,post_only:true,..} if *size_shares>Decimal::ZERO)));
+            // 必须实际D正量；当前责任/原价原量和完整资格均在下方核，不用取消项替代。
+            if name == "D" {
+                assert!(target.is_some(), "32固定D目标须正量，不能换前缀补例");
+            }
+            let current_summary = json!({"h":current_d.h,"prices":current_d.prices,"quantities":current_d.quantities,"books":current_d.books,"unavailable":current_d.unavailable,"source_health":current_d.source_health});
+            assert!(!current_d.initial);
+            assert!(current_d.unavailable.is_empty());
+            assert!(
+                current_d
+                    .source_health
+                    .iter()
+                    .all(|s| s.state.failure().is_none()),
+                "按正式可用健康条件，允许Normal/Elevated"
+            );
+            if let Some(index) = target {
+                let request = &intents[index].context.global_request_id;
+                let dependency = diagnostic
+                    .action_dependencies
+                    .iter()
+                    .find(|d| &d.request_id == request)
+                    .unwrap();
+                assert!(
+                    dependency.independent_held_token.is_none(),
+                    "目标须为普通补腿，不能以held修复替代"
+                );
+            }
+            assert!(
+                !diagnostic
+                    .account_dependencies
+                    .iter()
+                    .find(|a| a.condition_id == ConditionId(condition(CURRENT)))
+                    .unwrap()
+                    .unknown
+            );
+            let intent_count = intents.len();
+            let mut required = strategy.historical_market_requirements();
+            required.extend(strategy.calculation_market_requirements(&calculation));
+            let current_start = Instant::now();
+            let frames = shared
+                .strategy_selected_current_observations(&driver, &required)
+                .unwrap();
+            let current_read_ns = current_start.elapsed().as_nanos();
+            let qualify_start = Instant::now();
+            let (invalidated, calls) = shared
+                .revalidate_calculation(&mut strategy, &calculation, &frames, at)
+                .unwrap();
+            let qualify_ns = qualify_start.elapsed().as_nanos();
+            drop(frames);
+            qualification_items += calls;
+            // revalidate_calculation在首个待复核项惰性取得一次账户借用。
+            qualification_account_reads += u64::from(calls != 0);
+            // 先留原值，失败不回收唯一因果材料。
+            let serialize_start = Instant::now();
+            let bytes = serde_json::to_vec(&calculation).unwrap();
+            let serialization_ns = serialize_start.elapsed().as_nanos();
+            output.write_all(&bytes).unwrap();
+            output.write_all(b"\n").unwrap();
+            output.flush().unwrap();
+            serialized_bytes += bytes.len() + 1;
+            let sample = json!({"prefix_index":n,"group_position":group,"at":at,"seen_markets":51,"selected_markets":ids,"economics":economic_value,"current":current_summary,"target_intent_index":target,"intent_count":intent_count,"qualification_items":calls,"invalidated":invalidated.as_ref().map(|x|format!("{x:?}")),"selected_ns":selected_ns,"calculate_ns":calculate_ns,"current_read_ns":current_read_ns,"qualification_ns":qualify_ns,"serialization_ns":serialization_ns,"serialized_bytes":bytes.len()+1});
+            println!("pair_completion_m2_sample {name} {sample}");
+            assert!(invalidated.is_none(), "完整资格提前失效即未覆盖");
+            assert_eq!(calls, intent_count as u64);
+            if target.is_some() {
+                target_qualified += 1;
+            }
+            let drop_start = Instant::now();
+            drop((bytes, calculation));
+            let drop_ns = drop_start.elapsed().as_nanos();
+            let empty_start = Instant::now();
+            std::hint::black_box(());
+            let empty_timer_ns = empty_start.elapsed().as_nanos();
+            samples.push(json!({"actual":sample,"output_drop_ns":drop_ns,"empty_timer_pair_ns":empty_timer_ns}));
+        }
+        assert_eq!(samples.len(), 32);
+        if name == "D" {
+            assert_eq!(target_qualified, 32);
+        }
+        assert!(qualification_items <= 192);
+        output.flush().unwrap();
+        drop(output);
+        // 固定前缀后仅领取已有反馈，再真实stop/drain；不请求SIM完整公共EOF。
+        // DPT材料仍包含已stabilize的End，不将它冒称已消费或经济终局。
+        let final_apply = shared.apply_closed().unwrap();
+        let cutoff = driver.observation_cutoff().unwrap();
+        let final_read = shared.ledger().economic_read().unwrap();
+        let final_economics =
+            serde_json::to_value(final_read.market_totals().collect::<Vec<_>>()).unwrap();
+        drop(final_read);
+        let cleanup_start = Instant::now();
+        let drained = driver.stop_and_drain();
+        println!("pair_completion_m2_finish {name} {drained:?}");
+        drained.unwrap();
+        drop(strategy);
+        drop(shared);
+        drop(material);
+        let cleanup_ns = cleanup_start.elapsed().as_nanos();
+        let (files, bytes) = pair_completion_cost_files(&cell_root);
+        cells.push(json!({"mode":name,"config":config,"recorded_typed_inputs":1396,"recorded_end_inputs":1,"seen_markets":51,"historical_without_responsibility":48,"early":early_value,"early_selected_ns":early_ns,"explicit_selected_reads":33,"current_frame_reads":32,"revalidation_calls":32,"qualification_account_read_calls":qualification_account_reads,"setup_request_count":3,"setup_receipts":setup_receipts,"calculations":32,"qualification_items":qualification_items,"target_qualified":target_qualified,"preparation_ns":preparation_ns,"samples":samples,"serialized_calculation_bytes":serialized_bytes,"final_apply_closed":final_apply,"last_consumed_cutoff":cutoff,"public_eof_requested":false,"final_economics":final_economics,"automatic_noe_record_count":"Unknown; delivered feedback sequence is separate","recording_drained":true,"economic_finality":"Unknown; old resting responsibility is intentionally retained","cleanup_ns":cleanup_ns,"state_through_cleanup_ns":state_start.elapsed().as_nanos(),"rss_before":rss_before,"rss_after_cleanup":pair_completion_cost_rss(),"output_files":files,"output_bytes":bytes}));
+    }
+    let value = json!({"format":"issue384-m2-selected-full-qualification-cost-v1","states":2,"recorded_typed_inputs":2792,"recorded_end_inputs":2,"explicit_calculations":64,"explicit_selected_reads":66,"setup_requests":6,"explicit_feedback_injections":0,"rules_sha256":rules.file_sha256(),"finality_sha256":finality.policy_id(),"rules_path":rules.path(),"finality_path":finality_path,"input_binding":"#384已审M1 sealed参数；不沿用旧host历史身份","source_head":std::env::var("ISSUE185_SOURCE_HEAD").unwrap(),"source_sha256":std::env::var("ISSUE185_SOURCE_SHA256").unwrap(),"through_states_ns":whole.elapsed().as_nanos(),"cells":cells,"limits":"组件输出而非完整Day；时钟/断言/文件与准备均在完整外层；内部阶段不相加，不证明真实多市场完整Day/65min上界；重复建议未发送"});
+    std::fs::write(
+        root.join("m2-result.json"),
+        serde_json::to_vec_pretty(&value).unwrap(),
+    )
+    .unwrap();
+    println!("pair_completion_m2_complete states=2 calculations=64 recorded_typed=2792");
+}

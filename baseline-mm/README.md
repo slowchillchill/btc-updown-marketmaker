@@ -119,3 +119,5 @@ Chainlink 与两个资产盘口是新增配对的依赖。Binance 只按实际�
 持续库存的D-0380控制量为 `extra_quote_space_ticks: u32`（缺省0，非负整数共同额外tick数）。零值保持v1；正值使用独立 `candidate_v2_continuous_inventory_quote_space`，公式、cap/取档联动和准确构造见[持续库存说明](docs/strategies/continuous-inventory-v1.md)。这不批准真实研究或在线采用。
 
 D-0381的 `enable_ordinary_active_replenishment: bool` 缺省true，保留原候选；false使用独立v3，仅在原普通active稳定正量插点关闭本次BUY，保留initial/受限held及旧单维护。40字段、同次稀疏见证和读取边界见[持续库存说明](docs/strategies/continuous-inventory-v1.md#d-0381-普通active补量开关)。这不签发真实经营运行。
+
+D-0386新增`operating_mode`：缺省/`legacy`保留旧40叶及v1/v2/v3；`pair_completion`与`pair_completion_cost`分别为完成配对优先C/D的独立v4/v5。H/R全价责任、正式平均成本、D最高可行Maker价及冻结资格见[持续库存说明](docs/strategies/continuous-inventory-v1.md#d-0386完成配对优先的独立经营模式)。工程合成不授权真实四臂行情运行。
