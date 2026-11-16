@@ -676,7 +676,10 @@ async fn run_material<S: StrategyV1>(
         &prepared.public_root,
         prepared.hidden.prefix.clone(),
         material.preparation.read_page_rows,
-        material.preparation.max_read_batch_bytes,
+        material
+            .preparation
+            .recorded_read_batch_bytes()
+            .map_err(material_failure)?,
         crate::timing::DeliveryTimes {
             delays: config.timing.public_delivery_delay_ms.clone(),
             last: None,
@@ -697,7 +700,10 @@ async fn run_material<S: StrategyV1>(
         &prepared.hidden,
         &prepared.public_root,
         material.preparation.read_page_rows,
-        material.preparation.max_read_batch_bytes,
+        material
+            .preparation
+            .recorded_read_batch_bytes()
+            .map_err(material_failure)?,
     )
     .map_err(material_failure)?;
     run_material_with_sources(

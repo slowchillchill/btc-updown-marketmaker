@@ -141,14 +141,14 @@ impl MetadataInitializationSelectionV1 {
     pub fn open(
         config: &MetadataInitializationConfigV1,
         rows: usize,
-        bytes: usize,
+        bytes: impl Into<Option<usize>>,
     ) -> RecordingResult<Self> {
         Self::open_with_progress(config, rows, bytes, None)
     }
     pub fn open_with_progress(
         config: &MetadataInitializationConfigV1,
         rows: usize,
-        bytes: usize,
+        bytes: impl Into<Option<usize>>,
         progress: Option<&HistoricalPreparationNotifierV1<'_>>,
     ) -> RecordingResult<Self> {
         let files = resolve_initialization_files(&config.files)?;
@@ -159,9 +159,10 @@ impl MetadataInitializationSelectionV1 {
         config: &MetadataInitializationConfigV1,
         files: Vec<MetadataInitializationFileFactsV1>,
         rows: usize,
-        bytes: usize,
+        bytes: impl Into<Option<usize>>,
         progress: Option<&HistoricalPreparationNotifierV1<'_>>,
     ) -> RecordingResult<Self> {
+        let bytes = bytes.into();
         let mut starts = BTreeMap::new();
         let mut found = BTreeSet::new();
         let mut candidates = Vec::new();
@@ -257,7 +258,7 @@ impl MetadataInitializationSelectionV1 {
     pub fn read(
         &self,
         rows: usize,
-        bytes: usize,
+        bytes: impl Into<Option<usize>>,
     ) -> impl Iterator<Item = RecordingResult<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>> + '_
     {
         self.read_with_progress(rows, bytes, None, Pass::SecondSupply)
@@ -265,7 +266,7 @@ impl MetadataInitializationSelectionV1 {
     pub fn read_with_progress<'a>(
         &'a self,
         _rows: usize,
-        _bytes: usize,
+        _bytes: impl Into<Option<usize>>,
         progress: Option<&'a HistoricalPreparationNotifierV1<'_>>,
         pass: Pass,
     ) -> impl Iterator<Item = RecordingResult<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>> + 'a

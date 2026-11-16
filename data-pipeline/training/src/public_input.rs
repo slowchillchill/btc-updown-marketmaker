@@ -322,7 +322,7 @@ pub struct PublicFiniteFileV1 {
 pub fn open_finite_public_input_v1(
     file: &PublicFiniteFileV1,
     batch_rows: usize,
-    max_batch_bytes: usize,
+    max_batch_bytes: impl Into<Option<usize>>,
 ) -> Result<TypedRawParquetStream<TypedRawRowV2>, TypedRawReadError> {
     open_parquet_with_decoder(
         ParquetInputFacts {
@@ -335,7 +335,7 @@ pub fn open_finite_public_input_v1(
         },
         batch_rows,
         None,
-        Some(max_batch_bytes),
+        max_batch_bytes.into(),
         expected_public_schema,
         decode_public_batch_with_layout,
     )
@@ -360,14 +360,14 @@ pub fn open_validated_public_input_parquet_v1(
 pub fn open_validated_public_input_at_v1(
     file: &ValidatedDirectSourceParquetFileV3,
     batch_size: usize,
-    max_batch_bytes: usize,
+    max_batch_bytes: impl Into<Option<usize>>,
     cursor: &typed_raw::TypedRawCursorV1,
 ) -> Result<TypedRawParquetStream<TypedRawRowV2>, TypedRawReadError> {
     open_public_input_from_opened(
         file,
         file.take_opened()?,
         batch_size,
-        max_batch_bytes,
+        max_batch_bytes.into(),
         cursor.physical_row,
     )
 }
@@ -375,14 +375,14 @@ pub(crate) fn open_public_input_from_opened(
     file: &ValidatedDirectSourceParquetFileV3,
     opened: typed_raw::OpenedParquetV1,
     batch_size: usize,
-    max_batch_bytes: usize,
+    max_batch_bytes: Option<usize>,
     physical_row: u64,
 ) -> Result<TypedRawParquetStream<TypedRawRowV2>, TypedRawReadError> {
     typed_raw::stream_with_opened(
         file.input_facts(),
         batch_size,
         None,
-        Some(max_batch_bytes),
+        max_batch_bytes,
         expected_public_schema,
         decode_public_batch_with_layout,
         opened,

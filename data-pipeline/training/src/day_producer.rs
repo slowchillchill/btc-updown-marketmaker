@@ -235,7 +235,10 @@ impl<'a> DayProducerV1<'a> {
                 prepare_ns: 0,
             });
             // 多读一项才能识别非PM边界；它保持未应用，且不跨越其固定身份变化准备。
-            if !pm || self.queued.len() >= rows.max(1) || retained >= bytes {
+            if !pm
+                || self.queued.len() >= rows.max(1)
+                || bytes.is_some_and(|limit| retained >= limit)
+            {
                 break;
             }
         }

@@ -596,3 +596,88 @@ fn explicit_typed_requirements_share_core_without_observer_and_stop() {
     .unwrap();
     assert!(stopped.stopped);
 }
+
+#[test]
+fn optional_batch_bytes_config_and_large_public_batch() {
+    use data_pipeline_training::{public_input::*, typed_raw::TypedRawReadError};
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = fixture::build(temp.path(), 4);
+    fixture::append_large_reference(temp.path());
+    let mut value = serde_json::to_value(&config).unwrap();
+    value["preparation"]
+        .as_object_mut()
+        .unwrap()
+        .remove("max_read_batch_bytes");
+    let absent: ContinuousPublicExportConfigV1 = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(absent.preparation.max_read_batch_bytes, None);
+    assert!(
+        crate::prepare_historical_run_v1(&absent.preparation)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("需要显式")
+    );
+    value["preparation"]["max_read_batch_bytes"] = Value::Null;
+    let null: ContinuousPublicExportConfigV1 = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(null.preparation.max_read_batch_bytes, None);
+    value["preparation"]["max_read_batch_bytes"] = json!(64 << 20);
+    config = serde_json::from_value(value).unwrap();
+    assert_eq!(config.preparation.max_read_batch_bytes, Some(64 << 20));
+    assert_eq!(
+        config.preparation.recorded_read_batch_bytes().unwrap(),
+        64 << 20
+    );
+    let manifest_path = &config.preparation.scope.manifest_paths[0];
+    let manifest: Value = serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+    let fact = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"].as_str().unwrap().contains("large-reference"))
+        .unwrap();
+    let file: PublicFiniteFileV1 = serde_json::from_value(json!({
+        "path":manifest_path.parent().unwrap().join(fact["path"].as_str().unwrap()),
+        "source_kind":fact["source_kind"], "schema_version":fact["schema_version"],
+        "bytes":fact["bytes"], "rows":fact["rows"], "sha256":fact["sha256"],
+    }))
+    .unwrap();
+    let mut limited = open_finite_public_input_v1(&file, 16384, 64 << 20).unwrap();
+    let observed = match limited.next().unwrap() {
+        Err(TypedRawReadError::DecodeBatchBytesLimit {
+            observed, limit, ..
+        }) => {
+            assert_eq!(limit, 64 << 20);
+            observed
+        }
+        _ => panic!("显式有限配置必须识别合成大批次"),
+    };
+    assert!(observed > 64 << 20);
+    let mut unlimited = open_finite_public_input_v1(&file, 16384, None).unwrap();
+    assert_eq!(unlimited.next().unwrap().unwrap().len(), 9);
+    assert_eq!(unlimited.last_physical_batch_bytes(), observed);
+    drop(unlimited);
+    let (state, _) = run(&absent);
+    assert!(state.natural_end);
+    let error = export_continuous_public_v1(&config, |_| Ok(()), |_| {}, || false).unwrap_err();
+    assert!(error.to_string().contains("超过上限"));
+    println!("合法合成Arrow物理批次={observed}字节；None成功，显式64MiB拒绝");
+}
+
+#[test]
+fn optional_batch_bytes_preserves_public_results() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = fixture::build(temp.path(), 4);
+    let (limited, expected) = run(&config);
+    config.preparation.max_read_batch_bytes = None;
+    let (unlimited, actual) = run(&config);
+    assert_eq!(limited.processed_inputs, unlimited.processed_inputs);
+    assert_eq!(limited.applied_groups, unlimited.applied_groups);
+    assert_eq!(limited.last_group, unlimited.last_group);
+    let business = |records: Vec<Value>| {
+        records
+            .into_iter()
+            .filter(|v| !matches!(v["record_type"].as_str(), Some("config" | "completion")))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(business(expected), business(actual));
+}
