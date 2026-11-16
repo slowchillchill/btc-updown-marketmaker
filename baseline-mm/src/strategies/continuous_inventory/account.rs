@@ -16,7 +16,7 @@ pub struct ObligationDiagnosticV1 {
     pub success_applied: bool,
     pub economic_applied: Option<bool>,
     pub trade_disposition: Option<D>,
-    pub observed_noe_position: Option<::execution_normalization::NoeRecordPositionV1>,
+    pub observed_noe_visibility: Option<::execution_normalization::NoeConsumptionVisibilityV1>,
     pub economic_application_account_transition_seq: Option<u64>,
 }
 #[derive(Clone)]
@@ -143,7 +143,7 @@ pub(super) fn inventory(
                     success_applied: false,
                     economic_applied: None,
                     trade_disposition: None,
-                    observed_noe_position: None,
+                    observed_noe_visibility: None,
                     economic_application_account_transition_seq: None,
                 },
                 quantity: Decimal::ZERO,
@@ -237,7 +237,7 @@ pub(super) fn inventory(
                     success_applied: false,
                     economic_applied: None,
                     trade_disposition: None,
-                    observed_noe_position: None,
+                    observed_noe_visibility: None,
                     economic_application_account_transition_seq: None,
                 },
                 quantity: q,
@@ -308,7 +308,7 @@ pub(super) fn inventory(
                 success_applied: false,
                 economic_applied: Some(applied),
                 trade_disposition: Some(fact.economic_disposition.clone()),
-                observed_noe_position: trade.observed.as_ref().map(|r| r.position()),
+                observed_noe_visibility: trade.observed.as_ref().map(|r| r.visibility().clone()),
                 economic_application_account_transition_seq: fact
                     .economic_application_account_transition_seq,
             },

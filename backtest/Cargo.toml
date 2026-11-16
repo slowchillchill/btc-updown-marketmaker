@@ -23,6 +23,7 @@ tokio = { version = "=1.52.3", features = ["rt"] }
 ciborium = "=0.2.2"
 sha2 = "=0.10.9"
 imbl = "=7.0.2"
+zstd = "=0.13.3"
 
 [dev-dependencies]
 parquet = { version = "=59.0.0", default-features = false, features = ["arrow", "zstd"] }

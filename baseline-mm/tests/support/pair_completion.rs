@@ -545,7 +545,10 @@ async fn pair_completion_formal_scenarios_08_through_12() {
             .cutoff()
             .decision_time()
             .logical_time_utc_ms();
-        let q = f.strategy.qualify_intent(&read, &c, 0, at).unwrap();
+        let q = f
+            .strategy
+            .qualify_intent(&read, &c.strategy_view(), 0, at)
+            .unwrap();
         assert!(
             matches!(q, IntentQualificationV1::Invalidated(IntentInvalidationReasonV1 { ref reason_code, .. }) if reason_code == "pair_completion_ticks_changed")
         );

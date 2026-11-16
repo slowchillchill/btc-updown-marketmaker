@@ -77,28 +77,46 @@ pub(crate) fn book(
 }
 // 仅终态专用夹具使用原 collector 定时状态行；不改变普通夹具。
 fn local_transition(base: i64, end: bool) -> PolymarketMarketMetadataV5Row {
-    let at = base + if end { 10000 } else { 1000 };
+    local_transition_for(base, end, false)
+}
+fn local_transition_for(base: i64, end: bool, late_second: bool) -> PolymarketMarketMetadataV5Row {
+    let at = base
+        + if late_second {
+            if end { 40_101 } else { 40_100 }
+        } else if end {
+            10000
+        } else {
+            1000
+        };
+    let end_at = base + if late_second { 5000 } else { 10000 };
+    let source_received = base + if late_second { 40_000 } else { 0 };
     let payload = r#"{"orderPriceMinTickSize":"0.01"}"#;
     let mut row: PolymarketMarketMetadataRow = serde_json::from_value(json!({
         "metadata_row_kind": "market_state_transition", "timestamp_received": at,
         "metadata_origin": "local_market_state_timer", "collector_host_id": "synthetic-collector", "collector_region": "test",
         "schema_version": "polymarket_market_metadata_v5", "slug": "btc-updown-5m-engineering",
-        "condition_id": FIRST, "clob_market_id": "3195576", "asset_ids": "[\"20\",\"3\"]",
-        "market_start_utc": base+1000, "market_end_utc": base+10000, "fixed_identity_verified_at_utc": base-1,
+        "condition_id": if late_second {SECOND} else {FIRST}, "clob_market_id": if late_second {"3195577"} else {"3195576"}, "asset_ids": if late_second {"[\"21\",\"4\"]"} else {"[\"20\",\"3\"]"},
+        "market_start_utc": base+1000, "market_end_utc": end_at, "fixed_identity_verified_at_utc": if late_second {source_received-1} else {base-1},
         "market_lifecycle_state": "active", "market_runtime_role": if end { "resolution_pending" } else { "current" },
         "source_endpoint": "https://gamma-api.polymarket.com/markets",
         "source_evidence_origin": "gamma_markets_discovery", "source_evidence_event_type": "gamma_markets_discovery_response",
-        "source_evidence_received_at_utc": base, "source_evidence_raw_sha256": format!("{:x}",Sha256::digest(payload.as_bytes())),
+        "source_evidence_received_at_utc": source_received, "source_evidence_raw_sha256": format!("{:x}",Sha256::digest(payload.as_bytes())),
         "market_lifecycle_transition": if end { None } else { Some("prefetched_to_active") },
-        "lifecycle_scheduled_at_utc": if end { None } else { Some(at) },
+        "lifecycle_scheduled_at_utc": if end { None } else { Some(base+1000) },
         "lifecycle_applied_at_utc": if end { None } else { Some(at) },
         "market_runtime_role_transition": if end { "current_to_resolution_pending" } else { "next_to_current" },
-        "runtime_role_scheduled_at_utc": at, "runtime_role_applied_at_utc": at,
+        "runtime_role_scheduled_at_utc": if end {end_at} else {base+1000}, "runtime_role_applied_at_utc": at,
         "active_unavailable_reason": "not_applicable_for_row_kind", "response_fields_unavailable_reason": "not_applicable_for_row_kind",
-        "resolution_budget_horizon_utc": if end { Some(base+10000+8*60_000) } else { None },
+        "resolution_budget_horizon_utc": if end { Some(end_at+8*60_000) } else { None },
         "resolution_followup_status": if end { Some("pending") } else { None }
     })).unwrap();
-    row.collector_admission_sequence = if end { 4 } else { 2 };
+    row.collector_admission_sequence = if late_second {
+        if end { 4 } else { 3 }
+    } else if end {
+        4
+    } else {
+        2
+    };
     row.collector_admission_time_utc_ms = at + 1;
     let row = PolymarketMarketMetadataV5Row::from_common(row, None, None);
     let validation = row.validate();
@@ -108,6 +126,37 @@ fn local_transition(base: i64, end: bool) -> PolymarketMarketMetadataV5Row {
     );
     row
 }
+fn late_second_terminal(base: i64) -> PolymarketMarketMetadataV5Row {
+    // Same qualified WS pair as public_observation_core_tests: claimant, source
+    // and receive coordinates match the raw MarketResolved message exactly.
+    let source = base + 6000;
+    let received = base + 45_000;
+    let payload = r#"{"event_type":"market_resolved"}"#;
+    let mut row: PolymarketMarketMetadataRow = serde_json::from_value(json!({
+        "metadata_row_kind":"resolution_terminal_ws", "metadata_origin":"market_resolved_ws",
+        "timestamp_received":received, "collector_host_id":"synthetic-collector", "collector_region":"test",
+        "collector_admission_sequence":3, "collector_admission_time_utc_ms":received+1,
+        "schema_version":"polymarket_market_metadata_v5", "slug":"btc-updown-5m-engineering",
+        "condition_id":SECOND, "clob_market_id":"3195577", "asset_ids":"[\"21\",\"4\"]",
+        "market_start_utc":base+1000, "market_end_utc":base+5000, "fixed_identity_verified_at_utc":base-1,
+        "market_lifecycle_state":"retired", "market_runtime_role":"none",
+        "source_endpoint":"wss://ws-subscriptions-clob.polymarket.com/ws/market",
+        "source_evidence_origin":"market_resolved_ws", "source_evidence_event_type":"market_resolved", "source_evidence_channel":"market",
+        "source_evidence_received_at_utc":received, "row_evidence_validation_completed_at_utc":received+1,
+        "source_evidence_payload_json":payload, "source_evidence_raw_sha256":format!("{:x}",Sha256::digest(payload.as_bytes())),
+        "market_lifecycle_transition":"active_to_retired", "lifecycle_applied_at_utc":received+1,
+        "market_runtime_role_transition":"resolution_pending_to_none", "runtime_role_applied_at_utc":received+1,
+        "active_unavailable_reason":"not_applicable_for_row_kind", "ws_platform_timestamp_raw":source.to_string(), "ws_platform_timestamp_utc":source,
+        "winning_asset_id":"21", "winning_outcome":"Up", "resolution_evidence_source":"market_resolved_ws", "terminal_claim_owner":"market_resolved_ws",
+        "resolution_budget_horizon_utc":base+5000+480_000, "resolution_followup_status":"terminal_ws"
+    })).unwrap();
+    row.collector_admission_sequence = 5;
+    row.collector_admission_time_utc_ms = received + 1;
+    let row =
+        PolymarketMarketMetadataV5Row::from_common(row, Some("synthetic-epoch".into()), Some(8));
+    assert!(row.validate().is_complete(), "{:?}", row.validate());
+    row
+}
 fn material(
     root: &Path,
     base: i64,
@@ -115,6 +164,25 @@ fn material(
     terminal: Option<(PolymarketMarketMetadataV5Row, PolymarketOrderbookV3Message)>,
     maker_trade: bool,
     first_market_end_utc_ms: Option<i64>,
+) -> std::path::PathBuf {
+    material_with_late_second(
+        root,
+        base,
+        utc_day,
+        terminal,
+        maker_trade,
+        first_market_end_utc_ms,
+        false,
+    )
+}
+fn material_with_late_second(
+    root: &Path,
+    base: i64,
+    utc_day: &str,
+    terminal: Option<(PolymarketMarketMetadataV5Row, PolymarketOrderbookV3Message)>,
+    maker_trade: bool,
+    first_market_end_utc_ms: Option<i64>,
+    late_second: bool,
 ) -> std::path::PathBuf {
     let day = root.join("inputs");
     std::fs::create_dir(&day).unwrap();
@@ -141,9 +209,9 @@ fn material(
             SECOND,
             "3195577",
             ["21", "4"],
-            base + 6000,
-            base + 10000,
-            base + 20000,
+            base + if late_second { 40_000 } else { 6000 },
+            base + if late_second { 1000 } else { 10000 },
+            base + if late_second { 5000 } else { 20000 },
             if terminal_metadata.is_some() { 3 } else { 2 },
         ),
     ];
@@ -151,6 +219,11 @@ fn material(
         metadata_rows.insert(1, local_transition(base, false));
         metadata_rows.push(local_transition(base, true));
         metadata_rows.push(terminal);
+    }
+    if late_second {
+        metadata_rows.push(local_transition_for(base, false, true));
+        metadata_rows.push(local_transition_for(base, true, true));
+        metadata_rows.push(late_second_terminal(base));
     }
     metadata_writer
         .write_polymarket_market_metadata_v5_rows(&metadata_rows)
@@ -173,6 +246,30 @@ fn material(
         book(SECOND, "21", base + 10100, base + 10200, 5, "0.6"),
         book(SECOND, "4", base + 10100, base + 10200, 6, "0.6"),
     ];
+    if late_second {
+        // First public identity is later than end (5s) plus the full empirical
+        // feedback support (29697ms). Another market publishes in that gap.
+        pm_rows.truncate(4);
+        pm_rows.extend([
+            book(FIRST, "20", base + 35_000, base + 35_000, 5, "0.5"),
+            book(SECOND, "21", base + 1100, base + 40_200, 6, "0.6"),
+            book(SECOND, "4", base + 1100, base + 40_200, 7, "0.6"),
+        ]);
+        let mut terminal = book(SECOND, "21", base + 6000, base + 45_000, 8, "0.6");
+        terminal.event = PolymarketOrderbookV3Event::MarketResolved(
+            data_collect::polymarket_orderbook_v3::PolymarketMarketResolvedV3 {
+                clob_market_id: "3195577".into(),
+                question: None,
+                description: None,
+                asset_ids: vec!["21".into(), "4".into()],
+                outcomes: vec!["Up".into(), "Down".into()],
+                event_message: None,
+                winning_asset_id: "21".into(),
+                winning_outcome: "Up".into(),
+            },
+        );
+        pm_rows.push(terminal);
+    }
     if maker_trade {
         use data_collect::polymarket_orderbook_v3::{
             PolymarketLastTradePriceV3, PolymarketPriceChangeEntryV3, PolymarketPriceChangeV3,
@@ -401,5 +498,24 @@ fn setup_day_material(
         max_group_bytes: 1 << 24,
         finite_in_flight_groups: 128,
     };
+    (config, rules)
+}
+
+#[allow(dead_code)] // Shared fixture module is also compiled by other integration tests.
+pub(crate) fn setup_late_second(
+    root: &Path,
+) -> (HistoricalRunConfigV1, Arc<SealedProcessRuleSnapshotV3>) {
+    let (mut config, rules) = setup_day_material(root, BASE, "2026-08-24", None, false, true, None);
+    let separate = root.join("late");
+    std::fs::create_dir(&separate).unwrap();
+    config.preparation.scope.manifest_paths = vec![material_with_late_second(
+        &separate,
+        BASE,
+        "2026-08-24",
+        None,
+        false,
+        Some(BASE + 50_000),
+        true,
+    )];
     (config, rules)
 }

@@ -15,8 +15,7 @@ pub struct ProfitAllocationV2 {
     /// 原截止可配对孤腿场景；不能由后续别单池变化重估释放。
     pub original_orphan_shares: ExactRationalV1,
     pub original_orphan_principal_per_share: ExactRationalV1,
-    #[serde(with = "sim_system::public_consumption::checkpoint::cutoff")]
-    pub estimate_cutoff: sim_system::public_consumption::TrustedGroupDecisionCutoffV1,
+    pub estimate_cutoff: StrategyObservationCutoffV1,
     /// 首次分配的利润资源，不是当前预计损失或风险上界。
     pub allocated_profit_pusd: ExactRationalV1,
 }

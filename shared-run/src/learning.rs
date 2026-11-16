@@ -19,6 +19,27 @@ pub struct LearningAccountReadV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directed_confirmations: Option<DirectedConfirmationsReadV1>,
 }
+
+/// 已交付的账户事实。平台隐藏前沿产生的返佣资格只由宿主读取。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct StrategyLearningAccountReadV1<'a> {
+    pub confirmed: &'a ConfirmedEconomicsReadV1,
+    pub obligations: &'a [ObligationPrincipalReadV1],
+    pub pending_noe_record_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directed_confirmations: Option<&'a DirectedConfirmationsReadV1>,
+}
+
+impl<'a> From<&'a LearningAccountReadV1> for StrategyLearningAccountReadV1<'a> {
+    fn from(read: &'a LearningAccountReadV1) -> Self {
+        Self {
+            confirmed: &read.confirmed,
+            obligations: &read.obligations,
+            pending_noe_record_count: read.pending_noe_record_count,
+            directed_confirmations: read.directed_confirmations.as_ref(),
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QualifiedRebateReadV1 {
     pub identity: String,

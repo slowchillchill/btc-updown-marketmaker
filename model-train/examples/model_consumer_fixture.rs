@@ -144,6 +144,7 @@ fn main() -> Result<(), MaterialError> {
             candidates.push(candidate);
         }
         days.push(HistoricalDayConfigV1 {
+            offline_scenes: Default::default(),
             preparation: c.preparation,
             candidates,
             progress_interval_seconds: 1,

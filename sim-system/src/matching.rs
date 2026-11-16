@@ -2830,6 +2830,8 @@ pub(crate) struct ExecutionStateV2 {
     #[serde(default)]
     maker_model: MakerExecutionModelV1,
     queues: ExecutionQueueStateV2,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    offline_queue: Option<crate::offline_scene::SharedQueue>,
     account_overlay: AccountBookOverlayStoreV1,
     account: PlatformAccountStateV2,
     orders: BTreeMap<String, SimOrderRecordV2>,
@@ -2855,6 +2857,7 @@ impl ExecutionStateV2 {
             cancel_scenario: BTreeMap::new(),
             cancel_scenario_hits: Vec::new(),
             queues: ExecutionQueueStateV2::new(directory),
+            offline_queue: None,
             account_overlay: AccountBookOverlayStoreV1::new(directory),
             account,
             orders: BTreeMap::new(),
@@ -2884,6 +2887,10 @@ impl ExecutionStateV2 {
             crate::platform_rules::SelectedMakerModelV1::PublicTradeConservativeFifoV2 => {
                 MakerExecutionModelV1::PublicTradeConservativeFifoV2
             }
+            crate::platform_rules::SelectedMakerModelV1::LocalProbabilisticSharedFifoV2 => {
+                state.enable_offline_scene();
+                MakerExecutionModelV1::PublicTradeConservativeFifoV2
+            }
             crate::platform_rules::SelectedMakerModelV1::L2BookDeltaFifoEstimateV1(_) => {
                 MakerExecutionModelV1::L2BookDeltaFifoEstimateV1
             }
@@ -2891,9 +2898,218 @@ impl ExecutionStateV2 {
         state
     }
 
-    pub(crate) fn commit_admitted_market(&mut self, market: &PlatformMarketV1) {
+    pub(crate) fn offline_scene_enabled(&self) -> bool {
+        self.offline_queue.is_some()
+    }
+    pub(crate) fn enable_offline_scene(&mut self) {
+        self.offline_queue = Some(crate::offline_scene::SharedQueue::default());
+    }
+    pub(crate) fn apply_offline_scene_event(
+        &mut self,
+        event: &crate::offline_scene::Event,
+        rules: &PlatformRuleSnapshotV3,
+        finality: &TradeFinalityPolicyV2,
+    ) -> Result<ExecutionMarketEventEffectsV2, MatchingStateErrorV1> {
+        let mut effects = ExecutionMarketEventEffectsV2::default();
+        if self.queues.matching_closed(&event.level.condition)? {
+            return Ok(effects);
+        }
+        let fills = self
+            .offline_queue
+            .as_mut()
+            .expect("显式离线场景已启用")
+            .apply(event);
+        for fill in fills {
+            let dust = self
+                .offline_queue
+                .as_ref()
+                .and_then(|q| q.venue_dust_candidate(&fill.level))
+                .map(|id| AssetVenueDustCandidateV2 {
+                    platform_order_id: id.to_owned(),
+                    price_pusd_per_share: Decimal::from_i128_with_scale(
+                        fill.level.price_micro as i128,
+                        6,
+                    ),
+                });
+            self.apply_maker_depletions(
+                &fill.level.condition,
+                &fill.level.buy_token,
+                event.at_ms,
+                AssetQueueEffectsV2 {
+                    maker_depletions: vec![MakerQueueDepletionV2 {
+                        platform_order_id: fill.order,
+                        price_pusd_per_share: Decimal::from_i128_with_scale(
+                            fill.level.price_micro as i128,
+                            6,
+                        ),
+                        base_units: fill.quantity,
+                    }],
+                    venue_dust_candidate: dust,
+                },
+                rules,
+                finality,
+                &mut effects,
+            )?;
+        }
+        Ok(effects)
+    }
+    fn offline_opposite_token(
+        &self,
+        condition: &str,
+        token: &str,
+    ) -> Result<&str, MatchingStateErrorV1> {
+        let market = self
+            .queues
+            .markets
+            .get(condition)
+            .ok_or_else(|| MatchingStateErrorV1::UnknownMarket(condition.into()))?;
+        market
+            .assets
+            .keys()
+            .find(|t| t.as_str() != token)
+            .map(String::as_str)
+            .ok_or_else(|| MatchingStateErrorV1::UnknownAsset(token.into()))
+    }
+    fn offline_would_take(
+        &self,
+        condition: &str,
+        token: &str,
+        maximum_price: Decimal,
+    ) -> Result<bool, MatchingStateErrorV1> {
+        let opposite = self.offline_opposite_token(condition, token)?;
+        Ok(self
+            .offline_queue
+            .as_ref()
+            .unwrap()
+            .external_levels(condition, opposite)
+            .next()
+            .is_some_and(|(level, _)| {
+                Decimal::ONE - Decimal::from_i128_with_scale(level.price_micro as i128, 6)
+                    <= maximum_price
+            }))
+    }
+    fn calculate_offline_taker(
+        &self,
+        condition: &str,
+        token: &str,
+        maximum_price: Decimal,
+        target: TakerTargetV1,
+    ) -> Result<
+        (
+            CalculatedTakerConsumptionV2,
+            Vec<(
+                crate::offline_scene::Level,
+                Vec<crate::offline_scene::Slice>,
+            )>,
+        ),
+        MatchingStateErrorV1,
+    > {
+        let opposite = self.offline_opposite_token(condition, token)?;
+        let queue = self.offline_queue.as_ref().unwrap();
+        let mut plan = CalculatedTakerConsumptionV2 {
+            fills: Vec::new(),
+            matched_base_units: 0,
+            used_quote_units: 0,
+        };
+        let mut targets = Vec::new();
+        for (level, live) in queue.external_levels(condition, opposite) {
+            let price = Decimal::ONE - Decimal::from_i128_with_scale(level.price_micro as i128, 6);
+            if price > maximum_price
+                || target.complete(plan.matched_base_units, plan.used_quote_units)
+            {
+                break;
+            }
+            // Use an exact price ratio for the whole same-price live quantity.
+            // Padding represents only the arithmetic denominator, never liquidity.
+            // It is a multiple of one share, so cumulative quote is floor(base*price)
+            // and cannot accumulate one rounding error per artificial fragment.
+            let blocks = live / 1_000_000 + u128::from(live % 1_000_000 != 0);
+            let total = blocks
+                .checked_mul(1_000_000)
+                .ok_or(MatchingMathErrorV1::ArithmeticOverflow)?;
+            let quote = segment_quote_units_v1(total, price)?;
+            let next = match target {
+                TakerTargetV1::Quote(budget) => maximum_base_for_quote_budget_v1(
+                    total,
+                    quote,
+                    0,
+                    budget - plan.used_quote_units,
+                )?
+                .map(|(n, _)| n.min(live)),
+                TakerTargetV1::LimitBase {
+                    total_base_units,
+                    total_quote_units,
+                } => maximum_base_for_limit_order_segment_v1(
+                    total,
+                    quote,
+                    0,
+                    live.min(total_base_units - plan.matched_base_units),
+                    total_base_units,
+                    total_quote_units,
+                    plan.matched_base_units,
+                    plan.used_quote_units,
+                )?
+                .map(|(n, _)| n),
+            };
+            let Some(n) = next else {
+                continue;
+            };
+            let paid = segment_quote_units_v1(n, price)?;
+            // A whole price level below the existing quote quantum is left
+            // untouched. It cannot block later representable depth. Post-only
+            // crossing uses positive external depth independently of rounding.
+            if n == 0 || paid == 0 {
+                continue;
+            }
+            plan.matched_base_units += n;
+            plan.used_quote_units += paid;
+            plan.fills.push(CalculatedTakerFillV2 {
+                fill: TakerFillSliceV2 {
+                    price_pusd_per_share: price,
+                    base_units: n,
+                    quote_units: paid,
+                },
+                segment_index: 0,
+                consumed_base_units_after: 0,
+                account_taker_depletion_debt_units_after: 0,
+            });
+            targets.push((level.clone(), queue.taker_targets(level, n)));
+            if n < live {
+                break;
+            }
+        }
+        Ok((plan, targets))
+    }
+
+    pub(crate) fn preload_market(&mut self, market: &PlatformMarketV1) {
+        // Hidden quantity preparation has no account lifecycle or rebate clocks.
         self.queues.commit_admitted_market(market);
         self.account_overlay.commit_admitted_market(market);
+    }
+
+    pub(crate) fn publish_preloaded_market(
+        &mut self,
+        market: &PlatformMarketV1,
+        first_open_at: i64,
+    ) {
+        let condition = &market.market().condition_id.0;
+        if self.maker_rebate.markets.contains_key(condition) {
+            return;
+        }
+        self.maker_rebate.commit_admitted_market(market);
+        let end = market.market().window.end_at_utc_ms;
+        if end < first_open_at {
+            self.maker_rebate
+                .market_end_clocks
+                .remove(&(end, condition.clone()));
+            self.maker_rebate
+                .market_end_clocks
+                .insert((first_open_at, condition.clone()));
+        }
+    }
+
+    pub(crate) fn commit_admitted_market(&mut self, market: &PlatformMarketV1) {
+        self.preload_market(market);
         self.maker_rebate.commit_admitted_market(market);
     }
 
@@ -2913,6 +3129,11 @@ impl ExecutionStateV2 {
             .get(condition_id)
             .filter(|obligation| obligation.redeemed_at_utc_ms.is_some())
             .map(|obligation| &obligation.terminal)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_economic_market_for_tests(&self, condition: &str) -> bool {
+        self.maker_rebate.markets.contains_key(condition)
     }
 
     #[cfg(test)]
@@ -3168,11 +3389,25 @@ impl ExecutionStateV2 {
         let mut effects = ExecutionMarketEventEffectsV2::default();
         if platform_effective_at_utc_ms >= end_at_utc_ms {
             self.queues.end_matching(condition_id)?;
+            if let Some(queue) = &mut self.offline_queue {
+                queue.discard_condition(condition_id);
+            }
         }
         if self.queues.matching_closed(condition_id)? {
             return Ok(effects);
         }
 
+        if self.offline_queue.is_some()
+            && matches!(
+                normalized,
+                NormalizedMarketEventV2::InitialL2Snapshot { .. }
+                    | NormalizedMarketEventV2::LevelExecutionTransition { .. }
+                    | NormalizedMarketEventV2::PublicTrade(_)
+                    | NormalizedMarketEventV2::QualityBoundary { .. }
+            )
+        {
+            return Ok(effects);
+        }
         match normalized {
             NormalizedMarketEventV2::InitialL2Snapshot {
                 asset: snapshot_asset,
@@ -3340,6 +3575,9 @@ impl ExecutionStateV2 {
     ) -> Result<(), MatchingStateErrorV1> {
         for condition in closed_markets {
             self.queues.end_matching(condition)?;
+            if let Some(queue) = &mut self.offline_queue {
+                queue.discard_condition(condition);
+            }
         }
         Ok(())
     }
@@ -3351,7 +3589,11 @@ impl ExecutionStateV2 {
         platform_effective_at_utc_ms: i64,
         finality_policy: &TradeFinalityPolicyV2,
     ) -> Result<ExecutionMarketEventEffectsV2, MatchingStateErrorV1> {
-        if self.market_resolutions.contains_key(condition_id) {
+        // Preloaded quantity identities cannot create consumer-visible resolution
+        // obligations. The original public terminal path retries after publication.
+        if !self.maker_rebate.markets.contains_key(condition_id)
+            || self.market_resolutions.contains_key(condition_id)
+        {
             return Ok(ExecutionMarketEventEffectsV2::default());
         }
         let condition = ConditionId(condition_id.to_owned());
@@ -3492,7 +3734,16 @@ impl ExecutionStateV2 {
                 }
             };
         if open_base_units_before > 0 {
-            if !self.queues.matching_closed(&order.condition_id.0)? {
+            if let Some(queue) = &mut self.offline_queue {
+                queue.cancel_at(
+                    &crate::offline_scene::Level {
+                        condition: order.condition_id.0.clone(),
+                        buy_token: order.token_id.0.clone(),
+                        price_micro: micro_units_v1(order.source_price_pusd_per_share)? as u32,
+                    },
+                    platform_order_id,
+                );
+            } else if !self.queues.matching_closed(&order.condition_id.0)? {
                 self.queues
                     .asset_mut(&order.condition_id.0, &order.token_id.0)?
                     .remove_account_order_at_price(
@@ -3753,9 +4004,20 @@ impl ExecutionStateV2 {
             self.orders.insert(order.platform_order_id.clone(), order);
             return Ok(());
         }
-        self.queues
-            .asset_mut(condition_id, token_id)?
-            .remove_account_order(&candidate.platform_order_id);
+        if let Some(queue) = &mut self.offline_queue {
+            queue.cancel_at(
+                &crate::offline_scene::Level {
+                    condition: condition_id.into(),
+                    buy_token: token_id.into(),
+                    price_micro: micro_units_v1(candidate.price_pusd_per_share)? as u32,
+                },
+                &candidate.platform_order_id,
+            );
+        } else {
+            self.queues
+                .asset_mut(condition_id, token_id)?
+                .remove_account_order(&candidate.platform_order_id);
+        }
         self.account_overlay
             .subtract_quantity(
                 condition_id,
@@ -3817,10 +4079,45 @@ impl ExecutionStateV2 {
     ) -> Result<(Self, BuyOrderDispositionV2), MatchingStateErrorV1> {
         let terms = input.terms;
         let target = terms.target();
-        let calculated = self
-            .queues
-            .asset(&input.condition_id.0, &input.token_id.0)?
-            .calculate_taker_buy(terms.maximum_price(), target)?;
+        if self.offline_queue.is_some()
+            && terms.post_only()
+            && self.offline_would_take(
+                &input.condition_id.0,
+                &input.token_id.0,
+                terms.maximum_price(),
+            )?
+        {
+            return Ok((
+                self,
+                BuyOrderDispositionV2::RejectedNoEffect(
+                    BuyOrderRejectedReasonV2::PostOnlyWouldTake,
+                ),
+            ));
+        }
+        let (calculated, scene_targets) = if self.offline_queue.is_some() && terms.post_only() {
+            (
+                CalculatedTakerConsumptionV2 {
+                    fills: Vec::new(),
+                    matched_base_units: 0,
+                    used_quote_units: 0,
+                },
+                Vec::new(),
+            )
+        } else if self.offline_queue.is_some() {
+            self.calculate_offline_taker(
+                &input.condition_id.0,
+                &input.token_id.0,
+                terms.maximum_price(),
+                target,
+            )?
+        } else {
+            (
+                self.queues
+                    .asset(&input.condition_id.0, &input.token_id.0)?
+                    .calculate_taker_buy(terms.maximum_price(), target)?,
+                Vec::new(),
+            )
+        };
         if terms.post_only() && !calculated.fills.is_empty() {
             return Ok((
                 self,
@@ -4062,10 +4359,20 @@ impl ExecutionStateV2 {
             account_deltas.push(delta);
         }
 
-        let plan = self
-            .queues
-            .asset_mut(&input.condition_id.0, &input.token_id.0)?
-            .apply_taker_consumption(calculated);
+        let plan = if let Some(queue) = &mut self.offline_queue {
+            for (level, targets) in scene_targets {
+                queue.consume_targets(&level, &targets);
+            }
+            QueueMatchPlanV2 {
+                fills: calculated.fills.into_iter().map(|f| f.fill).collect(),
+                matched_base_units: calculated.matched_base_units,
+                used_quote_units: calculated.used_quote_units,
+            }
+        } else {
+            self.queues
+                .asset_mut(&input.condition_id.0, &input.token_id.0)?
+                .apply_taker_consumption(calculated)
+        };
         let mut order = SimOrderRecordV2 {
             platform_order_id: platform_order_id.clone(),
             global_request_id: input.global_request_id,
@@ -4087,7 +4394,17 @@ impl ExecutionStateV2 {
             let asset = self
                 .queues
                 .asset_mut(&order.condition_id.0, &order.token_id.0)?;
-            if self.maker_model != MakerExecutionModelV1::L2BookDeltaFifoEstimateV1 {
+            if let Some(queue) = &mut self.offline_queue {
+                queue.insert(
+                    crate::offline_scene::Level {
+                        condition: order.condition_id.0.clone(),
+                        buy_token: order.token_id.0.clone(),
+                        price_micro: micro_units_v1(order.source_price_pusd_per_share)? as u32,
+                    },
+                    platform_order_id.clone(),
+                    open_base_units,
+                );
+            } else if self.maker_model != MakerExecutionModelV1::L2BookDeltaFifoEstimateV1 {
                 asset.insert_conservative_account_remainder_for_model(
                     self.maker_model,
                     order.source_price_pusd_per_share,
@@ -4151,16 +4468,27 @@ impl ExecutionStateV2 {
                     .venue_dust_upper_exclusive_shares
                     .value(),
             )?;
-            if open_base_units < venue_dust_upper_exclusive_base_units
-                && self
-                    .queues
+            let offline_level = crate::offline_scene::Level {
+                condition: order.condition_id.0.clone(),
+                buy_token: order.token_id.0.clone(),
+                price_micro: micro_units_v1(order.source_price_pusd_per_share)? as u32,
+            };
+            let dust_candidate = if let Some(q) = &self.offline_queue {
+                q.venue_dust_candidate(&offline_level) == Some(platform_order_id.as_str())
+            } else {
+                self.queues
                     .asset(&order.condition_id.0, &order.token_id.0)?
                     .venue_dust_candidate(order.source_price_pusd_per_share, &platform_order_id)
                     .is_some()
-            {
-                self.queues
-                    .asset_mut(&order.condition_id.0, &order.token_id.0)?
-                    .remove_account_order(&platform_order_id);
+            };
+            if open_base_units < venue_dust_upper_exclusive_base_units && dust_candidate {
+                if let Some(q) = &mut self.offline_queue {
+                    q.cancel_at(&offline_level, &platform_order_id);
+                } else {
+                    self.queues
+                        .asset_mut(&order.condition_id.0, &order.token_id.0)?
+                        .remove_account_order(&platform_order_id);
+                }
 
                 self.account_overlay
                     .subtract_quantity(
@@ -4366,7 +4694,16 @@ impl ExecutionStateV2 {
         };
 
         if open_base_units_before > 0 {
-            if !self.queues.matching_closed(&condition_id.0)? {
+            if let Some(queue) = &mut self.offline_queue {
+                queue.cancel_at(
+                    &crate::offline_scene::Level {
+                        condition: order.condition_id.0.clone(),
+                        buy_token: order.token_id.0.clone(),
+                        price_micro: micro_units_v1(order.source_price_pusd_per_share)? as u32,
+                    },
+                    platform_order_id,
+                );
+            } else if !self.queues.matching_closed(&condition_id.0)? {
                 self.queues
                     .asset_mut(&condition_id.0, &token_id.0)?
                     .remove_account_order_at_price(price_pusd_per_share, platform_order_id)
@@ -4578,7 +4915,16 @@ impl ExecutionStateV2 {
         };
 
         if open_base_units_before > 0 {
-            if !self.queues.matching_closed(&condition_id.0)? {
+            if let Some(queue) = &mut self.offline_queue {
+                queue.cancel_at(
+                    &crate::offline_scene::Level {
+                        condition: condition_id.0.clone(),
+                        buy_token: token_id.0.clone(),
+                        price_micro: micro_units_v1(price_pusd_per_share)? as u32,
+                    },
+                    &platform_order_id,
+                );
+            } else if !self.queues.matching_closed(&condition_id.0)? {
                 self.queues
                     .asset_mut(&condition_id.0, &token_id.0)?
                     .remove_account_order_at_price(price_pusd_per_share, &platform_order_id);
@@ -7533,6 +7879,582 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn offline_scene_preserves_existing_partial_maker_dust_release() {
+        use crate::offline_scene::{Event, EventKind, Level};
+        let (mut state, condition, token) = execution_state_v2_for_resting_limit_tests("100");
+        let rules = crate::platform_rules::tests::successful_snapshot_v3_for_sim_tests().await;
+        let policy = economic_at_zero_policy_v2_for_tests();
+        state.enable_offline_scene();
+        let (next, _) = state
+            .apply_buy_order(
+                BuyOrderActionV2 {
+                    global_request_id: "offline-dust".into(),
+                    batch_item_ordinal: 0,
+                    item_id: "item".into(),
+                    condition_id: condition.clone(),
+                    token_id: token.clone(),
+                    effective_processing_at_utc_ms: 1200,
+                    terms: BuyOrderTermsV2::Gtc {
+                        limit_price_pusd_per_share: decimal("0.3"),
+                        accepted_base_units: 5_000_000,
+                        accepted_quote_units: 1_500_000,
+                        post_only: true,
+                    },
+                },
+                rules.snapshot(),
+                &policy,
+            )
+            .unwrap();
+        state = next;
+        let effects = state
+            .apply_offline_scene_event(
+                &Event {
+                    at_ms: 1300,
+                    source_sequence: 0,
+                    level: Level {
+                        condition: condition.0.clone(),
+                        buy_token: token.0.clone(),
+                        price_micro: 300_000,
+                    },
+                    kind: EventKind::Demand {
+                        quantity: 4_995_000,
+                    },
+                },
+                rules.snapshot(),
+                &policy,
+            )
+            .unwrap();
+        assert_eq!(effects.initial_trade_finality[0].base_units, 4_995_000);
+        assert_eq!(state.account.principal_encumbrance_pusd(), Decimal::ZERO);
+        assert_eq!(state.account.available_pusd(), decimal("98.5015"));
+        assert_eq!(
+            state.orders["sim-1"].terminal_reason,
+            Some(SimOrderTerminalReasonV1::VenueDustTerminal)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "explicit 1.5M-fragment taker scale fixture matching the observed preparation magnitude"]
+    async fn offline_scene_postonly_preview_cost_with_million_fragments() {
+        use crate::offline_scene::{Event, EventKind, Level, Slice};
+        let (mut state, condition, token) = execution_state_v2_for_resting_limit_tests("100");
+        state.enable_offline_scene();
+        let opposite = state.queues.markets[&condition.0]
+            .assets
+            .keys()
+            .find(|t| **t != token.0)
+            .unwrap()
+            .clone();
+        let level = Level {
+            condition: condition.0.clone(),
+            buy_token: opposite,
+            price_micro: 700_000,
+        };
+        let queue = state.offline_queue.as_mut().unwrap();
+        queue.apply(&Event {
+            at_ms: 0,
+            source_sequence: 0,
+            level: level.clone(),
+            kind: EventKind::Add {
+                segment: 1,
+                quantity: 3_000_000,
+                implicit: false,
+            },
+        });
+        queue.consume_targets(
+            &level,
+            &(0..1_500_000u128)
+                .map(|n| Slice {
+                    segment: 1,
+                    start: 2 * n + 1,
+                    end: 2 * n + 2,
+                })
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(queue.external_quantity(&level), 1_500_000);
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert!(
+                state
+                    .offline_would_take(&condition.0, &token.0, decimal("0.3"))
+                    .unwrap()
+            );
+        }
+        eprintln!(
+            "postonly cached preview: fragments=1500000, iterations=1000, elapsed_seconds={}",
+            start.elapsed().as_secs_f64()
+        );
+        let start = std::time::Instant::now();
+        let (plan, targets) = state
+            .calculate_offline_taker(
+                &condition.0,
+                &token.0,
+                decimal("0.3"),
+                TakerTargetV1::LimitBase {
+                    total_base_units: 100_000,
+                    total_quote_units: 30_000,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                plan.matched_base_units,
+                plan.used_quote_units,
+                plan.fills.len()
+            ),
+            (100_000, 30_000, 1)
+        );
+        assert_eq!(targets[0].1.len(), 100_000);
+        eprintln!(
+            "actual coordinate planning: targets=100000, elapsed_seconds={}",
+            start.elapsed().as_secs_f64()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn offline_scene_taker_aggregates_micro_fragments_without_price_or_fee_drift() {
+        use crate::offline_scene::{Event, EventKind, Level, Slice};
+        let rules = crate::platform_rules::tests::successful_snapshot_v3_for_sim_tests().await;
+        let policy = economic_at_zero_policy_v2_for_tests();
+        let mut states = Vec::new();
+        for fragmented in [false, true] {
+            let (mut state, condition, token) = execution_state_v2_for_resting_limit_tests("100");
+            state.enable_offline_scene();
+            let opposite = state.queues.markets[&condition.0]
+                .assets
+                .keys()
+                .find(|t| **t != token.0)
+                .unwrap()
+                .clone();
+            let level = Level {
+                condition: condition.0.clone(),
+                buy_token: opposite,
+                price_micro: 700_000,
+            };
+            let quantity = if fragmented { 20_000_000 } else { 19_999_901 };
+            state
+                .apply_offline_scene_event(
+                    &Event {
+                        at_ms: 1100,
+                        source_sequence: 0,
+                        level: level.clone(),
+                        kind: EventKind::Add {
+                            segment: 1,
+                            quantity,
+                            implicit: false,
+                        },
+                    },
+                    rules.snapshot(),
+                    &policy,
+                )
+                .unwrap();
+            if fragmented {
+                state.offline_queue.as_mut().unwrap().consume_targets(
+                    &level,
+                    &[Slice {
+                        segment: 1,
+                        start: 1,
+                        end: 100,
+                    }],
+                );
+            }
+            // The first surviving microshare alone cannot make a positive quote,
+            // but it must not block the following same-price live quantity.
+            assert!(
+                maximum_base_for_limit_order_segment_v1(
+                    20_000_000, 6_000_000, 0, 1, 10_000_000, 3_000_000, 0, 0
+                )
+                .unwrap()
+                .is_none()
+            );
+            let before = state.offline_queue.clone();
+            let request = |id: &str, terms| BuyOrderActionV2 {
+                global_request_id: id.into(),
+                batch_item_ordinal: 0,
+                item_id: id.into(),
+                condition_id: condition.clone(),
+                token_id: token.clone(),
+                effective_processing_at_utc_ms: 1200,
+                terms,
+            };
+            let (next, result) = state
+                .apply_buy_order(
+                    request(
+                        "postonly-fragments",
+                        BuyOrderTermsV2::Gtc {
+                            limit_price_pusd_per_share: decimal("0.3"),
+                            accepted_base_units: 10_000_000,
+                            accepted_quote_units: 3_000_000,
+                            post_only: true,
+                        },
+                    ),
+                    rules.snapshot(),
+                    &policy,
+                )
+                .unwrap();
+            state = next;
+            assert!(matches!(
+                result,
+                BuyOrderDispositionV2::RejectedNoEffect(
+                    BuyOrderRejectedReasonV2::PostOnlyWouldTake
+                )
+            ));
+            assert_eq!(state.offline_queue, before);
+            let (preview, targets) = state
+                .calculate_offline_taker(
+                    &condition.0,
+                    &token.0,
+                    decimal("0.3"),
+                    TakerTargetV1::Quote(3_000_000),
+                )
+                .unwrap();
+            assert_eq!(
+                (preview.matched_base_units, preview.used_quote_units),
+                (10_000_003, 3_000_000)
+            );
+            assert_eq!(preview.fills.len(), 1);
+            if fragmented {
+                assert_eq!(
+                    targets[0].1[0],
+                    Slice {
+                        segment: 1,
+                        start: 0,
+                        end: 1
+                    }
+                );
+            }
+            let (next, result) = state
+                .apply_buy_order(
+                    request(
+                        "first-fok",
+                        BuyOrderTermsV2::Fok {
+                            worst_price_pusd_per_share: decimal("0.3"),
+                            accepted_quote_budget_units: 3_000_000,
+                            sdk_taker_amount_audit_base_units: 10_000_000,
+                        },
+                    ),
+                    rules.snapshot(),
+                    &policy,
+                )
+                .unwrap();
+            state = next;
+            assert!(matches!(result, BuyOrderDispositionV2::Accepted(_)));
+            let (next, result) = state
+                .apply_buy_order(
+                    request(
+                        "second-fak",
+                        BuyOrderTermsV2::Fak {
+                            worst_price_pusd_per_share: decimal("0.3"),
+                            accepted_quote_budget_units: 3_000_000,
+                            sdk_taker_amount_audit_base_units: 10_000_000,
+                        },
+                    ),
+                    rules.snapshot(),
+                    &policy,
+                )
+                .unwrap();
+            state = next;
+            assert!(matches!(result, BuyOrderDispositionV2::Accepted(_)));
+            assert_eq!(
+                state
+                    .offline_queue
+                    .as_ref()
+                    .unwrap()
+                    .external_quantity(&level),
+                0
+            );
+            let base: u128 = state.fills.values().map(|f| f.base_units).sum();
+            let quote: u128 = state.fills.values().map(|f| f.quote_units).sum();
+            assert_eq!(base, 19_999_901);
+            assert_eq!(
+                quote,
+                segment_quote_units_v1(10_000_003, decimal("0.3")).unwrap()
+                    + segment_quote_units_v1(9_999_898, decimal("0.3")).unwrap()
+            );
+            assert_eq!(
+                segment_quote_units_v1(base, decimal("0.3")).unwrap() - quote,
+                1
+            );
+            assert_eq!(state.account.principal_encumbrance_pusd(), Decimal::ZERO);
+            states.push((
+                state.account.available_pusd(),
+                state
+                    .fills
+                    .values()
+                    .map(|f| (f.base_units, f.quote_units, f.immediate_taker_fee_units))
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        assert_eq!(states[0], states[1]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn offline_scene_taker_preview_rejections_batch_commit_and_closed_queue() {
+        use crate::offline_scene::{Event, EventKind, Level, Slice};
+        let (mut state, condition, token) = execution_state_v2_for_resting_limit_tests("100");
+        let rules = crate::platform_rules::tests::successful_snapshot_v3_for_sim_tests().await;
+        let policy = economic_at_zero_policy_v2_for_tests();
+        state.enable_offline_scene();
+        let opposite = state.queues.markets[&condition.0]
+            .assets
+            .keys()
+            .find(|t| **t != token.0)
+            .unwrap()
+            .clone();
+        let level = Level {
+            condition: condition.0.clone(),
+            buy_token: opposite,
+            price_micro: 700_000,
+        };
+        state
+            .apply_offline_scene_event(
+                &Event {
+                    at_ms: 1100,
+                    source_sequence: 0,
+                    level: level.clone(),
+                    kind: EventKind::Add {
+                        segment: 1,
+                        quantity: 20_000_000,
+                        implicit: false,
+                    },
+                },
+                rules.snapshot(),
+                &policy,
+            )
+            .unwrap();
+        state.offline_queue.as_mut().unwrap().consume_targets(
+            &level,
+            &[Slice {
+                segment: 1,
+                start: 5_000_000,
+                end: 10_000_000,
+            }],
+        );
+        let request = |id: &str, terms| BuyOrderActionV2 {
+            global_request_id: id.into(),
+            batch_item_ordinal: 0,
+            item_id: id.into(),
+            condition_id: condition.clone(),
+            token_id: token.clone(),
+            effective_processing_at_utc_ms: 1200,
+            terms,
+        };
+        let before = state.offline_queue.clone();
+        let (next, outcome) = state
+            .apply_buy_order(
+                request(
+                    "post-only",
+                    BuyOrderTermsV2::Gtc {
+                        limit_price_pusd_per_share: decimal("0.3"),
+                        accepted_base_units: 10_000_000,
+                        accepted_quote_units: 3_000_000,
+                        post_only: true,
+                    },
+                ),
+                rules.snapshot(),
+                &policy,
+            )
+            .unwrap();
+        state = next;
+        assert!(matches!(
+            outcome,
+            BuyOrderDispositionV2::RejectedNoEffect(_)
+        ));
+        assert_eq!(state.offline_queue, before);
+        let (next, outcome) = state
+            .apply_buy_order(
+                request(
+                    "funds",
+                    BuyOrderTermsV2::Gtc {
+                        limit_price_pusd_per_share: decimal("0.3"),
+                        accepted_base_units: 1_000_000_000,
+                        accepted_quote_units: 300_000_000,
+                        post_only: false,
+                    },
+                ),
+                rules.snapshot(),
+                &policy,
+            )
+            .unwrap();
+        state = next;
+        assert!(matches!(
+            outcome,
+            BuyOrderDispositionV2::RejectedNoEffect(_)
+        ));
+        assert_eq!(state.offline_queue, before);
+        let (next, outcome) = state
+            .apply_buy_order(
+                request(
+                    "fok",
+                    BuyOrderTermsV2::Fok {
+                        worst_price_pusd_per_share: decimal("0.3"),
+                        accepted_quote_budget_units: 3_000_000,
+                        sdk_taker_amount_audit_base_units: 10_000_000,
+                    },
+                ),
+                rules.snapshot(),
+                &policy,
+            )
+            .unwrap();
+        state = next;
+        assert!(matches!(outcome, BuyOrderDispositionV2::Accepted(_)));
+        assert_eq!(
+            state
+                .offline_queue
+                .as_ref()
+                .unwrap()
+                .external_quantity(&level),
+            4_999_997
+        );
+        assert_eq!(state.account.principal_encumbrance_pusd(), Decimal::ZERO);
+        let remaining = state.offline_queue.clone();
+        let available = state.account.available_pusd();
+        let (next, outcome) = state
+            .apply_buy_order(
+                request(
+                    "fok-short",
+                    BuyOrderTermsV2::Fok {
+                        worst_price_pusd_per_share: decimal("0.3"),
+                        accepted_quote_budget_units: 3_000_000,
+                        sdk_taker_amount_audit_base_units: 10_000_000,
+                    },
+                ),
+                rules.snapshot(),
+                &policy,
+            )
+            .unwrap();
+        state = next;
+        assert!(matches!(
+            outcome,
+            BuyOrderDispositionV2::RejectedNoEffect(_)
+        ));
+        assert_eq!(state.offline_queue, remaining);
+        assert_eq!(state.account.available_pusd(), available);
+        state.advance_market_time(&[condition.0.clone()]).unwrap();
+        assert_eq!(
+            state
+                .offline_queue
+                .as_ref()
+                .unwrap()
+                .external_quantity(&level),
+            0
+        );
+        state
+            .apply_offline_scene_event(
+                &Event {
+                    at_ms: 1300,
+                    source_sequence: 1,
+                    level: level.clone(),
+                    kind: EventKind::Add {
+                        segment: 2,
+                        quantity: 100,
+                        implicit: false,
+                    },
+                },
+                rules.snapshot(),
+                &policy,
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .offline_queue
+                .as_ref()
+                .unwrap()
+                .external_quantity(&level),
+            0
+        );
+        assert_eq!(state.account.available_pusd(), available);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn offline_scene_real_order_economic_and_cancel_chain() {
+        use crate::offline_scene::{Event, EventKind, Level};
+        let (mut state, condition, token) = execution_state_v2_for_resting_limit_tests("100");
+        let rules = crate::platform_rules::tests::successful_snapshot_v3_for_sim_tests().await;
+        let policy = economic_at_zero_policy_v2_for_tests();
+        state.enable_offline_scene();
+        let level = Level {
+            condition: condition.0.clone(),
+            buy_token: token.0.clone(),
+            price_micro: 300_000,
+        };
+        let event = |at_ms, kind| Event {
+            at_ms,
+            source_sequence: 0,
+            level: level.clone(),
+            kind,
+        };
+        state
+            .apply_offline_scene_event(
+                &event(
+                    1100,
+                    EventKind::Add {
+                        segment: 1,
+                        quantity: 20_000_000,
+                        implicit: false,
+                    },
+                ),
+                rules.snapshot(),
+                &policy,
+            )
+            .unwrap();
+        let (next, disposition) = state
+            .apply_buy_order(
+                BuyOrderActionV2 {
+                    global_request_id: "offline-maker".into(),
+                    batch_item_ordinal: 0,
+                    item_id: "item".into(),
+                    condition_id: condition.clone(),
+                    token_id: token.clone(),
+                    effective_processing_at_utc_ms: 1200,
+                    terms: BuyOrderTermsV2::Gtc {
+                        limit_price_pusd_per_share: decimal("0.3"),
+                        accepted_base_units: 10_000_000,
+                        accepted_quote_units: 3_000_000,
+                        post_only: true,
+                    },
+                },
+                rules.snapshot(),
+                &policy,
+            )
+            .unwrap();
+        assert!(matches!(disposition, BuyOrderDispositionV2::Accepted(_)));
+        state = next;
+        let effects = state
+            .apply_offline_scene_event(
+                &event(
+                    1300,
+                    EventKind::Demand {
+                        quantity: 25_000_000,
+                    },
+                ),
+                rules.snapshot(),
+                &policy,
+            )
+            .unwrap();
+        assert_eq!(effects.initial_trade_finality.len(), 1);
+        assert_eq!(effects.initial_trade_finality[0].base_units, 5_000_000);
+        assert_eq!(state.account.principal_encumbrance_pusd(), decimal("1.5"));
+        let (mut state, _) = state.apply_caller_cancel("sim-1", 1400).unwrap();
+        assert_eq!(state.account.available_pusd(), decimal("98.5"));
+        assert_eq!(state.account.principal_encumbrance_pusd(), Decimal::ZERO);
+        let effects = state
+            .apply_offline_scene_event(
+                &event(
+                    1500,
+                    EventKind::Demand {
+                        quantity: 30_000_000,
+                    },
+                ),
+                rules.snapshot(),
+                &policy,
+            )
+            .unwrap();
+        assert!(effects.initial_trade_finality.is_empty());
+        assert_eq!(state.fills.len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn execution_state_v2_accumulates_zero_quote_maker_then_creates_one_fill() {
         let (mut state, condition_id, token_id) = execution_state_v2_for_resting_limit_tests("10");
         let rules = crate::platform_rules::tests::successful_snapshot_v3_for_sim_tests().await;
@@ -10300,6 +11222,75 @@ mod tests {
                 next_account_transition_seq: 12,
             }
         );
+    }
+
+    #[test]
+    fn preloaded_market_defers_economic_owners_and_retains_resolution_evidence_on_restore() {
+        let (initial, condition, _) = execution_state_v2_for_resting_limit_tests("10");
+        let empty = crate::scenario::PlatformScenarioV1::try_new(vec![]).unwrap();
+        let directory = SessionMarketDirectoryV1::try_from_scenario(&empty).unwrap();
+        let mut state = ExecutionStateV2::new(&directory, initial.account);
+        state.enable_offline_scene();
+        let scenario = crate::scenario::scenario_for_sim_tests();
+        let member = &scenario.market_set().markets()[0];
+        state.preload_market(member);
+        assert_eq!(state.next_rebate_clock_at_utc_ms(), None);
+        let terminal = MarketResolutionTerminalV3::Resolved {
+            winning_asset_id: member.assets()[0].token_id.0.clone(),
+            winning_outcome: member.assets()[0].outcome.label.clone(),
+            payout_vector: member
+                .assets()
+                .iter()
+                .enumerate()
+                .map(|(index, asset)| contracts::PayoutEntryV1 {
+                    asset: asset.clone(),
+                    payout_pusd_per_share: ExactDecimal(if index == 0 { "1" } else { "0" }.into()),
+                })
+                .collect(),
+            mapping_rule_version: "preload-resolution-source-v1".into(),
+        };
+        let resolution = QualifiedMarketResolutionV2 {
+            resolution_event_id: "original-hidden-terminal".into(),
+            resolution_source_event_at_utc_ms: Some(4_000),
+            resolution_public_consumed_at_utc_ms: None,
+            terminal: terminal.clone(),
+            parsed_payouts: [Decimal::ONE, Decimal::ZERO],
+        };
+        let finality = crate::finality::successful_policy_v2_for_tests();
+        assert_eq!(
+            state
+                .apply_qualified_resolution(&condition.0, &resolution, 4_000, &finality)
+                .unwrap(),
+            ExecutionMarketEventEffectsV2::default()
+        );
+        assert!(state.market_resolutions.is_empty());
+        state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        state.publish_preloaded_market(member, 40_000);
+        state.publish_preloaded_market(member, 40_000);
+        assert_eq!(state.next_rebate_clock_at_utc_ms(), Some(40_000));
+        let effects = state
+            .apply_qualified_resolution(&condition.0, &resolution, 40_000, &finality)
+            .unwrap();
+        assert_eq!(effects.settlement.len(), 1); // resolved; rebate predecessor still pending
+        assert_eq!(
+            state.market_resolutions[&condition.0].resolution_source_event_at_utc_ms,
+            Some(4_000)
+        );
+        let restored: ExecutionStateV2 =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        let (state, effects) = state.advance_next_rebate_clock_at(40_000).unwrap();
+        let (restored, restored_effects) = restored.advance_next_rebate_clock_at(40_000).unwrap();
+        assert_eq!(effects, restored_effects);
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            serde_json::to_value(&restored).unwrap()
+        );
+        assert_eq!(
+            state.redeemed_market_resolution(&condition.0),
+            Some(&terminal)
+        );
+        assert_eq!(effects.settlement.len(), 2); // zero maker result, then original auto redeem
+        assert!(effects.account_deltas.is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

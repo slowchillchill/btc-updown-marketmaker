@@ -21,6 +21,8 @@ use rust_decimal::Decimal;
 use shared_run::*;
 use sim_system::{execution::*, platform_rules::*};
 use std::sync::Arc;
+#[path = "support/strategy_visibility.rs"]
+mod strategy_visibility;
 #[derive(Default)]
 struct Probe {
     no_trade_only: bool,
@@ -317,8 +319,8 @@ impl StrategyV1 for Probe {
     }
     fn dispatched(
         &mut self,
-        calculation: &StrategyCalculationV1,
-        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        calculation: &StrategyCalculationReadV1<'_>,
+        result: &Result<Vec<StrategySentIntentReceiptV1>, StrategyBatchExecutionErrorV1>,
     ) {
         if let StrategyOutputV1::Continue { intents, .. } = &calculation.output {
             for intent in intents {
@@ -1318,8 +1320,8 @@ impl StrategyV1 for HealthProbe {
     }
     fn next_health_evaluation_at(
         &self,
-        _: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
-        calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        _: &[StrategyMarketReadFrameV1<'_>],
+        calculation: Option<&StrategyCalculationReadV1<'_, Self::Diagnostics>>,
         at: i64,
     ) -> Option<i64> {
         let StrategyOutputV1::Continue { diagnostics, .. } = &calculation?.output else {
@@ -1384,7 +1386,7 @@ impl StrategyV1 for HealthProbe {
     fn qualify_intent(
         &mut self,
         input: &StrategyCurrentReadV1<'_>,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         _: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -1437,8 +1439,8 @@ impl StrategyV1 for HealthProbe {
     }
     fn invalidated(
         &mut self,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
-        result: &InvalidatedBatchV1,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
+        result: &StrategyInvalidatedBatchV1,
     ) {
         let StrategyOutputV1::Continue { diagnostics, .. } = &calculation.output else {
             panic!()
@@ -1454,8 +1456,8 @@ impl StrategyV1 for HealthProbe {
     }
     fn dispatched(
         &mut self,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
-        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
+        result: &Result<Vec<StrategySentIntentReceiptV1>, StrategyBatchExecutionErrorV1>,
     ) {
         let StrategyOutputV1::Continue { intents, .. } = &calculation.output else {
             return;
@@ -1568,8 +1570,8 @@ impl StrategyV1 for QuietDeadlineProbe {
     }
     fn next_health_evaluation_at(
         &self,
-        _: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
-        _: Option<&StrategyCalculationV1>,
+        _: &[StrategyMarketReadFrameV1<'_>],
+        _: Option<&StrategyCalculationReadV1<'_>>,
         at: i64,
     ) -> Option<i64> {
         (at < self.deadline).then_some(self.deadline)
@@ -1639,8 +1641,8 @@ impl StrategyV1 for MeasurementProbe {
     }
     fn next_health_evaluation_at(
         &self,
-        _: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
-        _: Option<&StrategyCalculationV1>,
+        _: &[StrategyMarketReadFrameV1<'_>],
+        _: Option<&StrategyCalculationReadV1<'_>>,
         at: i64,
     ) -> Option<i64> {
         [BASE + 2500, BASE + 3500]
@@ -1657,8 +1659,8 @@ impl StrategyV1 for MeasurementProbe {
     }
     fn dispatched(
         &mut self,
-        _: &StrategyCalculationV1,
-        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        _: &StrategyCalculationReadV1<'_>,
+        result: &Result<Vec<StrategySentIntentReceiptV1>, StrategyBatchExecutionErrorV1>,
     ) {
         assert!(result.as_ref().unwrap().is_empty());
         self.dispatches += 1;
@@ -1710,6 +1712,7 @@ fn day_received_range_does_not_include_late_received_hidden_source_fact() {
             candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
             progress_interval_seconds: 0,
             producer_lead_groups: Some(1),
+            offline_scenes: Default::default(),
         };
         let result = run_historical_days_v1(&[day], rules, &|_| {
             Ok(Probe {
@@ -1769,6 +1772,7 @@ fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
         candidates: vec![first, second],
         progress_interval_seconds: 0,
         producer_lead_groups: Some(1),
+        offline_scenes: Default::default(),
     };
     let preparation_seconds = preparation_started.elapsed().as_secs_f64();
     let operation_started = std::time::Instant::now();
@@ -1812,7 +1816,8 @@ fn original_day_shares_public_core_and_keeps_delayed_candidates_independent() {
         "日入口不得生成完整宽录制"
     );
     let fast = serde_json::to_string(&sim_log_values(&config.sim_log)).unwrap();
-    let slow = serde_json::to_string(&sim_log_values(&root.as_path().join("slow-sim.jsonl"))).unwrap();
+    let slow =
+        serde_json::to_string(&sim_log_values(&root.as_path().join("slow-sim.jsonl"))).unwrap();
     assert!(fast.contains("day-fast"));
     assert!(!fast.contains("day-slow"));
     assert!(slow.contains("day-slow"));
@@ -1852,6 +1857,7 @@ fn candidate_unwind_publishes_failure_and_wakes_daily_waiters() {
         candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
         progress_interval_seconds: 0,
         producer_lead_groups: Some(1),
+        offline_scenes: Default::default(),
     };
     let error = run_historical_days_v1(&[day], rules, &|_| -> Result<Probe, MaterialError> {
         panic!("fixture candidate unwind")
@@ -1877,6 +1883,7 @@ fn two_original_dates_keep_two_thousand_and_same_day_cross_market_continuity() {
             candidates: vec![candidate],
             progress_interval_seconds: 0,
             producer_lead_groups: Some(1),
+            offline_scenes: Default::default(),
         });
     }
     let rules = shared_rules.unwrap();
@@ -1971,6 +1978,7 @@ fn original_day_quantity_demand_union_preserves_complete_and_quantity_free_candi
             candidates: vec![first, second],
             progress_interval_seconds: 0,
             producer_lead_groups: Some(1),
+            offline_scenes: Default::default(),
         };
         let seen = [
             Arc::new(AtomicBool::new(false)),
@@ -2049,6 +2057,7 @@ fn research_day(config: &HistoricalRunConfigV1, _root: &std::path::Path) -> Hist
         candidates: vec![HistoricalPreparedRunConfigV1::from(config)],
         progress_interval_seconds: 0,
         producer_lead_groups: Some(1),
+        offline_scenes: Default::default(),
     }
 }
 
@@ -2408,6 +2417,7 @@ fn actual_day_initialization_statistics_keep_late_candidate_prefixes() {
         candidates,
         progress_interval_seconds: 0,
         producer_lead_groups: Some(1),
+        offline_scenes: Default::default(),
     };
     let result = run_historical_days_v1(&[day], rules, &|_| {
         Ok(Probe {
@@ -2476,6 +2486,7 @@ fn later_candidate_original_failure_survives_earlier_candidate_collateral_stop()
         candidates: vec![first, second],
         progress_interval_seconds: 0,
         producer_lead_groups: Some(1),
+        offline_scenes: Default::default(),
     };
     let error = run_historical_days_v1(&[day], rules.clone(), &|c| {
         Ok(Probe {
@@ -2581,6 +2592,7 @@ fn completed_business_report_survives_result_file_failure_without_completion_reu
         candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
         progress_interval_seconds: 0,
         producer_lead_groups: Some(1),
+        offline_scenes: Default::default(),
     };
     let error = run_historical_days_with_options_v1(
         &[day],
@@ -2642,6 +2654,7 @@ fn required_public_output_failure_returns_day_and_candidate_partial_status() {
         candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
         progress_interval_seconds: 0,
         producer_lead_groups: None,
+        offline_scenes: Default::default(),
     };
     let result = run_historical_days_with_options_v1(
         &[day],
@@ -2721,6 +2734,7 @@ fn early_strategy_exit_before_eof_propagates_required_public_finish_failure() {
         candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
         progress_interval_seconds: 0,
         producer_lead_groups: Some(0),
+        offline_scenes: Default::default(),
     };
     let failure = run_historical_days_with_options_v1(
         &[day],
@@ -2954,8 +2968,8 @@ impl StrategyV1 for FifoProbe {
     }
     fn dispatched(
         &mut self,
-        c: &StrategyCalculationV1,
-        r: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        c: &StrategyCalculationReadV1<'_>,
+        r: &Result<Vec<StrategySentIntentReceiptV1>, StrategyBatchExecutionErrorV1>,
     ) {
         self.inner.dispatched(c, r)
     }
@@ -3162,6 +3176,7 @@ fn fifo_day_shares_original_statistics_history_with_independent_accounts_and_pro
         candidates: vec![first, second],
         progress_interval_seconds: 0,
         producer_lead_groups: Some(1),
+        offline_scenes: Default::default(),
     };
     let result = run_historical_days_v1(&[day], rules, &|_| {
         Ok(FifoSharedStatisticsProbe {
@@ -3221,8 +3236,8 @@ impl StrategyV1 for ActiveWindowProbe {
     }
     fn dispatched(
         &mut self,
-        c: &StrategyCalculationV1,
-        r: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        c: &StrategyCalculationReadV1<'_>,
+        r: &Result<Vec<StrategySentIntentReceiptV1>, StrategyBatchExecutionErrorV1>,
     ) {
         self.inner.dispatched(c, r)
     }
@@ -3417,7 +3432,7 @@ impl StrategyV1 for DaySendBoundaryProbe {
     fn qualify_intent(
         &mut self,
         current: &StrategyCurrentReadV1<'_>,
-        _: &StrategyCalculationV1,
+        _: &StrategyCalculationReadV1<'_>,
         _: usize,
         _: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -3454,6 +3469,7 @@ fn formal_day_entries_select_actual_or_explicit_host_managed_error_order() {
             candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
             progress_interval_seconds: 0,
             producer_lead_groups: Some(1),
+            offline_scenes: Default::default(),
         };
         let post_reserve_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let factory = |_: &HistoricalPreparedRunConfigV1| {
@@ -3491,4 +3507,438 @@ fn formal_day_entries_select_actual_or_explicit_host_managed_error_order() {
             );
         }
     }
+}
+
+#[test]
+fn offline_scene_day_uses_frozen_events_and_original_public_chain() {
+    use backtest::offline_scene_source::*;
+    use sim_system::offline_scene::*;
+    let root = tempfile::tempdir().unwrap();
+    let (config, source) = setup(root.path());
+    let rules = derive_offline_probabilistic_snapshot_v3(
+        HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: source.path().to_owned(),
+            expected_file_sha256: source.file_sha256().clone(),
+            replay_causal_start_utc_ms: BASE,
+        },
+        root.path().join("offline-rules.json"),
+        serde_json::from_value::<ImplementationIdentityV1>(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(source.path()).unwrap())
+                .unwrap()["provenance"]["implementation_identity"]
+                .clone(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let (analysis, markets, market_assets, manifests) =
+        collect_scene_facts_v1(&config.preparation, BASE - 60_000, BASE + 60_000, 0).unwrap();
+    let mut scene = analysis.prepare(Parameters {
+        association_ms: 250,
+        allocation: Allocation::Nearest,
+        cancellation: Cancellation::SegmentProportionalV2,
+        internal_time: InternalTime::SourceWhenPresent,
+        seed: 7,
+        association_trade_shift_ms: 0,
+    });
+    for event in &mut scene.events {
+        event.at_ms = event.at_ms.max(BASE);
+    }
+    let old_path = root.path().join("scene.json");
+    let material = OfflineSceneMaterialV1 {
+        scene,
+        markets,
+        market_assets,
+        source_manifests: manifests,
+    };
+    material.clone().write_compact(&old_path).unwrap();
+    let path = root.path().join("stream.scene");
+    let mut writer = SceneStreamWriterV2::create(&path).unwrap();
+    for event in material.scene.events.iter().cloned() {
+        writer.push(event).unwrap();
+    }
+    let mut header = material.clone();
+    header.scene.events.clear();
+    writer.finish(header).unwrap();
+    let (_, old, _) = open_scene_material(&old_path).unwrap();
+    let (_, new, _) = open_scene_material_with_progress(&path, 1).unwrap();
+    assert_eq!(
+        old.map(Result::unwrap).collect::<Vec<_>>(),
+        new.map(Result::unwrap).collect::<Vec<_>>()
+    );
+    let parallel_path = root.path().join("parallel.scene");
+    let parallel = prepare_condition_parallel_scene_v2(
+        &analysis,
+        material.scene.parameters.clone(),
+        &material.markets,
+        &material.market_assets,
+        &material.source_manifests,
+        &parallel_path,
+        BASE,
+        2,
+        0,
+    )
+    .unwrap();
+    assert_eq!(parallel.report, material.scene.report);
+    let (_, parallel_events, _) = open_scene_material(&parallel_path).unwrap();
+    assert_eq!(
+        parallel_events.map(Result::unwrap).collect::<Vec<_>>(),
+        material.scene.events
+    );
+    let separate_path = root.path().join("separate.scene");
+    let separate_temporary = root.path().join("owned-separate-temporary");
+    let separated = prepare_condition_parallel_scene_with_temporary_root_v2(
+        &analysis,
+        material.scene.parameters.clone(),
+        &material.markets,
+        &material.market_assets,
+        &material.source_manifests,
+        &separate_path,
+        BASE,
+        2,
+        0,
+        Some(&separate_temporary),
+    )
+    .unwrap();
+    assert_eq!(separated.report, parallel.report);
+    let (_, events, _) = open_scene_material(&separate_path).unwrap();
+    assert_eq!(
+        events.map(Result::unwrap).collect::<Vec<_>>(),
+        material.scene.events
+    );
+    assert!(
+        !separate_temporary.exists(),
+        "successful final material releases its owned temporary directory"
+    );
+    let failed_temporary = root.path().join("owned-failed-temporary");
+    let failure = prepare_condition_parallel_scene_with_temporary_root_v2(
+        &analysis,
+        material.scene.parameters.clone(),
+        &material.markets,
+        &material.market_assets,
+        &material.source_manifests,
+        &root.path().join("missing-final-parent/failed.scene"),
+        BASE,
+        2,
+        0,
+        Some(&failed_temporary),
+    );
+    assert!(failure.is_err());
+    assert!(
+        std::fs::read_dir(&failed_temporary)
+            .unwrap()
+            .any(|entry| entry.unwrap().metadata().unwrap().len() > 0),
+        "final writer failure must retain the completed temporary streams"
+    );
+    let path = parallel_path;
+    let candidate = HistoricalPreparedRunConfigV1::from(&config);
+    let day = HistoricalDayConfigV1 {
+        preparation: config.preparation.clone(),
+        candidates: vec![candidate.clone()],
+        progress_interval_seconds: 0,
+        producer_lead_groups: Some(4),
+        offline_scenes: std::collections::BTreeMap::from([(
+            candidate.session.run_id.clone(),
+            path,
+        )]),
+    };
+    let result = run_historical_days_v1(&[day.clone()], rules.clone(), &|_| {
+        Ok(Probe {
+            rules: Some(rules.clone()),
+            ..Default::default()
+        })
+    })
+    .unwrap();
+    assert_eq!(result[0].public_applied_inputs, 9);
+    assert_eq!(result[0].candidates[0].report["end_reason"], "RangeEnd");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&candidate.metadata_path).unwrap()).unwrap();
+    assert_eq!(metadata["maker_model_version"], MODEL_VERSION);
+    assert_eq!(metadata["offline_scene"]["parameters"]["seed"], 7);
+    // All scene opens must complete before any worker starts. Otherwise a
+    // second-candidate open error joins the first worker waiting on an empty hub.
+    let mut bad_day = day;
+    let mut second = candidate.clone();
+    second.session.run_id = "second-invalid-scene".into();
+    bad_day.offline_scenes.insert(
+        second.session.run_id.clone(),
+        root.path().join("missing.scene"),
+    );
+    bad_day.candidates.push(second);
+    let started = std::sync::atomic::AtomicUsize::new(0);
+    let error = run_historical_days_v1(&[bad_day], rules.clone(), &|_| {
+        started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Probe::default())
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("No such file"), "{error}");
+    assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn offline_future_market_preload_is_private_until_original_public_delivery() {
+    offline_visibility_case(false);
+}
+#[test]
+fn offline_preloaded_market_end_cannot_publish_economics_before_late_identity() {
+    offline_visibility_case(true);
+}
+fn offline_visibility_case(late_identity: bool) {
+    use backtest::offline_scene_source::*;
+    use sim_system::offline_scene::*;
+    use std::collections::BTreeSet;
+    struct VisibilityProbe {
+        rules: Arc<SealedProcessRuleSnapshotV3>,
+        seen_public: BTreeSet<String>,
+        samples: Arc<std::sync::Mutex<Vec<(i64, bool, bool)>>>,
+        submitted: bool,
+        allow_order: bool,
+    }
+    impl StrategyV1 for VisibilityProbe {
+        type Error = &'static str;
+        type Diagnostics = ();
+        fn decide(
+            &mut self,
+            input: &StrategyInputV1,
+            at: i64,
+        ) -> Result<StrategyOutputV1, Self::Error> {
+            self.seen_public.extend(
+                input
+                    .markets
+                    .iter()
+                    .map(|m| m.observation.market.condition_id.0.clone()),
+            );
+            let public = self.seen_public.contains(SECOND);
+            let economic = input
+                .action_before
+                .economics()
+                .markets
+                .iter()
+                .any(|m| m.condition_id.0 == SECOND);
+            let ledger = input
+                .action_before
+                .ledger()
+                .market_projections
+                .iter()
+                .any(|m| m.condition_id.0 == SECOND);
+            assert!(
+                !economic || public,
+                "future identity leaked through full account economics at {at}"
+            );
+            assert!(
+                !ledger || public,
+                "future identity leaked through full ledger enumeration at {at}"
+            );
+            self.samples.lock().unwrap().push((at, public, economic));
+            let ready = input.markets.iter().any(|m| {
+                m.observation.market.condition_id.0 == SECOND
+                    && m.observation.assets.iter().all(|a| a.asks.value.is_some())
+            });
+            let intents = if self.allow_order && ready && !self.submitted {
+                self.submitted = true;
+                vec![buy(
+                    &self.rules,
+                    SECOND,
+                    "21",
+                    "visible-second",
+                    "0.3",
+                    true,
+                )]
+            } else {
+                vec![]
+            };
+            Ok(StrategyOutputV1::Continue {
+                intents,
+                next_evaluation_at_utc_ms: Some(at + 250),
+                diagnostics: (),
+            })
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (mut config, source) = if late_identity {
+        setup_late_second(root.path())
+    } else {
+        setup(root.path())
+    };
+    // The stock fixture ends at 12s. This case's demand is at 15s, followed by
+    // the fixed empirical inbound support (max 29697ms); 60s covers its feedback.
+    config.preparation.scope.received_end_utc_ms =
+        BASE + if late_identity { 90_000 } else { 60_000 };
+    config.research_evidence_path = Some(root.path().join("decisions.jsonl"));
+    let identity = serde_json::from_value::<ImplementationIdentityV1>(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(source.path()).unwrap())
+            .unwrap()["provenance"]["implementation_identity"]
+            .clone(),
+    )
+    .unwrap();
+    let rules = derive_offline_probabilistic_snapshot_v3(
+        HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: source.path().into(),
+            expected_file_sha256: source.file_sha256().clone(),
+            replay_causal_start_utc_ms: BASE,
+        },
+        root.path().join("rules-offline.json"),
+        identity,
+    )
+    .unwrap();
+    let (_, markets, market_assets, manifests) = collect_scene_facts_v1(
+        &config.preparation,
+        BASE - 60_000,
+        config.preparation.scope.received_end_utc_ms,
+        0,
+    )
+    .unwrap();
+    let level = Level {
+        condition: SECOND.into(),
+        buy_token: "21".into(),
+        price_micro: 400_000,
+    };
+    let parameters = Parameters {
+        association_ms: 250,
+        allocation: Allocation::Nearest,
+        cancellation: Cancellation::SegmentProportionalV2,
+        internal_time: InternalTime::SourceWhenPresent,
+        seed: 7,
+        association_trade_shift_ms: 0,
+    };
+    let mut demand_level = level.clone();
+    demand_level.price_micro = 300_000;
+    let events = vec![
+        Event {
+            at_ms: BASE + 500,
+            source_sequence: 0,
+            level: level.clone(),
+            kind: EventKind::Add {
+                segment: 1,
+                quantity: 10_000_000,
+                implicit: false,
+            },
+        },
+        Event {
+            at_ms: BASE + 1500,
+            source_sequence: 1,
+            level: level.clone(),
+            kind: EventKind::Cancel {
+                targets: vec![Slice {
+                    segment: 1,
+                    start: 0,
+                    end: 3_000_000,
+                }],
+                recovery: false,
+            },
+        },
+        Event {
+            at_ms: BASE + 2000,
+            source_sequence: 2,
+            level: level.clone(),
+            kind: EventKind::Demand {
+                quantity: 2_000_000,
+            },
+        },
+        Event {
+            at_ms: BASE + 15000,
+            source_sequence: 3,
+            level: demand_level,
+            kind: EventKind::Demand {
+                quantity: 8_000_000,
+            },
+        },
+    ];
+    let path = root.path().join("future.scene");
+    let mut writer = SceneStreamWriterV2::create(&path).unwrap();
+    for event in events {
+        writer.push(event).unwrap();
+    }
+    writer
+        .finish(OfflineSceneMaterialV1 {
+            scene: PreparedScene {
+                model_version: MODEL_VERSION.into(),
+                parameters,
+                events: vec![],
+                report: PreparationReport::default(),
+            },
+            markets,
+            market_assets,
+            source_manifests: manifests,
+        })
+        .unwrap();
+    let candidate = HistoricalPreparedRunConfigV1::from(&config);
+    let day = HistoricalDayConfigV1 {
+        preparation: config.preparation.clone(),
+        candidates: vec![candidate.clone()],
+        progress_interval_seconds: 0,
+        producer_lead_groups: Some(1),
+        offline_scenes: std::collections::BTreeMap::from([(
+            candidate.session.run_id.clone(),
+            path,
+        )]),
+    };
+    let samples = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let result = run_historical_days_v1(&[day], rules.clone(), &|_| {
+        Ok(VisibilityProbe {
+            rules: rules.clone(),
+            seen_public: BTreeSet::new(),
+            samples: samples.clone(),
+            submitted: false,
+            allow_order: !late_identity,
+        })
+    })
+    .unwrap();
+    assert_eq!(result[0].candidates[0].report["end_reason"], "RangeEnd");
+    let samples = samples.lock().unwrap();
+    assert!(
+        samples
+            .iter()
+            .any(|(at, public, economic)| *at >= BASE + 2000 && !public && !economic)
+    );
+    assert!(samples.iter().any(|(at, public, economic)| *at
+        >= BASE + if late_identity { 40_000 } else { 6000 }
+        && *public
+        && *economic));
+    // 10 external - 3 cancellation - 2 earlier demand = 5. Public publishing
+    // must not reinitialize that queue; the later 8-share demand fills Own 3.
+    let account = &result[0].candidates[0].report["account_economics_memory"];
+    let second = account["markets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["condition_id"] == SECOND)
+        .unwrap();
+    if late_identity {
+        assert!(
+            samples
+                .iter()
+                .any(|(at, public, economic)| *at >= BASE + 35_000
+                    && *at < BASE + 40_000
+                    && !public
+                    && !economic)
+        );
+        assert!(second["executed"].as_array().unwrap().iter().all(|role| {
+            Decimal::from_str_exact(role["shares"].as_str().unwrap())
+                .unwrap()
+                .is_zero()
+        }));
+        if second["settlement_state"] != "Redeemed" {
+            let kept = root.keep();
+            eprintln!("retained terminal visibility fixture={}", kept.display());
+        }
+        assert_eq!(second["settlement_state"], "Redeemed", "{second}");
+        return;
+    }
+    let executed =
+        Decimal::from_str_exact(second["executed"][0]["shares"].as_str().unwrap()).unwrap();
+    if executed != Decimal::from(3) {
+        eprintln!(
+            "visibility fixture report={}",
+            result[0].candidates[0].report
+        );
+        let kept = root.keep();
+        eprintln!("retained visibility fixture={}", kept.display());
+    }
+    assert_eq!(executed, Decimal::from(3));
+    let inputs = sim_log_values(&candidate.sim_log);
+    assert!(
+        serde_json::to_string(&inputs)
+            .unwrap()
+            .contains("PRELOAD_MARKET")
+    );
 }

@@ -3,7 +3,7 @@ use contracts::Sha256Hex;
 use sim_system::platform_rules::{
     HistoricalProcessSnapshotRequestV1, ImplementationIdentityV1,
     derive_historical_maker_snapshot_v3, derive_historical_maker_v2_snapshot_v3,
-    derive_public_maker_snapshot_v3,
+    derive_offline_probabilistic_snapshot_v3, derive_public_maker_snapshot_v3,
 };
 use std::{error::Error, path::PathBuf};
 
@@ -20,6 +20,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let rules = if args.get(5).map(String::as_str) == Some("PUBLIC_TRADE_CONSERVATIVE_FIFO_V2") {
         derive_historical_maker_v2_snapshot_v3(source, PathBuf::from(&args[3]), identity)?
+    } else if args.get(5).map(String::as_str) == Some("LOCAL_PROBABILISTIC_SHARED_FIFO_V2") {
+        derive_offline_probabilistic_snapshot_v3(source, PathBuf::from(&args[3]), identity)?
     } else if args.len() == 6 {
         let roles: Vec<contracts::SimCallerRoleV1> =
             serde_json::from_slice(&std::fs::read(&args[5])?)?;

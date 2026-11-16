@@ -126,8 +126,8 @@ fn fact<T>(v: T) -> ObservedFactV1<T> {
     }
 }
 /// 公开观测叶子通过正式类型构造；账户、持仓、订单、费用全部来自原SIM/NOE/Ledger。
-fn estimated(mut input: StrategyInputV1, price: &str) -> StrategyInputV1 {
-    for m in &mut input.markets {
+fn estimated(mut input: HostStrategyInputV1, price: &str) -> HostStrategyInputV1 {
+    for m in &mut input.strategy_input_mut().markets {
         m.observation.settlement_reference = fact(BtcSettlementReferenceV1::ChainlinkSpot);
         let anchor = MarketPriceAnchorV1 {
             price_usd_per_btc: ExactDecimal("100000".into()),
@@ -299,7 +299,7 @@ async fn fill_up(
     shared: &mut SharedExecutionV2,
     driver: &mut Driver,
     rules: &SealedProcessRuleSnapshotV3,
-) -> StrategyInputV1 {
+) -> HostStrategyInputV1 {
     shared
         .execute_batch_reserved(
             &mut driver.decision().unwrap(),
@@ -427,7 +427,9 @@ async fn temporary_reference_missing_inputs_zero_variance_and_nav_are_distinct()
         direct_anchor: a,
         dependency_frontier: input.markets[0].observation.visible_prefix.clone(),
     };
-    input.markets[0].observation.effective_reference = EffectiveMarketReferenceV1::TemporaryTwap(t);
+    input.strategy_input_mut().markets[0]
+        .observation
+        .effective_reference = EffectiveMarketReferenceV1::TemporaryTwap(t);
     let out = s.decide(&input, 22_000).unwrap();
     assert!(matches!(
         diagnostic(&out).markets[0].probability,
@@ -438,7 +440,9 @@ async fn temporary_reference_missing_inputs_zero_variance_and_nav_are_distinct()
             ..
         }
     ));
-    input.markets[0].observation.chainlink_spot = Default::default();
+    input.strategy_input_mut().markets[0]
+        .observation
+        .chainlink_spot = Default::default();
     let out = s.decide(&input, 21_001).unwrap();
     assert!(matches!(
         diagnostic(&out).markets[0].probability,
@@ -464,7 +468,7 @@ async fn actual_orphan_cost_and_fak_estimate_do_not_require_profit_or_a_premium_
         .decision_time()
         .logical_time_utc_ms();
     let mut input = estimated(input, "100000");
-    input.markets[0]
+    input.strategy_input_mut().markets[0]
         .observation
         .assets
         .iter_mut()
@@ -571,7 +575,7 @@ async fn profitable_pool(
     SharedExecutionV2,
     PoolDriver,
     Arc<SealedProcessRuleSnapshotV3>,
-    StrategyInputV1,
+    HostStrategyInputV1,
 ) {
     profitable_pool_shape(root, 10, 10).await
 }
@@ -583,7 +587,7 @@ async fn profitable_pool_shape(
     SharedExecutionV2,
     PoolDriver,
     Arc<SealedProcessRuleSnapshotV3>,
-    StrategyInputV1,
+    HostStrategyInputV1,
 ) {
     let dpt = root.join("dpt");
     let (core, times) = recorded_scaled_average_pool(&dpt, false, scale);
@@ -714,10 +718,16 @@ async fn positive_premium_is_compared_and_profit_occupation_tracks_real_dispatch
         .strategy_input(&mut driver)
         .unwrap()
         .unwrap()
+        .into_strategy_input()
         .action_before;
     assert_eq!(
-        s.qualify_intent(&health_read(&input, current_action), &calculation, 0, now)
-            .unwrap(),
+        s.qualify_intent(
+            &health_read(&input, current_action),
+            &calculation.strategy_view(),
+            0,
+            now
+        )
+        .unwrap(),
         IntentQualificationV1::Qualified,
         "原正利润池支持通过真实当前读取复核"
     );
@@ -827,7 +837,7 @@ async fn active_repair_cancels_same_side_then_recalculates_and_does_not_resend_u
         .logical_time_utc_ms();
     let adjust = |input| {
         let mut input = estimated(input, "100000");
-        input.markets[0]
+        input.strategy_input_mut().markets[0]
             .observation
             .assets
             .iter_mut()
@@ -921,9 +931,14 @@ async fn twap_uses_causal_integral_and_binance_corrections_can_reverse_repeatedl
         shared.strategy_input(&mut driver).unwrap().unwrap(),
         "99900",
     );
-    input.markets[0].observation.market.window.end_at_utc_ms = 120_000;
-    input.markets[0].observation.settlement_reference =
-        fact(BtcSettlementReferenceV1::ChainlinkTwapSixtySeconds);
+    input.strategy_input_mut().markets[0]
+        .observation
+        .market
+        .window
+        .end_at_utc_ms = 120_000;
+    input.strategy_input_mut().markets[0]
+        .observation
+        .settlement_reference = fact(BtcSettlementReferenceV1::ChainlinkTwapSixtySeconds);
     let mut s = strategy(config(), rules.clone());
     let first = s.decide(&input, 60_000).unwrap();
     assert!(matches!(
@@ -933,7 +948,9 @@ async fn twap_uses_causal_integral_and_binance_corrections_can_reverse_repeatedl
             ..
         }
     ));
-    input.markets[0].observation.chainlink_spot = fact(ChainlinkBtcUsdReferenceV1 {
+    input.strategy_input_mut().markets[0]
+        .observation
+        .chainlink_spot = fact(ChainlinkBtcUsdReferenceV1 {
         symbol: "btc/usd".into(),
         price_usd_per_btc: ExactDecimal("100500".into()),
         message_timestamp_utc_ms: 110_000,
@@ -956,9 +973,12 @@ async fn twap_uses_causal_integral_and_binance_corrections_can_reverse_repeatedl
         diagnostic(&missing_history.decide(&input, 110_000).unwrap()).markets[0].probability,
         ProbabilityEstimateV1::Unavailable(EstimateUnavailableV1::MissingWindowHistory)
     ));
-    input.markets[0].observation.settlement_reference =
-        fact(BtcSettlementReferenceV1::ChainlinkSpot);
-    input.markets[0].observation.chainlink_spot = fact(ChainlinkBtcUsdReferenceV1 {
+    input.strategy_input_mut().markets[0]
+        .observation
+        .settlement_reference = fact(BtcSettlementReferenceV1::ChainlinkSpot);
+    input.strategy_input_mut().markets[0]
+        .observation
+        .chainlink_spot = fact(ChainlinkBtcUsdReferenceV1 {
         symbol: "btc/usd".into(),
         price_usd_per_btc: ExactDecimal("100000".into()),
         message_timestamp_utc_ms: 60_000,
@@ -966,7 +986,9 @@ async fn twap_uses_causal_integral_and_binance_corrections_can_reverse_repeatedl
     let mut s = strategy(config(), rules);
     let mut innovations = Vec::new();
     for (n, price) in ["100100", "100200", "100000", "100250"].iter().enumerate() {
-        input.markets[0].observation.binance_trade = fact(BinanceAggregateTradeReferenceV1 {
+        input.strategy_input_mut().markets[0]
+            .observation
+            .binance_trade = fact(BinanceAggregateTradeReferenceV1 {
             symbol: "BTCUSDT".into(),
             aggregate_trade_id: n as u64,
             first_trade_id: n as u64,
@@ -1277,7 +1299,7 @@ async fn rolling_twap_fallback_cannot_supply_the_terminal_spot_integral() {
         shared.strategy_input(&mut driver).unwrap().unwrap(),
         "99900",
     );
-    let o = &mut input.markets[0].observation;
+    let o = &mut input.strategy_input_mut().markets[0].observation;
     o.market.window.end_at_utc_ms = 120_000;
     o.settlement_reference = fact(BtcSettlementReferenceV1::ChainlinkTwapSixtySeconds);
     o.chainlink_spot = ObservedFactV1::default();
@@ -1301,7 +1323,9 @@ async fn rolling_twap_fallback_cannot_supply_the_terminal_spot_integral() {
         ),
         "窗前TWAP仍可作为未来水平近似"
     );
-    input.markets[0].observation.chainlink_twap_sixty = fact(ChainlinkBtcUsdTwapReferenceV1 {
+    input.strategy_input_mut().markets[0]
+        .observation
+        .chainlink_twap_sixty = fact(ChainlinkBtcUsdTwapReferenceV1 {
         symbol: "btc/usd".into(),
         window_s: 60,
         price_usd_per_btc: ExactDecimal("100500".into()),
@@ -1330,7 +1354,7 @@ async fn fak_minimum_principal_is_independent_of_maker_minimum_shares() {
         let temp = tempfile::tempdir().unwrap();
         let (mut shared, mut driver, rules, input) = profitable_pool(temp.path()).await;
         let mut input = estimated(input, "100000");
-        input.markets[0]
+        input.strategy_input_mut().markets[0]
             .observation
             .assets
             .iter_mut()
@@ -1378,10 +1402,16 @@ async fn fak_minimum_principal_is_independent_of_maker_minimum_shares() {
             .strategy_input(&mut driver)
             .unwrap()
             .unwrap()
+            .into_strategy_input()
             .action_before;
         assert_eq!(
-            s.qualify_intent(&health_read(&input, action), &calculation, 0, now)
-                .unwrap(),
+            s.qualify_intent(
+                &health_read(&input, action),
+                &calculation.strategy_view(),
+                0,
+                now
+            )
+            .unwrap(),
             IntentQualificationV1::Qualified,
             "原金额FAK当前成本资格通过"
         );
@@ -1409,7 +1439,7 @@ fn health_read<'a>(
         markets: input
             .markets
             .iter()
-            .map(|f| PublicObservationFrameV1 {
+            .map(|f| StrategyMarketReadFrameV1 {
                 statistics: None,
                 observation: &f.observation,
                 rule_context: f.rule_context.clone(),
@@ -1432,7 +1462,9 @@ async fn health_dependencies_follow_enabled_algorithm_and_asset_scope() {
     c.probability.binance_innovation_weight = 0.0;
     c.probability.binance_pressure_weight_usd = 0.0;
     c.probability.binance_trade_pressure_weight_usd = 1.0;
-    input.markets[0].observation.source_progress = input.markets[0]
+    input.strategy_input_mut().markets[0]
+        .observation
+        .source_progress = input.markets[0]
         .observation
         .source_progress
         .iter()
@@ -1465,7 +1497,9 @@ async fn health_dependencies_follow_enabled_algorithm_and_asset_scope() {
         .find(|p| p.scope.source == SourceStreamKindV1::PolymarketBook)
         .unwrap();
     own.scope.asset_or_symbol = "unrelated-token".into();
-    input.markets[0].observation.source_progress = progress.into();
+    input.strategy_input_mut().markets[0]
+        .observation
+        .source_progress = progress.into();
     let output = disabled.decide(&input, 22_000).unwrap();
     assert!(
         diagnostic(&output).markets[0]
@@ -1494,10 +1528,16 @@ async fn frozen_action_invalidates_when_real_commitment_changes_without_rewritin
         .strategy_input(&mut driver)
         .unwrap()
         .unwrap()
+        .into_strategy_input()
         .action_before;
     assert_eq!(
-        s.qualify_intent(&health_read(&input, action), &calculation, 0, 22_000)
-            .unwrap(),
+        s.qualify_intent(
+            &health_read(&input, action),
+            &calculation.strategy_view(),
+            0,
+            22_000
+        )
+        .unwrap(),
         IntentQualificationV1::Qualified
     );
     shared
@@ -1522,9 +1562,10 @@ async fn frozen_action_invalidates_when_real_commitment_changes_without_rewritin
         .strategy_input(&mut driver)
         .unwrap()
         .unwrap()
+        .into_strategy_input()
         .action_before;
     assert!(
-        matches!(s.qualify_intent(&health_read(&current, action), &calculation, 0, 22_000).unwrap(), IntentQualificationV1::Invalidated(reason) if reason.reason_code == "action_business_facts_changed")
+        matches!(s.qualify_intent(&health_read(&current, action), &calculation.strategy_view(), 0, 22_000).unwrap(), IntentQualificationV1::Invalidated(reason) if reason.reason_code == "action_business_facts_changed")
     );
     assert_eq!(diagnostic(&calculation.output), &frozen);
 }
@@ -1539,7 +1580,9 @@ async fn independent_repair_qualifies_healthy_held_mark_and_rejects_missing_mark
         .decision_time()
         .logical_time_utc_ms();
     let mut input = estimated(raw, "100000");
-    input.markets[0].observation.source_progress = input.markets[0]
+    input.strategy_input_mut().markets[0]
+        .observation
+        .source_progress = input.markets[0]
         .observation
         .source_progress
         .iter()
@@ -1561,10 +1604,16 @@ async fn independent_repair_qualifies_healthy_held_mark_and_rejects_missing_mark
         .strategy_input(&mut driver)
         .unwrap()
         .unwrap()
+        .into_strategy_input()
         .action_before;
     assert_eq!(
-        s.qualify_intent(&health_read(&input, action), &calculation, index, at)
-            .unwrap(),
+        s.qualify_intent(
+            &health_read(&input, action),
+            &calculation.strategy_view(),
+            index,
+            at
+        )
+        .unwrap(),
         IntentQualificationV1::Qualified
     );
     let held = diagnostic(&calculation.output)
@@ -1573,7 +1622,7 @@ async fn independent_repair_qualifies_healthy_held_mark_and_rejects_missing_mark
         .find_map(|d| d.independent_held_token.as_ref())
         .unwrap()
         .clone();
-    input.markets[0]
+    input.strategy_input_mut().markets[0]
         .observation
         .assets
         .iter_mut()
@@ -1584,9 +1633,10 @@ async fn independent_repair_qualifies_healthy_held_mark_and_rejects_missing_mark
         .strategy_input(&mut driver)
         .unwrap()
         .unwrap()
+        .into_strategy_input()
         .action_before;
     assert!(
-        matches!(s.qualify_intent(&health_read(&input, action), &calculation, index, at).unwrap(), IntentQualificationV1::Invalidated(r) if r.reason_code == "repair_held_mark_unavailable")
+        matches!(s.qualify_intent(&health_read(&input, action), &calculation.strategy_view(), index, at).unwrap(), IntentQualificationV1::Invalidated(r) if r.reason_code == "repair_held_mark_unavailable")
     );
 }
 #[tokio::test(flavor = "current_thread")]
@@ -1628,11 +1678,11 @@ async fn invalidated_batch_registers_profit_only_for_actual_sent_prefix() {
             reason_code: "test-health-expired".into(),
             scopes: vec![],
         },
-        observed_cutoff: input.action_before.cutoff().clone(),
+        observed_cutoff: driver.observation_cutoff().unwrap(),
         detected_at_utc_ms: at,
         release_errors: vec![],
     };
-    s.invalidated(&calculation, &result);
+    s.invalidated(&calculation.strategy_view(), &result.strategy_view());
     let allocations = s.continuity().unresolved_profit_allocations;
     assert_eq!(allocations.len(), 1);
     assert!(!allocations.contains_key("unattempted-suffix"));
@@ -1701,9 +1751,10 @@ async fn real_pairing_changes_orphan_fee_contribution_and_invalidates_frozen_rep
             .strategy_input(&mut driver)
             .unwrap()
             .unwrap()
+            .into_strategy_input()
             .action_before;
         assert!(
-            matches!(s.qualify_intent(&health_read(&fresh, action), &calculation,index,at).unwrap(),IntentQualificationV1::Invalidated(r) if r.reason_code == "action_business_facts_changed")
+            matches!(s.qualify_intent(&health_read(&fresh, action), &calculation.strategy_view(),index,at).unwrap(),IntentQualificationV1::Invalidated(r) if r.reason_code == "action_business_facts_changed")
         );
         assert!(
             contracts::economics::EconomicRational::try_from(&original_fee)
@@ -1823,10 +1874,16 @@ async fn unrelated_market_commitment_does_not_invalidate_frozen_repair() {
         .strategy_input(&mut driver)
         .unwrap()
         .unwrap()
+        .into_strategy_input()
         .action_before;
     assert_eq!(
-        s.qualify_intent(&health_read(&current, action), &calculation, 0, at)
-            .unwrap(),
+        s.qualify_intent(
+            &health_read(&current, action),
+            &calculation.strategy_view(),
+            0,
+            at
+        )
+        .unwrap(),
         IntentQualificationV1::Qualified
     );
 }
@@ -1839,7 +1896,7 @@ async fn pending_twap_deadline_survives_spot_arrival() {
         shared.strategy_input(&mut driver).unwrap().unwrap(),
         "100000",
     );
-    let o = &mut input.markets[0].observation;
+    let o = &mut input.strategy_input_mut().markets[0].observation;
     o.market.window.end_at_utc_ms = 120_000;
     o.settlement_reference = fact(BtcSettlementReferenceV1::ChainlinkTwapThirtySeconds);
     o.chainlink_spot = Default::default();
@@ -1864,7 +1921,7 @@ async fn pending_twap_deadline_survives_spot_arrival() {
             .any(|p| p.source == SourceStreamKindV1::ChainlinkTwapThirty)
     );
     assert!(!intents(&calculation.output).is_empty());
-    let o = &mut input.markets[0].observation;
+    let o = &mut input.strategy_input_mut().markets[0].observation;
     o.chainlink_spot = fact(ChainlinkBtcUsdReferenceV1 {
         symbol: "btc/usd".into(),
         price_usd_per_btc: ExactDecimal("100000".into()),
@@ -1884,19 +1941,24 @@ async fn pending_twap_deadline_survives_spot_arrival() {
         .strategy_input(&mut driver)
         .unwrap()
         .unwrap()
+        .into_strategy_input()
         .action_before;
     let current = health_read(&input, action);
     assert_eq!(
-        s.qualify_intent(&current, &calculation, 0, 23000).unwrap(),
+        s.qualify_intent(&current, &calculation.strategy_view(), 0, 23000)
+            .unwrap(),
         IntentQualificationV1::Qualified
     );
-    let next = s.next_health_evaluation_at(&current.markets, Some(&calculation), 23000);
+    let next =
+        s.next_health_evaluation_at(&current.markets, Some(&calculation.strategy_view()), 23000);
     assert_eq!(
         s.next_health_evaluation_at(&current.markets, None, 23000),
         Some(28000),
         "没有待发决定时仍按当前spot经营依赖排期限"
     );
-    let at_due = s.qualify_intent(&current, &calculation, 0, 26000).unwrap();
+    let at_due = s
+        .qualify_intent(&current, &calculation.strategy_view(), 0, 26000)
+        .unwrap();
     println!(
         "frozen_twap_received=21000 spot_received=23000 frozen_deadline=26000 next={next:?} qualification_at_frozen_deadline={at_due:?}"
     );
@@ -1928,9 +1990,11 @@ async fn qualified_chainlink_history_survives_binance_failure_at_original_decide
     let condition = input.markets[0].observation.market.condition_id.0.clone();
     let mut strategy = strategy(c, rules);
     let reference = input.markets[0].observation.effective_reference.clone();
-    input.markets[0].observation.effective_reference = EffectiveMarketReferenceV1::Missing;
+    input.strategy_input_mut().markets[0]
+        .observation
+        .effective_reference = EffectiveMarketReferenceV1::Missing;
     for (at, price) in [(21000, "100000"), (22000, "100002"), (23000, "100001")] {
-        let o = &mut input.markets[0].observation;
+        let o = &mut input.strategy_input_mut().markets[0].observation;
         let mut progress = o.source_progress.to_vec();
         progress.retain(|p| p.scope.source != SourceStreamKindV1::BinanceAggregateTrade);
         let spot = progress
@@ -1964,7 +2028,9 @@ async fn qualified_chainlink_history_survives_binance_failure_at_original_decide
             ProbabilityEstimateV1::Unavailable(EstimateUnavailableV1::UnhealthySource)
         ));
         assert!(intents(&output).is_empty(), "综合健康失败仍限制新增风险");
-        input.markets[0].observation.effective_reference = reference.clone();
+        input.strategy_input_mut().markets[0]
+            .observation
+            .effective_reference = reference.clone();
     }
     let saved = serde_json::to_value(strategy.checkpoint()).unwrap();
     assert_eq!(
@@ -2087,7 +2153,7 @@ async fn actual_health_calculation_borrows_required_scope_among_unrelated_histor
             shared.strategy_input(&mut driver).unwrap().unwrap(),
             "100000",
         );
-        for market in &mut input.markets {
+        for market in &mut input.strategy_input_mut().markets {
             let original_progress: Vec<_> =
                 market.observation.source_progress.iter().cloned().collect();
             let mut values = SourceProgressSnapshotsV1::new();
@@ -2108,7 +2174,7 @@ async fn actual_health_calculation_borrows_required_scope_among_unrelated_histor
         );
         // 合法旧数组可以无序；同一健康调用仍读取原来源。
         let mut legacy = input;
-        for market in &mut legacy.markets {
+        for market in &mut legacy.strategy_input_mut().markets {
             let mut progress: Vec<_> = market.observation.source_progress.iter().cloned().collect();
             progress.reverse();
             market.observation.source_progress = progress.into();
@@ -2134,7 +2200,7 @@ async fn active_repair_uses_public_level_principals_and_one_total_fee() {
         .decision_time()
         .logical_time_utc_ms();
     let mut input = estimated(input, "100000");
-    let asset = input.markets[0]
+    let asset = input.strategy_input_mut().markets[0]
         .observation
         .assets
         .iter_mut()
@@ -2186,7 +2252,7 @@ async fn amount_pending_keeps_original_estimate_and_only_incremental_loss_until_
         .cutoff()
         .decision_time()
         .logical_time_utc_ms();
-    let asset = input.markets[0]
+    let asset = input.strategy_input_mut().markets[0]
         .observation
         .assets
         .iter_mut()
@@ -2241,6 +2307,7 @@ async fn amount_pending_keeps_original_estimate_and_only_incremental_loss_until_
             .strategy_input(&mut driver)
             .unwrap()
             .unwrap()
+            .into_strategy_input()
             .action_before;
         let mut next = StrategyInputV1 {
             market_frame_timing: None,

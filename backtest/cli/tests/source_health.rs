@@ -107,8 +107,8 @@ impl StrategyV1 for Trace {
     }
     fn next_health_evaluation_at(
         &self,
-        input: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
-        c: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        input: &[StrategyMarketReadFrameV1<'_>],
+        c: Option<&StrategyCalculationReadV1<'_, Self::Diagnostics>>,
         at: i64,
     ) -> Option<i64> {
         let started = Instant::now();
@@ -121,7 +121,7 @@ impl StrategyV1 for Trace {
     fn qualify_intent_public(
         &self,
         group: &ClosedBusinessGroupV1,
-        c: &StrategyCalculationV1<Self::Diagnostics>,
+        c: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         index: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -143,14 +143,14 @@ impl StrategyV1 for Trace {
     }
     fn calculation_market_requirements(
         &self,
-        c: &StrategyCalculationV1<Self::Diagnostics>,
+        c: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
     ) -> Vec<ConditionId> {
         self.strategy.calculation_market_requirements(c)
     }
     fn qualify_intent(
         &mut self,
         input: &StrategyCurrentReadV1<'_>,
-        c: &StrategyCalculationV1<Self::Diagnostics>,
+        c: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         index: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -161,7 +161,7 @@ impl StrategyV1 for Trace {
     fn qualify_intent_borrowed(
         &mut self,
         input: &BorrowedStrategyCurrentReadV1<'_>,
-        c: &StrategyCalculationV1<Self::Diagnostics>,
+        c: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         index: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -189,8 +189,8 @@ impl StrategyV1 for Trace {
     }
     fn dispatched(
         &mut self,
-        c: &StrategyCalculationV1<Self::Diagnostics>,
-        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        c: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
+        result: &Result<Vec<StrategySentIntentReceiptV1>, StrategyBatchExecutionErrorV1>,
     ) {
         self.strategy.dispatched(c, result);
         let StrategyOutputV1::Continue { intents, .. } = &c.output else {
@@ -231,8 +231,8 @@ impl StrategyV1 for Trace {
     }
     fn invalidated(
         &mut self,
-        c: &StrategyCalculationV1<Self::Diagnostics>,
-        result: &InvalidatedBatchV1,
+        c: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
+        result: &StrategyInvalidatedBatchV1,
     ) {
         println!(
             "invalidated calculation_start={} detected={} sent_prefix={} index={} reason={}",
@@ -316,6 +316,7 @@ fn run_day_trace_evidence(
         candidates: vec![candidate],
         progress_interval_seconds: 0,
         producer_lead_groups: None,
+        offline_scenes: Default::default(),
     };
     let sink = Arc::new(std::sync::Mutex::new(None));
     let factory = |_: &HistoricalPreparedRunConfigV1| -> Result<Trace, MaterialError> {
@@ -1433,7 +1434,7 @@ impl Trace {
     fn record_qualification(
         &mut self,
         result: Result<IntentQualificationV1, StrategyErrorV1>,
-        c: &StrategyCalculationV1<ComplementaryPairDiagnosticV1>,
+        c: &StrategyCalculationReadV1<'_, ComplementaryPairDiagnosticV1>,
         index: usize,
         at: i64,
         elapsed: std::time::Duration,

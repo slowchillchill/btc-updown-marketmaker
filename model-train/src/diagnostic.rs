@@ -905,6 +905,7 @@ mod tests {
             worker: c.worker.clone(),
             rules: export.rules.clone().into(),
             days: vec![HistoricalDayConfigV1 {
+                offline_scenes: Default::default(),
                 preparation: export.preparation.clone(),
                 candidates: vec![candidate],
                 progress_interval_seconds: 0,

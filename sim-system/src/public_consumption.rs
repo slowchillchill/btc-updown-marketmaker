@@ -743,6 +743,12 @@ where
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HiddenExecutionRecordV1 {
+    OfflineScene {
+        market: MarketIdentityV2,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assets: Option<[contracts::AssetIdentityV1; 2]>,
+        event: crate::offline_scene::Event,
+    },
     Step {
         market: MarketIdentityV2,
         step: PmReductionStepV1<'static, SourceEvidenceRefV3>,

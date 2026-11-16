@@ -24,10 +24,15 @@ pub(crate) enum ProductionV1 {
     Ended,
     Failed(String),
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CandidateWaitSourceV1 {
+    Public,
+    Hidden,
+}
 pub(crate) struct CandidateProgressV1 {
     pub cursor: CandidateCursorV1,
     pub active: bool,
-    pub waiting: bool,
+    pub waiting: Option<CandidateWaitSourceV1>,
     pub source_health: Option<bool>,
     pub source_progress: Option<bool>,
     pub requirements: Option<contracts::PublicObservationRequirementsV1>,
@@ -52,6 +57,23 @@ pub(crate) struct DayBufferV1 {
     pub production: ProductionV1,
     pub research_summary: bool,
     pub failure: Option<DayFailureSignalV1>,
+}
+impl DayBufferV1 {
+    /// Publishing and satisfying the wait predicate use the same Hub lock.
+    /// A notification alone does not mean the consumer has resumed yet.
+    pub(crate) fn material_published(&mut self, public: bool, hidden: bool) {
+        for candidate in &mut self.candidates {
+            if candidate.active
+                && match candidate.waiting {
+                    Some(CandidateWaitSourceV1::Public) => public,
+                    Some(CandidateWaitSourceV1::Hidden) => hidden,
+                    None => false,
+                }
+            {
+                candidate.waiting = None;
+            }
+        }
+    }
 }
 #[derive(Clone)]
 pub(crate) struct DayHubV1(pub Arc<(Mutex<DayBufferV1>, DaySignalsV1)>);
@@ -93,7 +115,7 @@ impl DayHubV1 {
                             },
                         },
                         active: true,
-                        waiting: false,
+                        waiting: None,
                         source_health: None,
                         source_progress: None,
                         requirements: None,
@@ -149,12 +171,7 @@ impl DayHubV1 {
         buffer.hidden_base = hidden;
         (retired_public, retired_hidden)
     }
-    pub fn finish<T>(
-        &self,
-        index: usize,
-        result: &Result<T, MaterialError>,
-        run_id: &str,
-    ) {
+    pub fn finish<T>(&self, index: usize, result: &Result<T, MaterialError>, run_id: &str) {
         let (mut buffer, cv) = (self.0.0.lock().unwrap(), &self.0.1);
         buffer.candidates[index].active = false;
         if let Err(error) = result {
@@ -372,7 +389,7 @@ impl Iterator for DayPublicSourceV1 {
                     emit_transport |= self.stages.add_delivery_work(delivery.public.len(), 0, 0);
                 }
                 if !delivery.public.is_empty() {
-                    buffer.candidates[self.index].waiting = false;
+                    buffer.candidates[self.index].waiting = None;
                     break;
                 }
                 drop(delivery);
@@ -392,8 +409,8 @@ impl Iterator for DayPublicSourceV1 {
                     }
                     ProductionV1::Running => {}
                 }
-                if !buffer.candidates[self.index].waiting {
-                    buffer.candidates[self.index].waiting = true;
+                if buffer.candidates[self.index].waiting != Some(CandidateWaitSourceV1::Public) {
+                    buffer.candidates[self.index].waiting = Some(CandidateWaitSourceV1::Public);
                     self.hub.0.1.control.notify_all();
                 }
                 #[cfg(test)]
@@ -535,7 +552,7 @@ impl Iterator for DayHiddenSourceV1 {
                     emit_transport |= self.stages.add_delivery_work(delivery.hidden.len(), 0, 0);
                 }
                 if !delivery.hidden.is_empty() {
-                    buffer.candidates[self.index].waiting = false;
+                    buffer.candidates[self.index].waiting = None;
                     break;
                 }
                 drop(delivery);
@@ -551,8 +568,8 @@ impl Iterator for DayHiddenSourceV1 {
                     }
                     ProductionV1::Running => {}
                 }
-                if !buffer.candidates[self.index].waiting {
-                    buffer.candidates[self.index].waiting = true;
+                if buffer.candidates[self.index].waiting != Some(CandidateWaitSourceV1::Hidden) {
+                    buffer.candidates[self.index].waiting = Some(CandidateWaitSourceV1::Hidden);
                     self.hub.0.1.control.notify_all();
                 }
                 #[cfg(test)]
@@ -658,6 +675,46 @@ mod tests {
                 v.wait_wall_including_lock_reacquire_ns += started.elapsed().as_nanos();
             });
         }
+    }
+    #[test]
+    fn publication_satisfies_only_the_requested_source_before_consumer_resumes() {
+        let hub = DayHubV1::new(&[]);
+        let mut buffer = hub.0.0.lock().unwrap();
+        buffer.candidates.push(CandidateProgressV1 {
+            cursor: CandidateCursorV1 {
+                public: 0,
+                hidden: 0,
+                times: crate::timing::DeliveryTimes {
+                    delays: crate::timing::DelayScheduleV1::Fixed(0),
+                    last: None,
+                },
+            },
+            active: true,
+            waiting: Some(CandidateWaitSourceV1::Hidden),
+            source_health: None,
+            source_progress: None,
+            requirements: None,
+            runtime_started: true,
+        });
+        buffer.material_published(true, false);
+        assert_eq!(
+            buffer.candidates[0].waiting,
+            Some(CandidateWaitSourceV1::Hidden),
+            "wrong channel must not cause backpressure deadlock"
+        );
+        buffer.material_published(false, true);
+        assert_eq!(
+            buffer.candidates[0].waiting, None,
+            "fulfilled wait must not allow producer runahead while consumer is descheduled"
+        );
+        buffer.candidates[0].waiting = Some(CandidateWaitSourceV1::Public);
+        buffer.material_published(false, true);
+        assert_eq!(
+            buffer.candidates[0].waiting,
+            Some(CandidateWaitSourceV1::Public)
+        );
+        buffer.material_published(true, false);
+        assert_eq!(buffer.candidates[0].waiting, None);
     }
     #[test]
     fn budget_poll_uses_atomic_flag_without_locking_or_publishing_a_prefetched_prefix() {
@@ -848,7 +905,7 @@ mod tests {
                         },
                     },
                     active: true,
-                    waiting: false,
+                    waiting: None,
                     source_health: None,
                     source_progress: None,
                     requirements: None,

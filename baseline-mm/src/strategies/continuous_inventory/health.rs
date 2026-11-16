@@ -1,6 +1,6 @@
 use super::*;
 use ::execution_normalization::{MemoryIdentityKeyV1, SourceNeutralEntityKeyV1};
-use sim_system::public_consumption::PublicObservationFrameV1;
+use shared_run::StrategyMarketReadFrameV1;
 
 fn invalid(code: &str, scopes: Vec<SourceStreamScopeV1>) -> IntentQualificationV1 {
     IntentQualificationV1::Invalidated(IntentInvalidationReasonV1 {
@@ -347,7 +347,7 @@ impl ContinuousInventoryV1 {
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl NecessaryActionAccountReadV2,
         >,
-        calculation: &StrategyCalculationV1<ContinuousInventoryDiagnosticV1>,
+        calculation: &StrategyCalculationReadV1<'_, ContinuousInventoryDiagnosticV1>,
         index: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, StrategyErrorV1> {
@@ -640,8 +640,8 @@ impl ContinuousInventoryV1 {
     }
     fn record_allocations(
         &mut self,
-        calculation: &StrategyCalculationV1<ContinuousInventoryDiagnosticV1>,
-        sent: &[SentIntentReceiptV1],
+        calculation: &StrategyCalculationReadV1<'_, ContinuousInventoryDiagnosticV1>,
+        sent: &[StrategySentIntentReceiptV1],
         uncertain: Option<usize>,
     ) {
         let StrategyOutputV1::Continue {
@@ -729,7 +729,7 @@ impl StrategyV1 for ContinuousInventoryV1 {
     }
     fn calculation_market_requirements(
         &self,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
     ) -> Vec<ConditionId> {
         match &calculation.output {
             StrategyOutputV1::Continue { diagnostics, .. } => diagnostics
@@ -748,8 +748,8 @@ impl StrategyV1 for ContinuousInventoryV1 {
     }
     fn next_health_evaluation_at(
         &self,
-        frames: &[PublicObservationFrameV1<'_>],
-        calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        frames: &[StrategyMarketReadFrameV1<'_>],
+        calculation: Option<&StrategyCalculationReadV1<'_, Self::Diagnostics>>,
         at: i64,
     ) -> Option<i64> {
         self.next_public_health_evaluation_at(
@@ -761,7 +761,7 @@ impl StrategyV1 for ContinuousInventoryV1 {
     fn next_public_health_evaluation_at(
         &self,
         markets: &[&MarketBusinessObservationV1],
-        calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        calculation: Option<&StrategyCalculationReadV1<'_, Self::Diagnostics>>,
         at: i64,
     ) -> Option<i64> {
         let dependencies = calculation
@@ -785,7 +785,7 @@ impl StrategyV1 for ContinuousInventoryV1 {
     fn qualify_intent_public(
         &self,
         group: &ClosedBusinessGroupV1,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         index: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -816,7 +816,7 @@ impl StrategyV1 for ContinuousInventoryV1 {
     fn qualify_intent(
         &mut self,
         input: &StrategyCurrentReadV1<'_>,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         index: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -825,7 +825,7 @@ impl StrategyV1 for ContinuousInventoryV1 {
     fn qualify_intent_borrowed(
         &mut self,
         input: &BorrowedStrategyCurrentReadV1<'_>,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         index: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -833,15 +833,15 @@ impl StrategyV1 for ContinuousInventoryV1 {
     }
     fn invalidated(
         &mut self,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
-        result: &InvalidatedBatchV1,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
+        result: &StrategyInvalidatedBatchV1,
     ) {
         self.record_allocations(calculation, &result.sent, None);
     }
     fn dispatched(
         &mut self,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
-        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
+        result: &Result<Vec<StrategySentIntentReceiptV1>, StrategyBatchExecutionErrorV1>,
     ) {
         match result {
             Ok(sent) => self.record_allocations(calculation, sent, None),

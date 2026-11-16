@@ -21,16 +21,16 @@ fn levels(rows: &[(&str, &str)]) -> Arc<ObservedFactV1<Vec<PriceLevelV1>>> {
     )
     .into()
 }
-fn asset(input: &mut StrategyInputV1, side: usize) -> &mut AssetBusinessObservationV1 {
+fn asset(input: &mut HostStrategyInputV1, side: usize) -> &mut AssetBusinessObservationV1 {
     let token = [UP_TOKEN_ID, DOWN_TOKEN_ID][side];
-    input.markets[0]
+    input.strategy_input_mut().markets[0]
         .observation
         .assets
         .iter_mut()
         .find(|a| a.asset.token_id.0 == token)
         .unwrap()
 }
-fn books(input: &mut StrategyInputV1, bids: [&[(&str, &str)]; 2], asks: [&[(&str, &str)]; 2]) {
+fn books(input: &mut HostStrategyInputV1, bids: [&[(&str, &str)]; 2], asks: [&[(&str, &str)]; 2]) {
     for side in 0..2 {
         let a = asset(input, side);
         a.bids = levels(bids[side]);
@@ -184,7 +184,9 @@ async fn v3_missing_bid_is_per_side_and_valid_bids_still_require_probability() {
         [&[("0.65", "10")], &[("0.30", "10")]],
         [&[], &[]],
     );
-    input.markets[0].observation.effective_reference = EffectiveMarketReferenceV1::Missing;
+    input.strategy_input_mut().markets[0]
+        .observation
+        .effective_reference = EffectiveMarketReferenceV1::Missing;
     let out = strategy(bb_config(), rules).decide(&input, 22000).unwrap();
     assert!(prices(&out).is_empty());
     assert!(

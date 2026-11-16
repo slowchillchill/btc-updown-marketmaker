@@ -64,8 +64,8 @@ impl ComplementaryPairV1 {
     }
     pub(super) fn health_deadline(
         &self,
-        input: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
-        calculation: Option<&StrategyCalculationV1<ComplementaryPairDiagnosticV1>>,
+        input: &[shared_run::StrategyMarketReadFrameV1<'_>],
+        calculation: Option<&StrategyCalculationReadV1<'_, ComplementaryPairDiagnosticV1>>,
         at: i64,
     ) -> Option<i64> {
         self.public_health_deadline(
@@ -77,7 +77,7 @@ impl ComplementaryPairV1 {
     pub(super) fn public_health_deadline(
         &self,
         input: &[&MarketBusinessObservationV1],
-        calculation: Option<&StrategyCalculationV1<ComplementaryPairDiagnosticV1>>,
+        calculation: Option<&StrategyCalculationReadV1<'_, ComplementaryPairDiagnosticV1>>,
         at: i64,
     ) -> Option<i64> {
         let frozen_dependencies = calculation
@@ -166,7 +166,7 @@ impl ComplementaryPairV1 {
     pub(super) fn qualify_public_group(
         &self,
         group: &ClosedBusinessGroupV1,
-        calculation: &StrategyCalculationV1<ComplementaryPairDiagnosticV1>,
+        calculation: &StrategyCalculationReadV1<'_, ComplementaryPairDiagnosticV1>,
         index: usize,
         at: i64,
     ) -> IntentQualificationV1 {
@@ -270,7 +270,7 @@ impl ComplementaryPairV1 {
             impl std::borrow::Borrow<SharedExecutionRegistryV2>,
             impl ActionAccountReadV2,
         >,
-        calculation: &StrategyCalculationV1<ComplementaryPairDiagnosticV1>,
+        calculation: &StrategyCalculationReadV1<'_, ComplementaryPairDiagnosticV1>,
         index: usize,
         at: i64,
     ) -> IntentQualificationV1 {

@@ -3,7 +3,7 @@ use baseline_mm::*;
 use contracts::*;
 use serde::{Deserialize, Serialize};
 use shared_run::*;
-use sim_system::public_consumption::PublicObservationFrameV1;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub(super) enum Diagnostics {
@@ -22,28 +22,44 @@ impl SelectedStrategy {
         }
     }
 }
+struct MappedCalculation<D> {
+    input_cutoff: StrategyObservationCutoffV1,
+    market_frame_timing: Option<StrategyMarketFrameTimingV1>,
+    calculation_started_at_utc_ms: i64,
+    output: StrategyOutputV1<D>,
+}
+impl<D> MappedCalculation<D> {
+    fn as_read(&self) -> StrategyCalculationReadV1<'_, D> {
+        StrategyCalculationReadV1 {
+            input_cutoff: self.input_cutoff.clone(),
+            market_frame_timing: self.market_frame_timing.clone(),
+            calculation_started_at_utc_ms: self.calculation_started_at_utc_ms,
+            output: &self.output,
+        }
+    }
+}
 fn legacy(
-    c: &StrategyCalculationV1<Diagnostics>,
-) -> StrategyCalculationV1<ComplementaryPairDiagnosticV1> {
+    c: &StrategyCalculationReadV1<'_, Diagnostics>,
+) -> MappedCalculation<ComplementaryPairDiagnosticV1> {
     map(c, |d| match d {
         Diagnostics::Legacy(d) => d.clone(),
         _ => unreachable!("正式选择一致"),
     })
 }
 fn inventory(
-    c: &StrategyCalculationV1<Diagnostics>,
-) -> StrategyCalculationV1<ContinuousInventoryDiagnosticV1> {
+    c: &StrategyCalculationReadV1<'_, Diagnostics>,
+) -> MappedCalculation<ContinuousInventoryDiagnosticV1> {
     map(c, |d| match d {
         Diagnostics::Inventory(d) => d.clone(),
         _ => unreachable!("正式选择一致"),
     })
 }
-fn map<A, B>(c: &StrategyCalculationV1<A>, f: impl Fn(&A) -> B) -> StrategyCalculationV1<B> {
-    StrategyCalculationV1 {
+fn map<A, B>(c: &StrategyCalculationReadV1<'_, A>, f: impl Fn(&A) -> B) -> MappedCalculation<B> {
+    MappedCalculation {
         input_cutoff: c.input_cutoff.clone(),
         market_frame_timing: c.market_frame_timing.clone(),
         calculation_started_at_utc_ms: c.calculation_started_at_utc_ms,
-        output: match &c.output {
+        output: match c.output {
             StrategyOutputV1::Continue {
                 intents,
                 next_evaluation_at_utc_ms,
@@ -81,6 +97,12 @@ fn output<A>(
 impl StrategyV1 for SelectedStrategy {
     type Error = StrategyErrorV1;
     type Diagnostics = Diagnostics;
+    fn take_learning_step(&mut self) -> Option<serde_json::Value> {
+        match self {
+            Self::Legacy(s) => s.take_learning_step(),
+            Self::Inventory(s) => s.take_learning_step(),
+        }
+    }
     fn uses_borrowed_input(&self) -> bool {
         match self {
             Self::Legacy(s) => s.uses_borrowed_input(),
@@ -126,24 +148,36 @@ impl StrategyV1 for SelectedStrategy {
     }
     fn calculation_market_requirements(
         &self,
-        c: &StrategyCalculationV1<Diagnostics>,
+        c: &StrategyCalculationReadV1<'_, Diagnostics>,
     ) -> Vec<ConditionId> {
         match self {
-            Self::Legacy(s) => s.calculation_market_requirements(&legacy(c)),
-            Self::Inventory(s) => s.calculation_market_requirements(&inventory(c)),
+            Self::Legacy(s) => s.calculation_market_requirements(&legacy(c).as_read()),
+            Self::Inventory(s) => s.calculation_market_requirements(&inventory(c).as_read()),
         }
     }
     fn next_health_evaluation_at(
         &self,
-        frames: &[PublicObservationFrameV1<'_>],
-        c: Option<&StrategyCalculationV1<Diagnostics>>,
+        frames: &[StrategyMarketReadFrameV1<'_>],
+        c: Option<&StrategyCalculationReadV1<'_, Diagnostics>>,
         at: i64,
     ) -> Option<i64> {
         match self {
-            Self::Legacy(s) => s.next_health_evaluation_at(frames, c.map(legacy).as_ref(), at),
-            Self::Inventory(s) => {
-                s.next_health_evaluation_at(frames, c.map(inventory).as_ref(), at)
-            }
+            Self::Legacy(s) => s.next_health_evaluation_at(
+                frames,
+                c.map(legacy)
+                    .as_ref()
+                    .map(MappedCalculation::as_read)
+                    .as_ref(),
+                at,
+            ),
+            Self::Inventory(s) => s.next_health_evaluation_at(
+                frames,
+                c.map(inventory)
+                    .as_ref()
+                    .map(MappedCalculation::as_read)
+                    .as_ref(),
+                at,
+            ),
         }
     }
     fn decide(
@@ -173,53 +207,57 @@ impl StrategyV1 for SelectedStrategy {
     fn qualify_intent(
         &mut self,
         i: &StrategyCurrentReadV1<'_>,
-        c: &StrategyCalculationV1<Diagnostics>,
+        c: &StrategyCalculationReadV1<'_, Diagnostics>,
         n: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
         match self {
-            Self::Legacy(s) => s.qualify_intent(i, &legacy(c), n, at),
-            Self::Inventory(s) => s.qualify_intent(i, &inventory(c), n, at),
+            Self::Legacy(s) => s.qualify_intent(i, &legacy(c).as_read(), n, at),
+            Self::Inventory(s) => s.qualify_intent(i, &inventory(c).as_read(), n, at),
         }
     }
     fn qualify_intent_borrowed(
         &mut self,
         i: &BorrowedStrategyCurrentReadV1<'_>,
-        c: &StrategyCalculationV1<Diagnostics>,
+        c: &StrategyCalculationReadV1<'_, Diagnostics>,
         n: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
         match self {
-            Self::Legacy(s) => s.qualify_intent_borrowed(i, &legacy(c), n, at),
-            Self::Inventory(s) => s.qualify_intent_borrowed(i, &inventory(c), n, at),
+            Self::Legacy(s) => s.qualify_intent_borrowed(i, &legacy(c).as_read(), n, at),
+            Self::Inventory(s) => s.qualify_intent_borrowed(i, &inventory(c).as_read(), n, at),
         }
     }
     fn qualify_intent_public(
         &self,
         g: &ClosedBusinessGroupV1,
-        c: &StrategyCalculationV1<Diagnostics>,
+        c: &StrategyCalculationReadV1<'_, Diagnostics>,
         n: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
         match self {
-            Self::Legacy(s) => s.qualify_intent_public(g, &legacy(c), n, at),
-            Self::Inventory(s) => s.qualify_intent_public(g, &inventory(c), n, at),
+            Self::Legacy(s) => s.qualify_intent_public(g, &legacy(c).as_read(), n, at),
+            Self::Inventory(s) => s.qualify_intent_public(g, &inventory(c).as_read(), n, at),
         }
     }
-    fn invalidated(&mut self, c: &StrategyCalculationV1<Diagnostics>, r: &InvalidatedBatchV1) {
+    fn invalidated(
+        &mut self,
+        c: &StrategyCalculationReadV1<'_, Diagnostics>,
+        r: &StrategyInvalidatedBatchV1,
+    ) {
         match self {
-            Self::Legacy(s) => s.invalidated(&legacy(c), r),
-            Self::Inventory(s) => s.invalidated(&inventory(c), r),
+            Self::Legacy(s) => s.invalidated(&legacy(c).as_read(), r),
+            Self::Inventory(s) => s.invalidated(&inventory(c).as_read(), r),
         }
     }
     fn dispatched(
         &mut self,
-        c: &StrategyCalculationV1<Diagnostics>,
-        r: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        c: &StrategyCalculationReadV1<'_, Diagnostics>,
+        r: &Result<Vec<StrategySentIntentReceiptV1>, StrategyBatchExecutionErrorV1>,
     ) {
         match self {
-            Self::Legacy(s) => s.dispatched(&legacy(c), r),
-            Self::Inventory(s) => s.dispatched(&inventory(c), r),
+            Self::Legacy(s) => s.dispatched(&legacy(c).as_read(), r),
+            Self::Inventory(s) => s.dispatched(&inventory(c).as_read(), r),
         }
     }
     fn research_diagnostics(&self, d: &Diagnostics) -> serde_json::Value {

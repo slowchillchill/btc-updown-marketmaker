@@ -118,6 +118,7 @@ fn day_saves_real_requests_after_eof_and_final_failure_keeps_business_reports() 
             candidates,
             progress_interval_seconds: 0,
             producer_lead_groups: Some(2048),
+            offline_scenes: Default::default(),
         };
         let make = |run: &HistoricalPreparedRunConfigV1| -> Result<Trace, MaterialError> {
             let index = usize::from(run.session.run_id == "late-1");

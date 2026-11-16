@@ -1,6 +1,6 @@
 //! 本次入口的首观察物理计时；不进入配置、轨迹或学习身份。
 use serde_json::{Value, json};
-use shared_run::MarketFrameTimingV1;
+use shared_run::StrategyMarketFrameTimingV1;
 use std::{sync::OnceLock, time::Instant};
 
 pub(crate) struct FirstObservation {
@@ -19,7 +19,7 @@ impl FirstObservation {
         account: &str,
         call: u64,
         at: i64,
-        frame: Option<&MarketFrameTimingV1>,
+        frame: Option<&StrategyMarketFrameTimingV1>,
     ) {
         // 常见后续调用只读一次已初始化标志；只在首事件取时、复制紧凑引用和输出。
         self.event.get_or_init(|| {

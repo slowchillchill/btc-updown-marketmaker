@@ -474,7 +474,7 @@ async fn terminal_order_keeps_successful_sibling_until_last_economics_closes() {
         estimated_shares: r(Decimal::from(10)).public(),
         original_orphan_shares: r(Decimal::from(10)).public(),
         original_orphan_principal_per_share: r(Decimal::new(9, 1)).public(),
-        estimate_cutoff: driver.observation_cutoff().unwrap(),
+        estimate_cutoff: (&driver.observation_cutoff().unwrap()).into(),
         allocated_profit_pusd: r(Decimal::new(22, 1)).public(),
     };
     // 复用原legacy checkpoint边界交接实际owner状态和待前驱引用；不加测试专用生产入口。

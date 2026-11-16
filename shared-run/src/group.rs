@@ -31,6 +31,7 @@ pub struct ActionBeforeRead<R, G = SharedExecutionRegistry<R>, A = OwnedActionAc
     obligation_orders: std::collections::BTreeSet<MemoryLogicalIdentityV1>,
     obligation_trades: Vec<ObservedTradeApplicationV1<R>>,
     cutoff: TrustedGroupDecisionCutoffV1,
+    visible_cutoff: StrategyObservationCutoffV1,
     registry: G,
     completion: PhantomData<R>,
     requests: Vec<RequestFunds>,
@@ -90,35 +91,41 @@ impl<
             .collect()
     }
 
-    pub fn cutoff(&self) -> &TrustedGroupDecisionCutoffV1 {
+    pub fn cutoff(&self) -> &StrategyObservationCutoffV1 {
+        &self.visible_cutoff
+    }
+    pub(crate) fn trusted_cutoff(&self) -> &TrustedGroupDecisionCutoffV1 {
         &self.cutoff
     }
-    pub fn orders(&self) -> impl Iterator<Item = ExecutionOrderRead<'_, R>> {
-        self.registry.borrow().unfinished_orders()
+    pub fn orders(&self) -> impl Iterator<Item = StrategyExecutionOrderReadV1<'_, R>> {
+        self.registry.borrow().unfinished_orders().map(Into::into)
     }
     /// 活动订单及尚有 Ledger 应用义务的已闭订单，按原身份去重。
-    pub fn obligation_orders(&self) -> impl Iterator<Item = ExecutionOrderRead<'_, R>> {
+    pub fn obligation_orders(&self) -> impl Iterator<Item = StrategyExecutionOrderReadV1<'_, R>> {
         self.obligation_orders
             .iter()
             .filter_map(|id| self.registry.borrow().order(id))
+            .map(Into::into)
     }
-    pub fn obligation_trades(&self) -> &[ObservedTradeApplicationV1<R>] {
-        &self.obligation_trades
+    pub fn obligation_trades(&self) -> Vec<StrategyObservedTradeApplicationV1<'_, R>> {
+        self.obligation_trades.iter().map(Into::into).collect()
     }
-    pub fn commitments(&self) -> impl Iterator<Item = IntentCommitmentReadV1<'_>> {
-        self.registry.borrow().all_commitments()
+    pub fn commitments(&self) -> impl Iterator<Item = StrategyIntentCommitmentReadV1<'_>> {
+        self.registry.borrow().all_commitments().map(Into::into)
     }
-    pub fn cancel_objects(&self) -> ExecutionReadValueV1<Vec<CancelObjectRead<'_, R>>> {
-        self.registry.borrow().cancel_objects()
+    pub fn cancel_objects(&self) -> ExecutionReadValueV1<Vec<StrategyCancelObjectReadV1<'_, R>>> {
+        strategy_cancel_objects(self.registry.borrow().cancel_objects())
     }
     pub fn cancel_objects_in<'a>(
         &'a self,
         current: Option<&'a ConditionId>,
         old: &'a [ConditionId],
-    ) -> ExecutionReadValueV1<Vec<CancelObjectRead<'a, R>>> {
-        self.registry
-            .borrow()
-            .cancel_objects_in(current.into_iter().chain(old))
+    ) -> ExecutionReadValueV1<Vec<StrategyCancelObjectReadV1<'a, R>>> {
+        strategy_cancel_objects(
+            self.registry
+                .borrow()
+                .cancel_objects_in(current.into_iter().chain(old)),
+        )
     }
     pub fn request_funds(&self) -> impl Iterator<Item = RequestFundsReadV1<'_>> {
         self.requests.iter().map(|r| RequestFundsReadV1 {
@@ -377,6 +384,7 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
                 ),
                 ledger: economic.into_base(),
             },
+            visible_cutoff: (&cutoff).into(),
             cutoff,
             registry,
             completion: PhantomData,
@@ -412,6 +420,7 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             obligation_orders,
             obligation_trades,
             pending_noe_record_count: self.pending.len(),
+            visible_cutoff: (&cutoff).into(),
             cutoff,
             registry,
             completion: PhantomData,
@@ -649,8 +658,8 @@ impl<G: Borrow<SharedExecutionRegistryV2>, A: NecessaryActionAccountReadV2>
     pub fn cancellation_requests(
         &self,
         scope: Option<&CancellationScopeV1<'_>>,
-    ) -> CancellationRequestsReadV1<'_> {
-        self.registry.borrow().cancellation_requests(scope)
+    ) -> StrategyCancellationRequestsReadV1<'_> {
+        self.registry.borrow().cancellation_requests(scope).into()
     }
 }
 
@@ -738,14 +747,14 @@ where
 impl<R: Clone + std::fmt::Debug + Eq, G: Borrow<SharedExecutionRegistry<R>>, A: ActionAccountReadV2>
     ActionBeforeRead<R, G, A>
 {
-    pub fn learning_account(&self) -> Option<&crate::LearningAccountReadV1> {
-        self.account.full().learning.as_ref()
+    pub fn learning_account(&self) -> Option<crate::StrategyLearningAccountReadV1<'_>> {
+        self.account.full().learning.as_ref().map(Into::into)
     }
     pub fn economics(&self) -> &AccountEconomicsReadV3 {
         &self.account.full().economics
     }
-    pub fn ledger(&self) -> &LedgerProjectionV2 {
-        &self.account.full().ledger
+    pub fn ledger(&self) -> StrategyLedgerReadV1<'_> {
+        (&self.account.full().ledger).into()
     }
     /// 默认拥有式消费者仍取得完整独立冻结；借用计算不调用此转换。
     pub fn to_owned_read(&self) -> ActionBeforeRead<R> {
@@ -753,6 +762,7 @@ impl<R: Clone + std::fmt::Debug + Eq, G: Borrow<SharedExecutionRegistry<R>>, A: 
             account: self.account.full().clone(),
             pending_noe_record_count: self.pending_noe_record_count,
             cutoff: self.cutoff.clone(),
+            visible_cutoff: self.visible_cutoff.clone(),
             registry: self
                 .registry
                 .borrow()
@@ -776,6 +786,7 @@ impl<R: Clone + std::fmt::Debug + Eq, G: Borrow<SharedExecutionRegistry<R>>>
             account: self.account.freeze_necessary(markets),
             pending_noe_record_count: self.pending_noe_record_count,
             cutoff: self.cutoff.clone(),
+            visible_cutoff: self.visible_cutoff.clone(),
             registry: self
                 .registry
                 .borrow()
@@ -804,5 +815,17 @@ impl SharedExecution<sim_system::execution::MeasuredCancellationEvidence> {
     /// V4原NOE源待领取接收时刻；仍须真实关闭前缀并观察后才能读取。
     pub fn next_pending_feedback_received_at_utc_ms(&self) -> Option<i64> {
         self.observation.next_pending_feedback_received_at_utc_ms()
+    }
+}
+
+fn strategy_cancel_objects<'a, R: Clone + std::fmt::Debug>(
+    value: ExecutionReadValueV1<Vec<CancelObjectRead<'a, R>>>,
+) -> ExecutionReadValueV1<Vec<StrategyCancelObjectReadV1<'a, R>>> {
+    match value {
+        ExecutionReadValueV1::Known(objects) => {
+            ExecutionReadValueV1::Known(objects.into_iter().map(Into::into).collect())
+        }
+        ExecutionReadValueV1::Unavailable => ExecutionReadValueV1::Unavailable,
+        ExecutionReadValueV1::NotApplicable => ExecutionReadValueV1::NotApplicable,
     }
 }

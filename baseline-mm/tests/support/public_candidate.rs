@@ -510,7 +510,11 @@ async fn public_v4_declarative_rule_expectations_at_real_new_pair_branch() {
         ("changed_config", true, "incomparable"),
         ("invalid_depth", true, "incomparable"),
     ] {
-        let mut input = shared.strategy_input(&mut driver).unwrap().unwrap();
+        let mut input = shared
+            .strategy_input(&mut driver)
+            .unwrap()
+            .unwrap()
+            .into_strategy_input();
         if id == "R07" {
             input.markets[0].observation.assets[0].bids = Arc::new(fact(vec![]));
         }
@@ -757,7 +761,11 @@ async fn public_v4_probability_maps_public_f4_to_f8_and_frozen_time() {
         .group_position
         < last
     {}
-    let mut input = shared.strategy_input(&mut driver).unwrap().unwrap();
+    let mut input = shared
+        .strategy_input(&mut driver)
+        .unwrap()
+        .unwrap()
+        .into_strategy_input();
     let stats = Arc::make_mut(input.markets[0].statistics.as_mut().unwrap());
     stats
         .spot_variance

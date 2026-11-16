@@ -778,6 +778,8 @@ struct UniqueSessionStateV2 {
 struct MarketEnrollmentStateV2 {
     records: Vec<MarketEnrollmentV2>,
     records_by_request_id: BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    internal_only_condition_ids: BTreeSet<String>,
     business_input_started: bool,
     paper_candidate_condition_ids: BTreeSet<String>,
     paper_candidate_token_ids: BTreeSet<String>,
@@ -841,6 +843,55 @@ impl UniqueSessionStateV2 {
         }
     }
 
+    fn preload_market(
+        &mut self,
+        request: &MarketEnrollmentRequestV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        if !matches!(self.initialization, SessionInitializationV2::Active { .. }) {
+            return Err(SimRunActorErrorV2::SessionNotActive);
+        }
+        if self.opening_fact.account_instance_key.caller_role == SimCallerRoleV1::Paper
+            || !self.execution_state.offline_scene_enabled()
+        {
+            return Err(SimRunActorErrorV2::InvalidMarketEnrollment(
+                "隐藏市场预载仅适用于显式离线撮合",
+            ));
+        }
+        if !is_stable_text(&request.enrollment_request_id) {
+            return Err(SimRunActorErrorV2::InvalidMarketEnrollment(
+                "enrollment_request_id 为空或含首尾空白",
+            ));
+        }
+        request
+            .market
+            .validate_for_admission()
+            .map_err(|_| SimRunActorErrorV2::InvalidMarketEnrollment("市场身份或结果身份非法"))?;
+        if let Some(existing) = self
+            .market_directory
+            .market(&request.market.market().condition_id.0)
+        {
+            if existing != &request.market {
+                return Err(SimRunActorErrorV2::MarketEnrollmentDirectory(
+                    crate::market_directory::SessionMarketDirectoryErrorV1::Condition(
+                        request.market.market().condition_id.0.clone(),
+                    ),
+                ));
+            }
+            return Ok(());
+        }
+        self.market_directory
+            .try_insert(request.market.clone())
+            .map_err(SimRunActorErrorV2::MarketEnrollmentDirectory)?;
+        self.public_markets.commit_admitted_market(&request.market);
+        if let Some(hidden) = self.hidden_platform_markets.as_mut() {
+            hidden.commit_admitted_market(&request.market);
+        }
+        self.execution_state.preload_market(&request.market);
+        self.market_enrollment
+            .internal_only_condition_ids
+            .insert(request.market.market().condition_id.0.clone());
+        Ok(())
+    }
     fn enroll_market(
         &mut self,
         request: &MarketEnrollmentRequestV1,
@@ -899,14 +950,42 @@ impl UniqueSessionStateV2 {
             assets: request.market.assets().clone(),
         };
 
-        self.market_directory
-            .try_insert(request.market.clone())
-            .map_err(SimRunActorErrorV2::MarketEnrollmentDirectory)?;
-        self.public_markets.commit_admitted_market(&request.market);
-        if let Some(hidden) = self.hidden_platform_markets.as_mut() {
-            hidden.commit_admitted_market(&request.market);
+        let internal = self
+            .market_enrollment
+            .internal_only_condition_ids
+            .contains(&request.market.market().condition_id.0);
+        if internal {
+            if self
+                .market_directory
+                .market(&request.market.market().condition_id.0)
+                != Some(&request.market)
+            {
+                return Err(SimRunActorErrorV2::MarketEnrollmentDirectory(
+                    crate::market_directory::SessionMarketDirectoryErrorV1::Condition(
+                        request.market.market().condition_id.0.clone(),
+                    ),
+                ));
+            }
+            let first_open_at = self
+                .hidden_platform_frontier
+                .closed_through_utc_ms
+                .map(|at| at.saturating_add(1))
+                .unwrap_or(i64::MIN);
+            self.execution_state
+                .publish_preloaded_market(&request.market, first_open_at);
+            self.market_enrollment
+                .internal_only_condition_ids
+                .remove(&request.market.market().condition_id.0);
+        } else {
+            self.market_directory
+                .try_insert(request.market.clone())
+                .map_err(SimRunActorErrorV2::MarketEnrollmentDirectory)?;
+            self.public_markets.commit_admitted_market(&request.market);
+            if let Some(hidden) = self.hidden_platform_markets.as_mut() {
+                hidden.commit_admitted_market(&request.market);
+            }
+            self.execution_state.commit_admitted_market(&request.market);
         }
-        self.execution_state.commit_admitted_market(&request.market);
         let index = self.market_enrollment.records.len();
         self.market_enrollment.records.push(enrollment.clone());
         self.market_enrollment
@@ -1008,6 +1087,7 @@ pub(crate) enum BusinessReducerInputV2<'a> {
     ActivateSession(&'a str),
     FailSessionInitialization(&'a str),
     EnrollMarket(&'a MarketEnrollmentRequestV1),
+    PreloadMarket(&'a MarketEnrollmentRequestV1),
     RegisterNewRequest {
         cutoff: &'a TrustedDecisionCutoffV2,
         request: &'a BusinessRequestV2,
@@ -1057,6 +1137,7 @@ pub(crate) enum BusinessReducerOutputV2 {
     CreateSession(CreateSessionControlResultV2),
     SessionInitialization(SessionInitializationControlResultV2),
     MarketEnrollment(MarketEnrollmentV2),
+    InternalMarketRegistered,
     RequestRegistration(MutationRequestReceiptV2),
     MutationAction(Option<MutationActionTransitionEffectsV2>),
     LogicalDrive(LogicalDriveOutputV2),
@@ -1344,7 +1425,8 @@ fn finalize_projection_batch_v2(
             CommittedBusinessOutputV2::RequestRegistration(result)
         }
         BusinessReducerOutputV2::MutationAction(None) => CommittedBusinessOutputV2::Driven,
-        BusinessReducerOutputV2::RetentionAdvanced => CommittedBusinessOutputV2::Driven,
+        BusinessReducerOutputV2::RetentionAdvanced
+        | BusinessReducerOutputV2::InternalMarketRegistered => CommittedBusinessOutputV2::Driven,
     };
     if account_opening.is_none() && market_enrollment.is_none() && drafts.is_empty() {
         return Ok((state, committed, None));
@@ -1687,6 +1769,12 @@ fn reduce_actor_input_v2(
             initial_market_directory,
             state,
             BusinessReducerInputV2::EnrollMarket(request),
+        ),
+        BusinessInputV2::PreloadMarket(request) => reduce_business_input_v2(
+            opened,
+            initial_market_directory,
+            state,
+            BusinessReducerInputV2::PreloadMarket(request),
         ),
         BusinessInputV2::Request { cutoff, request } => reduce_business_input_v2(
             opened,
@@ -2675,6 +2763,7 @@ where
             BusinessInputV2::FailSessionInitialization { failure_id }
         }
         LoggedBusinessInputV2::EnrollMarket(request) => BusinessInputV2::EnrollMarket(request),
+        LoggedBusinessInputV2::PreloadMarket(request) => BusinessInputV2::PreloadMarket(request),
         LoggedBusinessInputV2::Request { cutoff, request } => {
             BusinessInputV2::Request { cutoff, request }
         }
@@ -3392,6 +3481,20 @@ impl SimRunActorV2 {
         Ok(result)
     }
 
+    pub(crate) fn preload_market(
+        &mut self,
+        request: MarketEnrollmentRequestV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let mut committed = self.commit_group(vec![BusinessInputV2::PreloadMarket(request)])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        debug_assert!(matches!(
+            committed.outputs.pop(),
+            Some(CommittedBusinessOutputV2::Driven)
+        ));
+        Ok(())
+    }
     pub(crate) fn enroll_market(
         &mut self,
         request: MarketEnrollmentRequestV1,
@@ -3637,7 +3740,8 @@ impl SimRunActorV2 {
                                 .markets()
                                 .map(|m| m.market().window.end_at_utc_ms),
                         ),
-                        BusinessInputV2::EnrollMarket(request) => {
+                        BusinessInputV2::EnrollMarket(request)
+                        | BusinessInputV2::PreloadMarket(request) => {
                             self.unstable_market_ends
                                 .insert(request.market.market().window.end_at_utc_ms);
                         }
@@ -6107,8 +6211,26 @@ pub(crate) fn drive_business_input_at_v2(
     }
     if let Some(bucket) = hidden_bucket {
         let directory = &state.session.as_ref().unwrap().market_directory;
-        for record in bucket.records.iter() {
+        for (record_index, record) in bucket.records.iter().enumerate() {
             let result = match record {
+                HiddenExecutionRecordV1::OfflineScene {
+                    market,
+                    assets,
+                    event,
+                } => validate_offline_scene_record_v1(
+                    directory,
+                    state
+                        .session
+                        .as_ref()
+                        .unwrap()
+                        .execution_state
+                        .offline_scene_enabled(),
+                    bucket.reference.bucket_time_utc_ms(),
+                    record_index,
+                    market,
+                    assets.as_ref(),
+                    event,
+                ),
                 HiddenExecutionRecordV1::MarketFact(fact) => validate_membership_v1(
                     directory,
                     &fact.market,
@@ -6601,6 +6723,18 @@ fn reduce_business_input_v2(
                 SessionInitializationControlResultV2::FailedClosed,
             )
         }
+        BusinessReducerInputV2::PreloadMarket(request) => {
+            let Some(session) = state.session.as_mut() else {
+                return Err(unaccepted_business_input_v2(
+                    state,
+                    SimRunActorErrorV2::SessionNotCreated,
+                ));
+            };
+            if let Err(error) = session.preload_market(request) {
+                return Err(unaccepted_business_input_v2(state, error));
+            }
+            BusinessReducerOutputV2::InternalMarketRegistered
+        }
         BusinessReducerInputV2::EnrollMarket(request) => {
             let Some(session) = state.session.as_mut() else {
                 return Err(unaccepted_business_input_v2(
@@ -6802,8 +6936,8 @@ fn reduce_normalized_market_slice_v1(
                 }
             }
         }
-        if drives_execution {
-            let mut execution = session
+        let mut execution = if drives_execution {
+            let execution = session
                 .execution_state
                 .apply_market_event(
                     &event.market.condition_id.0,
@@ -6821,29 +6955,36 @@ fn reduce_normalized_market_slice_v1(
                     .execution_state
                     .invalidate_qualified_resolution(&event.market.condition_id.0, reason_code);
             }
-            if let Some(qualified_resolution) = market_application.qualified_resolution
-                && qualified_resolution
-                    .resolution_source_event_at_utc_ms
-                    .is_some()
-            {
-                // 已知平台源时间保持原逐记录路径；Gamma等待本毫秒完全闭合。
-                execution.merge(
-                    session
-                        .execution_state
-                        .apply_qualified_resolution(
-                            &event.market.condition_id.0,
-                            &qualified_resolution,
-                            platform_effective_at_utc_ms,
-                            finality_policy,
-                        )
-                        .map_err(|error| {
-                            MarketEventSliceReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
-                                error,
-                            ))
-                        })?,
-                );
-            }
-
+            Some(execution)
+        } else {
+            None
+        };
+        if (drives_execution
+            || (path == MarketEventPathV1::PublicVisibility
+                && session.execution_state.offline_scene_enabled()))
+            && let Some(qualified_resolution) = market_application.qualified_resolution
+            && qualified_resolution
+                .resolution_source_event_at_utc_ms
+                .is_some()
+        {
+            // Known source times remain intact. A terminal already received on
+            // the hidden path can acquire economic eligibility on public delivery.
+            let resolution = session
+                .execution_state
+                .apply_qualified_resolution(
+                    &event.market.condition_id.0,
+                    &qualified_resolution,
+                    platform_effective_at_utc_ms,
+                    finality_policy,
+                )
+                .map_err(|error| {
+                    MarketEventSliceReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
+                })?;
+            execution
+                .get_or_insert_with(ExecutionMarketEventEffectsV2::default)
+                .merge(resolution);
+        }
+        if let Some(execution) = execution {
             query_projection_changed |= execution.query_projection_changed();
             effects.execution.push(execution);
         }
@@ -6883,6 +7024,54 @@ enum MembershipAssetsV1<'a> {
     Exact(&'a [contracts::AssetIdentityV1]),
     Terminal(&'a contracts::MarketResolutionTerminalV3),
 }
+// Persisted Scene strings/integers do not carry the PM typed membership or
+// complete-bucket time proof. Validate those links at the actor acceptance
+// boundary. Empty targets and zero changes remain valid; only inverted cuts
+// are rejected because interval subtraction otherwise can duplicate quantity.
+fn validate_offline_scene_record_v1(
+    directory: &SessionMarketDirectoryV1,
+    enabled: bool,
+    at: i64,
+    index: usize,
+    market: &contracts::MarketIdentityV2,
+    assets: Option<&[contracts::AssetIdentityV1; 2]>,
+    event: &crate::offline_scene::Event,
+) -> Result<(), MarketEventErrorV1> {
+    if !enabled {
+        return Err(MarketEventErrorV1::InvalidBucket("场景需要显式离线模型"));
+    }
+    if event.at_ms != at {
+        return Err(MarketEventErrorV1::EventOutsideBucket { index });
+    }
+    if event.level.condition != market.condition_id.0 || event.level.price_micro > 1_000_000 {
+        return Err(MarketEventErrorV1::InvalidBucket("场景市场或价格坐标不符"));
+    }
+    validate_membership_v1(
+        directory,
+        market,
+        assets.map_or(MembershipAssetsV1::None, |a| MembershipAssetsV1::Exact(a)),
+    )?;
+    if !directory
+        .market(&market.condition_id.0)
+        .unwrap()
+        .assets()
+        .iter()
+        .any(|a| a.token_id.0 == event.level.buy_token)
+    {
+        return Err(MarketEventErrorV1::UnknownAsset(
+            event.level.buy_token.clone(),
+        ));
+    }
+    match &event.kind {
+        crate::offline_scene::EventKind::Cancel { targets, .. }
+            if targets.iter().any(|s| s.start > s.end) =>
+        {
+            Err(MarketEventErrorV1::InvalidBucket("场景取消区间非法"))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn validate_membership_v1(
     directory: &SessionMarketDirectoryV1,
     market: &contracts::MarketIdentityV2,
@@ -7738,7 +7927,10 @@ mod tests {
                 Ok(()),
             );
         }
-        for assets in [MembershipAssetsV1::None, MembershipAssetsV1::LevelChanges(&[])] {
+        for assets in [
+            MembershipAssetsV1::None,
+            MembershipAssetsV1::LevelChanges(&[]),
+        ] {
             assert_eq!(
                 validate_membership_v1(&directory, unknown.market(), assets),
                 Err(MarketEventErrorV1::UnknownMarket(
@@ -15871,6 +16063,257 @@ mod tests {
         );
     }
 
+    #[test]
+    fn decoded_offline_scene_rejects_foreign_asset_at_the_actor_boundary() {
+        let scenario = sealed_scenario();
+        let directory = SessionMarketDirectoryV1::try_from_scenario(scenario.scenario()).unwrap();
+        let member = directory.markets().next().unwrap();
+        let event = crate::offline_scene::Event {
+            at_ms: 2100,
+            source_sequence: 0,
+            level: crate::offline_scene::Level {
+                condition: member.market().condition_id.0.clone(),
+                buy_token: "999999".into(),
+                price_micro: 400_000,
+            },
+            kind: crate::offline_scene::EventKind::Demand { quantity: 1 },
+        };
+        assert!(matches!(
+            validate_offline_scene_record_v1(
+                &directory,
+                true,
+                2100,
+                0,
+                member.market(),
+                Some(member.assets()),
+                &event
+            ),
+            Err(MarketEventErrorV1::UnknownAsset(_))
+        ));
+    }
+
+    #[test]
+    fn decoded_scene_rejects_inverted_cuts_and_preserves_legal_zero_changes() {
+        use crate::offline_scene::{Event, EventKind, Level, Slice};
+        let scenario = sealed_scenario();
+        let directory = SessionMarketDirectoryV1::try_from_scenario(scenario.scenario()).unwrap();
+        let member = directory.markets().next().unwrap();
+        let mut event = Event {
+            at_ms: 2100,
+            source_sequence: 0,
+            level: Level {
+                condition: member.market().condition_id.0.clone(),
+                buy_token: member.assets()[0].token_id.0.clone(),
+                price_micro: 400_000,
+            },
+            kind: EventKind::Add {
+                segment: 0,
+                quantity: 0,
+                implicit: false,
+            },
+        };
+        for kind in [
+            EventKind::Add {
+                segment: 0,
+                quantity: 0,
+                implicit: false,
+            },
+            EventKind::Demand { quantity: 0 },
+            EventKind::Cancel {
+                targets: vec![],
+                recovery: false,
+            },
+            EventKind::Cancel {
+                targets: vec![Slice {
+                    segment: 0,
+                    start: 5,
+                    end: 5,
+                }],
+                recovery: false,
+            },
+        ] {
+            event.kind = kind;
+            validate_offline_scene_record_v1(
+                &directory,
+                true,
+                2100,
+                0,
+                member.market(),
+                Some(member.assets()),
+                &event,
+            )
+            .unwrap();
+        }
+        event.kind = EventKind::Cancel {
+            targets: vec![Slice {
+                segment: 0,
+                start: 6,
+                end: 5,
+            }],
+            recovery: false,
+        };
+        assert!(matches!(
+            validate_offline_scene_record_v1(
+                &directory,
+                true,
+                2100,
+                0,
+                member.market(),
+                Some(member.assets()),
+                &event
+            ),
+            Err(MarketEventErrorV1::InvalidBucket(_))
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn offline_internal_registration_replays_without_projection_and_publishes_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let source = successful_snapshot_v3_for_sim_tests().await;
+        // The helper drops its TempDir. Persist this test's owned source before
+        // invoking the real snapshot derivation and historical loading APIs.
+        let source_path = directory.path().join("source-rules.json");
+        let bytes = serde_json::to_vec(source.snapshot()).unwrap();
+        std::fs::write(&source_path, &bytes).unwrap();
+        use sha2::Digest;
+        let identity = ImplementationIdentityV1 {
+            git_commit: "a".repeat(40),
+            source_identity_sha256: sha('5'),
+            cargo_lock_sha256: sha('6'),
+        };
+        let rule_snapshot = crate::platform_rules::derive_offline_probabilistic_snapshot_v3(
+            crate::platform_rules::HistoricalProcessSnapshotRequestV1 {
+                snapshot_path: source_path,
+                expected_file_sha256: Sha256Hex(format!("{:x}", sha2::Sha256::digest(&bytes))),
+                replay_causal_start_utc_ms: i64::MAX,
+            },
+            directory.path().join("offline-rules.json"),
+            identity,
+        )
+        .unwrap();
+        let finality_policy = successful_policy_v2_for_tests();
+        let scenario = sealed_scenario();
+        let latency_profile = load_embedded_proxy_latency_profile().unwrap();
+        let mut actor = SimRunActorV2::create_new(
+            &path,
+            opened(
+                "offline-preload",
+                &rule_snapshot,
+                &finality_policy,
+                &scenario,
+                &latency_profile,
+            ),
+            rule_snapshot.clone(),
+            finality_policy.clone(),
+            scenario.clone(),
+            latency_profile.clone(),
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+        )
+        .unwrap();
+        let mut session_spec = spec("offline-preload", "create");
+        session_spec.caller_role = SimCallerRoleV1::HistoricalBacktest;
+        actor.create_session(session_spec).unwrap();
+        actor.activate_session("activate".into()).unwrap();
+        let original_projection = actor
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap()
+            .next_projection_batch_sequence;
+        let added = market('2', "456", "3", "4");
+        actor
+            .preload_market(MarketEnrollmentRequestV1 {
+                enrollment_request_id: "private".into(),
+                market: added.clone(),
+            })
+            .unwrap();
+        let session = actor.state.as_ref().unwrap().session.as_ref().unwrap();
+        assert_eq!(session.next_projection_batch_sequence, original_projection);
+        assert!(session.market_enrollment.records.is_empty());
+        assert!(
+            session
+                .market_enrollment
+                .internal_only_condition_ids
+                .contains(&added.market().condition_id.0)
+        );
+        assert_eq!(session.market_directory.markets().len(), 2);
+        assert!(
+            !session
+                .execution_state
+                .has_economic_market_for_tests(&added.market().condition_id.0)
+        );
+        let replayed = replay_event_log_v2(
+            &path,
+            &rule_snapshot,
+            &finality_policy,
+            &scenario,
+            &latency_profile,
+            MAX_GROUP_BYTES,
+            None,
+            |_| panic!("control-only log"),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&replayed.state).unwrap(),
+            serde_json::to_value(actor.state.as_ref().unwrap()).unwrap()
+        );
+        let published = actor
+            .enroll_market(MarketEnrollmentRequestV1 {
+                enrollment_request_id: "public".into(),
+                market: added.clone(),
+            })
+            .unwrap();
+        let sequence = actor.next_input_sequence_for_tests();
+        let again = actor
+            .enroll_market(MarketEnrollmentRequestV1 {
+                enrollment_request_id: "public".into(),
+                market: added.clone(),
+            })
+            .unwrap();
+        assert_eq!(published, again);
+        assert_eq!(actor.next_input_sequence_for_tests(), sequence);
+        let session = actor.state.as_ref().unwrap().session.as_ref().unwrap();
+        assert_eq!(
+            session.next_projection_batch_sequence,
+            original_projection + 1
+        );
+        assert_eq!(session.market_enrollment.records.len(), 1);
+        assert!(
+            session
+                .execution_state
+                .has_economic_market_for_tests(&added.market().condition_id.0)
+        );
+        assert!(
+            session
+                .market_enrollment
+                .internal_only_condition_ids
+                .is_empty()
+        );
+        assert_eq!(
+            session.execution_state.market_shape_for_tests(),
+            (2, 4, 2, 4)
+        );
+        let replayed = replay_event_log_v2(
+            &path,
+            &rule_snapshot,
+            &finality_policy,
+            &scenario,
+            &latency_profile,
+            MAX_GROUP_BYTES,
+            None,
+            |_| panic!("control-only log"),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&replayed.state).unwrap(),
+            serde_json::to_value(actor.state.as_ref().unwrap()).unwrap()
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn enrollment_extends_every_owned_container_once_and_reuses_the_success() {
         let directory = tempfile::tempdir().expect("创建市场登记测试目录");
@@ -20578,6 +21021,51 @@ fn reduce_public_group_v1(
     };
     let at = group.execution_time.logical_time_utc_ms();
     let mut effects = SessionMarketEventEffectsV2::default();
+    // Successful public consumption activates economic clocks, never hidden
+    // preloading. Do not schedule a timer inside an already closed hidden prefix.
+    let session = state.session.as_mut().unwrap();
+    let first_open_at = session
+        .hidden_platform_frontier
+        .closed_through_utc_ms
+        .map(|closed| closed.saturating_add(1).max(at))
+        .unwrap_or(at);
+    for context in &group.prepared.pm_contexts {
+        if session
+            .market_enrollment
+            .internal_only_condition_ids
+            .contains(&context.market.condition_id.0)
+        {
+            let market = session
+                .market_directory
+                .market(&context.market.condition_id.0)
+                .unwrap();
+            session
+                .execution_state
+                .publish_preloaded_market(market, first_open_at);
+            // A source-qualified terminal may already be held by the hidden
+            // market. Reuse that evidence, including its original source time;
+            // eligibility begins only with this actual public consumption.
+            if let Some(resolution) = session
+                .hidden_platform_markets
+                .as_ref()
+                .and_then(|markets| markets.qualified_resolution(&context.market.condition_id.0))
+            {
+                effects.execution.push(
+                    session
+                        .execution_state
+                        .apply_qualified_resolution(
+                            &context.market.condition_id.0,
+                            &resolution,
+                            at,
+                            finality_policy,
+                        )
+                        .map_err(|e| {
+                            BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(e))
+                        })?,
+                );
+            }
+        }
+    }
     for context in &group.prepared.pm_contexts {
         state
             .public_pm_evidence
@@ -20947,6 +21435,12 @@ impl PublicSimExecutionV1 {
     ) -> Result<SessionInitializationControlResultV2, SimRunActorErrorV2> {
         self.actor.fail_session_initialization(failure_id)
     }
+    pub fn preload_market(
+        &mut self,
+        request: MarketEnrollmentRequestV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        self.actor.preload_market(request)
+    }
     pub fn enroll_market(
         &mut self,
         request: MarketEnrollmentRequestV1,
@@ -21205,8 +21699,41 @@ impl PublicConsumptionStateV1 {
         )
     }
     /// 查询原成功登记映射，不另存宿主市场集合。
+    pub fn has_registered_market(&self, condition: &contracts::ConditionId) -> bool {
+        self.rules.contains_key(&condition.0)
+    }
     pub fn has_enrolled_market(&self, condition: &contracts::ConditionId) -> bool {
         self.rules.contains_key(&condition.0)
+            && !self
+                .execution
+                .actor
+                .state
+                .as_ref()
+                .and_then(|s| s.session.as_ref())
+                .is_some_and(|s| {
+                    s.market_enrollment
+                        .internal_only_condition_ids
+                        .contains(&condition.0)
+                })
+    }
+    /// Internal-only identity and matching state. No NOE/ledger market discovery.
+    pub fn preload_market(
+        &mut self,
+        request: MarketEnrollmentRequestV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let market = request.market.market().clone();
+        self.execution.preload_market(request)?;
+        self.rules
+            .entry(market.condition_id.0.clone())
+            .or_insert_with(|| {
+                Arc::new(
+                    self.execution
+                        .actor
+                        ._rule_snapshot
+                        .public_rule_context(market),
+                )
+            });
+        Ok(())
     }
     /// 沿原会话登记规则扩展市场；重复请求以原成功结果确定规则映射。
     pub fn enroll_market(
@@ -22195,7 +22722,19 @@ fn reduce_hidden_step_bucket_v1(
     let mut effects = SessionMarketEventEffectsV2::default();
     let fail = |error| BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::MarketEvent(error));
     for record in bucket.records.iter() {
+        if let HiddenExecutionRecordV1::OfflineScene { event, .. } = record {
+            let applied = state
+                .session
+                .as_mut()
+                .unwrap()
+                .execution_state
+                .apply_offline_scene_event(event, rules, finality)
+                .map_err(|e| BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(e)))?;
+            effects.execution.push(applied);
+            continue;
+        }
         let (normalized, market, identity, time, quality) = match record {
+            HiddenExecutionRecordV1::OfflineScene { .. } => unreachable!("场景事件已单独执行"),
             HiddenExecutionRecordV1::Step { market, step } => (
                 crate::market::normalize_pm_step_v1(step).map_err(fail)?,
                 market,

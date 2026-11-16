@@ -994,6 +994,7 @@ async fn historical_v4_and_day_hosts_apply_original_auto_feedback_and_gamma() {
                 candidates: vec![backtest::HistoricalPreparedRunConfigV1::from(&config)],
                 progress_interval_seconds: 0,
                 producer_lead_groups: Some(1),
+                offline_scenes: Default::default(),
             };
             let result = backtest::run_historical_days_v1(&[day], rules.clone(), &|_| {
                 Ok(HistoricalBuy {
