@@ -30,6 +30,9 @@ pub struct HistoricalDayConfigV1 {
     /// 生产领先的软目标；消费者仍需关闭隐藏桶时继续必要供料。
     #[serde(default)]
     pub producer_lead_groups: Option<usize>,
+    /// run_id 对应已冻结场景；文件内容身份进入本次运行元数据。
+    #[serde(default)]
+    pub offline_scenes: std::collections::BTreeMap<String, std::path::PathBuf>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DayFailureSourceV1 {
@@ -96,6 +99,7 @@ pub struct HistoricalDayResultV1 {
 pub struct HistoricalDayRunOptionsV1 {
     pub research_summary: bool,
     pub public_observer: Option<Arc<dyn HistoricalPublicObserverV1>>,
+    pub learning_observer_factory: Option<Arc<dyn crate::HistoricalLearningObserverFactoryV1>>,
     /// 正式预算从输入准备之前开始；候选在完整事件边界返回已有成绩。
     pub started: Instant,
     pub budget_stop_after: Option<Duration>,
@@ -107,6 +111,7 @@ impl Default for HistoricalDayRunOptionsV1 {
         Self {
             research_summary: false,
             public_observer: None,
+            learning_observer_factory: None,
             started: Instant::now(),
             budget_stop_after: None,
             producer_payload_bytes: None,
@@ -402,13 +407,47 @@ where
         };
         statistics.push(stream);
     }
+    let scene_materials = day
+        .candidates
+        .iter()
+        .map(|candidate| -> Result<_, MaterialError> {
+            let scene_material = day
+                .offline_scenes
+                .get(&candidate.session.run_id)
+                .map(|path| -> Result<_, MaterialError> {
+                    let opened = crate::offline_scene_source::open_scene_material_with_progress(
+                        path,
+                        day.progress_interval_seconds,
+                    )?;
+                    if opened.0.scene.model_version != sim_system::offline_scene::MODEL_VERSION {
+                        return Err("冻结场景模型版本与显式选择不符".into());
+                    }
+                    Ok(opened)
+                })
+                .transpose()?;
+            let selected_offline = rules.maker_model_version_for(candidate.session.caller_role)
+                == sim_system::offline_scene::MODEL_VERSION;
+            if selected_offline != scene_material.is_some() {
+                return Err("离线场景文件与显式撮合模型选择不一致".into());
+            }
+            Ok(scene_material)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     std::thread::scope(|scope| {
         let mut workers = Vec::new();
-        for (index, candidate) in day.candidates.iter().enumerate() {
+        for ((index, candidate), scene_material) in
+            day.candidates.iter().enumerate().zip(scene_materials)
+        {
             let context = HistoricalRuntimeContextV1 {
                 send_boundary,
                 statistics: statistics[index].clone(),
                 public_observer: options.public_observer.clone(),
+                learning_observer: options
+                    .learning_observer_factory
+                    .as_ref()
+                    .map(|factory| factory.create(candidate))
+                    .transpose()?
+                    .flatten(),
                 start: config.scope.received_start_utc_ms,
                 source_identity: source_identity.clone(),
                 day_log_binding: Some(sim_system::public_consumption::HistoricalDayLogBindingV1 {
@@ -416,9 +455,12 @@ where
                     consumption_sequence_ref: candidate.consumption_sequence_ref.clone(),
                     hidden_input_set_identity_sha256: input_identity.clone(),
                     hidden_consumer_stream_id: config.hidden_stream_id.clone(),
-                    hidden_ordering_version:
+                    hidden_ordering_version: if scene_material.is_some() {
+                        crate::offline_scene_source::ORDERING_VERSION.into()
+                    } else {
                         data_pipeline_training::hidden_stream::STREAMING_HIDDEN_ORDERING_VERSION
-                            .into(),
+                            .into()
+                    },
                 }),
                 end: config.scope.received_end_utc_ms,
                 operating_start: config
@@ -429,7 +471,7 @@ where
             };
             let rules = rules.clone();
             let hub = hub.clone();
-            let metadata = serde_json::json!({"config":candidate,"day":day,"input_set_identity_sha256":input_identity,"source_identity_sha256":source_identity,
+            let metadata = serde_json::json!({"offline_scene":scene_material.as_ref().map(|(m,_,sha)|serde_json::json!({"sha256":sha,"parameters":m.scene.parameters,"preparation_report":m.scene.report,"source_manifests":m.source_manifests})),"config":candidate,"day":day,"input_set_identity_sha256":input_identity,"source_identity_sha256":source_identity,
                 "source_manifests":admitted.iter().map(|d|(d.utc_day(),d.manifest_sha256())).collect::<Vec<_>>(),"rules_file_sha256":rules.file_sha256(),"maker_model_version":rules.maker_model_version_for(candidate.session.caller_role),"caller_role":candidate.session.caller_role,"input_lifecycle_policy":candidate.session.input_lifecycle_policy,"entry":"original-parquet-day-v1"});
             workers.push((
                 index,
@@ -457,6 +499,20 @@ where
                                 DayPublicSourceV1::new(hub.clone(), index, delivery.clone());
                             let hidden =
                                 DayHiddenSourceV1::new(hub.clone(), index, delivery.clone());
+                            let scene_identity =
+                                scene_material.as_ref().map(|(_, _, sha)| sha.clone());
+                            let hidden: Box<
+                                dyn Iterator<
+                                    Item = Result<AcceptedHiddenStepBucketV1, MaterialError>,
+                                >,
+                            > = match scene_material {
+                                Some((material, events, _)) => Box::new(
+                                    crate::offline_scene_source::SceneHiddenSourceV1::from_reader(
+                                        hidden, material, events,
+                                    ),
+                                ),
+                                None => Box::new(hidden),
+                            };
                             let control = DayCandidateControlV1::new(hub.clone(), index, delivery);
                             let runtime = tokio::runtime::Builder::new_current_thread().build()?;
                             let report = runtime
@@ -488,10 +544,18 @@ where
                                 })?;
                             Ok(HistoricalDayCandidateResultV1 {
                                 run_id: candidate.session.run_id.clone(),
-                                comparison_identity_sha256: comparison_identity(
-                                    candidate,
-                                    rules.file_sha256(),
-                                ),
+                                comparison_identity_sha256: {
+                                    let original =
+                                        comparison_identity(candidate, rules.file_sha256());
+                                    scene_identity.map_or(original.clone(), |scene| {
+                                        Sha256Hex(format!(
+                                            "{:x}",
+                                            Sha256::digest(
+                                                format!("{}:{}", original.0, scene.0).as_bytes()
+                                            )
+                                        ))
+                                    })
+                                },
                                 initial_available_pusd: candidate
                                     .session
                                     .initial_account_state
@@ -544,7 +608,7 @@ where
                     if ended {let _=measure_stage!(stages, ProducerWaitStartupOrCompletion, hub.0.1.control.wait_timeout(buffer,Duration::from_millis(20))).unwrap();continue;}
                     // 已有可消费材料时让慢候选追上；等待必要完整隐藏桶时继续供料，避免互等。
                     let backlog = options.producer_payload_bytes.map_or(buffer.public.len()+buffer.hidden.len()>lead, |limit| buffer.retained_payload_bytes >= limit && buffer.retained_payload_bytes > 0);
-                    if backlog && buffer.candidates.iter().any(|c|c.active&&!c.waiting) {
+                    if backlog && buffer.candidates.iter().any(|c|c.active&&c.waiting.is_none()) {
                         let wait_started=Instant::now();
                         let (mut buffer, _)=measure_stage!(stages, ProducerBackpressureWait, hub.0.1.control.wait_timeout(buffer,Duration::from_millis(10))).unwrap();
                         buffer.producer_wait_seconds += wait_started.elapsed().as_secs_f64();continue;
@@ -627,6 +691,7 @@ where
                     buffer.retained_payload_bytes=buffer.retained_payload_bytes.saturating_add(added);
                     buffer.peak_payload_bytes=buffer.peak_payload_bytes.max(buffer.retained_payload_bytes);
                     buffer.public_payload_sizes.extend(public_sizes);buffer.hidden_payload_sizes.extend(hidden_sizes);
+                    buffer.material_published(!groups.is_empty(), !hidden.is_empty());
                     if !groups.is_empty() {buffer.public.extend(groups);hub.0.1.public.notify_all();}
                     if hidden.len()!=0 {buffer.hidden.extend(hidden);hub.0.1.hidden.notify_all();}
                     #[cfg(feature = "stage-timing")]
@@ -957,9 +1022,11 @@ fn public_payload_hint(item: &DayPublicDeliveryV1, source_pm_hint: u64) -> u64 {
     // 每队列项计Arc槽位和已用上下文的已知布局；共享不作跨项去重，不是RSS。
     known += prepared.pm_contexts.capacity()
         * std::mem::size_of::<
-            Arc<data_pipeline_core::pm_reduction::PmMarketContextV1<
-                data_pipeline_core::pm_reduction::PreparedPmEvidenceV1<SourceEvidenceRefV3>,
-            >>,
+            Arc<
+                data_pipeline_core::pm_reduction::PmMarketContextV1<
+                    data_pipeline_core::pm_reduction::PreparedPmEvidenceV1<SourceEvidenceRefV3>,
+                >,
+            >,
         >()
         + prepared
             .pm_contexts

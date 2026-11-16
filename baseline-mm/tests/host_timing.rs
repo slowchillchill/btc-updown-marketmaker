@@ -706,7 +706,10 @@ async fn representative_host_calculation_timing() {
                 // 原金额、截止、观察及策略结果在计时外核对；不分派诊断动作。
                 assert_eq!(frozen.cutoff(), input.action_before.cutoff());
                 assert_eq!(frozen.economics(), input.action_before.economics());
-                assert_eq!(&projection, input.action_before.ledger());
+                assert_eq!(
+                    StrategyLedgerReadV1::from(&projection),
+                    input.action_before.ledger()
+                );
                 assert_eq!(&account, input.action_before.economics());
                 assert_eq!(market_totals, account.markets);
                 assert_eq!(account_v1.markets, account.markets);
@@ -1601,7 +1604,7 @@ impl StrategyV1 for NecessaryReadProbe {
     fn qualify_intent_borrowed(
         &mut self,
         input: &BorrowedStrategyCurrentReadV1<'_>,
-        _: &StrategyCalculationV1<Self::Diagnostics>,
+        _: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         _: usize,
         _: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -2048,7 +2051,7 @@ async fn pair_completion_multimarket_selected_qualification_cost() {
             );
             let intent_count = intents.len();
             let mut required = strategy.historical_market_requirements();
-            required.extend(strategy.calculation_market_requirements(&calculation));
+            required.extend(strategy.calculation_market_requirements(&calculation.strategy_view()));
             let current_start = Instant::now();
             let frames = shared
                 .strategy_selected_current_observations(&driver, &required)

@@ -74,7 +74,7 @@ pub struct SpecialRepairOriginV1 {
     pub call: u64,
     pub condition_id: ConditionId,
     pub token_id: TokenId,
-    pub sent_receipt: sim_system::execution::MutationRequestReceiptV2,
+    pub sent_receipt: shared_run::StrategyMutationReceiptV1,
 }
 impl SpecialStateV1 {
     pub fn update(&mut self, facts: &DirectedConfirmationsReadV1) -> Result<(), String> {

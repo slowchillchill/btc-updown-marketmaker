@@ -562,6 +562,15 @@ impl MarketStateStoreV2 {
         Ok(())
     }
 
+    pub(crate) fn qualified_resolution(
+        &self,
+        condition: &str,
+    ) -> Option<QualifiedMarketResolutionV2> {
+        self.markets
+            .get(condition)
+            .and_then(|market| market.qualified_resolution())
+    }
+
     pub(crate) fn all_qualified_resolutions_terminal(&self) -> bool {
         self.markets.values().all(|market| {
             market.source_qualified_resolution.is_some()

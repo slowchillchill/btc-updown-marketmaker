@@ -509,7 +509,7 @@ async fn script_group(
         }
         PaperScriptStepV1::AwaitingCancellationFeedback => {
             let context = config.cancel_context().expect("取消脚本阶段");
-            let requests = before.cancellation_requests(None);
+            let requests = shared.registry().cancellation_requests(None);
             if let ExecutionReadValueV1::Known(Some(feedback)) = requests.latest_response
                 && matches!(&feedback.record().source_reference().record,
                     SimV2SourceRecordReferenceV1::DirectResponse {

@@ -32,7 +32,7 @@ impl CalculationPublicHistoryV1 {
         };
         let selected = strategy
             .selects_relevant_markets()
-            .then(|| strategy.calculation_market_requirements(calculation));
+            .then(|| strategy.calculation_market_requirements(&calculation.strategy_view()));
         for (position, (group, applied_at)) in self.groups.iter().enumerate() {
             let mut at = (*applied_at).max(calculation.calculation_started_at_utc_ms);
             let next_group_at = self.groups.get(position + 1).map(|(_, at)| *at);
@@ -48,8 +48,8 @@ impl CalculationPublicHistoryV1 {
             loop {
                 for index in 0..intents.len() {
                     *checks += 1;
-                    if let IntentQualificationV1::Invalidated(reason) =
-                        strategy.qualify_intent_public(group, calculation, index, at)?
+                    if let IntentQualificationV1::Invalidated(reason) = strategy
+                        .qualify_intent_public(group, &calculation.strategy_view(), index, at)?
                     {
                         return Ok(Some(PublicCalculationInvalidationV1 {
                             intent_index: index,
@@ -59,7 +59,11 @@ impl CalculationPublicHistoryV1 {
                     }
                 }
                 let due = strategy
-                    .next_public_health_evaluation_at(&observations, Some(calculation), at)
+                    .next_public_health_evaluation_at(
+                        &observations,
+                        Some(&calculation.strategy_view()),
+                        at,
+                    )
                     .into_iter()
                     .chain(
                         observations
@@ -313,14 +317,7 @@ where
         let completed_notice = WORKER_RESULT_SENT_NOTICE.with(|notice| notice.borrow().clone());
         std::thread::spawn(move || {
             let started = std::time::Instant::now();
-            let result = strategy
-                .decide_detached(&input, at)
-                .map(|output| StrategyCalculationV1 {
-                    market_frame_timing: input.market_frame_timing.clone(),
-                    input_cutoff: input.action_before.cutoff().clone(),
-                    calculation_started_at_utc_ms: at,
-                    output,
-                });
+            let result = input.calculate_detached(&mut strategy, at);
             if matches!(
                 &result,
                 Ok(StrategyCalculationV1 {
@@ -396,7 +393,7 @@ where
             self.measurements.last_mathematical_invalid_at_utc_ms = Some(invalid.due_at_utc_ms);
             self.measurements.last_invalid_detected_at_utc_ms = Some(detected_at);
             strategy.invalidated(
-                &calculation,
+                &calculation.strategy_view(),
                 &InvalidatedBatchV1 {
                     sent: vec![],
                     invalidated_intent_index: invalid.intent_index,
@@ -404,7 +401,8 @@ where
                     observed_cutoff: driver.observation_cutoff().expect("真实计算已有观察"),
                     detected_at_utc_ms: detected_at,
                     release_errors: vec![],
-                },
+                }
+                .strategy_view(),
             );
             self.needs_calculation = true;
         } else if !strategy

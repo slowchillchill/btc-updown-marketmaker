@@ -480,3 +480,76 @@ D-0367 的公共环境适配复用上述原 Parquet 日供料及泛型策略入�
 持续库存的 `--strategy.enable_ordinary_active_replenishment true|false` 通过原Bool参数解析进入正式候选，缺省true；false使用 `candidate_v3_continuous_inventory_no_active_replenishment`，合法w>0也接受。完整生效配置含40个叶字段。实际抑制的同次原量见证沿原紧凑定义输出，空意图calculation仍保留；null不能作为全程无抑制的证明。字段与双坐标消费见[持续库存接口](../baseline-mm/docs/strategies/continuous-inventory-v1.md#d-0381-普通active补量开关)。
 
 公共PM固定上下文从`PmOwnedStateV1`原owner开始由`Arc`共享，沿day/online、prepared组及首次SIM证据状态传递；每组市场成员、排序及实际上下文值保持。`context()`仍借值，`pm_context()`的真实拥有型投影保留。当前盘口/tick继续由原运行状态归约，不按市场ID回填旧组。core、PreparedGroup和池化DeliveryBatch checkpoint沿原字段/值序列化；恢复不保证重建原共享指针拓扑，也不建立intern表。共享只减少这条固定上下文链的重复深复制，不改变Hub/64批/等待背压、安全前沿、退休或锁外释放策略，不据人工clone/drop计时宣称真实运行净收益。
+
+## 完整历史约束下的离线概率撮合（#388）
+
+`LOCAL_PROBABILISTIC_SHARED_FIFO_V2` 是显式选择的离线模型。旧
+`PUBLIC_TRADE_CONSERVATIVE_FIFO_V2` 和 PAPER 保留原身份及入口。算法、数量、
+内部时间、金额精度和模型假设见
+[局部概率撮合说明](../sim-system/docs/offline-probabilistic-matching.md)。
+
+冻结准备使用公共例程：
+
+```bash
+cargo run -p backtest --example prepare_offline_scene --release --locked --offline -- prepare.json
+```
+
+`prepare.json` 的 `preparation` 是 `HistoricalPreparationConfigV1`；另有
+`target_start`、`target_end`、`execution_start`、`scenarios`、`output`、
+`progress_seconds`、`scenario_workers` 和 `condition_workers`。`scenarios` 每项有
+`name` 与 `sim_system::offline_scene::Parameters`；可选 `association_scenarios`
+只比较局部关联，不生成无消费者的成交目标。字段及缺省值以
+[例程类型](examples/prepare_offline_scene.rs) 为准。一次公共事实扫描供各情景共享；
+condition 并行保留全局身份和派生顺序，运行账户不按市场切开。
+
+先用 `derive_historical_maker_rules` 的显式
+`LOCAL_PROBABILISTIC_SHARED_FIFO_V2` 选择参数派生独立规则，再在原 day 配置加入
+`offline_scenes`，将每个候选 `run.session.run_id` 映射到该情景的 `.scene` 清单路径。
+规则选择与文件存在性必须一致，清单及压缩载荷的身份进入运行元数据。
+
+```json
+"offline_scenes": {
+  "my-fixed-run": "/path/to/frozen/primary.scene"
+}
+```
+
+随后仍使用原 `backtest-cli --mode day --config day.json`，可以同时加入
+`--research-summary --research-evidence-root <新目录>` 保存必要明细。正式 NOE
+明细沿既有 `read_noe_prefix` 导出；
+[只读报告工具](tools/offline_matching_report.py) 联结订单、成交与原公开证据，不另算可执行余额。
+它要求零公开交付延迟，并保留未覆盖的 markout、右删失及未确认经济事实。
+
+准备接收范围、目标市场范围及策略入口范围必须分别固定。metadata 初始化范围须与
+日 scope 一致。隐藏历史可以预读，但其内部市场预载不会发布消费者可见登记；只有
+原公开组实际送达后才发布一次 `MarketEnrollment`，不重置已保存的隐藏数量。
+完整日、主要情景、真实成本和独立审查由 #388 的实际材料验收；入口存在不表示这些工作已通过。
+
+
+#388 的离线撮合明细工具为 `tools/offline_matching_report.py`。它读取正式 day 输出、候选决策证据、公共评价证据和正式 NOE 前缀，不另行归约余额。原单候选 `--noe-jsonl`（含 `/dev/stdin`）入口继续可用。也可用 `--noe-reader <read_noe_prefix二进制> --noe-context <该账户正式context目录>`，工具通过结构化参数启动原读取器，按 day 报告的 `durable_noe_prefix` 流式消费；读取器非零退出或前缀缺少完整结束声明都会使报告失败。
+
+多候选使用 `--batch-config <候选参数JSON数组> --batch-cost <成本JSON>`。数组中的每项使用单候选参数的下划线字段名。同一公共证据路径只读取、JSON 解码和计算 SHA 一次，同一行对象分发给各候选原有查询。每个候选保留各自的请求、订单、成交与查询状态；内存因此包含整批候选的必要状态，批量大小应按实测内存选择。工具不保存完整公共行情索引。
+
+下面是一小时代表输入的字段示例；实际路径、账户 context 和时间范围沿对应运行材料填写。增加同次 day 的其它候选时，使用其准确 `candidate_index` 和候选证据，并共享同一个 `public_evidence`。
+
+```json
+[
+  {
+    "day_output": "day.stdout.json",
+    "day_config": "day.json",
+    "day_index": 0,
+    "candidate_index": 0,
+    "candidate_evidence": "evidence/candidate-0-0.jsonl",
+    "public_evidence": "evidence/public-0.jsonl",
+    "noe_reader": "target/release/read_noe_prefix",
+    "noe_context": "runtime/primary/noe/context-EXACT_ID",
+    "range_end": 1792285800000,
+    "output": "details/primary",
+    "progress_seconds": 30
+  }
+]
+```
+
+进度区分候选证据、NOE 字节流 EOF、正式 reader 退出、共享公共扫描与最终统计。NOE 字节流 EOF 不代替正式前缀完整性或读取器成功。候选报告中的 RSS 是整个 Python 进程的高水位，候选 elapsed 在批处理中可能包含其它候选处理时间，不能把这些数逐项相加当总墙钟；总成本使用 `--batch-cost` 及外层实际进程计时。
+
+
+场景准备例程可选 `condition_temporary_root`。它是本次作业专用的临时根目录；并行构造为每个情景创建一个新的同名子目录，保存可重建的 condition 压缩流。`output` 继续指定最终场景目录，两者可位于不同文件系统。缺省保持原同目录行为，原 `prepare_condition_parallel_scene_v2` API 保持兼容；显式目录入口为 `prepare_condition_parallel_scene_with_temporary_root_v2`，其目录只属于一个情景。最终场景完整写出并完成原 SHA 后，才删除对应临时文件和空子目录；失败现场保留，不复用旧失败目录。串行 condition 构造不生成这些临时流。磁盘的实际挂载、用途、容量及本次新目录必须由作业准备核验，选项本身不授予任何磁盘或数据用途。

@@ -573,13 +573,7 @@ impl InventoryFixture {
             .cutoff()
             .decision_time()
             .logical_time_utc_ms();
-        let output = self.strategy.decide_detached(&input, at).unwrap();
-        StrategyCalculationV1 {
-            market_frame_timing: input.market_frame_timing,
-            input_cutoff: input.action_before.cutoff().clone(),
-            calculation_started_at_utc_ms: at,
-            output,
-        }
+        input.calculate_detached(&mut self.strategy, at).unwrap()
     }
     fn calculation(&mut self) -> StrategyCalculationV1<ContinuousInventoryDiagnosticV1> {
         let input = self
@@ -926,7 +920,7 @@ async fn health_deadline_invalidates_unsent_and_empty_book_keeps_cancellation_re
     let current = f.shared.strategy_current_read(&f.driver).unwrap().unwrap();
     let q = f
         .strategy
-        .qualify_intent(&current, &original, 0, at)
+        .qualify_intent(&current, &original.strategy_view(), 0, at)
         .unwrap();
     assert!(
         matches!(q,IntentQualificationV1::Invalidated(IntentInvalidationReasonV1 {ref reason_code,..}) if reason_code=="source_health")

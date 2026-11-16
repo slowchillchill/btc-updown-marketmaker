@@ -13,6 +13,10 @@ pub mod paper;
 
 mod strategy;
 pub use strategy::*;
+mod strategy_records;
+pub use strategy_records::*;
+mod strategy_visibility;
+pub use strategy_visibility::*;
 
 mod necessary;
 pub use necessary::{

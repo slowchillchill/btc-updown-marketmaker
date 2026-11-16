@@ -116,6 +116,8 @@ struct DayCommand {
     candidates: Vec<DayCandidateCommand>,
     #[serde(default)]
     producer_lead_groups: Option<usize>,
+    #[serde(default)]
+    offline_scenes: std::collections::BTreeMap<String, std::path::PathBuf>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -707,7 +709,7 @@ async fn main() {
                     run.strategy_request_namespace=Some(candidate.request_namespace);
                     candidates.push(run);
                 }
-                days.push(HistoricalDayConfigV1 {preparation:day.preparation,candidates,progress_interval_seconds:interval,producer_lead_groups:day.producer_lead_groups});
+                days.push(HistoricalDayConfigV1 {preparation:day.preparation,candidates,progress_interval_seconds:interval,producer_lead_groups:day.producer_lead_groups,offline_scenes:day.offline_scenes});
             }
             let factory=|run:&HistoricalPreparedRunConfigV1|->Result<SelectedStrategy,MaterialError> {
                 let strategy: StrategyParameters=serde_json::from_value(run.strategy.effective_parameters.clone())?;

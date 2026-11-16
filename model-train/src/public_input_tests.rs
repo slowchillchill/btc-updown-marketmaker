@@ -25,6 +25,9 @@ impl StrategyV1 for Capture {
     fn requires_learning_economics(&self) -> bool {
         self.inner.requires_learning_economics()
     }
+    fn take_learning_step(&mut self) -> Option<Value> {
+        self.inner.take_learning_step()
+    }
     fn requires_trade_economics_details(&self) -> bool {
         false
     }
@@ -78,7 +81,7 @@ pub(crate) fn collect(
     let opened = crate::open_consumer_rules(&config).unwrap();
     let worker = ModelWorker::start(config.worker.clone()).unwrap();
     let observed = Arc::new(Mutex::new(vec![]));
-    run_historical_days_with_parallelism_v1(
+    run_historical_days_with_options_v1(
         &config.days,
         opened.rules.clone(),
         &|c| {
@@ -97,6 +100,12 @@ pub(crate) fn collect(
             })
         },
         1,
+        &HistoricalDayRunOptionsV1 {
+            learning_observer_factory: Some(Arc::new(
+                crate::learning::ModelLearningObserverFactoryV1::new(opened.binding.clone()),
+            )),
+            ..Default::default()
+        },
     )
     .unwrap();
     drop(worker);

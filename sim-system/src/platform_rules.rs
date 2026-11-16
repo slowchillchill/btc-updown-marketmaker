@@ -430,6 +430,8 @@ pub enum HistoricalMakerModelV1 {
     PublicTradeConservativeFifoV1,
     #[serde(rename = "PUBLIC_TRADE_CONSERVATIVE_FIFO_V2")]
     PublicTradeConservativeFifoV2,
+    #[serde(rename = "LOCAL_PROBABILISTIC_SHARED_FIFO_V2")]
+    LocalProbabilisticSharedFifoV2,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -592,6 +594,7 @@ pub(crate) enum SelectedMakerModelV1<'a> {
     L2BookDeltaFifoEstimateV1(&'a str),
     PublicTradeConservativeFifoV1,
     PublicTradeConservativeFifoV2,
+    LocalProbabilisticSharedFifoV2,
 }
 impl PlatformRuleSnapshotV3 {
     /// 同一进程的双模型由冻结快照和实际调用方共同选定。
@@ -602,6 +605,9 @@ impl PlatformRuleSnapshotV3 {
             }
             SelectedMakerModelV1::PublicTradeConservativeFifoV2 => {
                 "PUBLIC_TRADE_CONSERVATIVE_FIFO_V2"
+            }
+            SelectedMakerModelV1::LocalProbabilisticSharedFifoV2 => {
+                crate::offline_scene::MODEL_VERSION
             }
             SelectedMakerModelV1::L2BookDeltaFifoEstimateV1(version) => version,
         }
@@ -623,6 +629,9 @@ impl PlatformRuleSnapshotV3 {
             }
             Some(HistoricalMakerModelV1::PublicTradeConservativeFifoV2) => {
                 SelectedMakerModelV1::PublicTradeConservativeFifoV2
+            }
+            Some(HistoricalMakerModelV1::LocalProbabilisticSharedFifoV2) => {
+                SelectedMakerModelV1::LocalProbabilisticSharedFifoV2
             }
             None => SelectedMakerModelV1::L2BookDeltaFifoEstimateV1(&rule.model_version),
         }
@@ -1202,6 +1211,32 @@ pub fn derive_historical_maker_v2_snapshot_v3(
         "; D-0374; frozen-platform-source-sha256:{}; https://github.com/slowchillchill/btc-updown-marketmaker/issues/327#issuecomment-6332743060",
         loaded.file_sha256().0
     ));
+    snapshot.provenance.implementation_identity = implementation_identity;
+    let (file_sha256, path, _) = seal_snapshot(&target_path, &snapshot, MAX_RULE_SNAPSHOT_BYTES)?;
+    Ok(Arc::new(SealedProcessRuleSnapshotV3 {
+        path,
+        file_sha256,
+        access_mode: SnapshotAccessMode::HistoricalAsOf,
+        snapshot,
+    }))
+}
+
+/// #388显式派生离线模型身份；平台规则及其他角色选择沿用原冻结值。
+pub fn derive_offline_probabilistic_snapshot_v3(
+    source: HistoricalProcessSnapshotRequestV1,
+    target_path: PathBuf,
+    implementation_identity: ImplementationIdentityV1,
+) -> Result<Arc<SealedProcessRuleSnapshotV3>, RuleSnapshotError> {
+    let loaded = load_historical_process_snapshot_v3(source)?;
+    validate_implementation_identity(&implementation_identity)?;
+    let mut snapshot = loaded.snapshot().clone();
+    let rule = &mut snapshot.project_account_rules.l2_queue_model;
+    rule.value.historical_backtest_model =
+        Some(HistoricalMakerModelV1::LocalProbabilisticSharedFifoV2);
+    rule.evidence.version = crate::offline_scene::MODEL_VERSION.into();
+    rule.evidence.reviewed_on_utc_date = "2026-11-07".into();
+    rule.evidence.scope = "#388：完整历史约束的冻结场景；仅显式HistoricalBacktest".into();
+    rule.evidence.source.push_str(&format!("; frozen-platform-source-sha256:{}; https://github.com/slowchillchill/btc-updown-marketmaker/issues/388",loaded.file_sha256().0));
     snapshot.provenance.implementation_identity = implementation_identity;
     let (file_sha256, path, _) = seal_snapshot(&target_path, &snapshot, MAX_RULE_SNAPSHOT_BYTES)?;
     Ok(Arc::new(SealedProcessRuleSnapshotV3 {

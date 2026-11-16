@@ -33,6 +33,8 @@ use rust_decimal::Decimal;
 use shared_run::*;
 use sim_system::{execution::*, public_consumption::*};
 use std::{path::Path, sync::Arc};
+#[path = "support/strategy_noe_visibility.rs"]
+mod strategy_noe_visibility;
 
 type Driver = FinitePublicConsumptionV1<RecordedPublicGroupSourceV1<MemoryRecordedTimes>>;
 fn setup(root: &Path) -> (SharedExecutionV2, Driver) {
@@ -242,10 +244,29 @@ async fn borrowed_input_revalues_same_ledger_and_keeps_owned_snapshot() {
             40_000 => ("11729", "125"),          // fresh空bid是已知零标记
             _ => continue,
         };
+        let original_frames: Vec<_> = driver
+            .frames_at_observation()
+            .iter()
+            .map(|frame| {
+                (
+                    frame.observation as *const MarketBusinessObservationV1,
+                    Arc::as_ptr(&frame.rule_context),
+                    frame.statistics.as_ref().map(Arc::as_ptr),
+                )
+            })
+            .collect();
         let borrowed = shared
             .strategy_borrowed_observation_input(&mut driver, true)
             .unwrap()
             .unwrap();
+        assert_eq!(borrowed.markets.len(), original_frames.len());
+        for (frame, (observation, rules, statistics)) in
+            borrowed.markets.iter().zip(&original_frames)
+        {
+            assert_eq!(frame.observation as *const _, *observation);
+            assert_eq!(Arc::as_ptr(&frame.rule_context), *rules);
+            assert_eq!(frame.statistics.as_ref().map(Arc::as_ptr), *statistics);
+        }
         assert_eq!(
             borrowed.action_before.economics(),
             owned.action_before.economics()
@@ -279,7 +300,7 @@ async fn borrowed_input_revalues_same_ledger_and_keeps_owned_snapshot() {
             )
         );
         if let Some(prior) = &first {
-            let prior: &StrategyInputV1 = prior;
+            let prior: &HostStrategyInputV1 = prior;
             assert_eq!(
                 borrowed.action_before.ledger(),
                 prior.action_before.ledger(),
@@ -605,6 +626,7 @@ async fn frozen_strategy_input_explicit_time_empty_error_exit_and_original_amoun
     let temp = tempfile::tempdir().unwrap();
     let (mut shared, mut driver) = setup(temp.path());
     let input = shared.strategy_input(&mut driver).unwrap().unwrap();
+    let original_host_cutoff = driver.observation_cutoff().unwrap();
     let old_market = input.markets[0].observation.clone();
     let old_economics = input.action_before.economics().clone();
     driver.next_group().unwrap().unwrap();
@@ -686,7 +708,7 @@ async fn frozen_strategy_input_explicit_time_empty_error_exit_and_original_amoun
     assert_eq!(qualification_calls, 0);
     assert!(receipts.is_empty());
     assert_eq!(sent_at_utc_ms, sent_at);
-    assert_eq!(calculation.calculation.input_cutoff, original_cutoff);
+    assert_eq!(calculation.calculation.input_cutoff, original_host_cutoff);
     assert_eq!(shared.ledger().applied_entry_sequence(), ledger_seq);
     assert_eq!(shared.registry().all_commitments().count(), 0);
     controlled.output = Some(Ok(StrategyOutputV1::Exit { diagnostics: () }));
@@ -753,7 +775,7 @@ async fn frozen_strategy_input_explicit_time_empty_error_exit_and_original_amoun
                     &mut driver,
                     FrozenStrategyMarketFrameV1 {
                         timing: MarketFrameTimingV1 {
-                            market_cutoff: original_cutoff.clone(),
+                            market_cutoff: original_host_cutoff.clone(),
                             earliest_start_at_utc_ms: 22_000,
                         },
                         markets: input.markets.clone(),
@@ -820,7 +842,7 @@ impl StrategyV1 for QualificationProbe {
     fn qualify_intent(
         &mut self,
         _: &StrategyCurrentReadV1<'_>,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         index: usize,
         _: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -844,8 +866,8 @@ impl StrategyV1 for QualificationProbe {
     }
     fn invalidated(
         &mut self,
-        _: &StrategyCalculationV1<Self::Diagnostics>,
-        result: &InvalidatedBatchV1,
+        _: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
+        result: &StrategyInvalidatedBatchV1,
     ) {
         self.invalidated = Some((
             result.sent.len(),
@@ -897,7 +919,10 @@ async fn qualification_stops_suffix_preserves_sent_unknown_and_releases_only_uns
     assert_eq!(result.sent.len(), 1);
     assert_eq!(result.invalidated_intent_index, 1);
     assert!(result.release_errors.is_empty());
-    assert_eq!(result.observed_cutoff, input.action_before.cutoff().clone());
+    assert_eq!(
+        StrategyObservationCutoffV1::from(&result.observed_cutoff),
+        *input.action_before.cutoff()
+    );
     assert!(shared.registry().frozen_intent("invalid").is_none());
     assert!(
         shared
@@ -990,7 +1015,6 @@ fn local_funds_classification_keeps_mixed_fault_unknown_and_release_failure_fata
     error.error = SharedActionErrorV1::Ledger(LedgerErrorV1::AccountNotOpened);
     assert!(!error.is_local_funds_rejection());
 }
-
 
 /// 真实NOE领取和资金变化后重新选取责任；闭市不裁掉旧持仓/预留。
 #[tokio::test(flavor = "current_thread")]
@@ -1181,7 +1205,7 @@ impl StrategyV1 for HostBoundaryProbe {
     fn qualify_intent(
         &mut self,
         current: &StrategyCurrentReadV1<'_>,
-        _: &StrategyCalculationV1,
+        _: &StrategyCalculationReadV1<'_>,
         index: usize,
         _: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -1323,7 +1347,7 @@ async fn finite_actual_and_host_managed_keep_distinct_feedback_and_ledger_order(
             qualified,
             observed_old: None,
         };
-        let frozen_cutoff = input.action_before.cutoff().clone();
+        let frozen_cutoff = driver.observation_cutoff().unwrap();
         let calculation = input.calculate(&mut strategy, at).unwrap().complete(at);
         while driver
             .next_group_at()
@@ -1462,7 +1486,7 @@ async fn finite_actual_bridge_error_precedes_feedback_and_invalidating_qualifica
         invalidated: None,
     };
     let input = shared.strategy_input(&mut driver).unwrap().unwrap();
-    let cutoff = input.action_before.cutoff().clone();
+    let cutoff = driver.observation_cutoff().unwrap();
     let at = cutoff.decision_time().logical_time_utc_ms();
     let calculation = input.calculate(&mut strategy, at).unwrap().complete(at);
     while driver
@@ -1558,7 +1582,7 @@ async fn finite_actual_qualification_preserves_sent_prefix_and_releases_only_uns
     let result = shared
         .dispatch_strategy_qualified(
             &mut driver
-                .send_decision_at(input.action_before.cutoff().clone(), at)
+                .send_decision_at(driver.observation_cutoff().unwrap(), at)
                 .unwrap(),
             &mut strategy,
             calculation,

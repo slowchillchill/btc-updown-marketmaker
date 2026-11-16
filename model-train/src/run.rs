@@ -125,6 +125,11 @@ pub(crate) fn run_with_worker_observed(
         config.parallel_dates,
         &HistoricalDayRunOptionsV1 {
             producer_payload_bytes: config.worker.performance.as_ref().map(|p| p.queue_bytes),
+            learning_observer_factory: Some(std::sync::Arc::new(
+                crate::learning::ModelLearningObserverFactoryV1::new(
+                    config.rules.frozen().ok_or("缺已解析规则绑定")?.clone(),
+                ),
+            )),
             ..Default::default()
         },
     )?;

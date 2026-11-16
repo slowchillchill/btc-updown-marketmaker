@@ -90,7 +90,7 @@ pub struct StrategyInputV1<
     M = FrozenMarketReadV1,
     A = OwnedActionAccountV2,
 > {
-    pub market_frame_timing: Option<MarketFrameTimingV1>,
+    pub market_frame_timing: Option<StrategyMarketFrameTimingV1>,
     pub action_before: ActionBeforeReadV2<G, A>,
     pub markets: Vec<M>,
     pub trade_economics: Vec<FrozenTradeEconomicsV1>,
@@ -99,15 +99,58 @@ pub struct StrategyInputV1<
 pub struct StrategyCurrentReadV1<'a, G = SharedExecutionRegistryV2, A = OwnedActionAccountV2> {
     pub action_before: ActionBeforeReadV2<G, A>,
     pub trade_economics: Vec<FrozenTradeEconomicsV1>,
-    pub markets: Vec<PublicObservationFrameV1<'a>>,
+    pub markets: Vec<StrategyMarketReadFrameV1<'a>>,
 }
 pub type BorrowedStrategyInputV1<'a> = StrategyInputV1<
     &'a SharedExecutionRegistryV2,
-    PublicObservationFrameV1<'a>,
+    StrategyMarketReadFrameV1<'a>,
     BorrowedActionAccountV2<'a>,
 >;
 pub type BorrowedStrategyCurrentReadV1<'a> =
     StrategyCurrentReadV1<'a, &'a SharedExecutionRegistryV2, BorrowedActionAccountV2<'a>>;
+/// 宿主拥有的输入外壳。策略只收到 Deref 目标，不能取得原冻结截止或宿主计算。
+pub struct HostStrategyInputV1<
+    G = SharedExecutionRegistryV2,
+    M = FrozenMarketReadV1,
+    A = OwnedActionAccountV2,
+> {
+    input: StrategyInputV1<G, M, A>,
+    host_market_frame_timing: Option<MarketFrameTimingV1>,
+}
+impl<G, M, A> std::ops::Deref for HostStrategyInputV1<G, M, A> {
+    type Target = StrategyInputV1<G, M, A>;
+    fn deref(&self) -> &Self::Target {
+        &self.input
+    }
+}
+impl<G, M, A> HostStrategyInputV1<G, M, A> {
+    /// 宿主配置或测试只编辑策略业务输入，原执行截止仍由外壳保留。
+    pub fn strategy_input_mut(&mut self) -> &mut StrategyInputV1<G, M, A> {
+        &mut self.input
+    }
+    pub fn into_strategy_input(self) -> StrategyInputV1<G, M, A> {
+        self.input
+    }
+    fn new(
+        input: StrategyInputV1<G, M, A>,
+        host_market_frame_timing: Option<MarketFrameTimingV1>,
+    ) -> Self {
+        Self {
+            input,
+            host_market_frame_timing,
+        }
+    }
+}
+pub type HostBorrowedStrategyInputV1<'a> = HostStrategyInputV1<
+    &'a SharedExecutionRegistryV2,
+    StrategyMarketReadFrameV1<'a>,
+    BorrowedActionAccountV2<'a>,
+>;
+pub type HostDetachedStrategyInputV1 = HostStrategyInputV1<
+    SharedExecutionRegistryV2,
+    FrozenMarketReadV1,
+    FrozenNecessaryActionAccountV2,
+>;
 enum CurrentRead<'a> {
     Owned(StrategyCurrentReadV1<'a>),
     Borrowed(BorrowedStrategyCurrentReadV1<'a>),
@@ -115,8 +158,8 @@ enum CurrentRead<'a> {
 impl CurrentRead<'_> {
     fn cutoff(&self) -> &TrustedGroupDecisionCutoffV1 {
         match self {
-            Self::Owned(r) => r.action_before.cutoff(),
-            Self::Borrowed(r) => r.action_before.cutoff(),
+            Self::Owned(r) => r.action_before.trusted_cutoff(),
+            Self::Borrowed(r) => r.action_before.trusted_cutoff(),
         }
     }
     fn qualify<S: StrategyV1>(
@@ -127,8 +170,10 @@ impl CurrentRead<'_> {
         at: i64,
     ) -> Result<IntentQualificationV1, S::Error> {
         match self {
-            Self::Owned(r) => strategy.qualify_intent(r, calculation, index, at),
-            Self::Borrowed(r) => strategy.qualify_intent_borrowed(r, calculation, index, at),
+            Self::Owned(r) => strategy.qualify_intent(r, &calculation.strategy_view(), index, at),
+            Self::Borrowed(r) => {
+                strategy.qualify_intent_borrowed(r, &calculation.strategy_view(), index, at)
+            }
         }
     }
 }
@@ -233,6 +278,10 @@ pub trait StrategyV1 {
     fn learning_result(&self) -> Option<serde_json::Value> {
         None
     }
+    /// 只向宿主移交本次已交付观察与动作的采集载荷，不接收学习标签。
+    fn take_learning_step(&mut self) -> Option<serde_json::Value> {
+        None
+    }
     /// 只序列化真实诊断；默认消费者没有研究诊断。
     fn research_diagnostics(&self, _diagnostics: &Self::Diagnostics) -> serde_json::Value {
         serde_json::Value::Null
@@ -260,7 +309,7 @@ pub trait StrategyV1 {
     }
     fn calculation_market_requirements(
         &self,
-        _calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        _calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
     ) -> Vec<ConditionId> {
         Vec::new()
     }
@@ -274,7 +323,7 @@ pub trait StrategyV1 {
     fn qualify_intent_borrowed(
         &mut self,
         input: &BorrowedStrategyCurrentReadV1<'_>,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         index: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -309,7 +358,7 @@ pub trait StrategyV1 {
     fn next_public_health_evaluation_at(
         &self,
         _markets: &[&MarketBusinessObservationV1],
-        _calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        _calculation: Option<&StrategyCalculationReadV1<'_, Self::Diagnostics>>,
         _at: i64,
     ) -> Option<i64> {
         None
@@ -317,8 +366,8 @@ pub trait StrategyV1 {
     /// 返回严格晚于当前时刻的必要期限；没有固定节拍或公共阈值。
     fn next_health_evaluation_at(
         &self,
-        _markets: &[PublicObservationFrameV1<'_>],
-        _calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        _markets: &[StrategyMarketReadFrameV1<'_>],
+        _calculation: Option<&StrategyCalculationReadV1<'_, Self::Diagnostics>>,
         _at: i64,
     ) -> Option<i64> {
         None
@@ -327,7 +376,7 @@ pub trait StrategyV1 {
     fn qualify_intent_public(
         &self,
         _group: &ClosedBusinessGroupV1,
-        _calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        _calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         _intent_index: usize,
         _at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -337,7 +386,7 @@ pub trait StrategyV1 {
     fn qualify_intent(
         &mut self,
         _input: &StrategyCurrentReadV1<'_>,
-        _calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        _calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         _intent_index: usize,
         _at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -345,8 +394,8 @@ pub trait StrategyV1 {
     }
     fn invalidated(
         &mut self,
-        _calculation: &StrategyCalculationV1<Self::Diagnostics>,
-        _result: &InvalidatedBatchV1,
+        _calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
+        _result: &StrategyInvalidatedBatchV1,
     ) {
     }
     fn decide(
@@ -357,8 +406,8 @@ pub trait StrategyV1 {
     /// 原分派结果通知；业务资源记忆由策略维护，公共层不解释诊断。
     fn dispatched(
         &mut self,
-        _calculation: &StrategyCalculationV1<Self::Diagnostics>,
-        _result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        _calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
+        _result: &Result<Vec<StrategySentIntentReceiptV1>, StrategyBatchExecutionErrorV1>,
     ) {
     }
 }
@@ -388,15 +437,19 @@ impl<D> StrategyCalculationV1<D> {
         }
     }
 }
-impl StrategyInputV1 {
+impl HostStrategyInputV1 {
+    /// 宿主采集器读取同次冻结的完整学习标签；策略只持有 StrategyInputV1。
+    pub fn learning_labels(&self) -> Option<&LearningAccountReadV1> {
+        self.input.action_before.account.learning.as_ref()
+    }
     pub fn calculate<S: StrategyV1>(
         &self,
         strategy: &mut S,
         calculation_started_at_utc_ms: i64,
     ) -> Result<StrategyCalculationV1<S::Diagnostics>, S::Error> {
         Ok(StrategyCalculationV1 {
-            market_frame_timing: self.market_frame_timing.clone(),
-            input_cutoff: self.action_before.cutoff().clone(),
+            market_frame_timing: self.host_market_frame_timing.clone(),
+            input_cutoff: self.action_before.trusted_cutoff().clone(),
             calculation_started_at_utc_ms,
             output: strategy.decide(self, calculation_started_at_utc_ms)?,
         })
@@ -411,7 +464,7 @@ impl BorrowedStrategyInputV1<'_> {
                 .action_before
                 .account
                 .driver
-                .map(|d| d.frames_at_observation())
+                .map(|d| strategy_market_views(&d.frames_at_observation()))
                 .unwrap_or_else(|| self.markets.clone())
                 .iter()
                 .map(|f| FrozenMarketReadV1 {
@@ -443,16 +496,38 @@ impl BorrowedStrategyInputV1<'_> {
             trade_economics: self.trade_economics.clone(),
         }
     }
+}
+impl HostBorrowedStrategyInputV1<'_> {
+    pub fn freeze_for_detached(&self) -> HostDetachedStrategyInputV1 {
+        HostStrategyInputV1::new(
+            self.input.freeze_for_detached(),
+            self.host_market_frame_timing.clone(),
+        )
+    }
     pub fn calculate_borrowed<S: StrategyV1>(
         &self,
         strategy: &mut S,
         at: i64,
     ) -> Result<StrategyCalculationV1<S::Diagnostics>, S::Error> {
         Ok(StrategyCalculationV1 {
-            market_frame_timing: self.market_frame_timing.clone(),
-            input_cutoff: self.action_before.cutoff().clone(),
+            market_frame_timing: self.host_market_frame_timing.clone(),
+            input_cutoff: self.action_before.trusted_cutoff().clone(),
             calculation_started_at_utc_ms: at,
             output: strategy.decide_borrowed(self, at)?,
+        })
+    }
+}
+impl HostDetachedStrategyInputV1 {
+    pub fn calculate_detached<S: DetachedStrategyV1>(
+        &self,
+        strategy: &mut S,
+        at: i64,
+    ) -> Result<StrategyCalculationV1<S::Diagnostics>, S::Error> {
+        Ok(StrategyCalculationV1 {
+            market_frame_timing: self.host_market_frame_timing.clone(),
+            input_cutoff: self.action_before.trusted_cutoff().clone(),
+            calculation_started_at_utc_ms: at,
+            output: strategy.decide_detached(&self.input, at)?,
         })
     }
 }
@@ -529,7 +604,7 @@ impl SharedExecutionV2 {
         &'a mut self,
         driver: &'a mut PublicConsumptionStateV1,
         details: bool,
-    ) -> Result<Option<BorrowedStrategyInputV1<'a>>, LedgerErrorV1> {
+    ) -> Result<Option<HostBorrowedStrategyInputV1<'a>>, LedgerErrorV1> {
         self.apply_closed()?;
         let Some(cutoff) = driver.observation_cutoff() else {
             return Ok(None);
@@ -541,23 +616,26 @@ impl SharedExecutionV2 {
         else {
             return Ok(None);
         };
-        Ok(Some(StrategyInputV1 {
-            market_frame_timing: None,
-            action_before,
-            trade_economics: if details {
-                self.freeze_trade_economics()
-            } else {
-                Vec::new()
+        Ok(Some(HostStrategyInputV1::new(
+            StrategyInputV1 {
+                market_frame_timing: None,
+                action_before,
+                trade_economics: if details {
+                    self.freeze_trade_economics()
+                } else {
+                    Vec::new()
+                },
+                markets: strategy_market_views(&frames),
             },
-            markets: frames,
-        }))
+            None,
+        )))
     }
     pub fn strategy_selected_observation_input<'a>(
         &'a mut self,
         driver: &'a mut PublicConsumptionStateV1,
         details: bool,
         historical: &[ConditionId],
-    ) -> Result<Option<BorrowedStrategyInputV1<'a>>, LedgerErrorV1> {
+    ) -> Result<Option<HostBorrowedStrategyInputV1<'a>>, LedgerErrorV1> {
         self.apply_closed()?;
         let Some(cutoff) = driver.observation_cutoff() else {
             return Ok(None);
@@ -570,16 +648,19 @@ impl SharedExecutionV2 {
         else {
             return Ok(None);
         };
-        Ok(Some(StrategyInputV1 {
-            market_frame_timing: None,
-            action_before,
-            markets: frames,
-            trade_economics: if details {
-                self.freeze_trade_economics()
-            } else {
-                Vec::new()
+        Ok(Some(HostStrategyInputV1::new(
+            StrategyInputV1 {
+                market_frame_timing: None,
+                action_before,
+                markets: strategy_market_views(&frames),
+                trade_economics: if details {
+                    self.freeze_trade_economics()
+                } else {
+                    Vec::new()
+                },
             },
-        }))
+            None,
+        )))
     }
     fn selected_observations<'a>(
         &self,
@@ -656,7 +737,7 @@ impl SharedExecutionV2 {
         driver: &mut PublicConsumptionStateV1,
         frame: FrozenStrategyMarketFrameV1,
         details: bool,
-    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+    ) -> Result<Option<HostStrategyInputV1>, LedgerErrorV1> {
         self.strategy_input_for_market_frame_with_learning(driver, frame, details, false)
     }
     /// 仅显式学习消费者取得累计经济与唯一本金，原消费者不新增扫描。
@@ -666,7 +747,7 @@ impl SharedExecutionV2 {
         frame: FrozenStrategyMarketFrameV1,
         details: bool,
         learning: bool,
-    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+    ) -> Result<Option<HostStrategyInputV1>, LedgerErrorV1> {
         self.strategy_input_for_market_frame_with_learning_requests(
             driver, frame, details, learning, None,
         )
@@ -678,7 +759,7 @@ impl SharedExecutionV2 {
         details: bool,
         learning: bool,
         requests: Option<&[String]>,
-    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+    ) -> Result<Option<HostStrategyInputV1>, LedgerErrorV1> {
         self.apply_closed()?;
         let Some(cutoff) = driver.observation_cutoff() else {
             return Ok(None);
@@ -692,28 +773,31 @@ impl SharedExecutionV2 {
             action_before.account.learning =
                 self.learning_account_with_requests_v1(driver, requests);
         }
-        Ok(Some(StrategyInputV1 {
-            market_frame_timing: Some(frame.timing),
-            action_before,
-            markets: frame.markets,
-            trade_economics: if details {
-                self.freeze_trade_economics()
-            } else {
-                Vec::new()
+        Ok(Some(HostStrategyInputV1::new(
+            StrategyInputV1 {
+                market_frame_timing: Some((&frame.timing).into()),
+                action_before,
+                markets: frame.markets,
+                trade_economics: if details {
+                    self.freeze_trade_economics()
+                } else {
+                    Vec::new()
+                },
             },
-        }))
+            Some(frame.timing.clone()),
+        )))
     }
     pub fn strategy_input(
         &mut self,
         driver: &mut PublicConsumptionStateV1,
-    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+    ) -> Result<Option<HostStrategyInputV1>, LedgerErrorV1> {
         self.strategy_input_with_trade_details(driver, true)
     }
     pub fn strategy_input_with_trade_details(
         &mut self,
         driver: &mut PublicConsumptionStateV1,
         details: bool,
-    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+    ) -> Result<Option<HostStrategyInputV1>, LedgerErrorV1> {
         let Some(cutoff) = self.prepare_action_group(driver)? else {
             return Ok(None);
         };
@@ -725,14 +809,14 @@ impl SharedExecutionV2 {
     pub fn strategy_observation_input(
         &mut self,
         driver: &mut PublicConsumptionStateV1,
-    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+    ) -> Result<Option<HostStrategyInputV1>, LedgerErrorV1> {
         self.strategy_observation_input_with_trade_details(driver, true)
     }
     pub fn strategy_observation_input_with_trade_details(
         &mut self,
         driver: &mut PublicConsumptionStateV1,
         details: bool,
-    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+    ) -> Result<Option<HostStrategyInputV1>, LedgerErrorV1> {
         self.apply_closed()?;
         let Some(cutoff) = driver.observation_cutoff() else {
             return Ok(None);
@@ -769,7 +853,7 @@ impl SharedExecutionV2 {
     ) -> Option<StrategyCurrentReadV1<'a>> {
         Some(StrategyCurrentReadV1 {
             action_before: self.freeze_action_before(cutoff, &frames)?,
-            markets: frames,
+            markets: strategy_market_views(&frames),
             trade_economics: if details {
                 self.freeze_trade_economics()
             } else {
@@ -792,7 +876,7 @@ impl SharedExecutionV2 {
                 } else {
                     Vec::new()
                 },
-                markets: frames,
+                markets: strategy_market_views(&frames),
             }))
         } else {
             self.current_read_from_frames(cutoff, frames, details)
@@ -812,25 +896,28 @@ impl SharedExecutionV2 {
         cutoff: TrustedGroupDecisionCutoffV1,
         frames: &[PublicObservationFrameV1<'_>],
         details: bool,
-    ) -> Option<StrategyInputV1> {
+    ) -> Option<HostStrategyInputV1> {
         let action_before = self.freeze_action_before(cutoff, frames)?;
-        Some(StrategyInputV1 {
-            market_frame_timing: None,
-            action_before,
-            trade_economics: if details {
-                self.freeze_trade_economics()
-            } else {
-                Vec::new()
+        Some(HostStrategyInputV1::new(
+            StrategyInputV1 {
+                market_frame_timing: None,
+                action_before,
+                trade_economics: if details {
+                    self.freeze_trade_economics()
+                } else {
+                    Vec::new()
+                },
+                markets: frames
+                    .iter()
+                    .map(|f| FrozenMarketReadV1 {
+                        statistics: f.statistics.clone(),
+                        observation: f.observation.clone(),
+                        rule_context: f.rule_context.clone(),
+                    })
+                    .collect(),
             },
-            markets: frames
-                .iter()
-                .map(|f| FrozenMarketReadV1 {
-                    statistics: f.statistics.clone(),
-                    observation: f.observation.clone(),
-                    rule_context: f.rule_context.clone(),
-                })
-                .collect(),
-        })
+            None,
+        ))
     }
     pub async fn dispatch_strategy<S: StrategyV1>(
         &mut self,
@@ -846,7 +933,10 @@ impl SharedExecutionV2 {
             StrategyOutputV1::Continue { intents, .. } => {
                 let sent_at_utc_ms = decision.sent_at_utc_ms();
                 let result = self.execute_batch_reserved(decision, intents).await;
-                strategy.dispatched(&calculation.calculation, &result);
+                strategy.dispatched(
+                    &calculation.calculation.strategy_view(),
+                    &strategy_dispatch_result(&result),
+                );
                 let receipts = match result {
                     Ok(receipts) => receipts,
                     Err(error) => return Err(StrategyDispatchFailureV1 { calculation, error }),
@@ -898,7 +988,7 @@ impl SharedExecutionV2 {
                         detected_at_utc_ms: at,
                         release_errors: vec![],
                     };
-                    strategy.invalidated(calculation, &result);
+                    strategy.invalidated(&calculation.strategy_view(), &result.strategy_view());
                     return Ok((Some(result), calls));
                 }
             }
@@ -934,9 +1024,9 @@ impl SharedExecutionV2 {
                 |execution, current_decision, index, at| {
                     let frames = if strategy.selects_relevant_markets() {
                         let mut historical = strategy.historical_market_requirements();
-                        historical.extend(
-                            strategy.calculation_market_requirements(&calculation.calculation),
-                        );
+                        historical.extend(strategy.calculation_market_requirements(
+                            &calculation.calculation.strategy_view(),
+                        ));
                         execution.selected_observations(
                             current_decision.observation_driver(),
                             &historical,
@@ -961,7 +1051,10 @@ impl SharedExecutionV2 {
             Ok(QualifiedBatchResultV1::Sent(sent)) => {
                 let sent_at_utc_ms = sent.first().map_or(sent_at_utc_ms, |r| r.sent_at_utc_ms);
                 let original = Ok(sent);
-                strategy.dispatched(&calculation.calculation, &original);
+                strategy.dispatched(
+                    &calculation.calculation.strategy_view(),
+                    &strategy_dispatch_result(&original),
+                );
                 Ok(QualifiedStrategyDispatchV1::Dispatched {
                     dispatch: StrategyDispatchV1::Continue {
                         calculation,
@@ -972,7 +1065,10 @@ impl SharedExecutionV2 {
                 })
             }
             Ok(QualifiedBatchResultV1::Invalidated(result)) => {
-                strategy.invalidated(&calculation.calculation, &result);
+                strategy.invalidated(
+                    &calculation.calculation.strategy_view(),
+                    &result.strategy_view(),
+                );
                 Ok(QualifiedStrategyDispatchV1::Invalidated {
                     calculation,
                     result,
@@ -981,7 +1077,10 @@ impl SharedExecutionV2 {
             }
             Err(QualifiedBatchErrorV1::Execution(error)) => {
                 let original = Err(error);
-                strategy.dispatched(&calculation.calculation, &original);
+                strategy.dispatched(
+                    &calculation.calculation.strategy_view(),
+                    &strategy_dispatch_result(&original),
+                );
                 match original {
                     Err(error) => Err(StrategyDispatchFailureV1 {
                         calculation,

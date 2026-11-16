@@ -97,8 +97,8 @@ impl StrategyV1 for FeeProbe {
     }
     fn dispatched(
         &mut self,
-        _: &StrategyCalculationV1,
-        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        _: &StrategyCalculationReadV1<'_>,
+        result: &Result<Vec<StrategySentIntentReceiptV1>, StrategyBatchExecutionErrorV1>,
     ) {
         let mut t = self.trace.lock().unwrap();
         match result {
@@ -199,6 +199,7 @@ fn day_v2_actual_fee_changes_cash_then_local_funds_stop_only_batch_with_or_witho
             candidates: vec![HistoricalPreparedRunConfigV1::from(&config)],
             progress_interval_seconds: 0,
             producer_lead_groups: Some(1),
+            offline_scenes: Default::default(),
         };
         let trace = Arc::new(Mutex::new(Trace::default()));
         let result = run_historical_days_v1(&[day], rules, &|_| {

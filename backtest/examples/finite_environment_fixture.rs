@@ -190,6 +190,7 @@ pub fn run_fixture(
             candidates: vec![HistoricalPreparedRunConfigV1::from(&c)],
             progress_interval_seconds: 0,
             producer_lead_groups: Some(1),
+            offline_scenes: Default::default(),
         };
         let result = run_historical_days_v1(&[day], rules.clone(), &|_| {
             Ok(Orders {

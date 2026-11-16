@@ -754,6 +754,7 @@ where
         )
         .map_err(material_failure)?,
         public_observer: None,
+        learning_observer: None,
         start: material.preparation.scope.received_start_utc_ms,
         source_identity: prepared.source_identity_sha256,
         day_log_binding: None,
@@ -811,10 +812,26 @@ pub(crate) enum HistoricalSendBoundaryV1 {
     ActualSendBoundary,
     HostManaged,
 }
+/// 宿主独立的学习采集器。原标签不进入 StrategyV1 的任何回调。
+pub trait HistoricalLearningObserverV1: Send {
+    fn observe(
+        &mut self,
+        step: serde_json::Value,
+        labels: &LearningAccountReadV1,
+    ) -> Result<(), MaterialError>;
+}
+/// 每个账户创建自己的采集器与输出流；策略不持有此对象。
+pub trait HistoricalLearningObserverFactoryV1: std::fmt::Debug + Send + Sync {
+    fn create(
+        &self,
+        config: &HistoricalPreparedRunConfigV1,
+    ) -> Result<Option<Box<dyn HistoricalLearningObserverV1>>, MaterialError>;
+}
 pub(crate) struct HistoricalRuntimeContextV1 {
     pub send_boundary: HistoricalSendBoundaryV1,
     pub statistics: Option<Arc<data_pipeline_core::public_statistics::PublicStatisticsStreamV1>>,
     pub public_observer: Option<Arc<dyn HistoricalPublicObserverV1>>,
+    pub learning_observer: Option<Box<dyn HistoricalLearningObserverV1>>,
     pub start: i64,
     pub source_identity: Sha256Hex,
     pub day_log_binding: Option<HistoricalDayLogBindingV1>,
@@ -850,7 +867,7 @@ where
 }
 pub(crate) async fn run_context_with_hook<S, I, H, C>(
     config: &HistoricalPreparedRunConfigV1,
-    context: HistoricalRuntimeContextV1,
+    mut context: HistoricalRuntimeContextV1,
     metadata: serde_json::Value,
     rules: Arc<SealedProcessRuleSnapshotV3>,
     strategy: &mut S,
@@ -867,6 +884,8 @@ where
     #[cfg(feature = "stage-timing")]
     let mut stages =
         crate::stage_timing::StageTimings::new(format!("candidate:{}", config.session.run_id));
+    let offline_matching = rules.maker_model_version_for(config.session.caller_role)
+        == sim_system::offline_scene::MODEL_VERSION;
     let health_enabled = strategy.uses_source_health();
     let mut evidence = crate::decision_evidence::DecisionEvidenceV1::open(
         config.research_evidence_path.as_deref(),
@@ -1133,15 +1152,14 @@ where
                         delivered_group = Some((group.group.group_position, initial, dependency));
                     }
                     for pm_context in &group.pm_contexts {
-                        if !driver.has_enrolled_market(&pm_context.market.condition_id) {
+                        if !(if offline_matching {driver.has_registered_market(&pm_context.market.condition_id)} else {driver.has_enrolled_market(&pm_context.market.condition_id)}) {
                             measure_stage!(
                                 stages,
                                 RecordingStabilizationWait,
                                 driver.wait_for_recording_capacity()
                             )
                             .map_err(HistoricalFailureCauseV1::Sim)?;
-                            driver
-                                .enroll_market(MarketEnrollmentRequestV1 {
+                            let request=MarketEnrollmentRequestV1 {
                                     enrollment_request_id: pm_context.market.condition_id.0.clone(),
                                     market: context
                                         .catalog
@@ -1155,8 +1173,8 @@ where
                                             )
                                         })?
                                         .clone(),
-                                })
-                                .map_err(HistoricalFailureCauseV1::Sim)?;
+                                };
+                            if offline_matching {driver.preload_market(request)} else {driver.enroll_market(request).map(|_|())}.map_err(HistoricalFailureCauseV1::Sim)?;
                         }
                     }
                 }
@@ -1169,6 +1187,16 @@ where
                 let applied =
                     measure_stage!(stages, SimNextGroupIncludingNoe, driver.next_group())
                         .map_err(HistoricalFailureCauseV1::Sim)?;
+                if offline_matching && applied.is_some() {
+                    if let Some(group)=&prepared_group {
+                        for pm in &group.pm_contexts {
+                            if !driver.has_enrolled_market(&pm.market.condition_id) {
+                                let market=context.catalog.read().unwrap().markets.get(&pm.market.condition_id.0).ok_or_else(||HistoricalFailureCauseV1::Material("已送达公共市场缺少目录身份".into()))?.clone();
+                                driver.enroll_market(MarketEnrollmentRequestV1 {enrollment_request_id:pm.market.condition_id.0.clone(),market}).map_err(HistoricalFailureCauseV1::Sim)?;
+                            }
+                        }
+                    }
+                }
                 // 每个合法组都检查，包括发送恰好到期的同毫秒；恢复不能复活旧决定。
                 if health_enabled
                     && let Some(p) = pending.as_mut()
@@ -1186,7 +1214,7 @@ where
                             PublicQualification,
                             strategy.qualify_intent_public(
                                 &group.group,
-                                &p.calculation.calculation,
+                                &p.calculation.calculation.strategy_view(),
                                 index,
                                 detected_at,
                             )
@@ -1203,7 +1231,7 @@ where
                             };
                             evidence.record(&serde_json::json!({"record_type":"invalidated_public", "timing":p.record, "reason_code":result.reason.reason_code,"scopes":result.reason.scopes,"observed_cutoff":result.observed_cutoff,"detected_at_utc_ms":result.detected_at_utc_ms,"invalidated_intent_index":result.invalidated_intent_index})).map_err(HistoricalFailureCauseV1::Material)?;
                             evidence.flush().map_err(HistoricalFailureCauseV1::Material)?;
-                            strategy.invalidated(&p.calculation.calculation, &result);
+                            strategy.invalidated(&p.calculation.calculation.strategy_view(), &result.strategy_view());
                             p.health_invalidated = true;
                             p.completed_at = p.completed_at.max(detected_at);
                             health_summary.invalidated_batches += 1;
@@ -1237,7 +1265,7 @@ where
                         if let Some(p) = pending.as_ref() {
                             historical.extend(
                                 strategy
-                                    .calculation_market_requirements(&p.calculation.calculation),
+                                    .calculation_market_requirements(&p.calculation.calculation.strategy_view()),
                             );
                         }
                         shared.strategy_selected_current_observations(&driver, &historical)
@@ -1280,11 +1308,11 @@ where
                     stages,
                     NextHealthEvaluationIncludingDependencyLookup,
                     strategy.next_health_evaluation_at(
-                        &current_input,
+                        &shared_run::strategy_market_views(&current_input),
                         pending
                             .as_ref()
                             .filter(|p| !p.health_invalidated)
-                            .map(|p| &p.calculation.calculation),
+                            .map(|p| p.calculation.calculation.strategy_view()).as_ref(),
                         at,
                     )
                 )
@@ -1470,14 +1498,14 @@ where
                 let bucket = next_hidden.take().expect("真实隐藏桶");
                 for record in bucket.records() {
                     let market = match record {
-                        HiddenExecutionRecordV1::Step { market, .. } => Some(market),
+                        HiddenExecutionRecordV1::Step { market, .. } | HiddenExecutionRecordV1::OfflineScene {market,..} => Some(market),
                         HiddenExecutionRecordV1::MarketFact(fact) => Some(&fact.market),
                         HiddenExecutionRecordV1::Reference(_)
                         | HiddenExecutionRecordV1::BinanceDepthReference { .. }
                         | HiddenExecutionRecordV1::BinanceDepthPositionReference { .. } => None,
                     };
                     if let Some(market) = market
-                        && !driver.has_enrolled_market(&market.condition_id)
+                        && !(if offline_matching {driver.has_registered_market(&market.condition_id)} else {driver.has_enrolled_market(&market.condition_id)})
                     {
                         measure_stage!(
                             stages,
@@ -1485,23 +1513,13 @@ where
                             driver.wait_for_recording_capacity()
                         )
                         .map_err(HistoricalFailureCauseV1::Sim)?;
-                        driver
-                            .enroll_market(MarketEnrollmentRequestV1 {
+                        let request=MarketEnrollmentRequestV1 {
                                 enrollment_request_id: market.condition_id.0.clone(),
-                                market: context
-                                    .catalog
-                                    .read()
-                                    .unwrap()
-                                    .markets
-                                    .get(&market.condition_id.0)
-                                    .ok_or_else(|| {
-                                        HistoricalFailureCauseV1::Material(
-                                            "已准备材料缺少隐藏市场目录项".into(),
-                                        )
-                                    })?
-                                    .clone(),
-                            })
-                            .map_err(HistoricalFailureCauseV1::Sim)?;
+                                market: if let HiddenExecutionRecordV1::OfflineScene {assets:Some(assets),..}=record {
+                                    PlatformMarketV1::try_new(market.clone(),assets.clone()).map_err(|e|HistoricalFailureCauseV1::Material(e.to_string().into()))?
+                                } else {context.catalog.read().unwrap().markets.get(&market.condition_id.0).ok_or_else(||HistoricalFailureCauseV1::Material("已准备材料缺少隐藏市场目录项".into()))?.clone()},
+                            };
+                        if offline_matching {driver.preload_market(request)} else {driver.enroll_market(request).map(|_|())}.map_err(HistoricalFailureCauseV1::Sim)?;
                     }
                 }
                 measure_stage!(
@@ -1622,10 +1640,23 @@ where
                     let input = shared.strategy_input_for_market_frame_with_learning_requests(
                         &mut driver, frame, strategy.requires_trade_economics_details(), strategy.requires_learning_economics(), strategy.retained_learning_requests().as_deref(),
                     ).map_err(HistoricalFailureCauseV1::Ledger)?;
-                    input.map(|input| {
+                    if let Some(input) = input {
                         fifo_summary.started_market_frames += 1;
-                        input.calculate(strategy, at)
-                    }).transpose().map_err(HistoricalFailureCauseV1::Strategy)?
+                        let calculation = input.calculate(strategy, at)
+                            .map_err(HistoricalFailureCauseV1::Strategy)?;
+                        if let Some(step) = strategy.take_learning_step() {
+                            let observer = context.learning_observer.as_mut().ok_or_else(|| {
+                                HistoricalFailureCauseV1::Material("学习采集缺独立宿主观察器".into())
+                            })?;
+                            let labels = input.learning_labels().ok_or_else(|| {
+                                HistoricalFailureCauseV1::Material("学习采集缺同次冻结标签".into())
+                            })?;
+                            observer.observe(step, labels).map_err(HistoricalFailureCauseV1::Material)?;
+                        }
+                        Some(calculation)
+                    } else {
+                        None
+                    }
                 } else if health_enabled && strategy.uses_borrowed_input() {
                     let input = measure_stage!(
                         stages,
@@ -1745,10 +1776,10 @@ where
                             stages,
                             NextHealthEvaluationIncludingDependencyLookup,
                             strategy.next_health_evaluation_at(
-                                &if strategy.selects_relevant_markets() {
+                                &shared_run::strategy_market_views(&if strategy.selects_relevant_markets() {
                                     let mut historical = strategy.historical_market_requirements();
                                     historical.extend(
-                                        strategy.calculation_market_requirements(&calculation),
+                                        strategy.calculation_market_requirements(&calculation.strategy_view()),
                                     );
                                     shared
                                         .strategy_selected_current_observations(
@@ -1758,8 +1789,8 @@ where
                                         .map_err(HistoricalFailureCauseV1::Ledger)?
                                 } else {
                                     driver.frames_at_observation()
-                                },
-                                Some(&calculation),
+                                }),
+                                Some(&calculation.strategy_view()),
                                 at,
                             )
                         )
@@ -2119,7 +2150,7 @@ mod failure_preservation_tests {
     #[derive(Default)]
     struct SentProbe {
         decided: bool,
-        sent: Vec<SentIntentReceiptV1>,
+        sent: Vec<shared_run::StrategySentIntentReceiptV1>,
         invalidate_after_prefix: bool,
         invalidations: usize,
     }
@@ -2167,7 +2198,7 @@ mod failure_preservation_tests {
         fn qualify_intent(
             &mut self,
             input: &StrategyCurrentReadV1<'_>,
-            _: &StrategyCalculationV1<Self::Diagnostics>,
+            _: &shared_run::StrategyCalculationReadV1<'_, Self::Diagnostics>,
             index: usize,
             _: i64,
         ) -> Result<IntentQualificationV1, Self::Error> {
@@ -2186,16 +2217,19 @@ mod failure_preservation_tests {
         }
         fn invalidated(
             &mut self,
-            _: &StrategyCalculationV1<Self::Diagnostics>,
-            result: &InvalidatedBatchV1,
+            _: &shared_run::StrategyCalculationReadV1<'_, Self::Diagnostics>,
+            result: &shared_run::StrategyInvalidatedBatchV1,
         ) {
             self.invalidations += 1;
             self.sent.extend(result.sent.iter().cloned());
         }
         fn dispatched(
             &mut self,
-            _: &StrategyCalculationV1,
-            result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+            _: &shared_run::StrategyCalculationReadV1<'_>,
+            result: &Result<
+                Vec<shared_run::StrategySentIntentReceiptV1>,
+                shared_run::StrategyBatchExecutionErrorV1,
+            >,
         ) {
             self.sent.extend(result.as_ref().unwrap().iter().cloned());
         }
@@ -2203,12 +2237,41 @@ mod failure_preservation_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn invalidation_release_conversion_preserves_real_receipt_and_all_original_errors() {
         let temp = tempfile::tempdir().unwrap();
-        let (config, rules) = crate::test_common::setup(temp.path());
+        let (mut config, rules) = crate::test_common::setup(temp.path());
+        config.research_evidence_path = Some(temp.path().join("evidence.jsonl"));
+        let _failure =
+            crate::decision_evidence::flush_failure_fixture::after_record("dispatch_entered");
         let mut probe = SentProbe::default();
-        run_historical_v1(&config, rules, &mut probe).await.unwrap();
+        let failure = run_historical_v1(&config, rules, &mut probe)
+            .await
+            .unwrap_err();
         assert_eq!(probe.sent.len(), 1);
-        let request_sequence = probe.sent[0].receipt.input_sequence();
-        let mut ledger = LedgerWriterV1::open_durable(&config.ledger_root).unwrap();
+        // 宿主失败报告保留真实回执；策略回调只收到业务投影。
+        let host_sent = failure
+            .report
+            .unwrap()
+            .failed_batch
+            .unwrap()
+            .dispatch_effects
+            .unwrap()
+            .sent;
+        let request_sequence = host_sent[0].receipt.input_sequence();
+        // 故意中断的运行不承诺完成耐久排空；转换测试只需正式已开户账本产生原错误。
+        // 使用独立原开户链，不能把失败运行的后台 genesis 写入当作此前提。
+        let error_fixture = tempfile::tempdir().unwrap();
+        let (error_config, error_rules) = crate::test_common::setup(error_fixture.path());
+        let (execution, _shared, observation) = assemble(
+            &HistoricalPreparedRunConfigV1::from(&error_config),
+            error_rules,
+            Sha256Hex("e".repeat(64)),
+            None,
+        )
+        .unwrap();
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(error_config.admission_policy);
+        ledger
+            .apply_noe_memory_v2(&observation.opening_record().unwrap())
+            .unwrap();
+        execution.stop_and_drain().unwrap();
         let errors = ["missing-release-a", "missing-release-b"]
             .into_iter()
             .map(|id| {
@@ -2228,7 +2291,7 @@ mod failure_preservation_tests {
             .map(|error| format!("{error:?}"))
             .collect::<Vec<_>>();
         // 只核对错误出口转换；没有向生产路径注入同步释放故障。
-        let (cause, effects) = invalidation_release_failure(probe.sent, errors);
+        let (cause, effects) = invalidation_release_failure(host_sent, errors);
         assert!(
             matches!(cause, ledger::LedgerErrorV1::ReservationRequestNotFound { request_identity } if request_identity.0 == "missing-release-a")
         );
@@ -2266,8 +2329,8 @@ mod failure_preservation_tests {
         let effects = batch.dispatch_effects.unwrap();
         assert_eq!(effects.sent.len(), 1);
         assert_eq!(
-            effects.sent[0].receipt.input_sequence(),
-            strategy.sent[0].receipt.input_sequence()
+            shared_run::StrategySentIntentReceiptV1::from(&effects.sent[0]).receipt,
+            strategy.sent[0].receipt
         );
         assert_eq!(effects.sent[0].context.global_request_id, "release-prefix");
         assert!(effects.release_errors.is_empty());
@@ -2307,8 +2370,8 @@ mod failure_preservation_tests {
         let effects = batch.dispatch_effects.unwrap();
         assert_eq!(effects.sent.len(), 1);
         assert_eq!(
-            effects.sent[0].receipt.input_sequence(),
-            strategy.sent[0].receipt.input_sequence()
+            shared_run::StrategySentIntentReceiptV1::from(&effects.sent[0]).receipt,
+            strategy.sent[0].receipt
         );
         assert_eq!(effects.sent[0].context.global_request_id, "release-prefix");
         assert!(effects.release_errors.is_empty());

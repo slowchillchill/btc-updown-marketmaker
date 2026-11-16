@@ -1151,6 +1151,7 @@ dependencies = [
  "sim-system",
  "tempfile",
  "tokio",
+ "zstd",
 ]
 
 [[package]]

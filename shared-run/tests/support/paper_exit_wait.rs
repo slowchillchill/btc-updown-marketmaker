@@ -231,7 +231,7 @@ impl StrategyV1 for FeedbackCompletionStrategy {
     fn qualify_intent_borrowed(
         &mut self,
         _: &BorrowedStrategyCurrentReadV1<'_>,
-        _: &StrategyCalculationV1,
+        _: &StrategyCalculationReadV1<'_>,
         _: usize,
         _: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -239,8 +239,8 @@ impl StrategyV1 for FeedbackCompletionStrategy {
     }
     fn dispatched(
         &mut self,
-        _: &StrategyCalculationV1,
-        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        _: &StrategyCalculationReadV1<'_>,
+        result: &Result<Vec<StrategySentIntentReceiptV1>, StrategyBatchExecutionErrorV1>,
     ) {
         let sent = result.as_ref().unwrap();
         if let Some(receipt) = sent.first() {
@@ -450,7 +450,7 @@ impl StrategyV1 for SilentHealthStrategy {
     fn qualify_intent_borrowed(
         &mut self,
         read: &BorrowedStrategyCurrentReadV1<'_>,
-        _: &StrategyCalculationV1,
+        _: &StrategyCalculationReadV1<'_>,
         _: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -482,8 +482,8 @@ impl StrategyV1 for SilentHealthStrategy {
     }
     fn dispatched(
         &mut self,
-        _: &StrategyCalculationV1,
-        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        _: &StrategyCalculationReadV1<'_>,
+        result: &Result<Vec<StrategySentIntentReceiptV1>, StrategyBatchExecutionErrorV1>,
     ) {
         if let Some(receipt) = result.as_ref().unwrap().first() {
             self.platform_arrived_at = Some(receipt.receipt.platform_arrived_at_utc_ms());

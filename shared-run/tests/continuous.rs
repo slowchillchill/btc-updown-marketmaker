@@ -148,7 +148,14 @@ async fn real_group_bridge_registry_ledger_freeze_and_recovery() {
         ));
     }
     let mut incomplete = SharedExecutionRegistryV1::new(Arc::new(opening.context().clone()));
-    incomplete.observe(orders[0].formed.unwrap());
+    incomplete.observe(
+        shared
+            .registry()
+            .order(orders[0].order_identity)
+            .unwrap()
+            .formed
+            .unwrap(),
+    );
     assert!(
         matches!(incomplete.cancel_objects(), ExecutionReadValueV1::Known(objects)
             if objects.len() == 1 && matches!(&objects[0], CancelObjectReadV1::Single { order }
@@ -266,8 +273,24 @@ async fn real_initial_taker_and_later_maker_keep_base_and_pending_commitment() {
             );
             seen = true;
             order_id = Some(orders[0].order_identity.clone());
-            saved.push(orders[0].accepted.unwrap().clone());
-            saved.push(orders[0].formed.unwrap().clone());
+            saved.push(
+                shared
+                    .registry()
+                    .order(orders[0].order_identity)
+                    .unwrap()
+                    .accepted
+                    .unwrap()
+                    .clone(),
+            );
+            saved.push(
+                shared
+                    .registry()
+                    .order(orders[0].order_identity)
+                    .unwrap()
+                    .formed
+                    .unwrap()
+                    .clone(),
+            );
             saved.extend(
                 shared
                     .registry()
@@ -384,7 +407,8 @@ async fn actual_pending_four_keeps_ten_then_finality_and_cancel_close_separate_r
                         commitment,
                         ExecutionReadValueV1::Known(ExactDecimal("10".into()))
                     );
-                    let order = view.orders().next().unwrap();
+                    let id = view.orders().next().unwrap().order_identity;
+                    let order = shared.registry().order(id).unwrap();
                     let formed = order.formed.unwrap();
                     let mut partial =
                         SharedExecutionRegistryV1::new(Arc::new(formed.context().clone()));
@@ -539,7 +563,8 @@ async fn actual_quote_orders_keep_original_target_until_complete_initial_set_is_
             };
             let at = view.cutoff().decision_time().logical_time_utc_ms();
             if at == 28_000 {
-                let order = view.orders().next().unwrap();
+                let id = view.orders().next().unwrap().order_identity;
+                let order = shared.registry().order(id).unwrap();
                 assert_eq!(
                     order.active_unfilled_shares,
                     ExecutionReadValueV1::NotApplicable
@@ -669,7 +694,10 @@ async fn all_parameter_readers_keep_cash100_while_later_real_maker_application_i
                 "100"
             );
             for frame in driver.decision().unwrap().frames() {
-                assert_eq!(&frame.decision_cutoff, after.cutoff());
+                assert_eq!(
+                    &StrategyObservationCutoffV1::from(&frame.decision_cutoff),
+                    after.cutoff()
+                );
             }
             seen = true;
         }
@@ -1312,13 +1340,14 @@ async fn real_late_query_cannot_reopen_closed_leg_and_paired_cancel_disappears()
             assert!(
                 objects
                     .iter()
-                    .any(|o| matches!(o, CancelObjectReadV1::Paired { .. }))
+                    .any(|o| matches!(o, StrategyCancelObjectReadV1::Paired { .. }))
             );
             let order = view
                 .orders()
                 .find(|o| o.origin.as_ref().unwrap().batch_item_ordinal == 1)
                 .unwrap();
             let id = order.order_identity.clone();
+            let order = shared.registry().order(&id).unwrap();
             late.observe(order.accepted.unwrap());
             late.observe(order.formed.unwrap());
             driver
@@ -1367,9 +1396,9 @@ async fn real_late_query_cannot_reopen_closed_leg_and_paired_cancel_disappears()
             assert!(
                 !objects
                     .iter()
-                    .any(|o| matches!(o, CancelObjectReadV1::Paired { .. }))
+                    .any(|o| matches!(o, StrategyCancelObjectReadV1::Paired { .. }))
             );
-            let CancelObjectReadV1::Market { orders, .. } = &objects[1] else {
+            let StrategyCancelObjectReadV1::Market { orders, .. } = &objects[1] else {
                 panic!("市场成员")
             };
             assert_eq!(orders.len(), 1);
@@ -1669,7 +1698,7 @@ async fn pairs_follow_real_formation_not_request_name() {
     let singles: Vec<_> = objects
         .iter()
         .filter_map(|o| match o {
-            CancelObjectReadV1::Single { order } => {
+            StrategyCancelObjectReadV1::Single { order } => {
                 Some(order.origin.as_ref().unwrap().intent.global_request_id())
             }
             _ => None,
@@ -1678,12 +1707,12 @@ async fn pairs_follow_real_formation_not_request_name() {
     let pairs: Vec<_> = objects
         .iter()
         .filter_map(|o| match o {
-            CancelObjectReadV1::Paired { origin, .. } => Some(origin.global_request_id()),
+            StrategyCancelObjectReadV1::Paired { origin, .. } => Some(origin.global_request_id()),
             _ => None,
         })
         .collect();
     for object in &objects {
-        if let CancelObjectReadV1::Paired { orders, .. } = object {
+        if let StrategyCancelObjectReadV1::Paired { orders, .. } = object {
             assert_eq!(orders[0].origin.as_ref().unwrap().batch_item_ordinal, 0);
             assert_eq!(orders[1].origin.as_ref().unwrap().batch_item_ordinal, 1);
         }
@@ -1764,7 +1793,7 @@ async fn equal_start_markets_sort_condition_before_order_formation() {
     let single: Vec<_> = objects
         .iter()
         .filter_map(|o| {
-            if let CancelObjectReadV1::Single { order } = o {
+            if let StrategyCancelObjectReadV1::Single { order } = o {
                 Some(order.origin.as_ref().unwrap().intent.global_request_id())
             } else {
                 None
@@ -1783,7 +1812,7 @@ async fn equal_start_markets_sort_condition_before_order_formation() {
     let pairs: Vec<_> = objects
         .iter()
         .filter_map(|o| {
-            if let CancelObjectReadV1::Paired { origin, orders } = o {
+            if let StrategyCancelObjectReadV1::Paired { origin, orders } = o {
                 assert_eq!(orders[0].origin.as_ref().unwrap().batch_item_ordinal, 0);
                 assert_eq!(orders[1].origin.as_ref().unwrap().batch_item_ordinal, 1);
                 Some(origin.global_request_id())
@@ -1796,7 +1825,7 @@ async fn equal_start_markets_sort_condition_before_order_formation() {
     let markets: Vec<_> = objects
         .iter()
         .filter_map(|o| {
-            if let CancelObjectReadV1::Market { condition_id, .. } = o {
+            if let StrategyCancelObjectReadV1::Market { condition_id, .. } = o {
                 Some(condition_id.0.as_str())
             } else {
                 None
@@ -2101,7 +2130,7 @@ async fn continuous_empty_reference_enrollment_uses_same_shared_chain_without_re
         initial.local_pending_reservation_projection
     );
     assert_eq!(after.market_projections, initial.market_projections);
-    assert_eq!(before.ledger(), &after);
+    assert_eq!(before.ledger(), StrategyLedgerReadV1::from(&after));
     assert!(
         shared
             .execute(
@@ -2132,7 +2161,7 @@ async fn continuous_empty_reference_enrollment_uses_same_shared_chain_without_re
         .unwrap();
     assert_eq!(request.scheduled_action_count(), 1);
     assert_eq!(shared.ledger().projection_v2().unwrap(), after);
-    assert_eq!(before.ledger(), &after);
+    assert_eq!(before.ledger(), StrategyLedgerReadV1::from(&after));
     assert_eq!(
         observation.opening_record().unwrap().position(),
         opening.position()
@@ -2305,11 +2334,11 @@ async fn online_same_input_handoff_serves_timers_then_enrolls_and_executes_once(
                 let before = shared.action_before(&mut driver).unwrap().unwrap();
                 assert_eq!(
                     before.ledger().account_instance_key,
-                    initial.account_instance_key
+                    &initial.account_instance_key
                 );
                 assert_eq!(
                     before.ledger().platform_confirmed_projection,
-                    initial.platform_confirmed_projection
+                    &initial.platform_confirmed_projection
                 );
                 if input_index == 1 {
                     let request = shared
@@ -2830,9 +2859,18 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
         );
         assert_eq!(response.response_counts, [Known(0), Known(0), Known(0)]);
         assert!(matches!(response.latest_response, Known(Some(_))));
-        let Known(Some(empty_completion)) = response.latest_response else {
+        let Known(Some(_)) = response.latest_response else {
             unreachable!()
         };
+        // Durable audit belongs to the host registry, outside the strategy view.
+        let Known(Some(empty_completion)) = shared
+            .registry()
+            .cancellation_requests(None)
+            .latest_response
+        else {
+            unreachable!()
+        };
+        let empty_completion = empty_completion.clone();
         shared
             .execute(
                 &mut driver.decision().unwrap(),
@@ -3333,7 +3371,7 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
             assert!(
                 objects
                     .iter()
-                    .any(|o| matches!(o, CancelObjectReadV1::Paired { .. }))
+                    .any(|o| matches!(o, StrategyCancelObjectReadV1::Paired { .. }))
             );
             initial_funds = Some(
                 view.order_funds()
@@ -3352,7 +3390,7 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
                     sim_system::execution::prepared_order_id_v1("terminal-pair", 0)
                 );
                 driver
-                    .send_decision_at(view.cutoff().clone(), send_at)
+                    .send_decision_at(driver.observation_cutoff().unwrap(), send_at)
                     .unwrap()
                     .request(BusinessRequestV2::Order(OrderRequestV2 {
                         context: context(request),
@@ -3440,7 +3478,7 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
             assert!(
                 !objects
                     .iter()
-                    .any(|o| matches!(o, CancelObjectReadV1::Paired { .. }))
+                    .any(|o| matches!(o, StrategyCancelObjectReadV1::Paired { .. }))
             );
             assert_eq!(
                 shared

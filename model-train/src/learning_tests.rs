@@ -18,6 +18,7 @@ pub(crate) fn material(root: &std::path::Path) -> (PublicExportRulesV1, Historic
     (
         export.rules,
         HistoricalDayConfigV1 {
+            offline_scenes: Default::default(),
             preparation: export.preparation,
             candidates: vec![candidate],
             progress_interval_seconds: 0,

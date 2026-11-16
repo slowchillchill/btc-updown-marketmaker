@@ -739,7 +739,7 @@ impl shared_run::StrategyV1 for ControlledOnlineStrategy {
     fn next_public_health_evaluation_at(
         &self,
         markets: &[&MarketBusinessObservationV1],
-        _: Option<&shared_run::StrategyCalculationV1>,
+        _: Option<&shared_run::StrategyCalculationReadV1<'_>>,
         at: i64,
     ) -> Option<i64> {
         shared_run::StrategyPublicHealthScheduleV1::next_evaluation_at(
@@ -754,7 +754,7 @@ impl shared_run::StrategyV1 for ControlledOnlineStrategy {
     fn qualify_intent_public(
         &self,
         group: &ClosedBusinessGroupV1,
-        _: &shared_run::StrategyCalculationV1,
+        _: &shared_run::StrategyCalculationReadV1<'_>,
         _: usize,
         at: i64,
     ) -> Result<shared_run::IntentQualificationV1, Self::Error> {
@@ -1260,7 +1260,7 @@ async fn strategy_host_end_stopped_duplicate_and_quiet_query_preserve_real_sourc
 #[derive(Default)]
 struct PrefixBoundaryFacts {
     qualifications: Vec<(usize, i64, i64)>,
-    receipts: Vec<shared_run::SentIntentReceiptV1>,
+    receipts: Vec<shared_run::StrategySentIntentReceiptV1>,
     invalidated_at: Option<(usize, i64, i64)>,
     final_cash: Option<rust_decimal::Decimal>,
 }
@@ -1285,7 +1285,7 @@ impl shared_run::StrategyV1 for PrefixBoundaryStrategy {
     fn qualify_intent_borrowed(
         &mut self,
         read: &shared_run::BorrowedStrategyCurrentReadV1<'_>,
-        _: &shared_run::StrategyCalculationV1,
+        _: &shared_run::StrategyCalculationReadV1<'_>,
         index: usize,
         at: i64,
     ) -> Result<shared_run::IntentQualificationV1, Self::Error> {
@@ -1311,10 +1311,10 @@ impl shared_run::StrategyV1 for PrefixBoundaryStrategy {
     }
     fn invalidated(
         &mut self,
-        _: &shared_run::StrategyCalculationV1,
-        result: &shared_run::InvalidatedBatchV1,
+        _: &shared_run::StrategyCalculationReadV1<'_>,
+        result: &shared_run::StrategyInvalidatedBatchV1,
     ) {
-        assert!(result.release_errors.is_empty());
+        assert_eq!(result.release_error_count, 0);
         let mut facts = self.facts.lock().unwrap();
         facts.receipts = result.sent.clone();
         facts.invalidated_at = Some((
@@ -1524,7 +1524,7 @@ impl shared_run::StrategyV1 for SettlementSocketStrategy {
     fn qualify_intent_borrowed(
         &mut self,
         _: &shared_run::BorrowedStrategyCurrentReadV1<'_>,
-        _: &shared_run::StrategyCalculationV1,
+        _: &shared_run::StrategyCalculationReadV1<'_>,
         _: usize,
         _: i64,
     ) -> Result<shared_run::IntentQualificationV1, Self::Error> {

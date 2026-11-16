@@ -220,6 +220,7 @@ fn bounded_dual_stream_dual_candidate_cost() {
                     .collect(),
                 progress_interval_seconds: 0,
                 producer_lead_groups: Some(2048),
+                offline_scenes: Default::default(),
             }
         })
         .collect::<Vec<_>>();

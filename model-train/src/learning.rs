@@ -5,6 +5,112 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use shared_run::LearningAccountReadV1;
 use std::path::PathBuf;
+
+/// 宿主为每个账户创建独立记录器；模型消费者只提交已交付事实形成的步骤。
+#[derive(Clone, Debug)]
+pub struct ModelLearningObserverFactoryV1 {
+    binding: crate::FrozenRuleBindingV1,
+}
+
+impl ModelLearningObserverFactoryV1 {
+    pub fn new(binding: crate::FrozenRuleBindingV1) -> Self {
+        Self { binding }
+    }
+}
+
+impl backtest::HistoricalLearningObserverFactoryV1 for ModelLearningObserverFactoryV1 {
+    fn create(
+        &self,
+        config: &backtest::HistoricalPreparedRunConfigV1,
+    ) -> Result<Option<Box<dyn backtest::HistoricalLearningObserverV1>>, backtest::MaterialError>
+    {
+        let consumer: crate::ConsumerConfig =
+            serde_json::from_value(config.strategy.effective_parameters["model_consumer"].clone())?;
+        consumer
+            .learning
+            .as_ref()
+            .map(|collection| {
+                ModelLearningObserverV1::new(collection, &self.binding).map(|observer| {
+                    Box::new(observer) as Box<dyn backtest::HistoricalLearningObserverV1>
+                })
+            })
+            .transpose()
+    }
+}
+
+struct ModelLearningObserverV1 {
+    trajectory: std::io::BufWriter<std::fs::File>,
+    last_confirmed: Option<std::sync::Arc<ledger::ConfirmedEconomicsReadV1>>,
+    last_qualified: Vec<shared_run::QualifiedRebateReadV1>,
+    confirmed_revision: u64,
+    collection_fault_after_call: Option<u64>,
+}
+
+impl ModelLearningObserverV1 {
+    fn new(
+        collection: &CollectionConfig,
+        binding: &crate::FrozenRuleBindingV1,
+    ) -> Result<Self, backtest::MaterialError> {
+        use std::io::Write;
+        if let Some(policy) = &collection.special {
+            policy.validate()?;
+        }
+        let mut trajectory =
+            crate::strategy::open_collection_trajectory(&collection.trajectory_path)?;
+        serde_json::to_writer(
+            &mut trajectory,
+            &json!({"record_type":"rules_binding","binding":binding,"model_public_input":crate::public_input::contract()}),
+        )?;
+        trajectory.write_all(b"\n")?;
+        trajectory.flush()?;
+        Ok(Self {
+            trajectory,
+            last_confirmed: None,
+            last_qualified: Vec::new(),
+            confirmed_revision: 0,
+            collection_fault_after_call: collection.collection_fault_after_call,
+        })
+    }
+}
+
+impl backtest::HistoricalLearningObserverV1 for ModelLearningObserverV1 {
+    fn observe(
+        &mut self,
+        mut step: Value,
+        labels: &LearningAccountReadV1,
+    ) -> Result<(), backtest::MaterialError> {
+        use std::{io::Write, sync::Arc};
+        let call = step["call"].as_u64().ok_or("学习步骤缺调用序号")?;
+        if !step["economic"].is_object() {
+            return Err("学习步骤缺已交付经济读取".into());
+        }
+        if self
+            .last_confirmed
+            .as_ref()
+            .is_none_or(|old| !Arc::ptr_eq(old, &labels.confirmed) && **old != *labels.confirmed)
+            || self.last_qualified != labels.qualified_rebates
+        {
+            self.confirmed_revision += 1;
+            serde_json::to_writer(
+                &mut self.trajectory,
+                &json!({"record_type":"confirmed_economic_update","revision":self.confirmed_revision,"confirmed":labels.confirmed,"qualified_rebates":labels.qualified_rebates}),
+            )?;
+            self.trajectory.write_all(b"\n")?;
+            self.last_confirmed = Some(labels.confirmed.clone());
+            self.last_qualified = labels.qualified_rebates.clone();
+        }
+        step["economic"]["confirmed_revision"] = self.confirmed_revision.into();
+        step["k_exact"] = serde_json::to_value(confirmed_k(labels)?.public())?;
+        serde_json::to_writer(&mut self.trajectory, &step)?;
+        self.trajectory.write_all(b"\n")?;
+        self.trajectory.flush()?;
+        if self.collection_fault_after_call == Some(call) {
+            return Err("injected-collection-boundary-fault".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CollectionConfig {
@@ -1157,6 +1263,7 @@ fn run_learning_job_opened(
 #[cfg(test)]
 mod target_tests {
     use super::*;
+    use backtest::HistoricalLearningObserverV1;
     fn read(k: i64) -> LearningAccountReadV1 {
         LearningAccountReadV1 {
             confirmed: std::sync::Arc::new(ledger::ConfirmedEconomicsReadV1 {
@@ -1257,6 +1364,156 @@ mod target_tests {
         assert_eq!(
             confirmed_k(&r).unwrap().sub(&confirmed),
             R::from_decimal(rust_decimal::Decimal::new(-1, 1))
+        );
+    }
+
+    fn collection_observer(
+        root: &std::path::Path,
+        path: &str,
+        fault: Option<u64>,
+    ) -> (ModelLearningObserverV1, PathBuf) {
+        let material = root.join(format!("{path}-rules"));
+        std::fs::create_dir(&material).unwrap();
+        let (_, rules) = crate::learning_test_fixture::common::setup(&material);
+        let binding = crate::FrozenRuleBindingV1::from_sealed(&rules, rules.access_mode());
+        let trajectory_path = root.join(path);
+        let config = CollectionConfig {
+            group_id: "host-label-fixture".into(),
+            active_end_utc_ms: 3000,
+            evidence_end_utc_ms: 4000,
+            trajectory_path: trajectory_path.clone(),
+            collection_fault_after_call: fault,
+            special: None,
+        };
+        (
+            ModelLearningObserverV1::new(&config, &binding).unwrap(),
+            trajectory_path,
+        )
+    }
+
+    #[test]
+    fn host_observer_preserves_nonzero_rebate_negative_correction_and_targets() {
+        use contracts::economics::*;
+        let root = tempfile::tempdir().unwrap();
+        let (mut observer, path) = collection_observer(root.path(), "trajectory.jsonl", None);
+        let mut original = read(20);
+        std::sync::Arc::make_mut(&mut original.confirmed)
+            .components
+            .push(ledger::ConfirmedComponentReadV1 {
+                identity: "rebate:Maker:0".into(),
+                kind: K::MakerRebate,
+                amount_pusd: R::from_decimal(1.into()).public(),
+            });
+        original
+            .qualified_rebates
+            .push(shared_run::QualifiedRebateReadV1 {
+                identity: "rebate:Maker:0".into(),
+                kind: RebateKindV1::Maker,
+                attribution_day_start_utc_ms: 0,
+                result: ExecutionReadValueV1::Known(RebateEntitlementReadV1 {
+                    day_result: RebateDayResultV1 {
+                        kind: RebateKindV1::Maker,
+                        attribution_day_start_utc_ms: 0,
+                        accrued_pusd: ExactDecimal("1.23456".into()),
+                        payable_pusd: ExactDecimal("1.2000".into()),
+                        locked_remainder_pusd: ExactDecimal("0.03456".into()),
+                        contribution_refs: vec!["original-trade".to_owned()],
+                    },
+                    paid_pusd: ExactDecimal("0".into()),
+                }),
+            });
+        let mut paid = original.clone();
+        let ExecutionReadValueV1::Known(entitlement) = &mut paid.qualified_rebates[0].result else {
+            unreachable!()
+        };
+        entitlement.paid_pusd = ExactDecimal("1.2000".into());
+        let mut corrected = paid.clone();
+        let ExecutionReadValueV1::Known(entitlement) = &mut corrected.qualified_rebates[0].result
+        else {
+            unreachable!()
+        };
+        entitlement.day_result.payable_pusd = ExactDecimal("1.1000".into());
+        let snapshots = [original, paid, corrected];
+        let safe = shared_run::StrategyLearningAccountReadV1::from(&snapshots[0]);
+        let mut expected_rows = Vec::new();
+        for (i, labels) in snapshots.iter().enumerate() {
+            let delivered = shared_run::StrategyLearningAccountReadV1::from(labels);
+            assert_eq!(
+                serde_json::to_value(delivered).unwrap(),
+                serde_json::to_value(safe).unwrap()
+            );
+            assert_eq!(format!("{delivered:?}"), format!("{safe:?}"));
+            let mut step = json!({"version":trajectory_version(None),"call":i+1,"processing_start_utc_ms":(i+1)*1000,"old_value":1.0,"old_joint_logp":-0.5,"economic":{"ledger_entry_seq":7,"obligations":delivered.obligations,"pending_noe_record_count":delivered.pending_noe_record_count}});
+            assert!(!step.to_string().contains("qualified_rebates"));
+            assert!(step.get("k_exact").is_none());
+            observer.observe(step.clone(), labels).unwrap();
+            // 原消费者在相同冻结时点写入的完整步骤，用于核对数值与原单流格式。
+            step["economic"]["confirmed_revision"] = (i + 1).into();
+            step["k_exact"] = serde_json::to_value(confirmed_k(labels).unwrap().public()).unwrap();
+            expected_rows.push(step);
+        }
+        let records: Vec<Value> = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 7, "规则绑定加三次更新与三条原格式步骤");
+        let rows: Vec<Value> = records
+            .iter()
+            .filter(|row| row["call"].is_u64())
+            .cloned()
+            .collect();
+        assert_eq!(rows, expected_rows);
+        let old_targets = freeze_labels(&expected_rows, &snapshots[2], 300.0).unwrap();
+        let new_targets = freeze_labels(&rows, &snapshots[2], 300.0).unwrap();
+        assert_eq!(new_targets, old_targets);
+        assert_eq!(new_targets[0]["reward"], 0.0, "付款不能再次奖励");
+        assert_eq!(new_targets[1]["reward"], -0.1, "资格负修正保留");
+        assert_eq!(
+            finite_j(&snapshots[2]).unwrap(),
+            R::from_decimal(rust_decimal::Decimal::new(211, 1))
+        );
+        for (i, update) in records
+            .iter()
+            .filter(|row| row["record_type"] == "confirmed_economic_update")
+            .enumerate()
+        {
+            assert_eq!(
+                update["qualified_rebates"],
+                serde_json::to_value(&snapshots[i].qualified_rebates).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn host_observer_keeps_n0_file_and_flushes_faulting_row_before_error() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut observer, path) = collection_observer(root.path(), "fault.jsonl", Some(1));
+        let empty = std::fs::read_to_string(&path).unwrap();
+        let initial: Vec<Value> = empty
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0]["record_type"], "rules_binding");
+        assert!(
+            initial[0].get("call").is_none(),
+            "N0没有Actor步骤但保留轨迹文件"
+        );
+        let error = observer
+            .observe(json!({"call":1,"economic":{}}), &read(3))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "injected-collection-boundary-fault");
+        let persisted: Vec<Value> = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(persisted.len(), 3);
+        assert_eq!(persisted[2]["call"], 1);
+        assert_eq!(
+            persisted[2]["k_exact"],
+            serde_json::to_value(R::from_decimal(3.into()).public()).unwrap()
         );
     }
 }

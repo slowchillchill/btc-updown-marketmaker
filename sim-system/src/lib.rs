@@ -20,6 +20,7 @@ pub(crate) mod market_directory;
 pub(crate) mod matching;
 #[cfg(feature = "measurement")]
 mod measurement_probe;
+pub mod offline_scene;
 mod prepared_order;
 
 pub mod platform_rules;

@@ -2,14 +2,17 @@ use super::*;
 
 pub(super) struct DecisionReads<'a> {
     pub(super) orders: Vec<
-        ExecutionOrderRead<'a, contracts::execution_normalization::CancellationRequestCompletedV1>,
+        StrategyExecutionOrderReadV1<
+            'a,
+            contracts::execution_normalization::CancellationRequestCompletedV1,
+        >,
     >,
     pub(super) orders_by_id:
         BTreeMap<&'a ::execution_normalization::MemoryLogicalIdentityV1, usize>,
     pub(super) orders_by_market: BTreeMap<&'a str, Vec<usize>>,
     pub(super) order_fees:
         BTreeMap<&'a ::execution_normalization::MemoryLogicalIdentityV1, Option<R>>,
-    pub(super) commitments: BTreeMap<&'a str, Vec<IntentCommitmentReadV1<'a>>>,
+    pub(super) commitments: BTreeMap<&'a str, Vec<StrategyIntentCommitmentReadV1<'a>>>,
 }
 impl<'a> DecisionReads<'a> {
     pub(super) fn new(

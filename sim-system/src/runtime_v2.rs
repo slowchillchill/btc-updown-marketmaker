@@ -250,6 +250,7 @@ pub(crate) enum BusinessInputV2 {
         failure_id: String,
     },
     EnrollMarket(MarketEnrollmentRequestV1),
+    PreloadMarket(MarketEnrollmentRequestV1),
     Request {
         cutoff: TrustedDecisionCutoffV2,
         request: BusinessRequestV2,
@@ -284,6 +285,7 @@ pub(crate) enum LoggedBusinessInputV2 {
         failure_id: String,
     },
     EnrollMarket(MarketEnrollmentRequestV1),
+    PreloadMarket(MarketEnrollmentRequestV1),
     Request {
         cutoff: TrustedDecisionCutoffV2,
         request: BusinessRequestV2,

@@ -400,8 +400,8 @@ impl StrategyV1 for MemoryProbe {
     }
     fn dispatched(
         &mut self,
-        _: &StrategyCalculationV1,
-        _: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        _: &StrategyCalculationReadV1<'_>,
+        _: &Result<Vec<StrategySentIntentReceiptV1>, StrategyBatchExecutionErrorV1>,
     ) {
         self.dispatched += 1;
     }

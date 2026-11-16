@@ -48,7 +48,7 @@ use super::common::limit_leg;
 use super::common::{
     decimal, exact, fd, float, floor_decimal, fraction_units, known, r, rational, value,
 };
-fn platform_id<C>(o: &ExecutionOrderRead<'_, C>) -> String {
+fn platform_id<C>(o: &StrategyExecutionOrderReadV1<'_, C>) -> String {
     match &o.order_identity.key {
         MemoryIdentityKeyV1::Entity(SourceNeutralEntityKeyV1::Order { source_order_id }) => {
             source_order_id.clone()
@@ -249,15 +249,15 @@ impl StrategyV1 for ComplementaryPairV1 {
     fn next_public_health_evaluation_at(
         &self,
         input: &[&MarketBusinessObservationV1],
-        calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        calculation: Option<&StrategyCalculationReadV1<'_, Self::Diagnostics>>,
         at: i64,
     ) -> Option<i64> {
         self.public_health_deadline(input, calculation, at)
     }
     fn next_health_evaluation_at(
         &self,
-        input: &[sim_system::public_consumption::PublicObservationFrameV1<'_>],
-        calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        input: &[shared_run::StrategyMarketReadFrameV1<'_>],
+        calculation: Option<&StrategyCalculationReadV1<'_, Self::Diagnostics>>,
         at: i64,
     ) -> Option<i64> {
         self.health_deadline(input, calculation, at)
@@ -265,7 +265,7 @@ impl StrategyV1 for ComplementaryPairV1 {
     fn qualify_intent_public(
         &self,
         group: &ClosedBusinessGroupV1,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         index: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -274,7 +274,7 @@ impl StrategyV1 for ComplementaryPairV1 {
     fn qualify_intent(
         &mut self,
         input: &StrategyCurrentReadV1<'_>,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         index: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -282,8 +282,8 @@ impl StrategyV1 for ComplementaryPairV1 {
     }
     fn invalidated(
         &mut self,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
-        result: &InvalidatedBatchV1,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
+        result: &StrategyInvalidatedBatchV1,
     ) {
         // 只登记真实已发前缀；尚未尝试的利润支持不形成策略占用。
         self.record_profit_allocations(calculation, &result.sent, None);
@@ -305,7 +305,7 @@ impl StrategyV1 for ComplementaryPairV1 {
     }
     fn calculation_market_requirements(
         &self,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
     ) -> Vec<ConditionId> {
         match &calculation.output {
             StrategyOutputV1::Continue { diagnostics, .. } => diagnostics
@@ -333,7 +333,7 @@ impl StrategyV1 for ComplementaryPairV1 {
     fn qualify_intent_borrowed(
         &mut self,
         input: &BorrowedStrategyCurrentReadV1<'_>,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
         index: usize,
         at: i64,
     ) -> Result<IntentQualificationV1, Self::Error> {
@@ -341,8 +341,8 @@ impl StrategyV1 for ComplementaryPairV1 {
     }
     fn dispatched(
         &mut self,
-        calculation: &StrategyCalculationV1<Self::Diagnostics>,
-        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+        calculation: &StrategyCalculationReadV1<'_, Self::Diagnostics>,
+        result: &Result<Vec<StrategySentIntentReceiptV1>, StrategyBatchExecutionErrorV1>,
     ) {
         let (sent, uncertain) = match result {
             Ok(receipts) => (receipts.as_slice(), None),
@@ -360,8 +360,8 @@ impl StrategyV1 for ComplementaryPairV1 {
 impl ComplementaryPairV1 {
     fn record_profit_allocations(
         &mut self,
-        calculation: &StrategyCalculationV1<ComplementaryPairDiagnosticV1>,
-        sent: &[SentIntentReceiptV1],
+        calculation: &StrategyCalculationReadV1<'_, ComplementaryPairDiagnosticV1>,
+        sent: &[StrategySentIntentReceiptV1],
         uncertain: Option<usize>,
     ) {
         let StrategyOutputV1::Continue {
