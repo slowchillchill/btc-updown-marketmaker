@@ -866,7 +866,7 @@ mod entry_identity_tests {
         let mut source = RecordedPublicGroupSourceV1::open(
             &prepared.public_root,
             config.preparation.read_page_rows,
-            config.preparation.max_read_batch_bytes,
+            config.preparation.max_read_batch_bytes.unwrap(),
             crate::timing::DeliveryTimes {
                 delays: crate::DelayScheduleV1::Fixed(0),
                 last: None,

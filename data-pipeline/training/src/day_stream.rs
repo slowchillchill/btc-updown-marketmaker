@@ -28,7 +28,7 @@ impl FileStreamV1<'_> {
         &mut self,
         physical: u64,
         rows: usize,
-        bytes: usize,
+        bytes: Option<usize>,
     ) -> RecordingResult<&TypedRawRowV2> {
         if !self.saved.pending.contains_key(&physical) {
             self.saved.pending.clear();
@@ -79,7 +79,7 @@ pub struct DayIngressV1<'a> {
     files: Vec<FileStreamV1<'a>>,
     saved: DayIngressStateV1,
     rows: usize,
-    bytes: usize,
+    bytes: Option<usize>,
     last_initialization_binding: Option<SourceArtifactBindingV1>,
     source_minima: Vec<Vec<Option<i64>>>,
     pm_minima: Vec<Vec<Option<(u64, i64, u64, u64)>>>,
@@ -122,18 +122,19 @@ fn admission(row: &TypedRawRowV2, e: &SourceEvidenceRefV3) -> (i64, u64) {
     }
 }
 impl<'a> DayIngressV1<'a> {
-    pub(crate) fn read_batch_limits(&self) -> (usize, usize) {
+    pub(crate) fn read_batch_limits(&self) -> (usize, Option<usize>) {
         (self.rows, self.bytes)
     }
     pub fn open(
         files: &[&'a ValidatedDirectSourceParquetFileV3],
         stream: String,
         rows: usize,
-        bytes: usize,
+        bytes: impl Into<Option<usize>>,
         received_range: std::ops::Range<i64>,
         initial: Vec<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>,
         max_epochs: usize,
     ) -> RecordingResult<Self> {
+        let bytes = bytes.into();
         Self::open_with_control(
             files,
             stream,
@@ -151,12 +152,13 @@ impl<'a> DayIngressV1<'a> {
         files: &[&'a ValidatedDirectSourceParquetFileV3],
         stream: String,
         rows: usize,
-        bytes: usize,
+        bytes: impl Into<Option<usize>>,
         received_range: std::ops::Range<i64>,
         initial: Vec<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>,
         max_epochs: usize,
         control: Option<&(dyn Fn(u64) -> RecordingResult<()> + Sync)>,
     ) -> RecordingResult<Self> {
+        let bytes = bytes.into();
         let cursors = files
             .iter()
             .enumerate()
@@ -205,7 +207,7 @@ impl<'a> DayIngressV1<'a> {
         files: &[&'a ValidatedDirectSourceParquetFileV3],
         saved: DayIngressStateV1,
         rows: usize,
-        bytes: usize,
+        bytes: Option<usize>,
         opened: Vec<crate::typed_raw::OpenedParquetV1>,
     ) -> RecordingResult<Self> {
         let mut source_minima = Vec::new();

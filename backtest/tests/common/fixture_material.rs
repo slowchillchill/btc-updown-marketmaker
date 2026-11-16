@@ -450,7 +450,7 @@ fn setup_day_material(
                 sort,
             },
             read_page_rows: 10,
-            max_read_batch_bytes: 1 << 20,
+            max_read_batch_bytes: Some(1 << 20),
             hidden_stream_id: "synthetic-hidden".into(),
         },
         timing: HistoricalTimingV1 {

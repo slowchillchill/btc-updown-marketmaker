@@ -8,9 +8,12 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     std::fs::create_dir(&root)?;
     let mut config = fixture::build(&root, count);
     config.preparation.read_page_rows = 4096;
-    config.preparation.max_read_batch_bytes = 16 << 20;
+    config.preparation.max_read_batch_bytes = Some(16 << 20);
     fixture::append_reference_inputs(&root);
     fixture::append_late_anchor(&root);
+    if args.next().as_deref() == Some("large") {
+        fixture::append_large_reference(&root);
+    }
     std::fs::write(
         root.join("config.json"),
         serde_json::to_vec_pretty(&config)?,

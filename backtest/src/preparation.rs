@@ -33,7 +33,8 @@ pub struct HistoricalPreparationConfigV1 {
     pub canonical: CanonicalRunConfig,
     pub recording: GateAOutputConfig,
     pub read_page_rows: usize,
-    pub max_read_batch_bytes: usize,
+    #[serde(default)]
+    pub max_read_batch_bytes: Option<usize>,
     pub hidden_stream_id: String,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -298,6 +299,13 @@ pub struct PreparedHistoricalRunV1 {
     pub initialization: HistoricalInitializationProvenanceV1,
 }
 impl HistoricalPreparationConfigV1 {
+    /// 录制公共流及隐藏材料入口仍使用其原有显式页预算。
+    pub(crate) fn recorded_read_batch_bytes(&self) -> Result<usize, MaterialError> {
+        self.max_read_batch_bytes.ok_or_else(|| {
+            "录制公共流/隐藏材料入口需要显式 max_read_batch_bytes；公共导出可省略".into()
+        })
+    }
+
     /// 新历史准备及其调用方报告共用的实际流头；不改写旧记录。
     pub fn effective_header(&self) -> PublicInputStreamHeaderV1 {
         let mut header = self.header.clone();
@@ -346,6 +354,7 @@ fn prepare_internal(
     mut statistics: Option<HistoricalStatisticsCollectorV1>,
     mut progress: Option<HistoricalPreparationProgressV1>,
 ) -> Result<(PreparedHistoricalRunV1, Option<HistoricalStatisticsV1>), MaterialError> {
+    let recorded_read_batch_bytes = config.recorded_read_batch_bytes()?;
     if let Some(p) = &mut progress {
         p.stage(Stage::Admission);
     }
@@ -525,7 +534,7 @@ fn prepare_internal(
         let reader = PublicRecordingReaderV1::recover(
             &public_root,
             config.read_page_rows,
-            config.max_read_batch_bytes,
+            recorded_read_batch_bytes,
         )?;
         let hidden = with_training_notifications(&mut progress, |notifications| {
             prepare_hidden_with_progress_v1(

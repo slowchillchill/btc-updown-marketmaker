@@ -251,3 +251,52 @@ pub fn append_late_anchor_at(root: &Path, base: i64) {
         1,
     );
 }
+
+/// 多个合法row-group合为超过64MiB的Arrow物理批次，验证取消可选上限。
+#[allow(dead_code)]
+pub fn append_large_reference(root: &Path) {
+    use data_collect::source_hourly_layout::RtdsChainlinkBtcUsdHourlyRow;
+    let version = data_pipeline_core::typed_raw::POLYMARKET_RTDS_CHAINLINK_BTC_USD_SCHEMA;
+    let at = common::BASE + 4000;
+    let padding =
+        "x".repeat((data_collect::writer::PARQUET_ROW_GROUP_MAX_BYTES / 2) as usize - 1024);
+    let payload =
+        json!({"symbol":"btc/usd","timestamp":at-1,"value":"103","padding":padding}).to_string();
+    let row = RtdsChainlinkBtcUsdHourlyRow {
+        timestamp_received: at,
+        message_timestamp: at - 1,
+        payload_timestamp: at - 1,
+        age_ms: Some(1),
+        symbol: "btc/usd".into(),
+        value: "103".into(),
+        topic: "crypto_prices_chainlink".into(),
+        message_type: "update".into(),
+        freshness_status: "fresh".into(),
+        subscription_filter: "{}".into(),
+        source_native_payload_json: payload,
+        collector_host_id: "synthetic-collector".into(),
+        collector_region: "test".into(),
+        source_endpoint: "wss://ws-live-data.polymarket.com".into(),
+        schema_version: version.into(),
+    };
+    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+        &root.join("inputs"),
+        "large-reference",
+        version,
+        "polymarket_rtds_chainlink_btc_usd",
+    )
+    .unwrap();
+    for _ in 0..9 {
+        writer
+            .write_rtds_chainlink_btc_usd_rows(std::slice::from_ref(&row))
+            .unwrap();
+    }
+    finish_source(
+        root,
+        writer,
+        "polymarket_rtds_chainlink_btc_usd",
+        version,
+        1,
+        9,
+    );
+}

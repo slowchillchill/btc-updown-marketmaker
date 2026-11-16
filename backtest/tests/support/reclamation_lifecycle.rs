@@ -280,7 +280,7 @@ fn run_lifecycle(ownership_cost: bool) {
         let source = RecordedPublicGroupSourceV1::open(
             &prepared.public_root,
             config.preparation.read_page_rows,
-            config.preparation.max_read_batch_bytes,
+            config.preparation.max_read_batch_bytes.unwrap(),
             crate::timing::DeliveryTimes {
                 delays: crate::DelayScheduleV1::Fixed(0),
                 last: None,
@@ -297,7 +297,7 @@ fn run_lifecycle(ownership_cost: bool) {
             &prepared.hidden,
             &prepared.public_root,
             config.preparation.read_page_rows,
-            config.preparation.max_read_batch_bytes,
+            config.preparation.max_read_batch_bytes.unwrap(),
         )
         .unwrap();
         let mut hidden = Vec::new();
