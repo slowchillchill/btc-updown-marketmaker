@@ -88,12 +88,99 @@ struct Submitted<R> {
     cancel_targets: Vec<R>,
     outcomes: BTreeMap<u16, Option<Identity>>,
 }
+type CompletionKey = (u64, u64, String);
+type RoutedCompletionKey = (CompletionKey, String);
+enum CancellationIndexScope {
+    Market(String),
+    Orders(Vec<(String, Option<String>)>),
+}
+/// 只保留当前读取所需的最近请求身份，不保存第二份历史完成事实。
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct CancellationPopulation {
+    pending: BTreeSet<String>,
+    latest: Option<CompletionKey>,
+    latest_market: Option<CompletionKey>,
+    markets: BTreeMap<String, CompletionKey>,
+    orders: BTreeMap<String, (CompletionKey, Option<String>)>,
+    orders_by_market: BTreeMap<String, BTreeSet<RoutedCompletionKey>>,
+    unlocated_orders: BTreeSet<RoutedCompletionKey>,
+}
+impl CancellationPopulation {
+    fn complete(&mut self, key: CompletionKey, scope: CancellationIndexScope) {
+        self.pending.remove(&key.2);
+        if self.latest.as_ref().is_none_or(|prior| prior < &key) {
+            self.latest = Some(key.clone());
+        }
+        match scope {
+            CancellationIndexScope::Market(condition) => {
+                if self.latest_market.as_ref().is_none_or(|prior| prior < &key) {
+                    self.latest_market = Some(key.clone());
+                }
+                let prior = self.markets.entry(condition).or_insert_with(|| key.clone());
+                if *prior < key {
+                    *prior = key;
+                }
+            }
+            CancellationIndexScope::Orders(ids) => {
+                for (id, condition) in ids {
+                    if self.orders.get(&id).is_none_or(|(prior, _)| prior < &key) {
+                        self.remove_order_route(&id);
+                        self.orders.insert(id.clone(), (key.clone(), condition));
+                        self.insert_order_route(&id);
+                    }
+                }
+            }
+        }
+    }
+    fn remove_order_route(&mut self, id: &str) {
+        if let Some((key, condition)) = self.orders.get(id) {
+            let entry = (key.clone(), id.to_owned());
+            if let Some(condition) = condition {
+                if let Some(group) = self.orders_by_market.get_mut(condition) {
+                    group.remove(&entry);
+                    if group.is_empty() {
+                        self.orders_by_market.remove(condition);
+                    }
+                }
+            } else {
+                self.unlocated_orders.remove(&entry);
+            }
+        }
+    }
+    fn insert_order_route(&mut self, id: &str) {
+        let (key, condition) = &self.orders[id];
+        let entry = (key.clone(), id.to_owned());
+        if let Some(condition) = condition {
+            self.orders_by_market
+                .entry(condition.clone())
+                .or_default()
+                .insert(entry);
+        } else {
+            self.unlocated_orders.insert(entry);
+        }
+    }
+    fn locate(&mut self, id: &str, condition: Option<String>) {
+        if self
+            .orders
+            .get(id)
+            .is_some_and(|(_, prior)| prior != &condition)
+        {
+            self.remove_order_route(id);
+            self.orders.get_mut(id).unwrap().1 = condition;
+            self.insert_order_route(id);
+        }
+    }
+}
 /// 原 owner 的活动身份集合；不保存第二份订单或成交事实。
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct ActionPopulation {
     orders: BTreeSet<Identity>,
     commitments: BTreeSet<String>,
     cancellations: BTreeSet<String>,
+    #[serde(default)]
+    cancellation_reads: Option<CancellationPopulation>,
+    #[serde(default)]
+    pairs_by_order: Option<BTreeMap<Identity, BTreeSet<String>>>,
 }
 /// 普通已稳定 NOE 读取不能直接传入共享登记；这不是公开生产者接口的来源认证。
 /// ```compile_fail
@@ -120,36 +207,107 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             orders: BTreeMap::new(),
             markets: BTreeMap::new(),
             cancel_locations: BTreeMap::new(),
-            action_population: Some(ActionPopulation::default()),
+            action_population: Some(ActionPopulation {
+                cancellation_reads: Some(CancellationPopulation::default()),
+                pairs_by_order: Some(BTreeMap::new()),
+                ..Default::default()
+            }),
         }
     }
     /// 旧完整检查点可能没有派生索引；仅在owner恢复时按原事实补建一次。
     pub(crate) fn rebuild_action_population_if_missing(&mut self) {
-        if self.action_population.is_some() {
-            return;
+        if self.action_population.is_none() {
+            self.action_population = Some(ActionPopulation {
+                orders: self
+                    .orders
+                    .iter()
+                    .filter(|(id, state)| self.unfinished(id, state))
+                    .map(|(id, _)| id.clone())
+                    .collect(),
+                commitments: self
+                    .intents
+                    .iter()
+                    .filter(|(_, request)| {
+                        request.receipt.is_some()
+                            && self.request_commitments(request).next().is_some()
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect(),
+                cancellations: self
+                    .intents
+                    .iter()
+                    .filter(|(_, request)| cancellation_scope(request.origin.intent()).is_some())
+                    .map(|(id, _)| id.clone())
+                    .collect(),
+                cancellation_reads: None,
+                pairs_by_order: None,
+            });
         }
-        self.action_population = Some(ActionPopulation {
-            orders: self
-                .orders
-                .iter()
-                .filter(|(id, state)| self.unfinished(id, state))
-                .map(|(id, _)| id.clone())
-                .collect(),
-            commitments: self
-                .intents
-                .iter()
-                .filter(|(_, request)| {
-                    request.receipt.is_some() && self.request_commitments(request).next().is_some()
-                })
-                .map(|(id, _)| id.clone())
-                .collect(),
-            cancellations: self
-                .intents
-                .iter()
-                .filter(|(_, request)| cancellation_scope(request.origin.intent()).is_some())
-                .map(|(id, _)| id.clone())
-                .collect(),
-        });
+        // 已有活动索引的旧检查点也可能没有新增撤单读取索引，仅恢复时补建一次。
+        if self
+            .action_population
+            .as_ref()
+            .unwrap()
+            .cancellation_reads
+            .is_none()
+        {
+            let mut reads = CancellationPopulation::default();
+            for (id, request) in &self.intents {
+                if cancellation_scope(request.origin.intent()).is_none() {
+                    continue;
+                }
+                if let Some(complete) = &request.completed {
+                    let key = delivery_key(complete);
+                    let scope =
+                        Self::cancellation_index_scope_from(request.origin.intent(), |order| {
+                            self.condition_for_platform_id(order).map(|c| c.0.clone())
+                        })
+                        .unwrap();
+                    reads.complete((key.0, key.1, id.clone()), scope);
+                } else if request.receipt.is_some() {
+                    reads.pending.insert(id.clone());
+                }
+            }
+            self.action_population.as_mut().unwrap().cancellation_reads = Some(reads);
+        }
+        if self
+            .action_population
+            .as_ref()
+            .unwrap()
+            .pairs_by_order
+            .is_none()
+        {
+            let mut pairs = BTreeMap::<Identity, BTreeSet<String>>::new();
+            for (id, request) in &self.intents {
+                if matches!(
+                    request.origin.intent(),
+                    ModelIntentV1::SubmitPairedBuy { .. }
+                ) {
+                    for identity in request.outcomes.values().flatten() {
+                        pairs
+                            .entry(identity.clone())
+                            .or_default()
+                            .insert(id.clone());
+                    }
+                }
+            }
+            self.action_population.as_mut().unwrap().pairs_by_order = Some(pairs);
+        }
+    }
+    fn cancellation_index_scope_from(
+        intent: &ModelIntentV1,
+        mut locate: impl FnMut(&str) -> Option<String>,
+    ) -> Option<CancellationIndexScope> {
+        match cancellation_scope(intent)? {
+            CancellationScopeV1::Market(condition) => {
+                Some(CancellationIndexScope::Market(condition.0.clone()))
+            }
+            CancellationScopeV1::Orders(ids) => Some(CancellationIndexScope::Orders(
+                ids.into_iter()
+                    .map(|id| (id.to_owned(), locate(id)))
+                    .collect(),
+            )),
+        }
     }
     pub(crate) fn context(&self) -> &ExecutionNormalizationContextV1 {
         &self.context
@@ -177,6 +335,20 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         first
     }
     pub(crate) fn action_snapshot_with_orders(&self, retained: &BTreeSet<Identity>) -> Self {
+        self.action_snapshot_with_orders_in(retained, false)
+    }
+    #[cfg(feature = "stage-timing")]
+    pub(crate) fn action_snapshot_full_history_for_measurement(
+        &self,
+        retained: &BTreeSet<Identity>,
+    ) -> Self {
+        self.action_snapshot_with_orders_in(retained, true)
+    }
+    fn action_snapshot_with_orders_in(
+        &self,
+        retained: &BTreeSet<Identity>,
+        full_history: bool,
+    ) -> Self {
         let mut orders: BTreeMap<_, _> = self
             .unfinished_orders()
             .map(|o| {
@@ -202,7 +374,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             .map(str::to_owned)
             .collect();
         needed.extend(
-            self.cancellation_intents()
+            self.pending_cancellation_intents(full_history)
                 .filter(|r| {
                     r.receipt.is_some()
                         && r.completed.is_none()
@@ -210,13 +382,22 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
                 })
                 .map(|r| r.origin.global_request_id().to_owned()),
         );
-        if let Some((request, _)) = self.latest_cancel_request(None) {
+        if let Some((request, _)) = self.latest_cancel_request_in(None, full_history) {
             needed.insert(request.origin.global_request_id().to_owned());
         }
-        if let Known(objects) = self.cancel_objects() {
+        let objects = if full_history {
+            self.cancel_objects_from_entries(
+                self.markets.values().map(|m| &m.market.condition_id),
+                self.orders.iter(),
+                true,
+            )
+        } else {
+            self.cancel_objects()
+        };
+        if let Known(objects) = objects {
             for object in objects {
                 if let Some((request, _)) =
-                    self.latest_cancel_request(Some(&object.request_scope()))
+                    self.latest_cancel_request_in(Some(&object.request_scope()), full_history)
                 {
                     needed.insert(request.origin.global_request_id().to_owned());
                 }
@@ -381,7 +562,32 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
                     if let Some((id, ordinal)) = &association
                         && let Some(intent) = self.intents.get_mut(id)
                     {
-                        intent.outcomes.insert(*ordinal, order.clone());
+                        let previous = intent.outcomes.insert(*ordinal, order.clone()).flatten();
+                        if matches!(
+                            intent.origin.intent(),
+                            ModelIntentV1::SubmitPairedBuy { .. }
+                        ) && let Some(pairs) = self
+                            .action_population
+                            .as_mut()
+                            .and_then(|p| p.pairs_by_order.as_mut())
+                        {
+                            // 单腿结果可能被后续响应替换；同一请求另一腿仍引用时不能移除。
+                            if let Some(previous) = previous
+                                && !intent
+                                    .outcomes
+                                    .values()
+                                    .any(|outcome| outcome.as_ref() == Some(&previous))
+                                && let Some(requests) = pairs.get_mut(&previous)
+                            {
+                                requests.remove(id);
+                                if requests.is_empty() {
+                                    pairs.remove(&previous);
+                                }
+                            }
+                            if let Some(order) = &order {
+                                pairs.entry(order.clone()).or_default().insert(id.clone());
+                            }
+                        }
                     }
                     if let Some(id) = order {
                         let state = self.orders.entry(id).or_default();
@@ -414,6 +620,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
                     if let Some(id) = cancellation_request_id(record)
                         && let Some(request) = self.intents.get_mut(id)
                     {
+                        // 完成摘要只保留当前最高键；refresh_request以替换后的实际键更新。
                         replace_delivery(&mut request.completed, record);
                     }
                 }
@@ -731,13 +938,47 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             )
         }
     }
+    fn pending_cancellation_intents(
+        &self,
+        full_history: bool,
+    ) -> Box<dyn Iterator<Item = &Submitted<Ref<R>>> + '_> {
+        if !full_history
+            && let Some(reads) = self
+                .action_population
+                .as_ref()
+                .and_then(|p| p.cancellation_reads.as_ref())
+        {
+            Box::new(
+                reads
+                    .pending
+                    .iter()
+                    .inspect(|_| {
+                        #[cfg(feature = "stage-timing")]
+                        crate::work_measurement::cancellation_source();
+                    })
+                    .filter_map(|id| self.intents.get(id)),
+            )
+        } else {
+            Box::new(
+                self.cancellation_intents()
+                    .filter(|request| request.receipt.is_some() && request.completed.is_none()),
+            )
+        }
+    }
     fn refresh_order(&mut self, identity: &Identity) {
         let Some(state) = self.orders.get(identity) else {
             return;
         };
         let active = self.unfinished(identity, state);
         let origin = state.origin.as_ref().map(|(id, _)| id.clone());
+        let platform_id = platform_id(identity);
+        let condition = self
+            .condition_for_platform_id(platform_id)
+            .map(|c| c.0.clone());
         if let Some(population) = &mut self.action_population {
+            if let Some(reads) = &mut population.cancellation_reads {
+                reads.locate(platform_id, condition);
+            }
             if active {
                 population.orders.insert(identity.clone());
             } else {
@@ -755,6 +996,15 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         let commitment =
             request.receipt.is_some() && self.request_commitments(request).next().is_some();
         let cancel = cancellation_scope(request.origin.intent()).is_some();
+        let complete = request.completed.as_ref().map(|record| {
+            let key = delivery_key(record);
+            (
+                (key.0, key.1, id.to_owned()),
+                Self::cancellation_index_scope_from(request.origin.intent(), |order| {
+                    self.condition_for_platform_id(order).map(|c| c.0.clone())
+                }),
+            )
+        });
         if let Some(population) = &mut self.action_population {
             if commitment {
                 population.commitments.insert(id.to_owned());
@@ -763,6 +1013,13 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             }
             if cancel {
                 population.cancellations.insert(id.to_owned());
+                if let Some(reads) = &mut population.cancellation_reads {
+                    if let Some((key, Some(scope))) = complete {
+                        reads.complete(key, scope);
+                    } else if request.receipt.is_some() {
+                        reads.pending.insert(id.to_owned());
+                    }
+                }
             }
         }
     }
@@ -873,10 +1130,10 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         conditions: impl IntoIterator<Item = &'a ConditionId>,
     ) -> ExecutionReadValueV1<Vec<CancelObjectRead<'a, R>>> {
         if self.action_population.is_some() {
-            self.cancel_objects_from_entries(conditions, self.active_order_entries())
+            self.cancel_objects_from_entries(conditions, self.active_order_entries(), false)
         } else {
             // 动作快照有意不保存活动索引，沿原路径逐条构造一次，并如实计数。
-            self.cancel_objects_from_entries(conditions, self.orders.iter())
+            self.cancel_objects_from_entries(conditions, self.orders.iter(), false)
         }
     }
     /// 工程对照保留原全历史扫描；默认入口使用已有活动身份索引。
@@ -887,12 +1144,14 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         self.cancel_objects_from_entries(
             self.markets.values().map(|m| &m.market.condition_id),
             self.orders.iter(),
+            true,
         )
     }
     fn cancel_objects_from_entries<'a>(
         &'a self,
         conditions: impl IntoIterator<Item = &'a ConditionId>,
         entries: impl Iterator<Item = (&'a Identity, &'a Order<Ref<R>>)>,
+        full_history: bool,
     ) -> ExecutionReadValueV1<Vec<CancelObjectRead<'a, R>>> {
         let eligible: BTreeMap<_, _> = entries
             .filter_map(|(id, state)| {
@@ -942,9 +1201,25 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             })
             .collect();
         let mut paired = Vec::new();
-        #[cfg(feature = "stage-timing")]
-        crate::work_measurement::paired_intents(self.intents.len());
-        for submitted in self.intents.values() {
+        let pair_requests: Box<dyn Iterator<Item = &Submitted<Ref<R>>>> = if !full_history
+            && let Some(pairs) = self
+                .action_population
+                .as_ref()
+                .and_then(|p| p.pairs_by_order.as_ref())
+        {
+            // 由实际outcomes逆查，不能用可能被后续归属覆盖的订单origin代替。
+            let ids = rank
+                .keys()
+                .filter_map(|identity| pairs.get(*identity))
+                .flat_map(|ids| ids.iter())
+                .collect::<BTreeSet<_>>();
+            Box::new(ids.into_iter().filter_map(|id| self.intents.get(id)))
+        } else {
+            Box::new(self.intents.values())
+        };
+        for submitted in pair_requests {
+            #[cfg(feature = "stage-timing")]
+            crate::work_measurement::paired_intents(1);
             if !matches!(
                 submitted.origin.intent(),
                 ModelIntentV1::SubmitPairedBuy { .. }
@@ -1426,10 +1701,58 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             }
         }
     }
-    fn latest_cancel_request(
+    fn latest_cancel_request_in(
         &self,
         scope: Option<&CancellationScopeV1<'_>>,
+        full_history: bool,
     ) -> Option<(&Submitted<Ref<R>>, bool)> {
+        if !full_history
+            && let Some(reads) = self
+                .action_population
+                .as_ref()
+                .and_then(|p| p.cancellation_reads.as_ref())
+        {
+            // 同完成键时原max_by_key取最后的请求ID；复合键保留该次序。
+            let mut keys = BTreeSet::new();
+            match scope {
+                None => {
+                    keys.extend(reads.latest.as_ref());
+                }
+                Some(CancellationScopeV1::Market(condition)) => {
+                    keys.extend(reads.markets.get(&condition.0));
+                    keys.extend(
+                        reads
+                            .orders_by_market
+                            .get(&condition.0)
+                            .and_then(|group| group.last())
+                            .map(|(key, _)| key),
+                    );
+                    keys.extend(reads.unlocated_orders.last().map(|(key, _)| key));
+                }
+                Some(CancellationScopeV1::Orders(ids)) => {
+                    for id in ids {
+                        keys.extend(reads.orders.get(*id).map(|(key, _)| key));
+                        if let Some(condition) = self.condition_for_platform_id(id) {
+                            keys.extend(reads.markets.get(&condition.0));
+                        } else {
+                            // 查询对象尚未定位时，任一市场撤单都可能相关。
+                            keys.extend(reads.latest_market.as_ref());
+                        }
+                    }
+                }
+            }
+            return keys.into_iter().rev().find_map(|key| {
+                #[cfg(feature = "stage-timing")]
+                {
+                    crate::work_measurement::cancellation_source();
+                    crate::work_measurement::latest_cancel();
+                }
+                let request = self.intents.get(&key.2)?;
+                let request_scope = cancellation_scope(request.origin.intent())?;
+                let relation = scope.map_or(Some(true), |s| self.relation(s, &request_scope));
+                (relation != Some(false)).then_some((request, relation.is_some()))
+            });
+        }
         self.cancellation_intents()
             .filter_map(|request| {
                 #[cfg(feature = "stage-timing")]
@@ -1514,12 +1837,16 @@ impl SharedExecutionRegistryV2 {
         &self,
         scope: Option<&CancellationScopeV1<'_>>,
     ) -> ExecutionReadValueV1<u64> {
+        self.pending_cancellation_count_in(scope, false)
+    }
+    fn pending_cancellation_count_in(
+        &self,
+        scope: Option<&CancellationScopeV1<'_>>,
+        full_history: bool,
+    ) -> ExecutionReadValueV1<u64> {
         let mut pending = 0;
         let mut pending_known = true;
-        for request in self
-            .cancellation_intents()
-            .filter(|r| r.receipt.is_some() && r.completed.is_none())
-        {
+        for request in self.pending_cancellation_intents(full_history) {
             let Some(request_scope) = cancellation_scope(request.origin.intent()) else {
                 continue;
             };
@@ -1539,12 +1866,27 @@ impl SharedExecutionRegistryV2 {
         &self,
         scope: Option<&CancellationScopeV1<'_>>,
     ) -> CancellationRequestsReadV1<'_> {
+        self.cancellation_requests_in(scope, false)
+    }
+    /// 原全历史遍历仅供工程对照；不复制请求或改变关联判断。
+    #[cfg(feature = "stage-timing")]
+    pub fn cancellation_requests_full_history_for_measurement(
+        &self,
+        scope: Option<&CancellationScopeV1<'_>>,
+    ) -> CancellationRequestsReadV1<'_> {
+        self.cancellation_requests_in(scope, true)
+    }
+    fn cancellation_requests_in(
+        &self,
+        scope: Option<&CancellationScopeV1<'_>>,
+        full_history: bool,
+    ) -> CancellationRequestsReadV1<'_> {
         let mut read = CancellationRequestsReadV1 {
-            pending_count: self.pending_cancellation_count(scope),
+            pending_count: self.pending_cancellation_count_in(scope, full_history),
             response_counts: [NotApplicable, NotApplicable, NotApplicable],
             latest_response: Known(None),
         };
-        let Some((request, known)) = self.latest_cancel_request(scope) else {
+        let Some((request, known)) = self.latest_cancel_request_in(scope, full_history) else {
             return read;
         };
         if !known {
@@ -1792,5 +2134,51 @@ impl RegistryCheckpointV2<::execution_normalization::NoeCheckpointRecordRefV1> {
             cancel_locations: state.cancel_locations,
             action_population: state.action_population,
         })
+    }
+}
+
+#[cfg(test)]
+mod cancellation_population_tests {
+    use super::*;
+    #[test]
+    fn equal_delivery_key_keeps_original_id_tie_and_later_completion_replaces_routes() {
+        let market = |name: &str| CancellationIndexScope::Market(name.into());
+        let mut reads = CancellationPopulation::default();
+        let original = [("a", (10, 2)), ("z", (10, 2)), ("middle", (9, 3))];
+        for (id, (sequence, ordinal)) in original {
+            reads.complete((sequence, ordinal, id.into()), market("market-a"));
+        }
+        let selected = original
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+            .into_iter()
+            .max_by_key(|(_, key)| *key)
+            .unwrap()
+            .0;
+        assert_eq!(
+            reads.markets["market-a"].2, selected,
+            "同完成键按原BTreeMap最后ID选择"
+        );
+        reads.complete((11, 0, "a".into()), market("market-a"));
+        assert_eq!(reads.markets["market-a"], (11, 0, "a".into()));
+        let orders = || CancellationIndexScope::Orders(vec![("platform-order".into(), None)]);
+        reads.complete((12, 0, "old-orders".into()), orders());
+        reads.complete((13, 0, "new-orders".into()), orders());
+        // 同请求更晚完成、旧完成重复到达都不能留下过期路由键。
+        reads.complete((14, 0, "new-orders".into()), orders());
+        reads.complete((13, 0, "new-orders".into()), orders());
+        assert_eq!(reads.unlocated_orders.len(), 1);
+        assert_eq!(
+            reads.unlocated_orders.first().unwrap().0,
+            (14, 0, "new-orders".into())
+        );
+        reads.locate("platform-order", Some("market-a".into()));
+        assert!(reads.unlocated_orders.is_empty());
+        reads.locate("platform-order", Some("market-b".into()));
+        assert!(!reads.orders_by_market.contains_key("market-a"));
+        assert_eq!(reads.orders_by_market["market-b"].len(), 1);
+        reads.locate("platform-order", None);
+        assert!(reads.orders_by_market.is_empty());
+        assert_eq!(reads.unlocated_orders.len(), 1);
     }
 }

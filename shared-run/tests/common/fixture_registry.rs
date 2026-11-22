@@ -36,3 +36,25 @@ pub fn assert_cancel_objects_reference<R: Clone + std::fmt::Debug + Eq>(
         ),
     }
 }
+
+pub fn assert_cancellation_requests_reference(
+    registry: &shared_run::SharedExecutionRegistryV2,
+    scope: Option<&shared_run::CancellationScopeV1<'_>>,
+) {
+    let actual = registry.cancellation_requests(scope);
+    let original = registry.cancellation_requests_full_history_for_measurement(scope);
+    assert_eq!(actual.pending_count, original.pending_count);
+    assert_eq!(actual.response_counts, original.response_counts);
+    match (actual.latest_response, original.latest_response) {
+        (
+            ExecutionReadValueV1::Known(Some(actual)),
+            ExecutionReadValueV1::Known(Some(original)),
+        ) => {
+            assert!(std::ptr::eq(actual, original), "返回同一正式完成记录引用");
+        }
+        (ExecutionReadValueV1::Known(None), ExecutionReadValueV1::Known(None))
+        | (ExecutionReadValueV1::Unavailable, ExecutionReadValueV1::Unavailable)
+        | (ExecutionReadValueV1::NotApplicable, ExecutionReadValueV1::NotApplicable) => {}
+        (actual, original) => panic!("最新响应不同: {actual:?} / {original:?}"),
+    }
+}

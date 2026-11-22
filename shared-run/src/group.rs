@@ -357,6 +357,23 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             frames,
         )
     }
+    /// 工程对照沿原历史筛选冻结同一账户前缀；只在计量特性下提供。
+    #[cfg(feature = "stage-timing")]
+    pub fn freeze_action_before_full_history_for_measurement(
+        &self,
+        cutoff: TrustedGroupDecisionCutoffV1,
+        frames: &[PublicObservationFrameV1<'_>],
+    ) -> Option<ActionBeforeRead<P::Completion>> {
+        crate::work_measurement::account_frames(frames.len());
+        let orders =
+            crate::necessary::obligation_order_ids(&self.ledger, &self.registry, &self.pending);
+        self.read_action_before(
+            self.registry
+                .action_snapshot_full_history_for_measurement(&orders),
+            cutoff,
+            frames,
+        )
+    }
     /// 同步调用期间借用原登记；Rust 借用阻止该范围内推进事实。
     pub fn borrow_action_before<'a>(
         &'a self,

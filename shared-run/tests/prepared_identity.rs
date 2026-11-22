@@ -1,5 +1,14 @@
 #[path = "common/fixture_registry.rs"]
 mod fixture_registry;
+#[cfg(feature = "stage-timing")]
+#[path = "common/fixture_market_identity.rs"]
+mod fixture_market_identity;
+#[cfg(feature = "stage-timing")]
+#[path = "common/fixture_multi_market.rs"]
+mod fixture_multi_market;
+#[cfg(feature = "stage-timing")]
+#[path = "support/cancellation_scaling.rs"]
+mod cancellation_scaling;
 #[path = "common/fixture_clock.rs"]
 mod fixture_clock;
 #[path = "common/fixture_execution.rs"]
@@ -531,6 +540,179 @@ async fn ended_order_history_cost_at_identical_current_responsibility() {
             "cancel_order_visits":after.cancel_order_visits-before.cancel_order_visits,
             "paired_intent_visits":after.paired_intent_visits-before.paired_intent_visits,
             "original_wall_ns":original_elapsed,"original_cancel_order_visits":original_after.cancel_order_visits-original_before.cancel_order_visits})
+        );
+    }
+}
+
+/// #392 已完成撤单不再进入在途统计；最新响应按原完成交付序查询。
+#[cfg(feature = "stage-timing")]
+#[tokio::test(flavor = "current_thread")]
+async fn cancellation_history_index_preserves_real_feedback_and_legacy_checkpoint() {
+    let mut responsibility = None;
+    for history in [0, 128] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dpt");
+        let core = recorded_memory_complete(&root);
+        let (mut execution, observation, _) = execution_with_rules_v4(
+            &temp.path().join("sim.jsonl"),
+            &core,
+            SUCCESS_POLICY,
+            None,
+            "e".repeat(64),
+            "1000",
+        );
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(
+            AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
+        );
+        execution
+            .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
+            .unwrap();
+        let mut shared = SharedExecutionV2::from_opening(ledger, observation.clone())
+            .unwrap()
+            .unwrap();
+        let source =
+            RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes).unwrap();
+        let mut driver = FinitePublicConsumptionV1::new(execution, source, "cancel-history".into());
+        driver.enable_finite_recording_wait().unwrap();
+        for _ in 0..2 {
+            driver.next_group().unwrap().unwrap();
+        }
+        let condition = ConditionId(CONDITION_ID.into());
+        let other = ConditionId(format!("0x{}", "2".repeat(64)));
+        let market = CancellationScopeV1::Market(&condition);
+        let no_match = CancellationScopeV1::Market(&other);
+        let unknown_order = CancellationScopeV1::Orders(vec!["not-yet-located"]);
+        for index in 0..=history {
+            let id = if index == history {
+                "latest".into()
+            } else {
+                format!("history-{index:03}")
+            };
+            driver.wait_for_recording_capacity().unwrap();
+            shared
+                .execute(
+                    &mut driver.decision().unwrap(),
+                    request(&id),
+                    Some(Arc::new(ModelIntentV1::CancelMarketOrders {
+                        condition_id: condition.clone(),
+                    })),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        for scope in [None, Some(&market), Some(&no_match), Some(&unknown_order)] {
+            fixture_registry::assert_cancellation_requests_reference(shared.registry(), scope);
+        }
+        assert_eq!(
+            shared.registry().pending_cancellation_count(None),
+            ExecutionReadValueV1::Known(history + 1)
+        );
+        while driver.next_group().unwrap().is_some() {
+            shared.apply_closed().unwrap();
+            for scope in [None, Some(&market), Some(&no_match), Some(&unknown_order)] {
+                fixture_registry::assert_cancellation_requests_reference(shared.registry(), scope);
+            }
+        }
+        let cutoff = serde_json::to_value(driver.observation_cutoff()).unwrap();
+        driver.stop_and_drain().unwrap();
+        shared.apply_closed().unwrap();
+        let read = shared.registry().cancellation_requests(None);
+        assert_eq!(read.pending_count, ExecutionReadValueV1::Known(0));
+        assert_eq!(
+            read.response_counts,
+            [const { ExecutionReadValueV1::Known(0) }; 3]
+        );
+        assert!(matches!(
+            read.latest_response,
+            ExecutionReadValueV1::Known(Some(_))
+        ));
+        assert!(matches!(
+            shared
+                .registry()
+                .cancellation_requests(Some(&unknown_order))
+                .latest_response,
+            ExecutionReadValueV1::Unavailable
+        ));
+        let current = serde_json::json!({"cash":shared.ledger().economic_read().unwrap().cash(),
+            "group":cutoff["receipt"]["group"],"visible_at":cutoff["decision_time"]["logical_time_utc_ms"],
+            "orders":shared.registry().orders().count(),"pending":read.pending_count,"counts":read.response_counts});
+        if let Some(expected) = &responsibility {
+            assert_eq!(&current, expected);
+        } else {
+            responsibility = Some(current);
+        }
+        for (name, scope) in [("latest", None), ("no_related_completion", Some(&no_match))] {
+            let before = account_history_visits_v1();
+            let started = std::time::Instant::now();
+            for _ in 0..32 {
+                let _ = shared.registry().cancellation_requests(scope);
+            }
+            let elapsed = started.elapsed().as_nanos();
+            let after = account_history_visits_v1();
+            let original_before = account_history_visits_v1();
+            let original_started = std::time::Instant::now();
+            for _ in 0..32 {
+                let _ = shared
+                    .registry()
+                    .cancellation_requests_full_history_for_measurement(scope);
+            }
+            let original_elapsed = original_started.elapsed().as_nanos();
+            let original_after = account_history_visits_v1();
+            assert_eq!(
+                after.latest_cancel_request_visits - before.latest_cancel_request_visits,
+                32 * if name == "latest" { 1 } else { 0 }
+            );
+            println!(
+                "cancel_history_cost={}",
+                serde_json::json!({"history":history,"completed_requests":history+1,"case":name,"frames":32,
+                "wall_ns":elapsed,"source_visits":after.cancellation_source_visits-before.cancellation_source_visits,
+                "latest_visits":after.latest_cancel_request_visits-before.latest_cancel_request_visits,
+                "original_wall_ns":original_elapsed,"original_source_visits":original_after.cancellation_source_visits-original_before.cancellation_source_visits,
+                "original_latest_visits":original_after.latest_cancel_request_visits-original_before.latest_cancel_request_visits})
+            );
+        }
+        let mut bytes = Vec::new();
+        shared.write_checkpoint(&mut bytes).unwrap();
+        let mut value: ciborium::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let ciborium::Value::Map(fields) = &mut value else {
+            panic!("checkpoint")
+        };
+        let (_, ciborium::Value::Map(registry)) = fields
+            .iter_mut()
+            .find(|(k, _)| k.as_text() == Some("registry"))
+            .unwrap()
+        else {
+            panic!("registry")
+        };
+        let (_, ciborium::Value::Map(population)) = registry
+            .iter_mut()
+            .find(|(k, _)| k.as_text() == Some("action_population"))
+            .unwrap()
+        else {
+            panic!("population")
+        };
+        population.retain(|(k, _)| k.as_text() != Some("cancellation_reads"));
+        let mut old = Vec::new();
+        ciborium::ser::into_writer(&value, &mut old).unwrap();
+        let mut ledger_bytes = Vec::new();
+        shared.ledger().write_checkpoint(&mut ledger_bytes).unwrap();
+        let restored = SharedExecutionV2::restore_checkpoint(
+            LedgerWriterV1::restore_checkpoint(ledger_bytes.as_slice()).unwrap(),
+            observation.clone(),
+            old.as_slice(),
+        )
+        .unwrap();
+        for scope in [None, Some(&market), Some(&no_match), Some(&unknown_order)] {
+            fixture_registry::assert_cancellation_requests_reference(restored.registry(), scope);
+        }
+        let before = account_history_visits_v1();
+        let _ = restored.registry().cancellation_requests(None);
+        let after = account_history_visits_v1();
+        assert_eq!(
+            after.latest_cancel_request_visits - before.latest_cancel_request_visits,
+            1,
+            "旧活动索引缺少新字段时恢复一次补建"
         );
     }
 }
