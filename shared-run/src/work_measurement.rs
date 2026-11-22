@@ -3,6 +3,7 @@ use std::cell::Cell;
 #[derive(Clone, Copy, Default, serde::Serialize)]
 pub struct AccountHistoryVisitsV1 {
     pub cancel_order_visits: u64,
+    pub order_read_constructions: u64,
     pub paired_intent_visits: u64,
     pub latest_cancel_request_visits: u64,
     pub cancellation_source_visits: u64,
@@ -64,6 +65,14 @@ pub(crate) fn nav_call() {
     VISITS.with(|v| {
         let mut s = v.get();
         s.nav_calls += 1;
+        v.set(s);
+    });
+}
+
+pub(crate) fn order_read_constructed() {
+    VISITS.with(|v| {
+        let mut s = v.get();
+        s.order_read_constructions += 1;
         v.set(s);
     });
 }

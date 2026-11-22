@@ -116,6 +116,17 @@ impl<
     pub fn cancel_objects(&self) -> ExecutionReadValueV1<Vec<StrategyCancelObjectReadV1<'_, R>>> {
         strategy_cancel_objects(self.registry.borrow().cancel_objects())
     }
+    /// 计量构建比较同一冻结读取的原历史路径，普通构建不提供此诊断入口。
+    #[cfg(feature = "stage-timing")]
+    pub fn cancel_objects_full_history_for_measurement(
+        &self,
+    ) -> ExecutionReadValueV1<Vec<StrategyCancelObjectReadV1<'_, R>>> {
+        strategy_cancel_objects(
+            self.registry
+                .borrow()
+                .cancel_objects_full_history_for_measurement(),
+        )
+    }
     pub fn cancel_objects_in<'a>(
         &'a self,
         current: Option<&'a ConditionId>,
@@ -725,7 +736,7 @@ where
             Legacy(SharedExecutionCheckpointV1<R>),
         }
         let saved: Saved<P::Completion> = ciborium::de::from_reader(reader)?;
-        let (registry, pending) = match saved {
+        let (mut registry, pending) = match saved {
             Saved::Current(saved) => (
                 saved.registry.restore(&saved.pool)?,
                 saved
@@ -736,6 +747,7 @@ where
             ),
             Saved::Legacy(saved) => (saved.registry, saved.pending),
         };
+        registry.rebuild_action_population_if_missing();
         Ok(Self {
             ledger,
             registry,

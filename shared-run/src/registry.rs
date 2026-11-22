@@ -123,6 +123,34 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             action_population: Some(ActionPopulation::default()),
         }
     }
+    /// 旧完整检查点可能没有派生索引；仅在owner恢复时按原事实补建一次。
+    pub(crate) fn rebuild_action_population_if_missing(&mut self) {
+        if self.action_population.is_some() {
+            return;
+        }
+        self.action_population = Some(ActionPopulation {
+            orders: self
+                .orders
+                .iter()
+                .filter(|(id, state)| self.unfinished(id, state))
+                .map(|(id, _)| id.clone())
+                .collect(),
+            commitments: self
+                .intents
+                .iter()
+                .filter(|(_, request)| {
+                    request.receipt.is_some() && self.request_commitments(request).next().is_some()
+                })
+                .map(|(id, _)| id.clone())
+                .collect(),
+            cancellations: self
+                .intents
+                .iter()
+                .filter(|(_, request)| cancellation_scope(request.origin.intent()).is_some())
+                .map(|(id, _)| id.clone())
+                .collect(),
+        });
+    }
     pub(crate) fn context(&self) -> &ExecutionNormalizationContextV1 {
         &self.context
     }
@@ -495,6 +523,8 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         id: &'a Identity,
         state: &'a Order<Ref<R>>,
     ) -> ExecutionOrderRead<'a, R> {
+        #[cfg(feature = "stage-timing")]
+        crate::work_measurement::order_read_constructed();
         let origin = state.origin.as_ref().and_then(|(id, ordinal)| {
             self.intents.get(id).map(|s| SubmittedLegReadV1 {
                 intent: &s.origin,
@@ -842,12 +872,32 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         &'a self,
         conditions: impl IntoIterator<Item = &'a ConditionId>,
     ) -> ExecutionReadValueV1<Vec<CancelObjectRead<'a, R>>> {
-        #[cfg(feature = "stage-timing")]
-        crate::work_measurement::cancel_orders(self.orders.len());
-        let eligible: BTreeMap<_, _> = self
-            .orders
-            .iter()
+        if self.action_population.is_some() {
+            self.cancel_objects_from_entries(conditions, self.active_order_entries())
+        } else {
+            // 动作快照有意不保存活动索引，沿原路径逐条构造一次，并如实计数。
+            self.cancel_objects_from_entries(conditions, self.orders.iter())
+        }
+    }
+    /// 工程对照保留原全历史扫描；默认入口使用已有活动身份索引。
+    #[cfg(feature = "stage-timing")]
+    pub fn cancel_objects_full_history_for_measurement(
+        &self,
+    ) -> ExecutionReadValueV1<Vec<CancelObjectRead<'_, R>>> {
+        self.cancel_objects_from_entries(
+            self.markets.values().map(|m| &m.market.condition_id),
+            self.orders.iter(),
+        )
+    }
+    fn cancel_objects_from_entries<'a>(
+        &'a self,
+        conditions: impl IntoIterator<Item = &'a ConditionId>,
+        entries: impl Iterator<Item = (&'a Identity, &'a Order<Ref<R>>)>,
+    ) -> ExecutionReadValueV1<Vec<CancelObjectRead<'a, R>>> {
+        let eligible: BTreeMap<_, _> = entries
             .filter_map(|(id, state)| {
+                #[cfg(feature = "stage-timing")]
+                crate::work_measurement::cancel_orders(1);
                 if !(state.accepted.is_some()
                     || state.formed.is_some()
                     || state.lifecycle.is_some()

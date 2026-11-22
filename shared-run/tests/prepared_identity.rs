@@ -1,3 +1,5 @@
+#[path = "common/fixture_registry.rs"]
+mod fixture_registry;
 #[path = "common/fixture_clock.rs"]
 mod fixture_clock;
 #[path = "common/fixture_execution.rs"]
@@ -391,7 +393,7 @@ async fn ended_order_history_cost_at_identical_current_responsibility() {
         execution
             .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
             .unwrap();
-        let mut shared = SharedExecutionV2::from_opening(ledger, observation)
+        let mut shared = SharedExecutionV2::from_opening(ledger, observation.clone())
             .unwrap()
             .unwrap();
         let source =
@@ -426,6 +428,7 @@ async fn ended_order_history_cost_at_identical_current_responsibility() {
         let mut canceled = false;
         while driver.next_group().unwrap().is_some() {
             shared.apply_closed().unwrap();
+            fixture_registry::assert_cancel_objects_reference(shared.registry());
             if !canceled
                 && driver
                     .observation_cutoff()
@@ -465,6 +468,56 @@ async fn ended_order_history_cost_at_identical_current_responsibility() {
         }
         let elapsed = started.elapsed().as_nanos();
         let after = account_history_visits_v1();
+        let original_started = std::time::Instant::now();
+        let original_before = account_history_visits_v1();
+        for _ in 0..32 {
+            let ExecutionReadValueV1::Known(objects) = shared
+                .registry()
+                .cancel_objects_full_history_for_measurement()
+            else {
+                panic!("known original objects")
+            };
+            assert!(objects.is_empty());
+        }
+        let original_elapsed = original_started.elapsed().as_nanos();
+        let original_after = account_history_visits_v1();
+        // 兼容真实旧检查点缺少可重建索引的表示，事实和引用池保持原样。
+        let mut checkpoint = Vec::new();
+        shared.write_checkpoint(&mut checkpoint).unwrap();
+        let mut value: ciborium::value::Value =
+            ciborium::de::from_reader(checkpoint.as_slice()).unwrap();
+        let ciborium::value::Value::Map(fields) = &mut value else {
+            panic!("checkpoint map")
+        };
+        let (_, ciborium::value::Value::Map(registry)) = fields
+            .iter_mut()
+            .find(|(k, _)| k.as_text() == Some("registry"))
+            .unwrap()
+        else {
+            panic!("registry map")
+        };
+        registry.retain(|(k, _)| k.as_text() != Some("action_population"));
+        let mut old_checkpoint = Vec::new();
+        ciborium::ser::into_writer(&value, &mut old_checkpoint).unwrap();
+        let mut ledger_bytes = Vec::new();
+        shared.ledger().write_checkpoint(&mut ledger_bytes).unwrap();
+        let restored = SharedExecutionV2::restore_checkpoint(
+            LedgerWriterV1::restore_checkpoint(ledger_bytes.as_slice()).unwrap(),
+            observation.clone(),
+            old_checkpoint.as_slice(),
+        )
+        .unwrap();
+        fixture_registry::assert_cancel_objects_reference(restored.registry());
+        let restored_before = account_history_visits_v1();
+        let _ = restored.registry().cancel_objects();
+        let restored_after = account_history_visits_v1();
+        assert_eq!(
+            restored_after.cancel_order_visits - restored_before.cancel_order_visits,
+            0,
+            "旧索引在恢复时重建，闭合历史无逐帧扫描"
+        );
+        assert_eq!(restored.registry().orders().count(), orders);
+
         let current = serde_json::json!({"cash":cash,"public_group":cutoff["receipt"]["group"],
             "visible_at":cutoff["decision_time"]["logical_time_utc_ms"],"active_cancel_objects":0});
         if let Some(expected) = &expected {
@@ -476,7 +529,8 @@ async fn ended_order_history_cost_at_identical_current_responsibility() {
             "ended_history_cost={}",
             serde_json::json!({"ended_orders":orders,"frames":32,"wall_ns":elapsed,
             "cancel_order_visits":after.cancel_order_visits-before.cancel_order_visits,
-            "paired_intent_visits":after.paired_intent_visits-before.paired_intent_visits})
+            "paired_intent_visits":after.paired_intent_visits-before.paired_intent_visits,
+            "original_wall_ns":original_elapsed,"original_cancel_order_visits":original_after.cancel_order_visits-original_before.cancel_order_visits})
         );
     }
 }
