@@ -4,6 +4,12 @@ use contracts::*;
 use serde::{Deserialize, Serialize};
 use sim_system::{offline_scene::*, public_consumption::*};
 use std::{collections::BTreeMap, iter::Peekable, sync::Arc};
+#[path = "scene_cache.rs"]
+mod scene_cache;
+pub use scene_cache::{
+    SharedSceneDiagnosticsV1, SharedSceneEventsV1, VerifiedOfflineSceneV1,
+    verify_scene_material_with_progress,
+};
 pub const ORDERING_VERSION: &str = "offline-scene-before-reference-before-pm-v1";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OfflineSceneMaterialV1 {
@@ -434,10 +440,17 @@ fn file_sha256_with_progress(
     path: &std::path::Path,
     interval_seconds: u64,
 ) -> Result<String, MaterialError> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
+    let file = std::fs::File::open(path)?;
     let total = file.metadata()?.len();
+    file_sha256_reader_with_progress(path, file, total, interval_seconds)
+}
+fn file_sha256_reader_with_progress(
+    path: &std::path::Path,
+    mut file: impl std::io::Read,
+    total: u64,
+    interval_seconds: u64,
+) -> Result<String, MaterialError> {
+    use sha2::{Digest, Sha256};
     let started = std::time::Instant::now();
     let mut last = started;
     let mut read = 0_u64;
@@ -581,71 +594,12 @@ pub fn open_scene_material_with_progress(
     path: &std::path::Path,
     interval_seconds: u64,
 ) -> Result<(Arc<OfflineSceneMaterialV1>, SceneEventReader, Sha256Hex), MaterialError> {
-    let sha = Sha256Hex(file_sha256_with_progress(path, interval_seconds)?);
-    let file = std::fs::File::open(path)?;
-    if path.extension().is_some_and(|e| e == "scene") {
-        let manifest: StreamManifestV2 = serde_json::from_reader(std::io::BufReader::new(file))?;
-        if manifest.storage_version != "OFFLINE_SCENE_JSONL_ZSTD_V2"
-            || !manifest.material.scene.events.is_empty()
-        {
-            return Err("离线场景存储版本或头不符".into());
-        }
-        let name = std::path::Path::new(&manifest.event_file);
-        if name.components().count() != 1
-            || !matches!(
-                name.components().next(),
-                Some(std::path::Component::Normal(_))
-            )
-        {
-            return Err("离线场景载荷路径越界".into());
-        }
-        let payload = path.parent().ok_or("离线场景没有父目录")?.join(name);
-        if file_sha256_with_progress(&payload, interval_seconds)? != manifest.event_sha256 {
-            return Err("离线场景载荷SHA256不符".into());
-        }
-        let decoder = zstd::stream::read::Decoder::new(std::fs::File::open(payload)?)?;
-        let events = serde_json::Deserializer::from_reader(std::io::BufReader::new(decoder))
-            .into_iter::<Event>();
-        Ok((
-            Arc::new(manifest.material),
-            Box::new(CheckedSceneEvents {
-                inner: events,
-                remaining: manifest.event_count,
-                last_at: None,
-                ended: false,
-            }),
-            sha,
-        ))
-    } else {
-        let stored: StoredSceneV1 = serde_json::from_reader(std::io::BufReader::new(file))?;
-        let levels = stored.levels;
-        let events = stored
-            .events
-            .into_iter()
-            .map(move |(at_ms, source_sequence, index, kind)| {
-                Ok(Event {
-                    at_ms,
-                    source_sequence,
-                    level: levels.get(index).ok_or("场景价位引用不存在")?.clone(),
-                    kind,
-                })
-            });
-        Ok((
-            Arc::new(OfflineSceneMaterialV1 {
-                scene: PreparedScene {
-                    model_version: stored.model_version,
-                    parameters: stored.parameters,
-                    events: Vec::new(),
-                    report: stored.report,
-                },
-                markets: stored.markets,
-                market_assets: stored.market_assets,
-                source_manifests: stored.source_manifests,
-            }),
-            Box::new(events),
-            sha,
-        ))
-    }
+    let verified = verify_scene_material_with_progress(path, interval_seconds)?;
+    Ok((
+        verified.material(),
+        verified.independent_reader()?,
+        verified.identity().clone(),
+    ))
 }
 
 #[cfg(test)]

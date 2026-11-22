@@ -3654,6 +3654,160 @@ fn offline_scene_day_uses_frozen_events_and_original_public_chain() {
         serde_json::from_slice(&std::fs::read(&candidate.metadata_path).unwrap()).unwrap();
     assert_eq!(metadata["maker_model_version"], MODEL_VERSION);
     assert_eq!(metadata["offline_scene"]["parameters"]["seed"], 7);
+    let scene_path = day.offline_scenes[&candidate.session.run_id].clone();
+    let verified = verify_scene_material_with_progress(&scene_path, 0).unwrap();
+    assert_eq!(verified.material().scene.parameters.seed, 7);
+    let mut shared_day = day.clone();
+    shared_day.candidates.clear();
+    shared_day.offline_scenes.clear();
+    shared_day.producer_lead_groups = Some(1);
+    let mut preverified = std::collections::BTreeMap::new();
+    for index in 0..3 {
+        let name = format!("shared-scene-{index}");
+        let mut run = reuse_outputs(&config, &root.path().join(&name));
+        run.session.run_id = name.clone();
+        run.session.account_id = format!("account-{index}");
+        run.session.session_id = format!("session-{index}");
+        // 场景seed固定7；三个合法账户seed独立设置，不作相等校验。
+        run.session.session_seed = Sha256Hex(format!("{:064x}", index + 1));
+        run.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(100 + index * 100);
+        shared_day
+            .offline_scenes
+            .insert(name.clone(), scene_path.clone());
+        preverified.insert(name, verified.clone());
+        shared_day.candidates.push(run);
+    }
+    let shared_result = run_historical_days_with_options_v1(
+        &[shared_day],
+        rules.clone(),
+        &|run: &HistoricalPreparedRunConfigV1| {
+            Ok(Probe {
+                no_trade_only: true,
+                exit_immediately: run.session.run_id == "shared-scene-2",
+                rules: Some(rules.clone()),
+                ..Default::default()
+            })
+        },
+        1,
+        &HistoricalDayRunOptionsV1 {
+            verified_offline_scenes: preverified,
+            offline_scene_cache_bytes: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        shared_result[0].candidates[0].report["end_reason"],
+        "RangeEnd"
+    );
+    assert_eq!(
+        shared_result[0].candidates[1].report["end_reason"],
+        "RangeEnd"
+    );
+    assert_eq!(
+        shared_result[0].candidates[2].report["end_reason"],
+        "StrategyExit"
+    );
+    // 从实际同一事实准备参数和场景seed不同的合法成品，用错句柄必须在启动账户前发现。
+    for (label, parameters) in [
+        (
+            "different-scene-seed",
+            Parameters {
+                seed: 8,
+                ..material.scene.parameters.clone()
+            },
+        ),
+        (
+            "different-scene-parameter",
+            Parameters {
+                association_ms: 251,
+                ..material.scene.parameters.clone()
+            },
+        ),
+    ] {
+        let alternate_root = root.path().join(label);
+        std::fs::create_dir(&alternate_root).unwrap();
+        let alternate_path = alternate_root.join(scene_path.file_name().unwrap());
+        let mut alternate_scene = analysis.prepare(parameters);
+        for event in &mut alternate_scene.events {
+            event.at_ms = event.at_ms.max(BASE);
+        }
+        let mut writer = SceneStreamWriterV2::create(&alternate_path).unwrap();
+        for event in &alternate_scene.events {
+            writer.push(event.clone()).unwrap();
+        }
+        let mut alternate_header = material.clone();
+        alternate_header.scene = alternate_scene;
+        alternate_header.scene.events.clear();
+        writer.finish(alternate_header).unwrap();
+        let mut wrong = day.clone();
+        wrong
+            .offline_scenes
+            .insert(candidate.session.run_id.clone(), alternate_path);
+        let started = std::sync::atomic::AtomicUsize::new(0);
+        let error = run_historical_days_with_options_v1(
+            &[wrong],
+            rules.clone(),
+            &|_| {
+                started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Probe::default())
+            },
+            1,
+            &HistoricalDayRunOptionsV1 {
+                verified_offline_scenes: std::collections::BTreeMap::from([(
+                    candidate.session.run_id.clone(),
+                    verified.clone(),
+                )]),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("绑定不一致"), "{error}");
+        assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+    // 元数据或路径对象变化不能独自判坏：新对象经完整验证，内容相同仍接受。
+    let copied_root = root.path().join("same-content-new-file");
+    std::fs::create_dir(&copied_root).unwrap();
+    let copied_path = copied_root.join(scene_path.file_name().unwrap());
+    std::fs::copy(&scene_path, &copied_path).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&scene_path).unwrap()).unwrap();
+    let payload = manifest["event_file"].as_str().unwrap();
+    std::fs::copy(
+        scene_path.parent().unwrap().join(payload),
+        copied_root.join(payload),
+    )
+    .unwrap();
+    let mut copied_day = day.clone();
+    let mut copied_run = reuse_outputs(&config, &root.path().join("copied-run"));
+    copied_run.session.run_id = "copied-run".into();
+    copied_day.candidates = vec![copied_run];
+    copied_day.offline_scenes =
+        std::collections::BTreeMap::from([("copied-run".into(), copied_path)]);
+    let copied_result = run_historical_days_with_options_v1(
+        &[copied_day],
+        rules.clone(),
+        &|_| {
+            Ok(Probe {
+                no_trade_only: true,
+                rules: Some(rules.clone()),
+                ..Default::default()
+            })
+        },
+        1,
+        &HistoricalDayRunOptionsV1 {
+            verified_offline_scenes: std::collections::BTreeMap::from([(
+                "copied-run".into(),
+                verified.clone(),
+            )]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        copied_result[0].candidates[0].report["end_reason"],
+        "RangeEnd"
+    );
     // All scene opens must complete before any worker starts. Otherwise a
     // second-candidate open error joins the first worker waiting on an empty hub.
     let mut bad_day = day;
@@ -3665,10 +3819,22 @@ fn offline_scene_day_uses_frozen_events_and_original_public_chain() {
     );
     bad_day.candidates.push(second);
     let started = std::sync::atomic::AtomicUsize::new(0);
-    let error = run_historical_days_v1(&[bad_day], rules.clone(), &|_| {
-        started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(Probe::default())
-    })
+    let error = run_historical_days_with_options_v1(
+        &[bad_day],
+        rules.clone(),
+        &|_| {
+            started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Probe::default())
+        },
+        1,
+        &HistoricalDayRunOptionsV1 {
+            verified_offline_scenes: std::collections::BTreeMap::from([(
+                "second-invalid-scene".into(),
+                verified,
+            )]),
+            ..Default::default()
+        },
+    )
     .unwrap_err();
     assert!(error.to_string().contains("No such file"), "{error}");
     assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 0);

@@ -109,6 +109,13 @@ pub struct HistoricalDayRunOptionsV1 {
     pub stop_at_utc_ms: Option<i64>,
     /// 工程测量时各账户在同一完整毫秒同步进程CPU采样；空值关闭。
     pub cpu_measurement_boundaries: Vec<i64>,
+    /// 调用方预检后传入同一已校验场景；每户仍按offline_scenes路径核对绑定。
+    pub verified_offline_scenes: std::collections::BTreeMap<
+        String,
+        Arc<crate::offline_scene_source::VerifiedOfflineSceneV1>,
+    >,
+    /// 同日不同场景共同分摊的共享事件缓存逻辑字节预算。
+    pub offline_scene_cache_bytes: usize,
 }
 impl Default for HistoricalDayRunOptionsV1 {
     fn default() -> Self {
@@ -121,6 +128,8 @@ impl Default for HistoricalDayRunOptionsV1 {
             producer_payload_bytes: None,
             stop_at_utc_ms: None,
             cpu_measurement_boundaries: Vec::new(),
+            verified_offline_scenes: Default::default(),
+            offline_scene_cache_bytes: 256 * 1024 * 1024,
         }
     }
 }
@@ -419,30 +428,96 @@ where
         };
         statistics.push(stream);
     }
-    let scene_materials = day
+    let mut verified_paths = std::collections::BTreeMap::<
+        std::path::PathBuf,
+        Arc<crate::offline_scene_source::VerifiedOfflineSceneV1>,
+    >::new();
+    let mut scene_verifications = 0_u64;
+    let verified_scenes = day
         .candidates
         .iter()
         .map(|candidate| -> Result<_, MaterialError> {
-            let scene_material = day
+            let verified = day
                 .offline_scenes
                 .get(&candidate.session.run_id)
                 .map(|path| -> Result<_, MaterialError> {
-                    let opened = crate::offline_scene_source::open_scene_material_with_progress(
-                        path,
-                        day.progress_interval_seconds,
-                    )?;
-                    if opened.0.scene.model_version != sim_system::offline_scene::MODEL_VERSION {
+                    let previous = options
+                        .verified_offline_scenes
+                        .get(&candidate.session.run_id)
+                        .or_else(|| verified_paths.get(path));
+                    let verified = if let Some(previous) = previous {
+                        if previous.matches_path(path)? {
+                            previous.clone()
+                        } else {
+                            // 路径或stat只作复用线索；新对象需要现有完整校验和内容身份对照。
+                            let current =
+                                crate::offline_scene_source::verify_scene_material_with_progress(
+                                    path,
+                                    day.progress_interval_seconds,
+                                )?;
+                            scene_verifications += 1;
+                            if current.identity() != previous.identity() {
+                                return Err("预校验场景内容与候选绑定不一致".into());
+                            }
+                            current
+                        }
+                    } else {
+                        scene_verifications += 1;
+                        crate::offline_scene_source::verify_scene_material_with_progress(
+                            path,
+                            day.progress_interval_seconds,
+                        )?
+                    };
+                    if verified.material().scene.model_version
+                        != sim_system::offline_scene::MODEL_VERSION
+                    {
                         return Err("冻结场景模型版本与显式选择不符".into());
                     }
-                    Ok(opened)
+                    verified_paths.insert(path.clone(), verified.clone());
+                    Ok(verified)
                 })
                 .transpose()?;
             let selected_offline = rules.maker_model_version_for(candidate.session.caller_role)
                 == sim_system::offline_scene::MODEL_VERSION;
-            if selected_offline != scene_material.is_some() {
+            if selected_offline != verified.is_some() {
                 return Err("离线场景文件与显式撮合模型选择不一致".into());
             }
-            Ok(scene_material)
+            Ok(verified)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut consumers = std::collections::BTreeMap::<String, usize>::new();
+    for verified in verified_scenes.iter().flatten() {
+        *consumers.entry(verified.identity().0.clone()).or_default() += 1;
+    }
+    let sharing_count = consumers.values().filter(|count| **count > 1).count();
+    let per_scene_cache_bytes = options.offline_scene_cache_bytes / sharing_count.max(1);
+    let mut shared_scenes = std::collections::BTreeMap::new();
+    for verified in verified_scenes.iter().flatten() {
+        if consumers[&verified.identity().0] > 1
+            && !shared_scenes.contains_key(&verified.identity().0)
+        {
+            shared_scenes.insert(
+                verified.identity().0.clone(),
+                crate::offline_scene_source::SharedSceneEventsV1::new(
+                    verified.clone(),
+                    per_scene_cache_bytes,
+                )?,
+            );
+        }
+    }
+    let scene_materials = verified_scenes
+        .iter()
+        .map(|verified| -> Result<_, MaterialError> {
+            verified
+                .as_ref()
+                .map(|verified| {
+                    let reader = match shared_scenes.get(&verified.identity().0) {
+                        Some(shared) => shared.reader()?,
+                        None => verified.independent_reader()?,
+                    };
+                    Ok((verified.material(), reader, verified.identity().clone()))
+                })
+                .transpose()
         })
         .collect::<Result<Vec<_>, _>>()?;
     std::thread::scope(|scope| {
@@ -810,6 +885,23 @@ where
                     failures.push((index, cause));
                 }
             }
+        }
+        #[cfg(feature = "stage-timing")]
+        if !verified_paths.is_empty() {
+            let diagnostics = shared_scenes
+                .iter()
+                .map(|(identity, shared)| {
+                    let value = match shared.diagnostics() {
+                        Ok(value) => serde_json::json!(value),
+                        Err(error) => serde_json::json!({"diagnostic_error":error.to_string()}),
+                    };
+                    (identity, value)
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            eprintln!(
+                "offline_scene_sharing={}",
+                serde_json::json!({"day_scene_verifications":scene_verifications,"scenes":diagnostics})
+            );
         }
         // 所有候选已交回最后的冻结请求；正常、提前结束与错误路径都显式检查尾部。
         let final_output = options
