@@ -429,20 +429,12 @@ pub type SceneEventReader = Box<dyn Iterator<Item = Result<Event, MaterialError>
 pub struct SceneStreamWriterV2 {
     path: std::path::PathBuf,
     payload: std::path::PathBuf,
-    encoder: zstd::stream::write::Encoder<'static, std::io::BufWriter<std::fs::File>>,
+    encoder: zstd::stream::write::Encoder<
+        'static,
+        std::io::BufWriter<scene_preparation::HashingWriter<std::fs::File>>,
+    >,
     events: u64,
     last_at: Option<i64>,
-}
-fn file_sha256(path: &std::path::Path) -> Result<String, MaterialError> {
-    file_sha256_with_progress(path, 0)
-}
-fn file_sha256_with_progress(
-    path: &std::path::Path,
-    interval_seconds: u64,
-) -> Result<String, MaterialError> {
-    let file = std::fs::File::open(path)?;
-    let total = file.metadata()?.len();
-    file_sha256_reader_with_progress(path, file, total, interval_seconds)
 }
 fn file_sha256_reader_with_progress(
     path: &std::path::Path,
@@ -494,12 +486,22 @@ fn file_sha256_reader_with_progress(
 }
 impl SceneStreamWriterV2 {
     pub fn create(path: &std::path::Path) -> Result<Self, MaterialError> {
+        Self::create_with_merge_workers(path, 1)
+    }
+    fn create_with_merge_workers(
+        path: &std::path::Path,
+        workers: usize,
+    ) -> Result<Self, MaterialError> {
+        if workers == 0 || workers > u32::MAX as usize {
+            return Err("compression workers out of range".into());
+        }
         let payload = path.with_extension("events.zst");
-        let mut encoder = zstd::stream::write::Encoder::new(
-            std::io::BufWriter::new(std::fs::File::create(&payload)?),
-            3,
-        )?;
+        let sink = scene_preparation::HashingWriter::new(std::fs::File::create(&payload)?);
+        let mut encoder = zstd::stream::write::Encoder::new(std::io::BufWriter::new(sink), 3)?;
         encoder.include_checksum(true)?;
+        if workers > 1 {
+            encoder.multithread((workers - 1) as u32)?;
+        }
         Ok(Self {
             path: path.into(),
             payload,
@@ -520,11 +522,23 @@ impl SceneStreamWriterV2 {
         Ok(())
     }
     pub fn finish(self, material: OfflineSceneMaterialV1) -> Result<u64, MaterialError> {
-        use std::io::Write;
+        self.finish_with_thread_sample(material)
+            .map(|(bytes, _)| bytes)
+    }
+    fn finish_with_thread_sample(
+        self,
+        material: OfflineSceneMaterialV1,
+    ) -> Result<(u64, Option<usize>), MaterialError> {
         if !material.scene.events.is_empty() {
             return Err("流式场景头不能包含另一份事件".into());
         }
-        self.encoder.finish()?.flush()?;
+        let sink = self
+            .encoder
+            .finish()?
+            .into_inner()
+            .map_err(|error| error.into_error())?;
+        let peak_process_threads = sink.peak_process_threads;
+        let event_sha256 = sink.finish();
         let manifest = StreamManifestV2 {
             storage_version: "OFFLINE_SCENE_JSONL_ZSTD_V2".into(),
             material,
@@ -535,13 +549,14 @@ impl SceneStreamWriterV2 {
                 .to_str()
                 .ok_or("场景文件名不是UTF8")?
                 .into(),
-            event_sha256: file_sha256(&self.payload)?,
+            event_sha256,
             event_count: self.events,
         };
-        let mut manifest_file = std::io::BufWriter::new(std::fs::File::create(&self.path)?);
-        serde_json::to_writer_pretty(&mut manifest_file, &manifest)?;
-        manifest_file.flush()?;
-        Ok(std::fs::metadata(self.path)?.len() + std::fs::metadata(self.payload)?.len())
+        scene_preparation::publish_manifest(&self.path, &manifest)?;
+        Ok((
+            std::fs::metadata(self.path)?.len() + std::fs::metadata(self.payload)?.len(),
+            peak_process_threads,
+        ))
     }
 }
 struct CheckedSceneEvents<I> {
@@ -663,11 +678,6 @@ mod stream_tests {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct RankedSceneEvent {
-    rank: usize,
-    event: Event,
-}
 #[derive(Debug, Serialize)]
 pub struct ScenePreparationCostV2 {
     pub events: u64,
@@ -720,166 +730,22 @@ pub fn prepare_condition_parallel_scene_with_temporary_root_v2(
     progress_seconds: u64,
     condition_temporary_root: Option<&std::path::Path>,
 ) -> Result<ScenePreparationCostV2, MaterialError> {
-    use std::{
-        io::Write,
-        sync::{
-            Mutex,
-            atomic::{AtomicUsize, Ordering},
-        },
-        time::Instant,
-    };
-    if condition_workers == 0 {
-        return Err("condition_workers需要大于零".into());
-    }
-    if let Some(directory) = condition_temporary_root {
-        // A failed job keeps its files. Never reuse that scene's directory.
-        std::fs::create_dir(directory)?;
-    }
-    let started = Instant::now();
-    eprintln!("场景数量预计划: start, total_conditions={}", markets.len());
-    let mut last_plan = Instant::now();
-    let mut phase = String::new();
-    let plan = analysis.condition_plan_with_progress(parameters.clone(),|current,completed,total| {
-        if current!=phase || completed==total || (progress_seconds>0 && last_plan.elapsed().as_secs()>=progress_seconds) {
-            eprintln!("场景数量预计划: phase={current}, completed={completed}, total={total}, elapsed_seconds={}",started.elapsed().as_secs());
-            phase=current.into();last_plan=Instant::now();
-        }
-    });
-    let quantity_plan_seconds = started.elapsed().as_secs_f64();
-    eprintln!(
-        "场景数量预计划完成: conditions={}, elapsed_seconds={quantity_plan_seconds}",
-        plan.condition_count()
-    );
-    let pending = Mutex::new(0..plan.condition_count());
-    let completed = AtomicUsize::new(0);
-    let results = std::thread::scope(
-        |scope| -> Result<Vec<(std::path::PathBuf, u64, PreparationReport)>, MaterialError> {
-            let mut handles = Vec::new();
-            for _ in 0..condition_workers.min(plan.condition_count()) {
-                let plan = &plan;
-                let pending = &pending;
-                let completed = &completed;
-                handles.push(scope.spawn(move || -> Result<Vec<(std::path::PathBuf,u64,PreparationReport)>,MaterialError> {
-                let mut results=Vec::new();
-                loop {
-                    let Some(index)=pending.lock().unwrap().next() else {break;};
-                    let temp=match condition_temporary_root {
-                        Some(directory)=>directory.join(format!("condition-{index}.jsonl.zst")),
-                        None=>path.with_extension(format!("condition-{index}.jsonl.zst")),
-                    };
-                    let mut encoder=zstd::stream::write::Encoder::new(std::io::BufWriter::new(std::fs::File::create(&temp)?),3)?;
-                    encoder.include_checksum(true)?;
-                    let mut last=Instant::now();let mut count=0u64;
-                    let scene=plan.prepare_condition(index,|phase,done,total| {
-                        if done==total || (progress_seconds>0 && last.elapsed().as_secs()>=progress_seconds) {
-                            eprintln!("场景市场构造: condition={}, phase={phase}, completed={done}, total={total}, elapsed_seconds={}",plan.condition_name(index),started.elapsed().as_secs());last=Instant::now();
-                        }
-                    },|rank,event| -> Result<(),MaterialError> {
-                        serde_json::to_writer(&mut encoder,&RankedSceneEvent {rank,event})?;encoder.write_all(b"\n")?;count+=1;Ok(())
-                    })?;
-                    encoder.finish()?.flush()?;
-                    results.push((temp,count,scene.report));
-                    let done=completed.fetch_add(1,Ordering::Relaxed)+1;
-                    eprintln!("场景市场完成: completed={done}, total={}, elapsed_seconds={}",plan.condition_count(),started.elapsed().as_secs());
-                }
-                Ok(results)
-            }));
-            }
-            let mut results = Vec::new();
-            for handle in handles {
-                results.extend(handle.join().map_err(|_| "市场构造线程panic")??);
-            }
-            Ok(results)
-        },
-    )?;
-    let construction_seconds = started.elapsed().as_secs_f64() - quantity_plan_seconds;
-    let report = plan.combine_reports(results.iter().map(|(_, _, r)| r.clone()));
-    let expected_events: u64 = results.iter().map(|(_, n, _)| *n).sum();
-    let temporary_logical_bytes = results
-        .iter()
-        .map(|(p, _, _)| std::fs::metadata(p).map(|m| m.len()))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .sum();
-    let merge_start = Instant::now();
-    eprintln!("场景保序合流: events={expected_events}, temporary_bytes={temporary_logical_bytes}");
-    type RankedReader = Box<dyn Iterator<Item = Result<RankedSceneEvent, serde_json::Error>>>;
-    let mut readers = Vec::<RankedReader>::new();
-    let mut heads = Vec::new();
-    let mut heap = std::collections::BinaryHeap::new();
-    for (path, _, _) in &results {
-        let decoder = zstd::stream::read::Decoder::new(std::fs::File::open(path)?)?;
-        let mut reader: RankedReader = Box::new(
-            serde_json::Deserializer::from_reader(std::io::BufReader::new(decoder)).into_iter(),
-        );
-        let head = reader.next().transpose()?;
-        if let Some(head) = &head {
-            heap.push(std::cmp::Reverse((head.rank, readers.len())));
-        }
-        readers.push(reader);
-        heads.push(head);
-    }
-    let mut writer = SceneStreamWriterV2::create(path)?;
-    let mut events = 0;
-    let mut previous_rank = None;
-    let mut last = Instant::now();
-    while let Some(std::cmp::Reverse((rank, index))) = heap.pop() {
-        if previous_rank.is_some_and(|previous| rank < previous) {
-            return Err("临时场景全局顺序不符".into());
-        }
-        previous_rank = Some(rank);
-        let mut event = heads[index].take().unwrap().event;
-        event.at_ms = event.at_ms.max(execution_start);
-        writer.push(event)?;
-        events += 1;
-        heads[index] = readers[index].next().transpose()?;
-        if let Some(head) = &heads[index] {
-            heap.push(std::cmp::Reverse((head.rank, index)));
-        }
-        if progress_seconds > 0 && last.elapsed().as_secs() >= progress_seconds {
-            eprintln!(
-                "场景保序合流: completed={events}, total={expected_events}, elapsed_seconds={}",
-                merge_start.elapsed().as_secs()
-            );
-            last = Instant::now();
-        }
-    }
-    if events != expected_events {
-        return Err("临时场景合流事件数不符".into());
-    }
-    let output_bytes = writer.finish(OfflineSceneMaterialV1 {
-        scene: PreparedScene {
-            model_version: if parameters.cancellation == Cancellation::Proportional {
-                FRAGMENT_MODEL_VERSION
-            } else {
-                MODEL_VERSION
-            }
-            .into(),
-            parameters,
-            events: Vec::new(),
-            report: report.clone(),
-        },
-        markets: markets.clone(),
-        market_assets: market_assets.clone(),
-        source_manifests: source_manifests.to_vec(),
-    })?;
-    // The complete authenticated final stream now contains every event. These
-    // exact owned temporary paths are reconstructible, unused intermediate files.
-    drop(readers);
-    for (path, _, _) in results {
-        std::fs::remove_file(path)?;
-    }
-    if let Some(directory) = condition_temporary_root {
-        std::fs::remove_dir(directory)?;
-    }
-    Ok(ScenePreparationCostV2 {
-        events,
-        output_bytes,
-        quantity_plan_seconds,
-        construction_seconds,
-        merge_seconds: merge_start.elapsed().as_secs_f64(),
-        temporary_logical_bytes,
+    Ok(prepare_condition_parallel_scene_with_options_v3(
+        analysis,
+        parameters,
+        markets,
+        market_assets,
+        source_manifests,
+        path,
+        execution_start,
         condition_workers,
-        report,
-    })
+        1,
+        progress_seconds,
+        condition_temporary_root,
+    )?
+    .cost)
 }
+
+#[path = "scene_preparation.rs"]
+mod scene_preparation;
+pub use scene_preparation::{ScenePreparationCostV3, prepare_condition_parallel_scene_with_options_v3};

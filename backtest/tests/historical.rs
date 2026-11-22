@@ -3609,6 +3609,58 @@ fn offline_scene_day_uses_frozen_events_and_original_public_chain() {
         !separate_temporary.exists(),
         "successful final material releases its owned temporary directory"
     );
+    for compression_workers in [1, 2, 4, 6] {
+        let output = root
+            .path()
+            .join(format!("parallel-compression-{compression_workers}.scene"));
+        let cost = prepare_condition_parallel_scene_with_options_v3(
+            &analysis,
+            material.scene.parameters.clone(),
+            &material.markets,
+            &material.market_assets,
+            &material.source_manifests,
+            &output,
+            BASE + 5_000,
+            16,
+            compression_workers,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(cost.cost.report, material.scene.report);
+        assert_eq!(
+            cost.event_serializations,
+            material.scene.events.len() as u64
+        );
+        assert_eq!(cost.merge_event_deserializations, 0);
+        assert_eq!(cost.temporary_read_passes, 1);
+        let (_, reader, _) = open_scene_material(&output).unwrap();
+        let mut clamped = material.scene.events.clone();
+        for event in &mut clamped {
+            event.at_ms = event.at_ms.max(BASE + 5_000);
+        }
+        assert_eq!(reader.collect::<Result<Vec<_>, _>>().unwrap(), clamped);
+    }
+    let blocked_output = root.path().join("blocked-construction.scene");
+    std::fs::create_dir(blocked_output.with_extension("condition-0.ranked.zst")).unwrap();
+    assert!(
+        prepare_condition_parallel_scene_with_options_v3(
+            &analysis,
+            material.scene.parameters.clone(),
+            &material.markets,
+            &material.market_assets,
+            &material.source_manifests,
+            &blocked_output,
+            BASE,
+            16,
+            4,
+            0,
+            None,
+        )
+        .is_err(),
+        "真实并行构造中的一个写盘错误必须返回，且先join其他工人"
+    );
+    assert!(!blocked_output.exists());
     let failed_temporary = root.path().join("owned-failed-temporary");
     let failure = prepare_condition_parallel_scene_with_temporary_root_v2(
         &analysis,
