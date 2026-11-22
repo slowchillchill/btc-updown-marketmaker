@@ -437,3 +437,6 @@ async fn current_prefix_account_assembly_matches_old_frames_and_measures_compone
 fn lane_time(lane: &Lane) -> i64 {
     lane.timing.earliest_start_at_utc_ms
 }
+
+#[path = "account_cache.rs"]
+mod account_cache;

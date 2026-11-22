@@ -65,7 +65,7 @@ pub(crate) fn sample_boundary(
     measurement.cutoffs[index] = cutoff;
     #[cfg(feature = "stage-timing")]
     {
-        measurement.work[index] = serde_json::json!({"history":shared_run::account_history_visits_v1(),"input_assembly_work":shared_run::strategy_input_assembly_work_v1(),"decision_recording":crate::stage_timing::recording_work()});
+        measurement.work[index] = serde_json::json!({"history":shared_run::account_history_visits_v1(),"input_assembly_work":shared_run::strategy_input_assembly_work_v1(),"ledger_economic_cache_work":ledger::economic_read_cache_work_v1(),"decision_recording":crate::stage_timing::recording_work()});
     }
     hub.0.1.control.notify_all();
     loop {

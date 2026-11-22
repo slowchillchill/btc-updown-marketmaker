@@ -52,6 +52,26 @@ use shared_run::*;
 use sim_system::{execution::*, public_consumption::*, *};
 use std::sync::Arc;
 
+#[cfg(feature = "stage-timing")]
+fn assert_economic_cache_reference(read: &LedgerEconomicReadV2<'_>) {
+    let cached = UnmarkedAccountEconomicsReadV3::from_ledger(read);
+    assert_eq!(
+        cached,
+        UnmarkedAccountEconomicsReadV3::from_ledger_uncached_for_measurement(read)
+    );
+    assert_eq!(
+        read.market_totals().collect::<Vec<_>>(),
+        read.market_totals_uncached_for_measurement()
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        AccountEconomicsReadV3::from_ledger_and_observations(read, std::iter::empty()),
+        AccountEconomicsReadV3::from_ledger_and_observations_uncached_for_measurement(
+            read,
+            std::iter::empty()
+        )
+    );
+}
 fn r(n: &str, d: &str) -> ExactRationalV1 {
     ExactRationalV1 {
         numerator: n.into(),
@@ -67,6 +87,8 @@ fn assert_necessary_economics(
 ) {
     let necessary = shared.ledger().necessary_read_v2().unwrap();
     let full = shared.ledger().economic_read().unwrap();
+    #[cfg(feature = "stage-timing")]
+    assert_economic_cache_reference(&full);
     let report = AccountEconomicsReadV3::from_ledger_and_observations(
         &full,
         driver.observations_at_current_prefix(),
@@ -508,6 +530,8 @@ async fn actual_chain_requested_settlement_s0_to_s4_and_stable_ledger() {
                 requested_at = Some(at);
             }
             let read = shared.ledger().economic_read().unwrap();
+            #[cfg(feature = "stage-timing")]
+            assert_economic_cache_reference(&read);
             assert_first_visible_acceptance(case, at, &read, &mut first_accepted_at);
             if let Some(start) = requested_at {
                 assert_settlement_cut(case, (at - start) as u64, &read, &mut seen_cuts);
@@ -528,6 +552,8 @@ async fn actual_chain_requested_settlement_s0_to_s4_and_stable_ledger() {
             "case {case}: true qualified resolution consumed"
         );
         let read = shared.ledger().economic_read().unwrap();
+        #[cfg(feature = "stage-timing")]
+        assert_economic_cache_reference(&read);
         let market = read
             .market_totals()
             .find(|m| m.condition_id.0 == CONDITION_ID)
@@ -753,6 +779,8 @@ async fn real_partial_makers_fix_average_cost_and_nonterminating_fraction() {
         }
         assert!(shared.apply_closed().unwrap());
         let read = shared.ledger().economic_read().unwrap();
+        #[cfg(feature = "stage-timing")]
+        assert_economic_cache_reference(&read);
         let m = read.market_totals().next().unwrap();
         let up = m
             .assets
@@ -972,6 +1000,8 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
         assert_necessary_economics(&shared, &driver);
         let totals = shared.ledger().necessary_read_v2().unwrap();
         let read = shared.ledger().economic_read().unwrap();
+        #[cfg(feature = "stage-timing")]
+        assert_economic_cache_reference(&read);
         let mut pnl = EconomicRational::zero();
         let mut unpaid = EconomicRational::zero();
         for m in read.market_totals() {
@@ -995,6 +1025,8 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
     }
     assert!(shared.apply_closed().unwrap());
     let read = shared.ledger().economic_read().unwrap();
+    #[cfg(feature = "stage-timing")]
+    assert_economic_cache_reference(&read);
     let day = read
         .rebate_days()
         .find(|d| d.kind == RebateKindV1::Maker)
@@ -1040,6 +1072,8 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
         &expected_totals
     );
     let read = restored.economic_read().unwrap();
+    #[cfg(feature = "stage-timing")]
+    assert_economic_cache_reference(&read);
     assert_eq!(read.market_totals().collect::<Vec<_>>(), expected_markets);
     let day = read
         .rebate_days()
@@ -1348,6 +1382,8 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
             if late && at == 66_000 {
                 assert!(shared.apply_closed().unwrap());
                 let read = shared.ledger().economic_read().unwrap();
+                #[cfg(feature = "stage-timing")]
+                assert_economic_cache_reference(&read);
                 let resolution = read.resolutions().next().unwrap();
                 assert_eq!(
                     resolution.economic_predecessors_closed,
@@ -1396,6 +1432,8 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
                 .unwrap()
             {
                 let read = shared.ledger().economic_read().unwrap();
+                #[cfg(feature = "stage-timing")]
+                assert_economic_cache_reference(&read);
                 for resolution in read.resolutions() {
                     assert_eq!(
                         resolution.settlement_cost_attribution,
@@ -1473,6 +1511,8 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
         assert!(stats.final_success);
         assert!(saw_pair);
         let read = shared.ledger().economic_read().unwrap();
+        #[cfg(feature = "stage-timing")]
+        assert_economic_cache_reference(&read);
         let nav = UnmarkedAccountEconomicsReadV3::from_ledger(&read);
         assert_eq!(nav.conservative_nav_pusd, r("24683", "250"));
         assert_eq!(
@@ -1603,6 +1643,8 @@ async fn stable_request_material_queries_pending_success_and_controlled_retry() 
                 driver.stabilize_recording().unwrap();
                 let restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
                 let read = restored.economic_read().unwrap();
+                #[cfg(feature = "stage-timing")]
+                assert_economic_cache_reference(&read);
                 let resolution = read.resolutions().next().unwrap();
                 let fact = resolution.request.unwrap();
                 assert_eq!(
@@ -1632,6 +1674,8 @@ async fn stable_request_material_queries_pending_success_and_controlled_retry() 
                 restored_request = Some(request);
             } else {
                 let read = shared.ledger().economic_read().unwrap();
+                #[cfg(feature = "stage-timing")]
+                assert_economic_cache_reference(&read);
                 let observation = read
                     .resolutions()
                     .next()
@@ -1726,6 +1770,8 @@ async fn pure_loser_closes_without_settlement_request_after_original_barriers() 
     }
     assert!(shared.apply_closed().unwrap());
     let read = shared.ledger().economic_read().unwrap();
+    #[cfg(feature = "stage-timing")]
+    assert_economic_cache_reference(&read);
     let resolution = read.resolutions().next().unwrap();
     assert_eq!(
         resolution.economic_predecessors_closed,
@@ -1840,6 +1886,8 @@ async fn paired_receivable_precedes_loser_failure_and_compensation_barrier() {
             .unwrap()
         {
             let read = shared.ledger().economic_read().unwrap();
+            #[cfg(feature = "stage-timing")]
+            assert_economic_cache_reference(&read);
             for resolution in read.resolutions() {
                 assert_eq!(
                     resolution.settlement_cost_attribution,
@@ -1898,6 +1946,8 @@ async fn paired_receivable_precedes_loser_failure_and_compensation_barrier() {
     assert!(saw_principal_dedup);
     assert!(shared.apply_closed().unwrap());
     let read = shared.ledger().economic_read().unwrap();
+    #[cfg(feature = "stage-timing")]
+    assert_economic_cache_reference(&read);
     assert_eq!(read.cash().actual_available_pusd.0, "99.1152");
     let market = read.market_totals().next().unwrap();
     assert_eq!(market.executed[1].actual_fee_pusd.0, "0.1848");
