@@ -105,6 +105,10 @@ pub struct HistoricalDayRunOptionsV1 {
     pub budget_stop_after: Option<Duration>,
     /// 显式执行模式的公共队列逻辑载荷字节软目标；缺省保留原领先组策略。
     pub producer_payload_bytes: Option<u64>,
+    /// 显式工程前缀截止。各户完成本毫秒动作后保留部分成绩。
+    pub stop_at_utc_ms: Option<i64>,
+    /// 工程测量时各账户在同一完整毫秒同步进程CPU采样；空值关闭。
+    pub cpu_measurement_boundaries: Vec<i64>,
 }
 impl Default for HistoricalDayRunOptionsV1 {
     fn default() -> Self {
@@ -115,6 +119,8 @@ impl Default for HistoricalDayRunOptionsV1 {
             started: Instant::now(),
             budget_stop_after: None,
             producer_payload_bytes: None,
+            stop_at_utc_ms: None,
+            cpu_measurement_boundaries: Vec::new(),
         }
     }
 }
@@ -351,7 +357,13 @@ where
     }
     let options = &bound_options;
     let hub = DayHubV1::new(&day.candidates);
-    hub.0.0.lock().unwrap().research_summary = options.research_summary;
+    {
+        let mut buffer = hub.0.0.lock().unwrap();
+        buffer.research_summary = options.research_summary;
+        buffer.progress_enabled = day.progress_interval_seconds > 0;
+        buffer.cpu_measurement = (!options.cpu_measurement_boundaries.is_empty()).then(||
+            crate::day_measurement::DayCpuMeasurement::new(&options.cpu_measurement_boundaries, day.candidates.len()));
+    }
     let mut count = 0;
     let (mut producer, catalog) = {
         let catalog = Arc::new(RwLock::new(HistoricalRuntimeCatalogV1 {
@@ -513,7 +525,8 @@ where
                                 ),
                                 None => Box::new(hidden),
                             };
-                            let control = DayCandidateControlV1::new(hub.clone(), index, delivery);
+                            let mut control = DayCandidateControlV1::new(hub.clone(), index, delivery);
+                            control.stop_at = options.stop_at_utc_ms;
                             let runtime = tokio::runtime::Builder::new_current_thread().build()?;
                             let report = runtime
                                 .block_on(run_context_with_hook(
@@ -577,6 +590,8 @@ where
         let mut stages = crate::stage_timing::StageTimings::new("day_producer".into());
         let started = Instant::now();
         let mut progress = Instant::now();
+        let mut progress_measurement =
+            (day.progress_interval_seconds > 0).then(crate::day_progress::DayProgress::new);
         let lead = day
             .producer_lead_groups
             .unwrap_or(std::thread::available_parallelism()?.get() * 1024);
@@ -584,11 +599,27 @@ where
         let mut byte_accounting_seconds = 0.0;
         let production=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||->Result<(),MaterialError> {
             loop {
+                // 进程文件读取放在Hub锁外，避免暂停所有消费者。
+                let progress_snapshot = if day.progress_interval_seconds > 0 && progress.elapsed() >= Duration::from_secs(day.progress_interval_seconds) {
+                    let watermarks = hub.0.1.completed_at.iter().map(|at| {
+                        let at = at.load(std::sync::atomic::Ordering::Relaxed);
+                        (at != i64::MIN).then_some(at)
+                    }).collect::<Vec<_>>();
+                    let active = hub.0.0.lock().unwrap().candidates.iter().map(|c| c.active).collect::<Vec<_>>();
+                    Some(progress_measurement.as_mut().unwrap().snapshot(&watermarks, &active, options.stop_at_utc_ms.map_or(config.scope.received_end_utc_ms, |stop| stop.min(config.scope.received_end_utc_ms))))
+                } else { None };
                 {
-                    let buffer=hub.0.0.lock().unwrap();
+                    let mut buffer=hub.0.0.lock().unwrap();
                     if let Some(error)=&buffer.failure {return Err(error.message.clone().into());}
-                    if day.progress_interval_seconds>0 && progress.elapsed()>=Duration::from_secs(day.progress_interval_seconds) {
-                        eprintln!("日作业: phase={}, inputs={count}, active_candidates={}, retained_public_groups={}, retained_hidden_buckets={}, elapsed_seconds={}, total_inputs=unknown",if ended {"consuming"} else {"producing"},buffer.candidates.iter().filter(|c|c.active).count(),buffer.public.len(),buffer.hidden.len(),started.elapsed().as_secs());progress=Instant::now();
+                    if let Some(mut value) = progress_snapshot {
+                        eprintln!("日作业: phase={}, inputs={count}, active_candidates={}, retained_public_groups={}, retained_hidden_buckets={}, elapsed_seconds={}, total_inputs=unknown",if ended {"consuming"} else {"producing"},buffer.candidates.iter().filter(|c|c.active).count(),buffer.public.len(),buffer.hidden.len(),started.elapsed().as_secs());
+                        value["run_ids"] = serde_json::json!(day.candidates.iter().map(|c| &c.session.run_id).collect::<Vec<_>>());
+                        value["producer_public_applied_inputs"] = serde_json::json!(count);
+                        value["retained_public_groups"] = serde_json::json!(buffer.public.len());
+                        value["retained_hidden_buckets"] = serde_json::json!(buffer.hidden.len());
+                        value["producer_backpressure_wait_seconds"] = serde_json::json!(buffer.producer_wait_seconds);
+                        eprintln!("day_progress={value}");
+                        progress=Instant::now();
                     }
                     if buffer.candidates.iter().any(|c|c.active&&(!c.runtime_started||c.source_health.is_none()||c.source_progress.is_none()||c.requirements.is_none())) {let _=measure_stage!(stages, ProducerWaitStartupOrCompletion, hub.0.1.control.wait_timeout(buffer,Duration::from_millis(20))).unwrap();continue;}
                     if options.public_observer.is_some() || buffer.candidates.iter().any(|c|c.source_health==Some(true)||c.source_progress==Some(true)) {producer.core.enable_source_progress();}
@@ -609,6 +640,10 @@ where
                     // 已有可消费材料时让慢候选追上；等待必要完整隐藏桶时继续供料，避免互等。
                     let backlog = options.producer_payload_bytes.map_or(buffer.public.len()+buffer.hidden.len()>lead, |limit| buffer.retained_payload_bytes >= limit && buffer.retained_payload_bytes > 0);
                     if backlog && buffer.candidates.iter().any(|c|c.active&&c.waiting.is_none()) {
+                        if buffer.cpu_measurement.as_ref().is_some_and(|m| m.blocks_supply(&buffer.candidates)) {
+                            buffer.cpu_measurement.as_mut().unwrap().abandon_waiting("producer_backpressure");
+                            hub.0.1.control.notify_all();
+                        }
                         let wait_started=Instant::now();
                         let (mut buffer, _)=measure_stage!(stages, ProducerBackpressureWait, hub.0.1.control.wait_timeout(buffer,Duration::from_millis(10))).unwrap();
                         buffer.producer_wait_seconds += wait_started.elapsed().as_secs_f64();continue;
@@ -620,6 +655,9 @@ where
                 #[cfg(feature = "stage-timing")]
                 let diagnostic_sample = stages.next_diagnostic_sample();
                 count+=1;
+                if !options.cpu_measurement_boundaries.is_empty() {
+                    hub.0.1.producer_applied_inputs.store(count, std::sync::atomic::Ordering::Relaxed);
+                }
                 let mut research_public = Vec::new();
                 if let Some(observer) = &options.public_observer {
                     for group in &next.applied.closed_groups {

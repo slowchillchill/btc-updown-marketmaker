@@ -365,3 +365,118 @@ async fn registry_checkpoint_cost_keeps_real_eight_and_eighty_order_histories() 
         );
     }
 }
+
+/// #392 保持同一终态公开前缀、现金和零活跃责任，只增加真实已终结订单历史。
+#[cfg(feature = "stage-timing")]
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit #392 bounded historical-order visit measurement"]
+async fn ended_order_history_cost_at_identical_current_responsibility() {
+    use rust_decimal::Decimal;
+    let mut expected = None;
+    for orders in [0, 128] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dpt");
+        let core = recorded_memory_complete(&root);
+        let (mut execution, observation, _) = execution_with_rules_v4(
+            &temp.path().join("sim.jsonl"),
+            &core,
+            SUCCESS_POLICY,
+            None,
+            "e".repeat(64),
+            "1000",
+        );
+        let mut ledger = LedgerWriterV1::new_with_admission_v3(
+            AccountAdmissionPolicyV3::ActualCashNoMarketLimit,
+        );
+        execution
+            .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
+            .unwrap();
+        let mut shared = SharedExecutionV2::from_opening(ledger, observation)
+            .unwrap()
+            .unwrap();
+        let source =
+            RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes).unwrap();
+        let mut driver = FinitePublicConsumptionV1::new(execution, source, "history-cost".into());
+        driver.enable_finite_recording_wait().unwrap();
+        for _ in 0..2 {
+            driver.next_group().unwrap().unwrap();
+        }
+        for index in 0..orders {
+            driver.wait_for_recording_capacity().unwrap();
+            shared
+                .execute(
+                    &mut driver.decision().unwrap(),
+                    request(&format!("history-{index}")),
+                    Some(Arc::new(ModelIntentV1::SubmitSingleBuy {
+                        condition_id: ConditionId(CONDITION_ID.into()),
+                        order: BuyLegIntentV1 {
+                            token_id: TokenId(UP_TOKEN_ID.into()),
+                            order: BuyOrderIntentV1::GtcLimit {
+                                limit_price_pusd_per_share: Decimal::new(1, 2),
+                                size_shares: Decimal::from(5),
+                                post_only: true,
+                            },
+                        },
+                    })),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let mut canceled = false;
+        while driver.next_group().unwrap().is_some() {
+            shared.apply_closed().unwrap();
+            if !canceled
+                && driver
+                    .observation_cutoff()
+                    .unwrap()
+                    .decision_time()
+                    .logical_time_utc_ms()
+                    >= 26_000
+            {
+                shared
+                    .execute(
+                        &mut driver.decision().unwrap(),
+                        request("history-cancel"),
+                        Some(Arc::new(ModelIntentV1::CancelMarketOrders {
+                            condition_id: ConditionId(CONDITION_ID.into()),
+                        })),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                canceled = true;
+            }
+        }
+        assert!(canceled);
+        let cutoff = serde_json::to_value(driver.observation_cutoff()).unwrap();
+        assert!(cutoff.is_object());
+        driver.stop_and_drain().unwrap();
+        shared.apply_closed().unwrap();
+        assert_eq!(shared.registry().orders().count(), orders);
+        let cash = shared.ledger().economic_read().unwrap().cash().to_owned();
+        let before = account_history_visits_v1();
+        let started = std::time::Instant::now();
+        for _ in 0..32 {
+            let ExecutionReadValueV1::Known(objects) = shared.registry().cancel_objects() else {
+                panic!("known terminal objects")
+            };
+            assert!(objects.is_empty(), "真实终态历史没有可撤责任");
+        }
+        let elapsed = started.elapsed().as_nanos();
+        let after = account_history_visits_v1();
+        let current = serde_json::json!({"cash":cash,"public_group":cutoff["receipt"]["group"],
+            "visible_at":cutoff["decision_time"]["logical_time_utc_ms"],"active_cancel_objects":0});
+        if let Some(expected) = &expected {
+            assert_eq!(&current, expected);
+        } else {
+            expected = Some(current);
+        }
+        println!(
+            "ended_history_cost={}",
+            serde_json::json!({"ended_orders":orders,"frames":32,"wall_ns":elapsed,
+            "cancel_order_visits":after.cancel_order_visits-before.cancel_order_visits,
+            "paired_intent_visits":after.paired_intent_visits-before.paired_intent_visits})
+        );
+    }
+}

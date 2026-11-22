@@ -33,3 +33,8 @@ pub mod paper_strategy;
 #[cfg(test)]
 #[path = "../tests/support/observation_scaling.rs"]
 mod observation_scaling;
+
+#[cfg(feature = "stage-timing")]
+mod work_measurement;
+#[cfg(feature = "stage-timing")]
+pub use work_measurement::{AccountHistoryVisitsV1, account_history_visits_v1};

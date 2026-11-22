@@ -4,6 +4,8 @@ extern crate self as backtest;
 #[macro_use]
 mod stage_timing;
 mod day;
+mod day_progress;
+mod day_measurement;
 pub mod offline_scene_source;
 mod public_observer;
 pub use public_observer::*;

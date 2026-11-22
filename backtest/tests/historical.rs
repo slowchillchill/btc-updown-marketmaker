@@ -3942,3 +3942,130 @@ fn offline_visibility_case(late_identity: bool) {
             .contains("PRELOAD_MARKET")
     );
 }
+
+#[test]
+fn exact_prefix_stop_finishes_zero_delay_actions_before_returning() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = setup(temp.path());
+    config.timing.calculation_duration_ms = DelayScheduleV1::Fixed(0);
+    config.timing.dispatch_delay_ms = DelayScheduleV1::Fixed(0);
+    let day = research_day(&config, &temp.path().join("state"));
+    let results = run_historical_days_with_options_v1(
+        &[day],
+        rules.clone(),
+        &|_| {
+            Ok(Probe {
+                rules: Some(rules.clone()),
+                no_trade_only: true,
+                ..Default::default()
+            })
+        },
+        1,
+        &HistoricalDayRunOptionsV1 {
+            stop_at_utc_ms: Some(BASE + 2301),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let report = &results[0].candidates[0].report;
+    assert_eq!(report["end_reason"], "BudgetStop");
+    assert_eq!(report["last_observed_at_utc_ms"], BASE + 2301);
+    let timing = &report["last_dispatched_calculation_timing"];
+    assert_eq!(timing["calculation_started_at_utc_ms"], BASE + 2301);
+    assert_eq!(
+        timing["calculation_started_at_utc_ms"],
+        timing["scheduled_send_at_utc_ms"]
+    );
+}
+
+#[test]
+fn cpu_window_releases_survivor_after_other_account_exits_or_fails() {
+    for fail in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, rules) = setup(tmp.path());
+        let mut day = research_day(&config, &tmp.path().join("state"));
+        let mut second = reuse_outputs(&config, &tmp.path().join("second"));
+        second.session.run_id = "survivor".into();
+        second.session.account_id = "survivor-account".into();
+        day.candidates.push(second);
+        let result = run_historical_days_with_options_v1(
+            &[day],
+            rules.clone(),
+            &|run: &HistoricalPreparedRunConfigV1| {
+                let survivor = run.session.run_id == "survivor";
+                Ok(Probe {
+                    no_trade_only: survivor,
+                    exit_immediately: !survivor && !fail,
+                    fail: !survivor && fail,
+                    rules: Some(rules.clone()),
+                    ..Default::default()
+                })
+            },
+            1,
+            &HistoricalDayRunOptionsV1 {
+                cpu_measurement_boundaries: vec![BASE + 1200, BASE + 2200],
+                stop_at_utc_ms: Some(BASE + 2500),
+                ..Default::default()
+            },
+        );
+        if fail {
+            assert!(result.is_err());
+        } else {
+            let result = result.unwrap();
+            assert_eq!(result[0].candidates[0].report["end_reason"], "StrategyExit");
+            assert_eq!(
+                result[0].candidates[1].report["last_observed_at_utc_ms"],
+                BASE + 2500
+            );
+        }
+    }
+}
+
+#[test]
+fn cpu_window_and_small_lead_with_different_delays_preserve_business_progress() {
+    let mut reference = None;
+    for measured in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut config, rules) = setup(tmp.path());
+        config.timing.decision_mode = HistoricalDecisionModeV1::Fixed100msFifo;
+        config.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(0);
+        let mut day = research_day(&config, &tmp.path().join("state"));
+        day.producer_lead_groups = Some(1);
+        let mut delayed = reuse_outputs(&config, &tmp.path().join("delayed"));
+        delayed.session.run_id = "delayed".into();
+        delayed.session.account_id = "delayed-account".into();
+        delayed.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(10_000);
+        day.candidates.push(delayed);
+        let result = run_historical_days_with_options_v1(
+            &[day],
+            rules.clone(),
+            &|_| {
+                Ok(Probe {
+                    no_trade_only: true,
+                    rules: Some(rules.clone()),
+                    ..Default::default()
+                })
+            },
+            1,
+            &HistoricalDayRunOptionsV1 {
+                cpu_measurement_boundaries: if measured {
+                    vec![BASE + 2500, BASE + 2900]
+                } else {
+                    vec![]
+                },
+                stop_at_utc_ms: Some(BASE + 3500),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let summaries=result[0].candidates.iter().map(|candidate| {
+            let r=&candidate.report;
+            serde_json::json!({"reason":r["end_reason"],"observed":r["last_observed_at_utc_ms"],"calculations":r["calculation_count"],"cutoff":r["observation_cutoff"],"economics":r["day_economics"],"last_dispatch":r["last_dispatched_calculation_timing"]})
+        }).collect::<Vec<_>>();
+        if let Some(reference) = &reference {
+            assert_eq!(&summaries, reference);
+        } else {
+            reference = Some(summaries);
+        }
+    }
+}

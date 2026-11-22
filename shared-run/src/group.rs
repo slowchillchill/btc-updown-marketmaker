@@ -336,6 +336,8 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         cutoff: TrustedGroupDecisionCutoffV1,
         frames: &[PublicObservationFrameV1<'_>],
     ) -> Option<ActionBeforeRead<P::Completion>> {
+        #[cfg(feature = "stage-timing")]
+        crate::work_measurement::account_frames(frames.len());
         let orders =
             crate::necessary::obligation_order_ids(&self.ledger, &self.registry, &self.pending);
         self.read_action_before(

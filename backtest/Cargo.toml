@@ -7,7 +7,7 @@ publish = false
 [features]
 default = []
 # 有限本地测量；默认构建没有计时或汇总输出。
-stage-timing = ["data-pipeline-training/stage-timing"]
+stage-timing = ["data-pipeline-training/stage-timing", "shared-run/stage-timing"]
 
 [dependencies]
 rust_decimal = { version = "=1.42.1", default-features = false, features = ["std"] }

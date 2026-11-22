@@ -25,6 +25,7 @@ define_stages! {
     ApplyClosedIncludingNoeClaimAndLedger => "apply_closed_including_noe_claim_and_ledger",
     CalculationIncludingCutoffCopyAndDecide => "calculation_including_cutoff_copy_and_decide",
     CurrentPublicObservationAssembly => "current_public_observation_assembly",
+    FrozenMarketFrameAssembly => "frozen_market_frame_assembly",
     DayEconomicSampling => "day_economic_sampling",
     DeliveryAssemblyAndPublishIncludingLock => "delivery_assembly_and_publish_including_lock",
     DispatchIncludingReserveBridgeSim => "dispatch_including_reserve_bridge_sim",
@@ -74,6 +75,9 @@ pub(crate) struct StageTimings {
     claimed: u64,
     reclaimed_public: u64,
     reclaimed_hidden: u64,
+    cpu_boundaries: std::collections::VecDeque<i64>,
+    clock_ticks_per_second: Option<f64>,
+    market_frame_visits: u64,
 }
 #[cfg(feature = "stage-timing")]
 impl StageTimings {
@@ -97,6 +101,19 @@ impl StageTimings {
             claimed: 0,
             reclaimed_public: 0,
             reclaimed_hidden: 0,
+            cpu_boundaries: std::env::var("BACKTEST_CPU_BOUNDARIES_UTC_MS")
+                .ok()
+                .and_then(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().parse::<i64>())
+                        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+                        .ok()
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+            clock_ticks_per_second: None,
+            market_frame_visits: 0,
         }
     }
     /// 同一退休元组依原顺序释放；每个子区间计一次根 Vec 释放，可能为空。
@@ -152,7 +169,8 @@ impl StageTimings {
             "initialization_market_visits":self.initialization_market_visits,
             "initialization_source_id_visits":self.initialization_source_id_visits,
             "claimed_items":self.claimed,"reclaimed_public":self.reclaimed_public,
-            "reclaimed_hidden":self.reclaimed_hidden})
+            "reclaimed_hidden":self.reclaimed_hidden,"market_frame_visits":self.market_frame_visits,
+            "account_history_visits":shared_run::account_history_visits_v1(),"decision_recording":recording_work()})
     }
     pub(crate) fn start(&self, stage: Stage) -> Option<std::time::Instant> {
         (self.diagnostics_enabled
@@ -178,6 +196,54 @@ impl StageTimings {
             .zip(&self.samples)
             .filter(|(_, sample)| sample.count > 0)
             .collect()
+    }
+    pub(crate) fn market_frame_work(&mut self, count: usize) {
+        self.market_frame_visits += count as u64;
+    }
+    pub(crate) fn cpu_boundary_due(&self, at: i64) -> bool {
+        self.cpu_boundaries
+            .front()
+            .is_some_and(|boundary| *boundary <= at)
+    }
+    pub(crate) fn event_completed(
+        &mut self,
+        at: i64,
+        cutoff: Option<&sim_system::public_consumption::TrustedGroupDecisionCutoffV1>,
+    ) {
+        while self
+            .cpu_boundaries
+            .front()
+            .is_some_and(|boundary| *boundary <= at)
+        {
+            let boundary = self.cpu_boundaries.pop_front().unwrap();
+            let process = crate::ProcessCountersV1::read().ok();
+            let thread_cpu = std::fs::read_to_string("/proc/thread-self/stat")
+                .ok()
+                .and_then(|stat| {
+                    let fields = stat
+                        .rsplit_once(") ")?
+                        .1
+                        .split_whitespace()
+                        .collect::<Vec<_>>();
+                    Some((
+                        fields.get(11)?.parse::<u64>().ok()?,
+                        fields.get(12)?.parse::<u64>().ok()?,
+                    ))
+                });
+            if self.clock_ticks_per_second.is_none() {
+                self.clock_ticks_per_second = crate::process_clock_ticks_per_second_v1();
+            }
+            eprintln!(
+                "runtime_cpu_boundary={}",
+                serde_json::json!({
+                "scope":self.label,"requested_at_utc_ms":boundary,"completed_event_at_utc_ms":at,
+                "observation_cutoff":cutoff,"clock_ticks_per_second":self.clock_ticks_per_second,
+                "process_counters":process,"thread_user_system_ticks":thread_cpu,
+                "history_visits":shared_run::account_history_visits_v1(),"stages":self.samples(),
+                "scope_wall_ns":self.started.map(|s|s.elapsed().as_nanos()),
+                "process_counters_overlap_other_accounts":true})
+            );
+        }
     }
     pub(crate) fn emit_hour(&self, boundary_utc_ms: i64) {
         eprintln!(
@@ -305,5 +371,74 @@ mod tests {
         assert_eq!(sample.count, 2);
         assert_eq!(sample.total_ns, 10);
         assert_eq!(sample.max_ns, 7);
+    }
+}
+
+#[cfg(feature = "stage-timing")]
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub(crate) struct RecordingWork {
+    calls: u64,
+    encode_and_buffer_ns: u128,
+    file_write_ns: u128,
+    file_write_bytes: u64,
+}
+#[cfg(feature = "stage-timing")]
+thread_local! { static RECORDING: std::cell::Cell<RecordingWork> = std::cell::Cell::new(RecordingWork::default()); }
+#[cfg(feature = "stage-timing")]
+pub(crate) fn recording_work() -> RecordingWork {
+    RECORDING.with(std::cell::Cell::get)
+}
+#[cfg(feature = "stage-timing")]
+pub(crate) struct EvidenceFile(pub std::fs::File);
+#[cfg(feature = "stage-timing")]
+impl From<std::fs::File> for EvidenceFile {
+    fn from(file: std::fs::File) -> Self {
+        Self(file)
+    }
+}
+#[cfg(feature = "stage-timing")]
+impl std::io::Write for EvidenceFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let started = std::time::Instant::now();
+        let result = self.0.write(bytes);
+        RECORDING.with(|value| {
+            let mut work = value.get();
+            work.file_write_ns += started.elapsed().as_nanos();
+            work.file_write_bytes += result.as_ref().copied().unwrap_or(0) as u64;
+            value.set(work);
+        });
+        result
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+#[cfg(feature = "stage-timing")]
+pub(crate) struct EncodingTimer {
+    started: std::time::Instant,
+    previous_write_ns: u128,
+}
+#[cfg(feature = "stage-timing")]
+impl EncodingTimer {
+    pub fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            previous_write_ns: recording_work().file_write_ns,
+        }
+    }
+}
+#[cfg(feature = "stage-timing")]
+impl Drop for EncodingTimer {
+    fn drop(&mut self) {
+        RECORDING.with(|value| {
+            let mut work = value.get();
+            work.calls += 1;
+            work.encode_and_buffer_ns += self
+                .started
+                .elapsed()
+                .as_nanos()
+                .saturating_sub(work.file_write_ns - self.previous_write_ns);
+            value.set(work);
+        });
     }
 }

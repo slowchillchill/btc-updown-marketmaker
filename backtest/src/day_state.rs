@@ -8,7 +8,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
 };
 
@@ -56,6 +56,8 @@ pub(crate) struct DayBufferV1 {
     pub candidates: Vec<CandidateProgressV1>,
     pub production: ProductionV1,
     pub research_summary: bool,
+    pub progress_enabled: bool,
+    pub cpu_measurement: Option<crate::day_measurement::DayCpuMeasurement>,
     pub failure: Option<DayFailureSignalV1>,
 }
 impl DayBufferV1 {
@@ -82,6 +84,8 @@ pub(crate) struct DaySignalsV1 {
     pub hidden: Condvar,
     pub control: Condvar,
     pub budget_stop_requested: AtomicBool,
+    pub completed_at: Vec<Arc<AtomicI64>>,
+    pub producer_applied_inputs: AtomicU64,
 }
 impl DaySignalsV1 {
     pub fn notify_all(&self) {
@@ -124,6 +128,8 @@ impl DayHubV1 {
                     .collect(),
                 production: ProductionV1::Running,
                 research_summary: false,
+                progress_enabled: false,
+                cpu_measurement: None,
                 failure: None,
             }),
             DaySignalsV1 {
@@ -131,6 +137,11 @@ impl DayHubV1 {
                 hidden: Condvar::new(),
                 control: Condvar::new(),
                 budget_stop_requested: AtomicBool::new(false),
+                producer_applied_inputs: AtomicU64::new(0),
+                completed_at: candidates
+                    .iter()
+                    .map(|_| Arc::new(AtomicI64::new(i64::MIN)))
+                    .collect(),
             },
         )))
     }
@@ -594,6 +605,10 @@ impl Iterator for DayHiddenSourceV1 {
     }
 }
 pub(crate) struct DayCandidateControlV1 {
+    pub stop_at: Option<i64>,
+    prefix_completed: bool,
+    cpu_boundaries: VecDeque<i64>,
+    completed_at: Option<Arc<AtomicI64>>,
     delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     hub: DayHubV1,
     index: usize,
@@ -604,7 +619,27 @@ impl DayCandidateControlV1 {
         index: usize,
         delivery: Rc<RefCell<DayLocalDeliveryCacheV1>>,
     ) -> Self {
+        let completed_at = hub
+            .0
+            .0
+            .lock()
+            .unwrap()
+            .progress_enabled
+            .then(|| hub.0.1.completed_at[index].clone());
+        let cpu_boundaries = hub
+            .0
+            .0
+            .lock()
+            .unwrap()
+            .cpu_measurement
+            .as_ref()
+            .map(|m| m.boundaries.clone())
+            .unwrap_or_default();
         Self {
+            cpu_boundaries,
+            stop_at: None,
+            prefix_completed: false,
+            completed_at,
             delivery,
             hub,
             index,
@@ -612,6 +647,25 @@ impl DayCandidateControlV1 {
     }
 }
 impl RuntimeControlV1 for DayCandidateControlV1 {
+    fn stop_at(&self) -> Option<i64> {
+        self.stop_at
+    }
+    fn cpu_boundary_due(&self, at: i64) -> bool {
+        self.cpu_boundaries.front().is_some_and(|b| *b <= at)
+    }
+    fn measure_boundary(&mut self, at: i64, cutoff: Option<TrustedGroupDecisionCutoffV1>) {
+        let remaining = crate::day_measurement::sample_boundary(&self.hub, self.index, at, cutoff);
+        self.cpu_boundaries.pop_front();
+        if !remaining {
+            self.cpu_boundaries.clear();
+        }
+    }
+    fn event_completed(&mut self, at: i64) {
+        self.prefix_completed = self.stop_at.is_some_and(|stop| at >= stop);
+        if let Some(completed_at) = &self.completed_at {
+            completed_at.store(at, Ordering::Relaxed);
+        }
+    }
     fn public_evidence(&self, position: u64) -> Option<Arc<HistoricalPublicEvidenceV1>> {
         self.delivery
             .borrow()
@@ -636,7 +690,7 @@ impl RuntimeControlV1 for DayCandidateControlV1 {
         self.hub.0.1.control.notify_all();
     }
     fn stop_requested(&mut self) -> Result<bool, MaterialError> {
-        Ok(self.hub.0.1.budget_stop_requested.load(Ordering::Acquire))
+        Ok(self.prefix_completed || self.hub.0.1.budget_stop_requested.load(Ordering::Acquire))
     }
 }
 
@@ -675,6 +729,34 @@ mod tests {
                 v.wait_wall_including_lock_reacquire_ns += started.elapsed().as_nanos();
             });
         }
+    }
+    #[test]
+    fn progress_watermark_records_completed_events_and_can_be_disabled() {
+        let mut hub = DayHubV1::new(&[]);
+        let signals = &mut Arc::get_mut(&mut hub.0).unwrap().1;
+        signals
+            .completed_at
+            .push(Arc::new(AtomicI64::new(i64::MIN)));
+        let delivery = Rc::new(RefCell::new(DayLocalDeliveryCacheV1 {
+            public: VecDeque::new(),
+            hidden: VecDeque::new(),
+            initialization: None,
+            research_public: None,
+            public_end: 128,
+            hidden_end: 256,
+            times: crate::timing::DeliveryTimes {
+                delays: crate::timing::DelayScheduleV1::Fixed(0),
+                last: Some(999),
+            },
+        }));
+        let mut disabled = DayCandidateControlV1::new(hub.clone(), 0, delivery.clone());
+        disabled.event_completed(100);
+        assert_eq!(hub.0.1.completed_at[0].load(Ordering::Relaxed), i64::MIN);
+        hub.0.0.lock().unwrap().progress_enabled = true;
+        let mut enabled = DayCandidateControlV1::new(hub.clone(), 0, delivery);
+        enabled.event_completed(107);
+        assert_eq!(hub.0.1.completed_at[0].load(Ordering::Relaxed), 107);
+        // 已预取到999的交付状态不能成为已完成水位。
     }
     #[test]
     fn publication_satisfies_only_the_requested_source_before_consumer_resumes() {

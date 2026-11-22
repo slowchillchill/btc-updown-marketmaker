@@ -683,12 +683,20 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
                 population
                     .cancellations
                     .iter()
+                    .inspect(|_| {
+                        #[cfg(feature = "stage-timing")]
+                        crate::work_measurement::cancellation_source();
+                    })
                     .filter_map(|id| self.intents.get(id)),
             )
         } else {
             Box::new(
                 self.intents
                     .values()
+                    .inspect(|_| {
+                        #[cfg(feature = "stage-timing")]
+                        crate::work_measurement::cancellation_source();
+                    })
                     .filter(|s| cancellation_scope(s.origin.intent()).is_some()),
             )
         }
@@ -834,6 +842,8 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         &'a self,
         conditions: impl IntoIterator<Item = &'a ConditionId>,
     ) -> ExecutionReadValueV1<Vec<CancelObjectRead<'a, R>>> {
+        #[cfg(feature = "stage-timing")]
+        crate::work_measurement::cancel_orders(self.orders.len());
         let eligible: BTreeMap<_, _> = self
             .orders
             .iter()
@@ -882,6 +892,8 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             })
             .collect();
         let mut paired = Vec::new();
+        #[cfg(feature = "stage-timing")]
+        crate::work_measurement::paired_intents(self.intents.len());
         for submitted in self.intents.values() {
             if !matches!(
                 submitted.origin.intent(),
@@ -1370,6 +1382,8 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
     ) -> Option<(&Submitted<Ref<R>>, bool)> {
         self.cancellation_intents()
             .filter_map(|request| {
+                #[cfg(feature = "stage-timing")]
+                crate::work_measurement::latest_cancel();
                 let request_scope = cancellation_scope(request.origin.intent())?;
                 let complete = request.completed.as_ref()?;
                 let relation = scope.map_or(Some(true), |s| self.relation(s, &request_scope));
