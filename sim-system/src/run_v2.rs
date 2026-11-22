@@ -22042,8 +22042,7 @@ impl PublicConsumptionStateV1 {
     pub fn public_rule_contexts(
         &self,
     ) -> impl Iterator<Item = &Arc<contracts::PublicTradingRuleContextV1>> {
-        self.observations_at_current_prefix()
-            .iter()
+        self.observations_at_current_prefix_iter()
             .map(|o| &self.rules[&o.market.condition_id.0])
     }
     pub fn observation_at_current_prefix(
@@ -22066,6 +22065,14 @@ impl PublicConsumptionStateV1 {
         self.last_prepared
             .as_ref()
             .map_or(&[], |p| p.group.observations.as_slice())
+    }
+    /// 直接借用当前已消费前缀的原观察；Shared表示不额外物化完整Vec，保持原观察顺序。
+    pub fn observations_at_current_prefix_iter(
+        &self,
+    ) -> impl Iterator<Item = &contracts::MarketBusinessObservationV1> {
+        self.last_prepared
+            .iter()
+            .flat_map(|prepared| prepared.group.observations.iter())
     }
     /// 尚未结束市场加实际消费者义务；按原观察顺序定位，不创建全市场帧。
     pub fn selected_frames_at_observation<'a, 'b>(

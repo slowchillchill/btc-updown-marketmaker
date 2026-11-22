@@ -349,12 +349,38 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
     ) -> Option<ActionBeforeRead<P::Completion>> {
         #[cfg(feature = "stage-timing")]
         crate::work_measurement::account_frames(frames.len());
-        let orders =
-            crate::necessary::obligation_order_ids(&self.ledger, &self.registry, &self.pending);
+        let orders = measure_input_phase!(
+            FreezeOrderScope,
+            crate::necessary::obligation_order_ids(&self.ledger, &self.registry, &self.pending)
+        );
         self.read_action_before(
-            self.registry.action_snapshot_with_orders(&orders),
+            measure_input_phase!(
+                FreezeRegistry,
+                self.registry.action_snapshot_with_orders(&orders)
+            ),
             cutoff,
             frames,
+        )
+    }
+    /// 冻结账户只使用当前原观察值，不为账户经济读取重建未使用的统计帧。
+    pub(crate) fn freeze_action_before_current_prefix(
+        &self,
+        cutoff: TrustedGroupDecisionCutoffV1,
+        driver: &PublicConsumptionStateV1,
+    ) -> Option<ActionBeforeRead<P::Completion>> {
+        #[cfg(feature = "stage-timing")]
+        crate::work_measurement::account_frames(driver.public_observation_count());
+        let orders = measure_input_phase!(
+            FreezeOrderScope,
+            crate::necessary::obligation_order_ids(&self.ledger, &self.registry, &self.pending)
+        );
+        self.read_action_before_observations(
+            measure_input_phase!(
+                FreezeRegistry,
+                self.registry.action_snapshot_with_orders(&orders)
+            ),
+            cutoff,
+            driver.observations_at_current_prefix_iter(),
         )
     }
     /// 工程对照沿原历史筛选冻结同一账户前缀；只在计量特性下提供。
@@ -388,19 +414,43 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         cutoff: TrustedGroupDecisionCutoffV1,
         frames: &[PublicObservationFrameV1<'_>],
     ) -> Option<ActionBeforeRead<P::Completion, G>> {
-        let economic = self.ledger.economic_read()?;
-        let obligation_orders =
-            crate::necessary::obligation_order_ids(&self.ledger, &self.registry, &self.pending);
-        let obligation_trades = crate::necessary::freeze_obligation_trades(
-            &self.ledger,
-            &self.registry,
-            &obligation_orders,
+        self.read_action_before_observations(
+            registry,
+            cutoff,
+            frames.iter().map(|frame| frame.observation),
+        )
+    }
+    fn read_action_before_observations<'a, G: Borrow<SharedExecutionRegistry<P::Completion>>>(
+        &self,
+        registry: G,
+        cutoff: TrustedGroupDecisionCutoffV1,
+        observations: impl Iterator<Item = &'a contracts::MarketBusinessObservationV1>,
+    ) -> Option<ActionBeforeRead<P::Completion, G>> {
+        let economic = measure_input_phase!(LedgerEconomicRead, self.ledger.economic_read())?;
+        let obligation_orders = measure_input_phase!(
+            ActionOrderScope,
+            crate::necessary::obligation_order_ids(&self.ledger, &self.registry, &self.pending)
         );
-        let request_trades = crate::necessary::freeze_request_trades(
-            &self.ledger,
-            &crate::necessary::request_trade_identities(&self.registry, &obligation_orders),
+        let obligation_trades = measure_input_phase!(
+            ObligationTrades,
+            crate::necessary::freeze_obligation_trades(
+                &self.ledger,
+                &self.registry,
+                &obligation_orders
+            )
         );
-        let (requests, orders) = self.read_action_funds(registry.borrow(), &obligation_orders);
+        let request_trade_ids = measure_input_phase!(
+            RequestTradeIdentities,
+            crate::necessary::request_trade_identities(&self.registry, &obligation_orders)
+        );
+        let request_trades = measure_input_phase!(
+            RequestTradeEconomics,
+            crate::necessary::freeze_request_trades(&self.ledger, &request_trade_ids)
+        );
+        let (requests, orders) = measure_input_phase!(
+            ActionFunds,
+            self.read_action_funds(registry.borrow(), &obligation_orders)
+        );
         Some(ActionBeforeRead {
             obligation_orders,
             obligation_trades,
@@ -408,11 +458,11 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             account: OwnedActionAccountV2 {
                 learning: None,
                 request_trades,
-                economics: AccountEconomicsReadV3::from_ledger_and_observations(
-                    &economic,
-                    frames.iter().map(|f| f.observation),
+                economics: measure_input_phase!(
+                    AccountEconomics,
+                    AccountEconomicsReadV3::from_ledger_and_observations(&economic, observations)
                 ),
-                ledger: economic.into_base(),
+                ledger: measure_input_phase!(LedgerProjection, economic.into_base()),
             },
             visible_cutoff: (&cutoff).into(),
             cutoff,

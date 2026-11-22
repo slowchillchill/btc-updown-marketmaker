@@ -170,7 +170,7 @@ impl StageTimings {
             "initialization_source_id_visits":self.initialization_source_id_visits,
             "claimed_items":self.claimed,"reclaimed_public":self.reclaimed_public,
             "reclaimed_hidden":self.reclaimed_hidden,"market_frame_visits":self.market_frame_visits,
-            "account_history_visits":shared_run::account_history_visits_v1(),"decision_recording":recording_work()})
+            "account_history_visits":shared_run::account_history_visits_v1(),"input_assembly_work":shared_run::strategy_input_assembly_work_v1(),"decision_recording":recording_work()})
     }
     pub(crate) fn start(&self, stage: Stage) -> Option<std::time::Instant> {
         (self.diagnostics_enabled
@@ -239,7 +239,7 @@ impl StageTimings {
                 "scope":self.label,"requested_at_utc_ms":boundary,"completed_event_at_utc_ms":at,
                 "observation_cutoff":cutoff,"clock_ticks_per_second":self.clock_ticks_per_second,
                 "process_counters":process,"thread_user_system_ticks":thread_cpu,
-                "history_visits":shared_run::account_history_visits_v1(),"stages":self.samples(),
+                "history_visits":shared_run::account_history_visits_v1(),"input_assembly_work":shared_run::strategy_input_assembly_work_v1(),"stages":self.samples(),
                 "scope_wall_ns":self.started.map(|s|s.elapsed().as_nanos()),
                 "process_counters_overlap_other_accounts":true})
             );

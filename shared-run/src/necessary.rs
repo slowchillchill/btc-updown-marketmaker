@@ -412,7 +412,7 @@ impl ActionAccountReadV2 for BorrowedActionAccountV2<'_> {
             let economics = if let Some(driver) = self.driver {
                 AccountEconomicsReadV3::from_ledger_and_observations(
                     &read,
-                    driver.observations_at_current_prefix(),
+                    driver.observations_at_current_prefix_iter(),
                 )
             } else {
                 AccountEconomicsReadV3::from_ledger_and_observations(
