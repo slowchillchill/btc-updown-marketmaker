@@ -1029,6 +1029,7 @@ where
                 grid_at.filter(|t| *t < active_end),
                 pending_at.filter(|t| *t < active_end),
                 health_at.filter(|t| *t < active_end),
+                control.stop_at(),
             ]
             .into_iter()
             .flatten()
@@ -1565,6 +1566,8 @@ where
             }
             if grid_at == Some(at) && at < active_end {
                 fifo_summary.grid_opportunities += 1;
+                #[cfg(feature = "stage-timing")]
+                let freeze_started = stages.start(crate::stage_timing::Stage::FrozenMarketFrameAssembly);
                 if let Some(cutoff) = driver.observation_cutoff() {
                     let frames = if strategy.selects_relevant_markets() {
                         shared
@@ -1576,6 +1579,8 @@ where
                     } else {
                         driver.frames_at_observation()
                     };
+                    #[cfg(feature = "stage-timing")]
+                    stages.market_frame_work(frames.len());
                     if !frames.is_empty() {
                         let earliest_start_at_utc_ms = crate::timing::after(
                             at,
@@ -1619,6 +1624,8 @@ where
                 } else {
                     fifo_summary.grid_without_market_frame += 1;
                 }
+                #[cfg(feature = "stage-timing")]
+                stages.finish(crate::stage_timing::Stage::FrozenMarketFrameAssembly, freeze_started);
                 grid_at = at.checked_add(100).filter(|next| *next < active_end);
             }
             if at < active_end && fifo_enabled && pending.is_none() && start_at.is_none() {
@@ -1643,12 +1650,12 @@ where
                 start_at = None;
                 let calculation = if fifo_enabled {
                     let frame = fifo.pop_front().expect("已到队首处理时刻");
-                    let input = shared.strategy_input_for_market_frame_with_learning_requests(
+                    let input = measure_stage!(stages, StrategyInputAssembly, shared.strategy_input_for_market_frame_with_learning_requests(
                         &mut driver, frame, strategy.requires_trade_economics_details(), strategy.requires_learning_economics(), strategy.retained_learning_requests().as_deref(),
-                    ).map_err(HistoricalFailureCauseV1::Ledger)?;
+                    )).map_err(HistoricalFailureCauseV1::Ledger)?;
                     if let Some(input) = input {
                         fifo_summary.started_market_frames += 1;
-                        let calculation = input.calculate(strategy, at)
+                        let calculation = measure_stage!(stages, CalculationIncludingCutoffCopyAndDecide, input.calculate(strategy, at))
                             .map_err(HistoricalFailureCauseV1::Strategy)?;
                         if let Some(step) = strategy.take_learning_step() {
                             let observer = context.learning_observer.as_mut().ok_or_else(|| {
@@ -1856,6 +1863,18 @@ where
                     DayEconomicSampling,
                     sample_day_economics(&driver, &shared, at, &mut day_economics)
                 );
+            }
+            if !immediate_pending && !immediate_start {
+                #[cfg(feature = "stage-timing")]
+                if stages.cpu_boundary_due(at) {
+                    stages.event_completed(at, driver.observation_cutoff().as_ref());
+                }
+                control.event_completed(at);
+                if control.cpu_boundary_due(at) {
+                    #[cfg(feature="stage-timing")]
+                    stages.emit_hour(at);
+                    control.measure_boundary(at, driver.observation_cutoff());
+                }
             }
             if control.stop_requested().map_err(HistoricalFailureCauseV1::Material)? {
                 // 同毫秒已算完的Exit保持原终止原因；未到期的计算保持部分成绩中的原状态。
@@ -2107,6 +2126,11 @@ impl<D> Default for RuntimeLoopStateV1<D> {
     }
 }
 pub(crate) trait RuntimeControlV1 {
+    fn stop_at(&self) -> Option<i64> { None }
+    fn cpu_boundary_due(&self, _at:i64) -> bool { false }
+    fn measure_boundary(&mut self, _at:i64, _cutoff:Option<TrustedGroupDecisionCutoffV1>) {}
+    /// 完整模拟毫秒事件后的诊断水位，不能用预取游标代替。
+    fn event_completed(&mut self, _at: i64) {}
     fn public_evidence(&self, _position: u64) -> Option<Arc<HistoricalPublicEvidenceV1>> {
         None
     }

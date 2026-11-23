@@ -10,6 +10,10 @@ pub(super) struct EconomicReadIndex {
     pub positions: std::sync::OnceLock<std::sync::Arc<Vec<super::ConfirmedPositionReadV1>>>,
     #[serde(skip)]
     pub account: std::sync::OnceLock<super::necessary::AccountIndex>,
+    #[serde(skip)]
+    pub market_details: std::sync::OnceLock<
+        BTreeMap<String, std::sync::OnceLock<super::MarketEconomicTotalsReadV1>>,
+    >,
     pub markets: BTreeMap<String, TradeTotals>,
     pub estimates: BTreeMap<(RebateKindV1, i64), BTreeMap<String, Estimate>>,
     pub contributed: BTreeSet<Identity>,

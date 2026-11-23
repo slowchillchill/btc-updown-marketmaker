@@ -14,6 +14,11 @@ type R = EconomicRational;
 #[path = "economics/read_index.rs"]
 mod read_index;
 use read_index::EconomicReadIndex;
+#[cfg(feature = "stage-timing")]
+#[path = "economics/cache_work.rs"]
+mod cache_work;
+#[cfg(feature = "stage-timing")]
+pub use cache_work::{EconomicReadCacheWorkV1, economic_read_cache_work_v1};
 #[path = "economics/necessary.rs"]
 mod necessary;
 pub use necessary::*;
@@ -986,7 +991,7 @@ impl EconomicsState {
         if self
             .read_index
             .as_ref()
-            .is_some_and(|i| i.account.get().is_some())
+            .is_some_and(|i| i.account.get().is_some() || i.market_details.get().is_some())
         {
             affected.extend(patch.markets.iter().map(|(id, _)| id.clone()));
             affected.extend(
@@ -994,6 +999,13 @@ impl EconomicsState {
                     .trades
                     .iter()
                     .map(|(_, t)| t.fact.condition_id.0.clone()),
+            );
+            affected.extend(
+                patch
+                    .trades
+                    .iter()
+                    .filter_map(|(id, _)| self.trades.get(id))
+                    .map(|trade| trade.fact.condition_id.0.clone()),
             );
             let add_day_markets = |affected: &mut std::collections::BTreeSet<String>,
                                    day: &RebateDay| {
@@ -1011,6 +1023,13 @@ impl EconomicsState {
                 match update {
                     RebateDayUpdate::Contributions { additions } => {
                         affected.extend(additions.iter().map(|(_, c)| c.condition_id.0.clone()));
+                        // 估计返佣按被贡献的原成交身份移除；失效也覆盖其实际市场。
+                        affected.extend(
+                            additions
+                                .iter()
+                                .filter_map(|(_, c)| self.trades.get(&c.trade_identity))
+                                .map(|trade| trade.fact.condition_id.0.clone()),
+                        );
                     }
                     RebateDayUpdate::Existing(day) => {
                         if let Some(old) = self.days.get(key) {
@@ -1123,6 +1142,15 @@ impl EconomicsState {
                         );
                     }
                     *day = previous;
+                }
+            }
+        }
+        if let Some(details) = index.market_details.get_mut() {
+            for id in &affected {
+                let entry = details.entry(id.clone()).or_default();
+                if entry.take().is_some() {
+                    #[cfg(feature = "stage-timing")]
+                    cache_work::detail_invalidate();
                 }
             }
         }
@@ -1533,197 +1561,250 @@ impl LedgerEconomicReadV2<'_> {
             })
         })
     }
+    /// 原市场完整明细；按经济补丁实际影响的市场失效，返回值仍是独立拥有式值。
     pub fn market_totals(&self) -> impl Iterator<Item = MarketEconomicTotalsReadV1> + '_ {
-        self.state.markets.iter().map(|(condition, m)| {
-            let (pair, orphan) = m.receivables();
-            let redeemed = m
-                .resolution
-                .as_ref()
-                .map(|r| r.redeemed_pair)
-                .unwrap_or_default();
-            let redeemed_orphan = m
-                .resolution
-                .as_ref()
-                .map(|r| r.redeemed_orphan)
-                .unwrap_or_default();
-            let rebates = std::array::from_fn(|r| {
-                let kind = if r == 0 {
-                    RebateKindV1::Maker
-                } else {
-                    RebateKindV1::Taker
-                };
-                let mut amounts: [R; 5] = std::array::from_fn(|_| R::zero());
-                for day in self.state.days.values().filter(|d| d.kind == kind) {
-                    for (sum, value) in amounts.iter_mut().zip(day.amounts(Some(condition))) {
-                        *sum = sum.add(&value);
-                    }
-                }
-                RebateAmountsReadV1::from_amounts(
-                    amounts,
-                    self.estimated_rebate(kind, Some(condition), None),
-                )
-            });
-            // 修复缺口只看已公开终局实际份额；经济成功池仍沿原入账条件更新。
-            let mut final_success_quantity = [Decimal::ZERO; 2];
-            if let Some(assets) = &m.assets {
-                if let Some(index) = &self.state.read_index {
-                    if let Some(totals) = index.markets.get(condition) {
-                        final_success_quantity = std::array::from_fn(|i| {
-                            *totals
-                                .final_success
-                                .get(&assets[i].token_id.0)
-                                .unwrap_or(&Decimal::ZERO)
-                        });
-                    }
-                } else {
-                    for trade in self.state.trades.values().filter(|t| {
-                        t.fact.condition_id.0 == *condition
-                            && t.fact.economic_disposition
-                                == SourceNeutralTradeEconomicDispositionV1::FinalSuccess
-                    }) {
-                        if let Some(i) = assets
-                            .iter()
-                            .position(|a| a.token_id == trade.fact.token_id)
-                        {
-                            final_success_quantity[i] +=
-                                decimal(&trade.fact.base_quantity_shares).expect("原真实成交份额");
-                        }
-                    }
-                }
-            }
-            let successful_investment_pusd = if let Some(index) = &self.state.read_index {
-                index
-                    .markets
-                    .get(condition)
-                    .map_or_else(R::zero, |t| t.investment.clone())
-                    .public()
-            } else {
+        let cache = self.state.read_index.as_ref().map(|index| {
+            index.market_details.get_or_init(|| {
                 self.state
-                    .trades
-                    .values()
-                    .filter(|t| {
-                        t.fact.condition_id.0 == *condition
-                            && t.success_applied
-                            && t.economic_applied
-                    })
-                    .fold(R::zero(), |sum, t| {
-                        sum.add(&R::from_decimal(
-                            decimal(&t.fact.quote_amount_pusd).expect("原本金"),
-                        ))
-                        .add(&R::from_decimal(t.net_fee))
-                    })
-                    .public()
-            };
-            let successful_investment =
-                R::try_from(&successful_investment_pusd).expect("原成功投入");
-            let unpaired_success_fee_pusd = self.unpaired_fee(condition, m);
-            let paired_fee = match &unpaired_success_fee_pusd {
-                ExecutionReadValueV1::Known(unpaired) => ExecutionReadValueV1::Known(
-                    successful_investment
-                        .sub(&m.success_cost[0])
-                        .sub(&m.success_cost[1])
-                        .sub(&R::try_from(unpaired).expect("原孤腿费用"))
-                        .public(),
-                ),
-                _ => ExecutionReadValueV1::Unavailable,
-            };
-            let paired_spread = match &paired_fee {
-                ExecutionReadValueV1::Known(fee) => ExecutionReadValueV1::Known(
-                    R::from_decimal(m.paired)
-                        .sub(&m.paired_cost[0])
-                        .sub(&m.paired_cost[1])
-                        .sub(&R::try_from(fee).expect("原配对费用"))
-                        .public(),
-                ),
-                _ => ExecutionReadValueV1::Unavailable,
-            };
-            MarketEconomicTotalsReadV1 {
-                condition_id: ConditionId(condition.clone()),
-                assets: m.assets.clone(),
-                success_shares: std::array::from_fn(|i| {
-                    exact(m.success_quantity[i] - redeemed - redeemed_orphan[i])
-                }),
-                success_principal_cost_pusd: std::array::from_fn(|i| {
-                    if redeemed > Decimal::ZERO || redeemed_orphan[i] > Decimal::ZERO {
-                        R::zero().public()
-                    } else {
-                        m.success_cost[i].public()
-                    }
-                }),
-                repair_gap_shares: std::array::from_fn(|i| {
-                    exact(
-                        (final_success_quantity[1 - i] - final_success_quantity[i])
-                            .max(Decimal::ZERO),
-                    )
-                }),
-                unpaid_taker_fee_pusd: exact(m.unpaid_taker),
-                settlement_state: match &m.resolution {
-                    None => EconomicSettlementStateV1::Unresolved,
-                    Some(resolution) if resolution.auto_redeemed => {
-                        EconomicSettlementStateV1::Redeemed
-                    }
-                    Some(resolution) => match resolution.request.as_ref().map(|r| r.outcome) {
-                        Some(SettlementRequestOutcomeV1::FinalSuccess)
-                            if resolution.redeemed_pair > Decimal::ZERO
-                                || resolution
-                                    .redeemed_orphan
-                                    .iter()
-                                    .any(|q| *q > Decimal::ZERO) =>
-                        {
-                            EconomicSettlementStateV1::Redeemed
-                        }
-                        Some(SettlementRequestOutcomeV1::FinalFailureNoEffect) => {
-                            EconomicSettlementStateV1::RequestFailedNoEffect
-                        }
-                        Some(_) => EconomicSettlementStateV1::RequestPending,
-                        None if pair + orphan > Decimal::ZERO => {
-                            EconomicSettlementStateV1::ReceivableNotRequested
-                        }
-                        None => EconomicSettlementStateV1::ResolvedNoCurrentPayout,
-                    },
-                },
-                cumulative_paired_shares: exact(m.paired),
-                cumulative_paired_principal_cost_pusd: std::array::from_fn(|i| {
-                    m.paired_cost[i].public()
-                }),
-                cumulative_paired_actual_trade_fee_pusd: paired_fee,
-                cumulative_paired_spread_after_trade_fee_pusd: paired_spread,
-                redeemed_paired_shares: exact(redeemed),
-                paired_shares: exact(m.paired - redeemed),
-                orphan_shares: std::array::from_fn(|i| {
-                    exact(m.pools[i].quantity - redeemed_orphan[i])
-                }),
-                executed: std::array::from_fn(|r| ExecutedEconomicsReadV1 {
-                    shares: exact(m.executed_quantity[r]),
-                    principal_pusd: exact(m.executed_principal[r]),
-                    actual_fee_pusd: exact(m.executed_fees[r]),
-                }),
-                rebates,
-                guaranteed_position_value_pusd: exact(if m.resolution.is_some() {
-                    Decimal::ZERO
-                } else {
-                    m.paired
-                }),
-                paired_resolution_receivable_pusd: exact(pair),
-                winner_orphan_receivable_pusd: exact(orphan),
-                unpaid_settlement_fee_pusd: exact(m.settlement_recognized - m.settlement_paid),
-                unpaid_settlement_fee_attribution: m
-                    .resolution
-                    .as_ref()
-                    .map(|r| ExecutionReadValueV1::Known(r.category))
-                    .unwrap_or(ExecutionReadValueV1::NotApplicable),
-                confirmed_net_pnl_pusd: m.pi.public(),
-                confirmed_net_loss_pusd: R::zero().sub(&m.pi).max(R::zero()).public(),
-                maximum_confirmed_net_loss_pusd: m.maximum_loss.public(),
-                unpaired_success_fee_pusd,
-                successful_investment_pusd,
-                unresolved_orphan_principal_cost_pusd: if m.resolution.is_some() {
-                    R::zero().public()
-                } else {
-                    m.pools[0].cost.add(&m.pools[1].cost).public()
-                },
+                    .markets
+                    .keys()
+                    .map(|id| (id.clone(), std::sync::OnceLock::new()))
+                    .collect()
+            })
+        });
+        self.state.markets.iter().map(move |(condition, market)| {
+            if let Some(cache) = cache {
+                let mut built = false;
+                let value = cache
+                    .get(condition)
+                    .expect("原经济提交维护派生市场键")
+                    .get_or_init(|| {
+                        built = true;
+                        #[cfg(feature = "stage-timing")]
+                        cache_work::detail_build();
+                        self.market_total(condition, market)
+                    });
+                if !built {
+                    #[cfg(feature = "stage-timing")]
+                    cache_work::detail_hit();
+                }
+                value.clone()
+            } else {
+                #[cfg(feature = "stage-timing")]
+                cache_work::detail_build();
+                self.market_total(condition, market)
             }
         })
+    }
+    /// 仅工程对照绕过派生明细缓存，保持原顺序与完整字段。
+    #[cfg(feature = "stage-timing")]
+    pub fn market_totals_uncached_for_measurement(
+        &self,
+    ) -> impl Iterator<Item = MarketEconomicTotalsReadV1> + '_ {
+        self.state.markets.iter().map(|(condition, market)| {
+            cache_work::reference_build();
+            self.market_total(condition, market)
+        })
+    }
+    /// 原账户索引的精确未盯市位置贡献：保守、maker归属、方向归属；不含可见现金。
+    pub fn unmarked_position_totals(&self) -> Option<[R; 3]> {
+        let account = self
+            .state
+            .read_index
+            .as_ref()?
+            .account
+            .get_or_init(|| necessary::AccountIndex::from_state(self.state));
+        Some([
+            account.totals.conservative_positions.clone(),
+            account.maker_positions.clone(),
+            account.directional_positions.clone(),
+        ])
+    }
+    fn market_total(&self, condition: &str, m: &Market) -> MarketEconomicTotalsReadV1 {
+        let (pair, orphan) = m.receivables();
+        let redeemed = m
+            .resolution
+            .as_ref()
+            .map(|r| r.redeemed_pair)
+            .unwrap_or_default();
+        let redeemed_orphan = m
+            .resolution
+            .as_ref()
+            .map(|r| r.redeemed_orphan)
+            .unwrap_or_default();
+        let rebates = std::array::from_fn(|r| {
+            let kind = if r == 0 {
+                RebateKindV1::Maker
+            } else {
+                RebateKindV1::Taker
+            };
+            let mut amounts: [R; 5] = std::array::from_fn(|_| R::zero());
+            for day in self.state.days.values().filter(|d| d.kind == kind) {
+                for (sum, value) in amounts.iter_mut().zip(day.amounts(Some(condition))) {
+                    *sum = sum.add(&value);
+                }
+            }
+            RebateAmountsReadV1::from_amounts(
+                amounts,
+                self.estimated_rebate(kind, Some(condition), None),
+            )
+        });
+        // 修复缺口只看已公开终局实际份额；经济成功池仍沿原入账条件更新。
+        let mut final_success_quantity = [Decimal::ZERO; 2];
+        if let Some(assets) = &m.assets {
+            if let Some(index) = &self.state.read_index {
+                if let Some(totals) = index.markets.get(condition) {
+                    final_success_quantity = std::array::from_fn(|i| {
+                        *totals
+                            .final_success
+                            .get(&assets[i].token_id.0)
+                            .unwrap_or(&Decimal::ZERO)
+                    });
+                }
+            } else {
+                for trade in self.state.trades.values().filter(|t| {
+                    t.fact.condition_id.0.as_str() == condition
+                        && t.fact.economic_disposition
+                            == SourceNeutralTradeEconomicDispositionV1::FinalSuccess
+                }) {
+                    if let Some(i) = assets
+                        .iter()
+                        .position(|a| a.token_id == trade.fact.token_id)
+                    {
+                        final_success_quantity[i] +=
+                            decimal(&trade.fact.base_quantity_shares).expect("原真实成交份额");
+                    }
+                }
+            }
+        }
+        let successful_investment_pusd = if let Some(index) = &self.state.read_index {
+            index
+                .markets
+                .get(condition)
+                .map_or_else(R::zero, |t| t.investment.clone())
+                .public()
+        } else {
+            self.state
+                .trades
+                .values()
+                .filter(|t| {
+                    t.fact.condition_id.0.as_str() == condition
+                        && t.success_applied
+                        && t.economic_applied
+                })
+                .fold(R::zero(), |sum, t| {
+                    sum.add(&R::from_decimal(
+                        decimal(&t.fact.quote_amount_pusd).expect("原本金"),
+                    ))
+                    .add(&R::from_decimal(t.net_fee))
+                })
+                .public()
+        };
+        let successful_investment = R::try_from(&successful_investment_pusd).expect("原成功投入");
+        let unpaired_success_fee_pusd = self.unpaired_fee(condition, m);
+        let paired_fee = match &unpaired_success_fee_pusd {
+            ExecutionReadValueV1::Known(unpaired) => ExecutionReadValueV1::Known(
+                successful_investment
+                    .sub(&m.success_cost[0])
+                    .sub(&m.success_cost[1])
+                    .sub(&R::try_from(unpaired).expect("原孤腿费用"))
+                    .public(),
+            ),
+            _ => ExecutionReadValueV1::Unavailable,
+        };
+        let paired_spread = match &paired_fee {
+            ExecutionReadValueV1::Known(fee) => ExecutionReadValueV1::Known(
+                R::from_decimal(m.paired)
+                    .sub(&m.paired_cost[0])
+                    .sub(&m.paired_cost[1])
+                    .sub(&R::try_from(fee).expect("原配对费用"))
+                    .public(),
+            ),
+            _ => ExecutionReadValueV1::Unavailable,
+        };
+        MarketEconomicTotalsReadV1 {
+            condition_id: ConditionId(condition.to_owned()),
+            assets: m.assets.clone(),
+            success_shares: std::array::from_fn(|i| {
+                exact(m.success_quantity[i] - redeemed - redeemed_orphan[i])
+            }),
+            success_principal_cost_pusd: std::array::from_fn(|i| {
+                if redeemed > Decimal::ZERO || redeemed_orphan[i] > Decimal::ZERO {
+                    R::zero().public()
+                } else {
+                    m.success_cost[i].public()
+                }
+            }),
+            repair_gap_shares: std::array::from_fn(|i| {
+                exact(
+                    (final_success_quantity[1 - i] - final_success_quantity[i]).max(Decimal::ZERO),
+                )
+            }),
+            unpaid_taker_fee_pusd: exact(m.unpaid_taker),
+            settlement_state: match &m.resolution {
+                None => EconomicSettlementStateV1::Unresolved,
+                Some(resolution) if resolution.auto_redeemed => {
+                    EconomicSettlementStateV1::Redeemed
+                }
+                Some(resolution) => match resolution.request.as_ref().map(|r| r.outcome) {
+                    Some(SettlementRequestOutcomeV1::FinalSuccess)
+                        if resolution.redeemed_pair > Decimal::ZERO
+                            || resolution
+                                .redeemed_orphan
+                                .iter()
+                                .any(|q| *q > Decimal::ZERO) =>
+                    {
+                        EconomicSettlementStateV1::Redeemed
+                    }
+                    Some(SettlementRequestOutcomeV1::FinalFailureNoEffect) => {
+                        EconomicSettlementStateV1::RequestFailedNoEffect
+                    }
+                    Some(_) => EconomicSettlementStateV1::RequestPending,
+                    None if pair + orphan > Decimal::ZERO => {
+                        EconomicSettlementStateV1::ReceivableNotRequested
+                    }
+                    None => EconomicSettlementStateV1::ResolvedNoCurrentPayout,
+                },
+            },
+            cumulative_paired_shares: exact(m.paired),
+            cumulative_paired_principal_cost_pusd: std::array::from_fn(|i| {
+                m.paired_cost[i].public()
+            }),
+            cumulative_paired_actual_trade_fee_pusd: paired_fee,
+            cumulative_paired_spread_after_trade_fee_pusd: paired_spread,
+            redeemed_paired_shares: exact(redeemed),
+            paired_shares: exact(m.paired - redeemed),
+            orphan_shares: std::array::from_fn(|i| exact(m.pools[i].quantity - redeemed_orphan[i])),
+            executed: std::array::from_fn(|r| ExecutedEconomicsReadV1 {
+                shares: exact(m.executed_quantity[r]),
+                principal_pusd: exact(m.executed_principal[r]),
+                actual_fee_pusd: exact(m.executed_fees[r]),
+            }),
+            rebates,
+            guaranteed_position_value_pusd: exact(if m.resolution.is_some() {
+                Decimal::ZERO
+            } else {
+                m.paired
+            }),
+            paired_resolution_receivable_pusd: exact(pair),
+            winner_orphan_receivable_pusd: exact(orphan),
+            unpaid_settlement_fee_pusd: exact(m.settlement_recognized - m.settlement_paid),
+            unpaid_settlement_fee_attribution: m
+                .resolution
+                .as_ref()
+                .map(|r| ExecutionReadValueV1::Known(r.category))
+                .unwrap_or(ExecutionReadValueV1::NotApplicable),
+            confirmed_net_pnl_pusd: m.pi.public(),
+            confirmed_net_loss_pusd: R::zero().sub(&m.pi).max(R::zero()).public(),
+            maximum_confirmed_net_loss_pusd: m.maximum_loss.public(),
+            unpaired_success_fee_pusd,
+            successful_investment_pusd,
+            unresolved_orphan_principal_cost_pusd: if m.resolution.is_some() {
+                R::zero().public()
+            } else {
+                m.pools[0].cost.add(&m.pools[1].cost).public()
+            },
+        }
     }
 }
 impl Market {

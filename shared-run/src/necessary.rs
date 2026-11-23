@@ -360,6 +360,8 @@ pub fn conservative_nav<'a>(
     read: &LedgerNecessaryReadV2<'_>,
     mut observation: impl FnMut(&str) -> Option<&'a MarketBusinessObservationV1>,
 ) -> ExecutionReadValueV1<R> {
+    #[cfg(feature = "stage-timing")]
+    crate::work_measurement::nav_call();
     let (actual, reserved) = read.cash();
     let mut nav = Some(
         R::from_decimal(actual)
@@ -367,6 +369,8 @@ pub fn conservative_nav<'a>(
             .add(&read.account().conservative_positions),
     );
     for id in read.marked_markets() {
+        #[cfg(feature = "stage-timing")]
+        crate::work_measurement::nav_market();
         let (assets, shares) = read.marked_position(id).expect("原未决市场");
         let observation = observation(id);
         for (side, shares) in shares
@@ -408,7 +412,7 @@ impl ActionAccountReadV2 for BorrowedActionAccountV2<'_> {
             let economics = if let Some(driver) = self.driver {
                 AccountEconomicsReadV3::from_ledger_and_observations(
                     &read,
-                    driver.observations_at_current_prefix(),
+                    driver.observations_at_current_prefix_iter(),
                 )
             } else {
                 AccountEconomicsReadV3::from_ledger_and_observations(

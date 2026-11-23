@@ -159,7 +159,8 @@ fn consume_one(
                 assert_eq!(bucket.reference(), &expected_hidden[hidden_count]);
                 for record in bucket.records() {
                     let market = match record {
-                        HiddenExecutionRecordV1::Step { market, .. } => Some(market),
+                        HiddenExecutionRecordV1::Step { market, .. }
+                        | HiddenExecutionRecordV1::OfflineScene { market, .. } => Some(market),
                         HiddenExecutionRecordV1::MarketFact(fact) => Some(&fact.market),
                         HiddenExecutionRecordV1::Reference(_)
                         | HiddenExecutionRecordV1::BinanceDepthReference { .. }

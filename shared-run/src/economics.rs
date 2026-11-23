@@ -36,12 +36,31 @@ impl AccountEconomicsReadV3 {
         read: &LedgerEconomicReadV2<'_>,
         observations: impl IntoIterator<Item = &'a contracts::MarketBusinessObservationV1>,
     ) -> Self {
+        Self::from_unmarked_and_observations(
+            UnmarkedAccountEconomicsReadV3::from_ledger(read),
+            observations,
+        )
+    }
+    /// 原逐市场构造与精确汇总仅供同一前缀工程对照。
+    #[cfg(feature = "stage-timing")]
+    pub fn from_ledger_and_observations_uncached_for_measurement<'a>(
+        read: &LedgerEconomicReadV2<'_>,
+        observations: impl IntoIterator<Item = &'a contracts::MarketBusinessObservationV1>,
+    ) -> Self {
+        Self::from_unmarked_and_observations(
+            UnmarkedAccountEconomicsReadV3::from_ledger_uncached_for_measurement(read),
+            observations,
+        )
+    }
+    fn from_unmarked_and_observations<'a>(
+        base: UnmarkedAccountEconomicsReadV3,
+        observations: impl IntoIterator<Item = &'a contracts::MarketBusinessObservationV1>,
+    ) -> Self {
         use contracts::ExecutionReadValueV1::{Known, Unavailable};
         let observations: std::collections::BTreeMap<_, _> = observations
             .into_iter()
             .map(|o| (&o.market.condition_id.0, o))
             .collect();
-        let base = UnmarkedAccountEconomicsReadV3::from_ledger(read);
         let mut mark = Some(R::zero());
         for market in &base.markets {
             if market.settlement_state != ledger::EconomicSettlementStateV1::Unresolved {
@@ -102,8 +121,38 @@ fn rational(value: &ExactRationalV1) -> R {
 }
 impl UnmarkedAccountEconomicsReadV3 {
     pub fn from_ledger(read: &LedgerEconomicReadV2<'_>) -> Self {
-        let cash = read.cash().clone();
         let markets: Vec<_> = read.market_totals().collect();
+        let Some([conservative, maker, directional]) = read.unmarked_position_totals() else {
+            return Self::from_markets(read, markets);
+        };
+        let cash = read.cash().clone();
+        let liquid = amount(&cash.actual_available_pusd).add(&amount(&cash.actual_reserved_pusd));
+        Self {
+            cash,
+            markets,
+            conservative_nav_pusd: liquid.add(&conservative).public(),
+            worst_case_maker_nav_pusd: liquid
+                .sub(&amount(&read.residual_cash().directional_cash_pusd))
+                .sub(&amount(&read.residual_cash().other_cash_pusd))
+                .add(&maker)
+                .public(),
+            directional_residual_pusd: amount(&read.residual_cash().directional_cash_pusd)
+                .add(&directional)
+                .public(),
+            other_account_residual_pusd: amount(&read.residual_cash().other_cash_pusd).public(),
+            other_receivable_pusd: R::zero().public(),
+            other_liability_pusd: R::zero().public(),
+        }
+    }
+    #[cfg(feature = "stage-timing")]
+    pub fn from_ledger_uncached_for_measurement(read: &LedgerEconomicReadV2<'_>) -> Self {
+        Self::from_markets(
+            read,
+            read.market_totals_uncached_for_measurement().collect(),
+        )
+    }
+    fn from_markets(read: &LedgerEconomicReadV2<'_>, markets: Vec<MarketEconomicsReadV1>) -> Self {
+        let cash = read.cash().clone();
         let mut conservative =
             amount(&cash.actual_available_pusd).add(&amount(&cash.actual_reserved_pusd));
         // 来源归属评价由真实总现金及 D/O 派生，不参与交易资金准入。

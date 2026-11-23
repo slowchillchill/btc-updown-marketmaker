@@ -760,18 +760,60 @@ impl SharedExecutionV2 {
         learning: bool,
         requests: Option<&[String]>,
     ) -> Result<Option<HostStrategyInputV1>, LedgerErrorV1> {
-        self.apply_closed()?;
+        self.strategy_input_for_market_frame_with_learning_requests_in(
+            driver, frame, details, learning, requests, false,
+        )
+    }
+    /// 原当前全统计帧重建路径，仅供有限工程对照；冻结市场帧及当前账户规则不变。
+    #[cfg(feature = "stage-timing")]
+    pub fn strategy_input_for_market_frame_with_learning_requests_reference_for_measurement(
+        &mut self,
+        driver: &mut PublicConsumptionStateV1,
+        frame: FrozenStrategyMarketFrameV1,
+        details: bool,
+        learning: bool,
+        requests: Option<&[String]>,
+    ) -> Result<Option<HostStrategyInputV1>, LedgerErrorV1> {
+        self.strategy_input_for_market_frame_with_learning_requests_in(
+            driver, frame, details, learning, requests, true,
+        )
+    }
+    fn strategy_input_for_market_frame_with_learning_requests_in(
+        &mut self,
+        driver: &mut PublicConsumptionStateV1,
+        frame: FrozenStrategyMarketFrameV1,
+        details: bool,
+        learning: bool,
+        requests: Option<&[String]>,
+        reference_frames: bool,
+    ) -> Result<Option<HostStrategyInputV1>, LedgerErrorV1> {
+        #[cfg(feature = "stage-timing")]
+        let _assembly = crate::input_measurement::AssemblyScope::new(if reference_frames {
+            crate::input_measurement::Mode::ReferenceFrames
+        } else {
+            crate::input_measurement::Mode::CurrentPrefix
+        });
+        measure_input_phase!(ApplyClosed, self.apply_closed())?;
         let Some(cutoff) = driver.observation_cutoff() else {
             return Ok(None);
         };
-        let current = driver.frames_at_observation();
-        self.observe_group(&current);
-        let Some(mut action_before) = self.freeze_action_before(cutoff, &current) else {
+        let action_before = if reference_frames {
+            let current =
+                measure_input_phase!(CurrentStatisticsFrames, driver.frames_at_observation());
+            measure_input_phase!(RegisterPublicRules, self.observe_group(&current));
+            self.freeze_action_before(cutoff, &current)
+        } else {
+            measure_input_phase!(RegisterPublicRules, self.observe_public_rules(driver));
+            self.freeze_action_before_current_prefix(cutoff, driver)
+        };
+        let Some(mut action_before) = action_before else {
             return Ok(None);
         };
         if learning {
-            action_before.account.learning =
-                self.learning_account_with_requests_v1(driver, requests);
+            action_before.account.learning = measure_input_phase!(
+                LearningAccount,
+                self.learning_account_with_requests_v1(driver, requests)
+            );
         }
         Ok(Some(HostStrategyInputV1::new(
             StrategyInputV1 {
@@ -779,7 +821,7 @@ impl SharedExecutionV2 {
                 action_before,
                 markets: frame.markets,
                 trade_economics: if details {
-                    self.freeze_trade_economics()
+                    measure_input_phase!(TradeDetails, self.freeze_trade_economics())
                 } else {
                     Vec::new()
                 },

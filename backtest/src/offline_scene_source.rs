@@ -4,6 +4,12 @@ use contracts::*;
 use serde::{Deserialize, Serialize};
 use sim_system::{offline_scene::*, public_consumption::*};
 use std::{collections::BTreeMap, iter::Peekable, sync::Arc};
+#[path = "scene_cache.rs"]
+mod scene_cache;
+pub use scene_cache::{
+    SharedSceneDiagnosticsV1, SharedSceneEventsV1, VerifiedOfflineSceneV1,
+    verify_scene_material_with_progress,
+};
 pub const ORDERING_VERSION: &str = "offline-scene-before-reference-before-pm-v1";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OfflineSceneMaterialV1 {
@@ -137,6 +143,22 @@ impl<I: Iterator<Item = Result<AcceptedHiddenStepBucketV1, MaterialError>>> Iter
 }
 
 /// 准备阶段复用原日供料及正式归约，不建立另一份原始解码或观察副本。
+// 三张身份表在首次登记时一起建立，此后仅检查二元性，不重复复制原身份。
+fn remember_scene_market<E>(
+    markets: &mut BTreeMap<String, MarketIdentityV2>,
+    assets: &mut BTreeMap<String, [AssetIdentityV1; 2]>,
+    tokens: &mut BTreeMap<String, Vec<String>>,
+    id: &str,
+    context: &data_pipeline_core::pm_reduction::PmMarketContextV1<E>,
+) -> Result<bool, MaterialError> {
+    if context.assets.len() != 2 { return Err("冻结场景市场不是二元身份".into()); }
+    if markets.contains_key(id) { return Ok(false); }
+    markets.insert(id.into(), context.market.clone());
+    assets.insert(id.into(), [context.assets[0].asset.clone(), context.assets[1].asset.clone()]);
+    tokens.insert(id.into(), context.assets.iter().map(|a| a.asset.token_id.0.clone()).collect());
+    Ok(true)
+}
+
 pub fn collect_scene_facts_v1(
     config: &crate::HistoricalPreparationConfigV1,
     target_start: i64,
@@ -206,6 +228,10 @@ pub fn collect_scene_facts_v1(
         Sha256Hex(inputs.input_set_identity_sha256().into()),
         config.hidden_stream_id.clone(),
     )?;
+    #[cfg(feature = "stage-timing")]
+    let mut identity_work = (0_u64, 0_u64, 0_u128);
+    #[cfg(feature = "stage-timing")]
+    let mut fact_generation_ns = 0_u128;
     let mut facts = Vec::new();
     let mut markets = BTreeMap::new();
     let mut market_assets = BTreeMap::new();
@@ -223,31 +249,21 @@ pub fn collect_scene_facts_v1(
     let mut sequence = 0u64;
     while let Some(applied) = producer.next_applied()? {
         count += 1;
+        #[cfg(feature = "stage-timing")]
+        let identity_started = std::time::Instant::now();
         for (id, context) in &applied.contexts {
             if context.market.window.start_at_utc_ms >= target_start
                 && context.market.window.start_at_utc_ms < target_end
             {
-                markets
-                    .entry(id.clone())
-                    .or_insert_with(|| context.market.clone());
-                market_assets.entry(id.clone()).or_insert(
-                    context
-                        .assets
-                        .iter()
-                        .map(|a| a.asset.clone())
-                        .collect::<Vec<_>>()
-                        .try_into()
-                        .map_err(|_| "冻结场景市场不是二元身份")?,
-                );
-                tokens.entry(id.clone()).or_insert_with(|| {
-                    context
-                        .assets
-                        .iter()
-                        .map(|a| a.asset.token_id.0.clone())
-                        .collect()
-                });
+                let _built = remember_scene_market(&mut markets, &mut market_assets, &mut tokens, id, context)?;
+                #[cfg(feature = "stage-timing")]
+                { identity_work.0 += 1; identity_work.1 += u64::from(_built); }
             }
         }
+        #[cfg(feature = "stage-timing")]
+        { identity_work.2 += identity_started.elapsed().as_nanos(); }
+        #[cfg(feature = "stage-timing")]
+        let facts_started = std::time::Instant::now();
         for bucket in applied.hidden {
             for record in bucket.records {
                 let ResolvedHiddenRecordV1::Step { stored, market } = record else {
@@ -348,6 +364,8 @@ pub fn collect_scene_facts_v1(
                 }
             }
         }
+        #[cfg(feature = "stage-timing")]
+        { fact_generation_ns += facts_started.elapsed().as_nanos(); }
         if progress_seconds > 0 && progress.elapsed().as_secs() >= progress_seconds {
             eprintln!(
                 "场景准备: inputs={count}, facts={}, markets={}, elapsed_seconds={}, total_inputs=unknown",
@@ -358,11 +376,19 @@ pub fn collect_scene_facts_v1(
             progress = std::time::Instant::now();
         }
     }
+    let fact_count = facts.len();
+    #[cfg(feature = "stage-timing")]
+    let analysis_started = std::time::Instant::now();
+    let analysis = Analysis::new(facts);
+    #[cfg(feature = "stage-timing")]
+    eprintln!("scene_collection_work={}", serde_json::json!({"inputs":count,"facts":fact_count,"markets":markets.len(),"elapsed_ns":started.elapsed().as_nanos(),"fact_generation_ns":fact_generation_ns,"analysis_index_ns":analysis_started.elapsed().as_nanos(),"producer":producer.stage_timings(),"lower_bound_work":producer.ingress.lower_bound_work(),"identity_contexts":identity_work.0,"asset_constructions":identity_work.1,"identity_ns":identity_work.2}));
     let manifests = admitted
         .iter()
         .map(|d| (d.utc_day().to_string(), d.manifest_sha256().to_string()))
         .collect();
-    Ok((Analysis::new(facts), markets, market_assets, manifests))
+    #[cfg(not(feature = "stage-timing"))]
+    let _ = fact_count;
+    Ok((analysis, markets, market_assets, manifests))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -423,21 +449,20 @@ pub type SceneEventReader = Box<dyn Iterator<Item = Result<Event, MaterialError>
 pub struct SceneStreamWriterV2 {
     path: std::path::PathBuf,
     payload: std::path::PathBuf,
-    encoder: zstd::stream::write::Encoder<'static, std::io::BufWriter<std::fs::File>>,
+    encoder: zstd::stream::write::Encoder<
+        'static,
+        std::io::BufWriter<scene_preparation::HashingWriter<std::fs::File>>,
+    >,
     events: u64,
     last_at: Option<i64>,
 }
-fn file_sha256(path: &std::path::Path) -> Result<String, MaterialError> {
-    file_sha256_with_progress(path, 0)
-}
-fn file_sha256_with_progress(
+fn file_sha256_reader_with_progress(
     path: &std::path::Path,
+    mut file: impl std::io::Read,
+    total: u64,
     interval_seconds: u64,
 ) -> Result<String, MaterialError> {
     use sha2::{Digest, Sha256};
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let total = file.metadata()?.len();
     let started = std::time::Instant::now();
     let mut last = started;
     let mut read = 0_u64;
@@ -481,12 +506,22 @@ fn file_sha256_with_progress(
 }
 impl SceneStreamWriterV2 {
     pub fn create(path: &std::path::Path) -> Result<Self, MaterialError> {
+        Self::create_with_merge_workers(path, 1)
+    }
+    fn create_with_merge_workers(
+        path: &std::path::Path,
+        workers: usize,
+    ) -> Result<Self, MaterialError> {
+        if workers == 0 || workers > u32::MAX as usize {
+            return Err("compression workers out of range".into());
+        }
         let payload = path.with_extension("events.zst");
-        let mut encoder = zstd::stream::write::Encoder::new(
-            std::io::BufWriter::new(std::fs::File::create(&payload)?),
-            3,
-        )?;
+        let sink = scene_preparation::HashingWriter::new(std::fs::File::create(&payload)?);
+        let mut encoder = zstd::stream::write::Encoder::new(std::io::BufWriter::new(sink), 3)?;
         encoder.include_checksum(true)?;
+        if workers > 1 {
+            encoder.multithread((workers - 1) as u32)?;
+        }
         Ok(Self {
             path: path.into(),
             payload,
@@ -507,11 +542,23 @@ impl SceneStreamWriterV2 {
         Ok(())
     }
     pub fn finish(self, material: OfflineSceneMaterialV1) -> Result<u64, MaterialError> {
-        use std::io::Write;
+        self.finish_with_thread_sample(material)
+            .map(|(bytes, _)| bytes)
+    }
+    fn finish_with_thread_sample(
+        self,
+        material: OfflineSceneMaterialV1,
+    ) -> Result<(u64, Option<usize>), MaterialError> {
         if !material.scene.events.is_empty() {
             return Err("流式场景头不能包含另一份事件".into());
         }
-        self.encoder.finish()?.flush()?;
+        let sink = self
+            .encoder
+            .finish()?
+            .into_inner()
+            .map_err(|error| error.into_error())?;
+        let peak_process_threads = sink.peak_process_threads;
+        let event_sha256 = sink.finish();
         let manifest = StreamManifestV2 {
             storage_version: "OFFLINE_SCENE_JSONL_ZSTD_V2".into(),
             material,
@@ -522,13 +569,14 @@ impl SceneStreamWriterV2 {
                 .to_str()
                 .ok_or("场景文件名不是UTF8")?
                 .into(),
-            event_sha256: file_sha256(&self.payload)?,
+            event_sha256,
             event_count: self.events,
         };
-        let mut manifest_file = std::io::BufWriter::new(std::fs::File::create(&self.path)?);
-        serde_json::to_writer_pretty(&mut manifest_file, &manifest)?;
-        manifest_file.flush()?;
-        Ok(std::fs::metadata(self.path)?.len() + std::fs::metadata(self.payload)?.len())
+        scene_preparation::publish_manifest(&self.path, &manifest)?;
+        Ok((
+            std::fs::metadata(self.path)?.len() + std::fs::metadata(self.payload)?.len(),
+            peak_process_threads,
+        ))
     }
 }
 struct CheckedSceneEvents<I> {
@@ -581,71 +629,12 @@ pub fn open_scene_material_with_progress(
     path: &std::path::Path,
     interval_seconds: u64,
 ) -> Result<(Arc<OfflineSceneMaterialV1>, SceneEventReader, Sha256Hex), MaterialError> {
-    let sha = Sha256Hex(file_sha256_with_progress(path, interval_seconds)?);
-    let file = std::fs::File::open(path)?;
-    if path.extension().is_some_and(|e| e == "scene") {
-        let manifest: StreamManifestV2 = serde_json::from_reader(std::io::BufReader::new(file))?;
-        if manifest.storage_version != "OFFLINE_SCENE_JSONL_ZSTD_V2"
-            || !manifest.material.scene.events.is_empty()
-        {
-            return Err("离线场景存储版本或头不符".into());
-        }
-        let name = std::path::Path::new(&manifest.event_file);
-        if name.components().count() != 1
-            || !matches!(
-                name.components().next(),
-                Some(std::path::Component::Normal(_))
-            )
-        {
-            return Err("离线场景载荷路径越界".into());
-        }
-        let payload = path.parent().ok_or("离线场景没有父目录")?.join(name);
-        if file_sha256_with_progress(&payload, interval_seconds)? != manifest.event_sha256 {
-            return Err("离线场景载荷SHA256不符".into());
-        }
-        let decoder = zstd::stream::read::Decoder::new(std::fs::File::open(payload)?)?;
-        let events = serde_json::Deserializer::from_reader(std::io::BufReader::new(decoder))
-            .into_iter::<Event>();
-        Ok((
-            Arc::new(manifest.material),
-            Box::new(CheckedSceneEvents {
-                inner: events,
-                remaining: manifest.event_count,
-                last_at: None,
-                ended: false,
-            }),
-            sha,
-        ))
-    } else {
-        let stored: StoredSceneV1 = serde_json::from_reader(std::io::BufReader::new(file))?;
-        let levels = stored.levels;
-        let events = stored
-            .events
-            .into_iter()
-            .map(move |(at_ms, source_sequence, index, kind)| {
-                Ok(Event {
-                    at_ms,
-                    source_sequence,
-                    level: levels.get(index).ok_or("场景价位引用不存在")?.clone(),
-                    kind,
-                })
-            });
-        Ok((
-            Arc::new(OfflineSceneMaterialV1 {
-                scene: PreparedScene {
-                    model_version: stored.model_version,
-                    parameters: stored.parameters,
-                    events: Vec::new(),
-                    report: stored.report,
-                },
-                markets: stored.markets,
-                market_assets: stored.market_assets,
-                source_manifests: stored.source_manifests,
-            }),
-            Box::new(events),
-            sha,
-        ))
-    }
+    let verified = verify_scene_material_with_progress(path, interval_seconds)?;
+    Ok((
+        verified.material(),
+        verified.independent_reader()?,
+        verified.identity().clone(),
+    ))
 }
 
 #[cfg(test)]
@@ -709,11 +698,6 @@ mod stream_tests {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct RankedSceneEvent {
-    rank: usize,
-    event: Event,
-}
 #[derive(Debug, Serialize)]
 pub struct ScenePreparationCostV2 {
     pub events: u64,
@@ -766,166 +750,22 @@ pub fn prepare_condition_parallel_scene_with_temporary_root_v2(
     progress_seconds: u64,
     condition_temporary_root: Option<&std::path::Path>,
 ) -> Result<ScenePreparationCostV2, MaterialError> {
-    use std::{
-        io::Write,
-        sync::{
-            Mutex,
-            atomic::{AtomicUsize, Ordering},
-        },
-        time::Instant,
-    };
-    if condition_workers == 0 {
-        return Err("condition_workers需要大于零".into());
-    }
-    if let Some(directory) = condition_temporary_root {
-        // A failed job keeps its files. Never reuse that scene's directory.
-        std::fs::create_dir(directory)?;
-    }
-    let started = Instant::now();
-    eprintln!("场景数量预计划: start, total_conditions={}", markets.len());
-    let mut last_plan = Instant::now();
-    let mut phase = String::new();
-    let plan = analysis.condition_plan_with_progress(parameters.clone(),|current,completed,total| {
-        if current!=phase || completed==total || (progress_seconds>0 && last_plan.elapsed().as_secs()>=progress_seconds) {
-            eprintln!("场景数量预计划: phase={current}, completed={completed}, total={total}, elapsed_seconds={}",started.elapsed().as_secs());
-            phase=current.into();last_plan=Instant::now();
-        }
-    });
-    let quantity_plan_seconds = started.elapsed().as_secs_f64();
-    eprintln!(
-        "场景数量预计划完成: conditions={}, elapsed_seconds={quantity_plan_seconds}",
-        plan.condition_count()
-    );
-    let pending = Mutex::new(0..plan.condition_count());
-    let completed = AtomicUsize::new(0);
-    let results = std::thread::scope(
-        |scope| -> Result<Vec<(std::path::PathBuf, u64, PreparationReport)>, MaterialError> {
-            let mut handles = Vec::new();
-            for _ in 0..condition_workers.min(plan.condition_count()) {
-                let plan = &plan;
-                let pending = &pending;
-                let completed = &completed;
-                handles.push(scope.spawn(move || -> Result<Vec<(std::path::PathBuf,u64,PreparationReport)>,MaterialError> {
-                let mut results=Vec::new();
-                loop {
-                    let Some(index)=pending.lock().unwrap().next() else {break;};
-                    let temp=match condition_temporary_root {
-                        Some(directory)=>directory.join(format!("condition-{index}.jsonl.zst")),
-                        None=>path.with_extension(format!("condition-{index}.jsonl.zst")),
-                    };
-                    let mut encoder=zstd::stream::write::Encoder::new(std::io::BufWriter::new(std::fs::File::create(&temp)?),3)?;
-                    encoder.include_checksum(true)?;
-                    let mut last=Instant::now();let mut count=0u64;
-                    let scene=plan.prepare_condition(index,|phase,done,total| {
-                        if done==total || (progress_seconds>0 && last.elapsed().as_secs()>=progress_seconds) {
-                            eprintln!("场景市场构造: condition={}, phase={phase}, completed={done}, total={total}, elapsed_seconds={}",plan.condition_name(index),started.elapsed().as_secs());last=Instant::now();
-                        }
-                    },|rank,event| -> Result<(),MaterialError> {
-                        serde_json::to_writer(&mut encoder,&RankedSceneEvent {rank,event})?;encoder.write_all(b"\n")?;count+=1;Ok(())
-                    })?;
-                    encoder.finish()?.flush()?;
-                    results.push((temp,count,scene.report));
-                    let done=completed.fetch_add(1,Ordering::Relaxed)+1;
-                    eprintln!("场景市场完成: completed={done}, total={}, elapsed_seconds={}",plan.condition_count(),started.elapsed().as_secs());
-                }
-                Ok(results)
-            }));
-            }
-            let mut results = Vec::new();
-            for handle in handles {
-                results.extend(handle.join().map_err(|_| "市场构造线程panic")??);
-            }
-            Ok(results)
-        },
-    )?;
-    let construction_seconds = started.elapsed().as_secs_f64() - quantity_plan_seconds;
-    let report = plan.combine_reports(results.iter().map(|(_, _, r)| r.clone()));
-    let expected_events: u64 = results.iter().map(|(_, n, _)| *n).sum();
-    let temporary_logical_bytes = results
-        .iter()
-        .map(|(p, _, _)| std::fs::metadata(p).map(|m| m.len()))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .sum();
-    let merge_start = Instant::now();
-    eprintln!("场景保序合流: events={expected_events}, temporary_bytes={temporary_logical_bytes}");
-    type RankedReader = Box<dyn Iterator<Item = Result<RankedSceneEvent, serde_json::Error>>>;
-    let mut readers = Vec::<RankedReader>::new();
-    let mut heads = Vec::new();
-    let mut heap = std::collections::BinaryHeap::new();
-    for (path, _, _) in &results {
-        let decoder = zstd::stream::read::Decoder::new(std::fs::File::open(path)?)?;
-        let mut reader: RankedReader = Box::new(
-            serde_json::Deserializer::from_reader(std::io::BufReader::new(decoder)).into_iter(),
-        );
-        let head = reader.next().transpose()?;
-        if let Some(head) = &head {
-            heap.push(std::cmp::Reverse((head.rank, readers.len())));
-        }
-        readers.push(reader);
-        heads.push(head);
-    }
-    let mut writer = SceneStreamWriterV2::create(path)?;
-    let mut events = 0;
-    let mut previous_rank = None;
-    let mut last = Instant::now();
-    while let Some(std::cmp::Reverse((rank, index))) = heap.pop() {
-        if previous_rank.is_some_and(|previous| rank < previous) {
-            return Err("临时场景全局顺序不符".into());
-        }
-        previous_rank = Some(rank);
-        let mut event = heads[index].take().unwrap().event;
-        event.at_ms = event.at_ms.max(execution_start);
-        writer.push(event)?;
-        events += 1;
-        heads[index] = readers[index].next().transpose()?;
-        if let Some(head) = &heads[index] {
-            heap.push(std::cmp::Reverse((head.rank, index)));
-        }
-        if progress_seconds > 0 && last.elapsed().as_secs() >= progress_seconds {
-            eprintln!(
-                "场景保序合流: completed={events}, total={expected_events}, elapsed_seconds={}",
-                merge_start.elapsed().as_secs()
-            );
-            last = Instant::now();
-        }
-    }
-    if events != expected_events {
-        return Err("临时场景合流事件数不符".into());
-    }
-    let output_bytes = writer.finish(OfflineSceneMaterialV1 {
-        scene: PreparedScene {
-            model_version: if parameters.cancellation == Cancellation::Proportional {
-                FRAGMENT_MODEL_VERSION
-            } else {
-                MODEL_VERSION
-            }
-            .into(),
-            parameters,
-            events: Vec::new(),
-            report: report.clone(),
-        },
-        markets: markets.clone(),
-        market_assets: market_assets.clone(),
-        source_manifests: source_manifests.to_vec(),
-    })?;
-    // The complete authenticated final stream now contains every event. These
-    // exact owned temporary paths are reconstructible, unused intermediate files.
-    drop(readers);
-    for (path, _, _) in results {
-        std::fs::remove_file(path)?;
-    }
-    if let Some(directory) = condition_temporary_root {
-        std::fs::remove_dir(directory)?;
-    }
-    Ok(ScenePreparationCostV2 {
-        events,
-        output_bytes,
-        quantity_plan_seconds,
-        construction_seconds,
-        merge_seconds: merge_start.elapsed().as_secs_f64(),
-        temporary_logical_bytes,
+    Ok(prepare_condition_parallel_scene_with_options_v3(
+        analysis,
+        parameters,
+        markets,
+        market_assets,
+        source_manifests,
+        path,
+        execution_start,
         condition_workers,
-        report,
-    })
+        1,
+        progress_seconds,
+        condition_temporary_root,
+    )?
+    .cost)
 }
+
+#[path = "scene_preparation.rs"]
+mod scene_preparation;
+pub use scene_preparation::{ScenePreparationCostV3, prepare_condition_parallel_scene_with_options_v3};

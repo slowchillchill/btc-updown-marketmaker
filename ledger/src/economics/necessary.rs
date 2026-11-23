@@ -57,9 +57,16 @@ impl AccountEconomicNumbersV1 {
 }
 #[derive(Default)]
 pub(super) struct AccountIndex {
-    contributions: BTreeMap<String, AccountEconomicNumbersV1>,
+    contributions: BTreeMap<String, AccountContribution>,
     pub totals: AccountEconomicNumbersV1,
+    pub maker_positions: R,
+    pub directional_positions: R,
     pub marked: BTreeSet<String>,
+}
+struct AccountContribution {
+    numbers: AccountEconomicNumbersV1,
+    maker_positions: R,
+    directional_positions: R,
 }
 impl AccountIndex {
     pub fn from_state(state: &EconomicsState) -> Self {
@@ -75,8 +82,12 @@ impl AccountIndex {
         index
     }
     pub fn replace(&mut self, id: &str, state: &EconomicsState, pending: R) {
+        #[cfg(feature = "stage-timing")]
+        super::cache_work::account_replace();
         if let Some(old) = self.contributions.remove(id) {
-            self.totals.adjust(&old, true);
+            self.totals.adjust(&old.numbers, true);
+            self.maker_positions = self.maker_positions.sub(&old.maker_positions);
+            self.directional_positions = self.directional_positions.sub(&old.directional_positions);
         }
         self.marked.remove(id);
         let Some(m) = state.markets.get(id) else {
@@ -112,8 +123,26 @@ impl AccountIndex {
         if m.resolution.is_none() && m.pools.iter().any(|p| p.quantity > Decimal::ZERO) {
             self.marked.insert(id.into());
         }
+        let mut maker_positions = common.sub(&taker);
+        let mut directional_positions = R::from_decimal(orphan);
+        match m.resolution.as_ref().map(|r| r.category) {
+            Some(SettlementCostAttributionV1::Maker) => maker_positions = maker_positions.sub(&fee),
+            Some(SettlementCostAttributionV1::Directional) => {
+                directional_positions = directional_positions.sub(&fee)
+            }
+            _ => {}
+        }
         self.totals.adjust(&value, false);
-        self.contributions.insert(id.into(), value);
+        self.maker_positions = self.maker_positions.add(&maker_positions);
+        self.directional_positions = self.directional_positions.add(&directional_positions);
+        self.contributions.insert(
+            id.into(),
+            AccountContribution {
+                numbers: value,
+                maker_positions,
+                directional_positions,
+            },
+        );
     }
 }
 pub struct LedgerNecessaryReadV2<'a> {

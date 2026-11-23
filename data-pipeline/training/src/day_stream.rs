@@ -84,6 +84,27 @@ pub struct DayIngressV1<'a> {
     source_minima: Vec<Vec<Option<i64>>>,
     pm_minima: Vec<Vec<Option<(u64, i64, u64, u64)>>>,
     heads: BTreeMap<(u8, u64, u64, String, usize), i64>,
+    #[cfg(feature = "stage-timing")]
+    lower_work: std::cell::Cell<DayIngressLowerBoundWorkV1>,
+}
+#[cfg(feature = "stage-timing")]
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub struct DayIngressLowerBoundWorkV1 {
+    pub source_queries: u64,
+    pub pm_queries: u64,
+    pub source_file_entries: u64,
+    pub pm_file_entries: u64,
+    pub initial_evidence_rows: u64,
+    pub combined_queries: u64,
+    pub combined_file_entries: u64,
+    pub ingress_open_ns: u128,
+    pub ordering_index_ns: u128,
+    pub suffix_minima_ns: u128,
+    pub head_selection_ns: u128,
+    pub row_fetch_evidence_ns: u128,
+    pub head_selections: u64,
+    pub temporary_head_maps: u64,
+    pub head_key_clones: u64,
 }
 pub(crate) fn source(evidence: &SourceEvidenceRefV3) -> usize {
     match evidence.source_kind {
@@ -158,6 +179,8 @@ impl<'a> DayIngressV1<'a> {
         max_epochs: usize,
         control: Option<&(dyn Fn(u64) -> RecordingResult<()> + Sync)>,
     ) -> RecordingResult<Self> {
+        #[cfg(feature = "stage-timing")]
+        let ingress_open_started = std::time::Instant::now();
         let bytes = bytes.into();
         let cursors = files
             .iter()
@@ -177,8 +200,12 @@ impl<'a> DayIngressV1<'a> {
             .iter()
             .map(|file| file.take_opened())
             .collect::<Result<Vec<_>, _>>()?;
+        #[cfg(feature = "stage-timing")]
+        let index_started = std::time::Instant::now();
         let (order, epochs) =
             crate::day_order::locate(files, rows, &received_range, &opened, max_epochs, control)?;
+        #[cfg(feature = "stage-timing")]
+        let ordering_index_ns = index_started.elapsed().as_nanos();
         let mut keyed = initial
             .into_iter()
             .map(|(row, binding)| {
@@ -201,7 +228,15 @@ impl<'a> DayIngressV1<'a> {
             initial: initial.into(),
             twap: Vec::new(),
         };
-        Self::from_opened(files, saved, rows, bytes, opened)
+        let ingress = Self::from_opened(files, saved, rows, bytes, opened)?;
+        #[cfg(feature = "stage-timing")]
+        {
+            let mut work = ingress.lower_work.get();
+            work.ingress_open_ns = ingress_open_started.elapsed().as_nanos();
+            work.ordering_index_ns = ordering_index_ns;
+            ingress.lower_work.set(work);
+        }
+        Ok(ingress)
     }
     fn from_opened(
         files: &[&'a ValidatedDirectSourceParquetFileV3],
@@ -210,6 +245,8 @@ impl<'a> DayIngressV1<'a> {
         bytes: Option<usize>,
         opened: Vec<crate::typed_raw::OpenedParquetV1>,
     ) -> RecordingResult<Self> {
+        #[cfg(feature = "stage-timing")]
+        let minima_started = std::time::Instant::now();
         let mut source_minima = Vec::new();
         let mut pm_minima = Vec::new();
         let mut heads = BTreeMap::new();
@@ -250,29 +287,77 @@ impl<'a> DayIngressV1<'a> {
             source_minima,
             pm_minima,
             heads,
+            #[cfg(feature = "stage-timing")]
+            lower_work: std::cell::Cell::new(DayIngressLowerBoundWorkV1 {
+                suffix_minima_ns: minima_started.elapsed().as_nanos(),
+                ..Default::default()
+            }),
         })
     }
     /// 全部未消费的原行都在最小顺序索引中；批次预读不推进消费位置。
     pub fn unread_source_lower_bound(&self) -> RecordingResult<Option<i64>> {
-        let mut minimum = self
+        #[cfg(feature = "stage-timing")]
+        {
+            let mut work = self.lower_work.get();
+            work.source_queries += 1;
+            work.source_file_entries += self.heads.len() as u64;
+            self.lower_work.set(work);
+        }
+        let minimum = self
             .heads
             .keys()
             .filter_map(|key| self.source_minima[key.4][self.files[key.4].saved.order_position])
             .min();
+        self.initial_source_lower_bound(minimum)
+    }
+    fn initial_source_lower_bound(&self, mut minimum: Option<i64>) -> RecordingResult<Option<i64>> {
         for (row, _) in &self.saved.initial {
-            minimum = minimum
-                .into_iter()
-                .chain(source_evidence_v3_from_typed_raw_v2(row)?.source_event_at_utc_ms)
-                .min();
+            #[cfg(feature = "stage-timing")]
+            {
+                let mut work = self.lower_work.get();
+                work.initial_evidence_rows += 1;
+                self.lower_work.set(work);
+            }
+            minimum = minimum.into_iter()
+                .chain(source_evidence_v3_from_typed_raw_v2(row)?.source_event_at_utc_ms).min();
         }
         Ok(minimum)
     }
+    /// 生产者在同一原读取位置同时需要两种下界；单次遍历，不新增维护状态。
+    /// 初始行仍在原下界检查位置读取，错误由生产者在Core应用后消费。
+    pub(crate) fn unread_lower_bounds(&self) -> (RecordingResult<Option<i64>>, Option<(u64, i64, u64, u64)>) {
+        #[cfg(feature = "stage-timing")]
+        {
+            let mut work = self.lower_work.get();
+            work.combined_queries += 1;
+            work.combined_file_entries += self.heads.len() as u64;
+            self.lower_work.set(work);
+        }
+        let mut source = None;
+        let mut pm = None;
+        for key in self.heads.keys() {
+            let file = key.4;
+            let position = self.files[file].saved.order_position;
+            source = source.into_iter().chain(self.source_minima[file][position]).min();
+            pm = pm.into_iter().chain(self.pm_minima[file][position]).min();
+        }
+        (self.initial_source_lower_bound(source), pm)
+    }
     pub fn unread_pm_lower_bound(&self) -> Option<(u64, i64, u64, u64)> {
+        #[cfg(feature = "stage-timing")]
+        {
+            let mut work = self.lower_work.get();
+            work.pm_queries += 1;
+            work.pm_file_entries += self.heads.len() as u64;
+            self.lower_work.set(work);
+        }
         self.heads
             .keys()
             .filter_map(|key| self.pm_minima[key.4][self.files[key.4].saved.order_position])
             .min()
     }
+    #[cfg(feature = "stage-timing")]
+    pub fn lower_bound_work(&self) -> DayIngressLowerBoundWorkV1 { self.lower_work.get() }
     pub fn epochs(&self) -> &BTreeMap<(u8, String), u64> {
         &self.saved.epochs
     }
@@ -283,6 +368,10 @@ impl<'a> DayIngressV1<'a> {
         if self.saved.ended {
             return Ok(None);
         }
+        #[cfg(feature = "stage-timing")]
+        let head_started = std::time::Instant::now();
+        #[cfg(feature = "stage-timing")]
+        let mut head_key_clones = 0_u64;
         let mut source_heads: BTreeMap<u8, ((u8, u64, u64, String, usize), i64)> = BTreeMap::new();
         for s in 0..6u8 {
             if let Some((key, received)) = self
@@ -291,6 +380,8 @@ impl<'a> DayIngressV1<'a> {
                 .next()
                 .filter(|(key, _)| key.0 == s)
             {
+                #[cfg(feature = "stage-timing")]
+                { head_key_clones += 1; }
                 source_heads.insert(s, (key.clone(), *received));
             }
         }
@@ -298,6 +389,8 @@ impl<'a> DayIngressV1<'a> {
         if let Some((row, _)) = self.saved.initial.front() {
             let e = source_evidence_v3_from_typed_raw_v2(row)?;
             let a = admission(row, &e);
+            #[cfg(feature = "stage-timing")]
+            { head_key_clones += 1; }
             let key = (
                 0,
                 (a.0 as u64) ^ (1 << 63),
@@ -313,6 +406,15 @@ impl<'a> DayIngressV1<'a> {
         let chosen = source_heads
             .into_iter()
             .min_by(|(sa, (ka, ra)), (sb, (kb, rb))| (ra, sa, &ka.3).cmp(&(rb, sb, &kb.3)));
+        #[cfg(feature = "stage-timing")]
+        {
+            let mut work = self.lower_work.get();
+            work.head_selection_ns += head_started.elapsed().as_nanos();
+            work.head_selections += 1;
+            work.temporary_head_maps += 1;
+            work.head_key_clones += head_key_clones;
+            self.lower_work.set(work);
+        }
         self.last_initialization_binding = None;
         let ingress = if let Some((_, (key, _))) = chosen {
             let (row, source_evidence) = if key.4 == usize::MAX {
@@ -323,6 +425,8 @@ impl<'a> DayIngressV1<'a> {
                 let i = key.4;
                 self.heads.remove(&key);
                 let coordinate = &self.saved.order[i][self.files[i].saved.order_position];
+                #[cfg(feature = "stage-timing")]
+                let row_started = std::time::Instant::now();
                 self.files[i].head(coordinate.physical_row, self.rows, self.bytes)?;
                 let row = self.files[i]
                     .saved
@@ -330,6 +434,12 @@ impl<'a> DayIngressV1<'a> {
                     .remove(&coordinate.physical_row)
                     .unwrap();
                 let evidence = source_evidence_v3_from_typed_raw_v2(&row)?;
+                #[cfg(feature = "stage-timing")]
+                {
+                    let mut work = self.lower_work.get();
+                    work.row_fetch_evidence_ns += row_started.elapsed().as_nanos();
+                    self.lower_work.set(work);
+                }
                 self.files[i].saved.order_position += 1;
                 if let Some(next) = self.saved.order[i].get(self.files[i].saved.order_position) {
                     self.heads.insert(

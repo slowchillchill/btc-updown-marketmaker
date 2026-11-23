@@ -1,3 +1,5 @@
+#[path = "common/fixture_registry.rs"]
+mod fixture_registry;
 #[path = "common/fixture_clock.rs"]
 mod fixture_clock;
 #[path = "common/fixture_execution.rs"]
@@ -136,6 +138,32 @@ async fn real_group_bridge_registry_ledger_freeze_and_recovery() {
         driver.next_group().unwrap().unwrap();
     }
     let snapshot = shared.action_before(&mut driver).unwrap().unwrap();
+    #[cfg(feature = "stage-timing")]
+    {
+        let cutoff = driver.observation_cutoff().unwrap();
+        let frames = driver.frames_at_observation();
+        let frozen = shared
+            .freeze_action_before(cutoff.clone(), &frames)
+            .unwrap();
+        let borrowed = shared.borrow_action_before(cutoff, &frames).unwrap();
+        let owned = borrowed.to_owned_read();
+        for read in [&frozen, &owned] {
+            let before = account_history_visits_v1();
+            let actual = read.cancel_objects();
+            let after = account_history_visits_v1();
+            let original = read.cancel_objects_full_history_for_measurement();
+            assert_eq!(
+                actual, original,
+                "真实冻结读取保留原配对、Unknown及经济状态"
+            );
+            assert_eq!(after.cancel_order_visits - before.cancel_order_visits, 2);
+            assert_eq!(
+                after.order_read_constructions - before.order_read_constructions,
+                2,
+                "有意无索引的动作快照每条订单只构造一次"
+            );
+        }
+    }
     assert!(snapshot.cutoff().private_feedback_sequence() > 0);
     let orders: Vec<_> = snapshot.orders().collect();
     assert_eq!(orders.len(), 2);
@@ -156,6 +184,10 @@ async fn real_group_bridge_registry_ledger_freeze_and_recovery() {
             .formed
             .unwrap(),
     );
+    #[cfg(feature = "stage-timing")]
+    fixture_registry::assert_cancel_objects_reference(&incomplete);
+    #[cfg(feature = "stage-timing")]
+    fixture_registry::assert_cancel_objects_reference(shared.registry());
     assert!(
         matches!(incomplete.cancel_objects(), ExecutionReadValueV1::Known(objects)
             if objects.len() == 1 && matches!(&objects[0], CancelObjectReadV1::Single { order }
@@ -3466,6 +3498,22 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
                 order.active_unfilled_shares,
                 Known(ExactDecimal("0".into()))
             );
+            #[cfg(feature = "stage-timing")]
+            {
+                let before = account_history_visits_v1();
+                let actual = view.cancel_objects();
+                let after = account_history_visits_v1();
+                assert_eq!(actual, view.cancel_objects_full_history_for_measurement());
+                assert_eq!(
+                    after.cancel_order_visits - before.cancel_order_visits,
+                    2,
+                    "动作快照保留配对请求的已闭合腿，实际扫描必须计入这条订单"
+                );
+                assert_eq!(
+                    after.order_read_constructions - before.order_read_constructions,
+                    2
+                );
+            }
             assert_eq!(
                 view.orders()
                     .filter(|o| o.cancellable == Known(true))

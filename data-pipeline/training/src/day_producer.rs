@@ -52,6 +52,8 @@ struct PrefetchedInputV1 {
     #[cfg(feature = "stage-timing")]
     decode_ns: u128,
     #[cfg(feature = "stage-timing")]
+    lower_bound_ns: [u128; 3],
+    #[cfg(feature = "stage-timing")]
     prepare_ns: u128,
 }
 fn ordinary_pm(input: &RecordedIngressV1) -> bool {
@@ -219,18 +221,22 @@ impl<'a> DayProducerV1<'a> {
             let pm = ordinary_pm(&input);
             retained += retained_pm_input_bytes_hint(&input);
             // 原路径在当前 Core 应用后才消费下界错误，预读不能提前报告它。
-            let source_lower = self
-                .ingress
-                .unread_source_lower_bound()
-                .map_err(|e| e.to_string());
+            #[cfg(feature = "stage-timing")]
+            let bound_started = std::time::Instant::now();
+            let (source_lower, pm_lower) = self.ingress.unread_lower_bounds();
+            let source_lower = source_lower.map_err(|error| error.to_string());
+            #[cfg(feature = "stage-timing")]
+            let lower_bound_ns = [0, 0, bound_started.elapsed().as_nanos()];
             self.queued.push_back(PrefetchedInputV1 {
                 input,
                 initialization_binding: self.ingress.initialization_binding().cloned(),
                 source_lower,
-                pm_lower: self.ingress.unread_pm_lower_bound(),
+                pm_lower,
                 prepared_pm: None,
                 #[cfg(feature = "stage-timing")]
                 decode_ns,
+                #[cfg(feature = "stage-timing")]
+                lower_bound_ns,
                 #[cfg(feature = "stage-timing")]
                 prepare_ns: 0,
             });
@@ -301,6 +307,8 @@ impl<'a> DayProducerV1<'a> {
             #[cfg(feature = "stage-timing")]
             decode_ns,
             #[cfg(feature = "stage-timing")]
+            lower_bound_ns,
+            #[cfg(feature = "stage-timing")]
             prepare_ns,
         } = entry;
         #[cfg(feature = "stage-timing")]
@@ -325,6 +333,9 @@ impl<'a> DayProducerV1<'a> {
             self.timings.inputs += 1;
             self.timings.by_source[timing_source].inputs += 1;
             let elapsed = decode_ns;
+            self.timings.source_lower_ns += lower_bound_ns[0];
+            self.timings.pm_lower_ns += lower_bound_ns[1];
+            self.timings.combined_lower_ns += lower_bound_ns[2];
             self.timings.decode_ns += elapsed;
             self.timings.by_source[timing_source].stage_ns[0] += elapsed;
         }
@@ -530,6 +541,10 @@ pub struct DayProducerStageTimingsV1 {
     pub pm_preparation_batch_wall_ns: u128,
     pub inputs: u64,
     pub decode_ns: u128,
+    pub source_lower_ns: u128,
+    pub pm_lower_ns: u128,
+    /// 成对单遍计算，不能再拆分或重复分摊至两个独立阶段。
+    pub combined_lower_ns: u128,
     pub prepare_ns: u128,
     pub core_ns: u128,
     pub material_ns: u128,

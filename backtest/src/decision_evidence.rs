@@ -1,11 +1,15 @@
 use crate::MaterialError;
+#[cfg(feature = "stage-timing")]
+use crate::stage_timing::EvidenceFile;
 use serde::Serialize;
 use std::{
     fs::OpenOptions,
     io::{BufWriter, Write},
     path::Path,
 };
-pub(crate) struct DecisionEvidenceV1(Option<BufWriter<std::fs::File>>);
+#[cfg(not(feature = "stage-timing"))]
+type EvidenceFile = std::fs::File;
+pub(crate) struct DecisionEvidenceV1(Option<BufWriter<EvidenceFile>>);
 impl DecisionEvidenceV1 {
     pub fn open(path: Option<&Path>) -> Result<Self, MaterialError> {
         let mut output = Self(
@@ -14,7 +18,7 @@ impl DecisionEvidenceV1 {
                     .write(true)
                     .create_new(true)
                     .open(p)
-                    .map(|f| BufWriter::with_capacity(1024 * 1024, f))
+                    .map(|f| BufWriter::with_capacity(1024 * 1024, EvidenceFile::from(f)))
             })
             .transpose()?,
         );
@@ -36,6 +40,8 @@ impl DecisionEvidenceV1 {
                 .and_then(|v| v.as_str()),
         );
         if let Some(writer) = &mut self.0 {
+            #[cfg(feature = "stage-timing")]
+            let _encoding = crate::stage_timing::EncodingTimer::new();
             serde_json::to_writer(&mut *writer, value)?;
             writer.write_all(b"\n")?;
         }
@@ -55,9 +61,9 @@ mod tests {
     use super::*;
     #[test]
     fn buffered_output_failure_is_propagated() {
-        let mut out = DecisionEvidenceV1(Some(BufWriter::new(
+        let mut out = DecisionEvidenceV1(Some(BufWriter::new(EvidenceFile::from(
             OpenOptions::new().write(true).open("/dev/full").unwrap(),
-        )));
+        ))));
         assert!(out.record(&serde_json::json!({"value":1})).is_err() || out.flush().is_err());
     }
 }

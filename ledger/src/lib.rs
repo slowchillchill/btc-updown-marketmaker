@@ -46,3 +46,6 @@ pub use core::economics::{
 pub use core::economics::{ConfirmedPositionReadV1, FinalSuccessAnchorV1, TradeConfirmationReadV1};
 
 pub use core::economics::{TradeConfirmationChangeReadV1, visit_trade_confirmation_changes_v1};
+
+#[cfg(feature = "stage-timing")]
+pub use core::economics::{EconomicReadCacheWorkV1, economic_read_cache_work_v1};

@@ -339,3 +339,7 @@ async fn finite_observation_scaling() {
 #[cfg(feature = "observation-diagnostics")]
 #[path = "observation_btc.rs"]
 mod btc;
+
+#[cfg(feature = "stage-timing")]
+#[path = "input_assembly.rs"]
+mod input_assembly;
