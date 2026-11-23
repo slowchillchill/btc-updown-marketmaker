@@ -129,7 +129,7 @@ impl Default for HistoricalDayRunOptionsV1 {
             stop_at_utc_ms: None,
             cpu_measurement_boundaries: Vec::new(),
             verified_offline_scenes: Default::default(),
-            offline_scene_cache_bytes: 256 * 1024 * 1024,
+            offline_scene_cache_bytes: 2 * 1024 * 1024 * 1024,
         }
     }
 }
