@@ -143,6 +143,22 @@ impl<I: Iterator<Item = Result<AcceptedHiddenStepBucketV1, MaterialError>>> Iter
 }
 
 /// 准备阶段复用原日供料及正式归约，不建立另一份原始解码或观察副本。
+// 三张身份表在首次登记时一起建立，此后仅检查二元性，不重复复制原身份。
+fn remember_scene_market<E>(
+    markets: &mut BTreeMap<String, MarketIdentityV2>,
+    assets: &mut BTreeMap<String, [AssetIdentityV1; 2]>,
+    tokens: &mut BTreeMap<String, Vec<String>>,
+    id: &str,
+    context: &data_pipeline_core::pm_reduction::PmMarketContextV1<E>,
+) -> Result<bool, MaterialError> {
+    if context.assets.len() != 2 { return Err("冻结场景市场不是二元身份".into()); }
+    if markets.contains_key(id) { return Ok(false); }
+    markets.insert(id.into(), context.market.clone());
+    assets.insert(id.into(), [context.assets[0].asset.clone(), context.assets[1].asset.clone()]);
+    tokens.insert(id.into(), context.assets.iter().map(|a| a.asset.token_id.0.clone()).collect());
+    Ok(true)
+}
+
 pub fn collect_scene_facts_v1(
     config: &crate::HistoricalPreparationConfigV1,
     target_start: i64,
@@ -212,6 +228,10 @@ pub fn collect_scene_facts_v1(
         Sha256Hex(inputs.input_set_identity_sha256().into()),
         config.hidden_stream_id.clone(),
     )?;
+    #[cfg(feature = "stage-timing")]
+    let mut identity_work = (0_u64, 0_u64, 0_u128);
+    #[cfg(feature = "stage-timing")]
+    let mut fact_generation_ns = 0_u128;
     let mut facts = Vec::new();
     let mut markets = BTreeMap::new();
     let mut market_assets = BTreeMap::new();
@@ -229,31 +249,21 @@ pub fn collect_scene_facts_v1(
     let mut sequence = 0u64;
     while let Some(applied) = producer.next_applied()? {
         count += 1;
+        #[cfg(feature = "stage-timing")]
+        let identity_started = std::time::Instant::now();
         for (id, context) in &applied.contexts {
             if context.market.window.start_at_utc_ms >= target_start
                 && context.market.window.start_at_utc_ms < target_end
             {
-                markets
-                    .entry(id.clone())
-                    .or_insert_with(|| context.market.clone());
-                market_assets.entry(id.clone()).or_insert(
-                    context
-                        .assets
-                        .iter()
-                        .map(|a| a.asset.clone())
-                        .collect::<Vec<_>>()
-                        .try_into()
-                        .map_err(|_| "冻结场景市场不是二元身份")?,
-                );
-                tokens.entry(id.clone()).or_insert_with(|| {
-                    context
-                        .assets
-                        .iter()
-                        .map(|a| a.asset.token_id.0.clone())
-                        .collect()
-                });
+                let _built = remember_scene_market(&mut markets, &mut market_assets, &mut tokens, id, context)?;
+                #[cfg(feature = "stage-timing")]
+                { identity_work.0 += 1; identity_work.1 += u64::from(_built); }
             }
         }
+        #[cfg(feature = "stage-timing")]
+        { identity_work.2 += identity_started.elapsed().as_nanos(); }
+        #[cfg(feature = "stage-timing")]
+        let facts_started = std::time::Instant::now();
         for bucket in applied.hidden {
             for record in bucket.records {
                 let ResolvedHiddenRecordV1::Step { stored, market } = record else {
@@ -354,6 +364,8 @@ pub fn collect_scene_facts_v1(
                 }
             }
         }
+        #[cfg(feature = "stage-timing")]
+        { fact_generation_ns += facts_started.elapsed().as_nanos(); }
         if progress_seconds > 0 && progress.elapsed().as_secs() >= progress_seconds {
             eprintln!(
                 "场景准备: inputs={count}, facts={}, markets={}, elapsed_seconds={}, total_inputs=unknown",
@@ -364,11 +376,19 @@ pub fn collect_scene_facts_v1(
             progress = std::time::Instant::now();
         }
     }
+    let fact_count = facts.len();
+    #[cfg(feature = "stage-timing")]
+    let analysis_started = std::time::Instant::now();
+    let analysis = Analysis::new(facts);
+    #[cfg(feature = "stage-timing")]
+    eprintln!("scene_collection_work={}", serde_json::json!({"inputs":count,"facts":fact_count,"markets":markets.len(),"elapsed_ns":started.elapsed().as_nanos(),"fact_generation_ns":fact_generation_ns,"analysis_index_ns":analysis_started.elapsed().as_nanos(),"producer":producer.stage_timings(),"lower_bound_work":producer.ingress.lower_bound_work(),"identity_contexts":identity_work.0,"asset_constructions":identity_work.1,"identity_ns":identity_work.2}));
     let manifests = admitted
         .iter()
         .map(|d| (d.utc_day().to_string(), d.manifest_sha256().to_string()))
         .collect();
-    Ok((Analysis::new(facts), markets, market_assets, manifests))
+    #[cfg(not(feature = "stage-timing"))]
+    let _ = fact_count;
+    Ok((analysis, markets, market_assets, manifests))
 }
 
 #[derive(Serialize, Deserialize)]
